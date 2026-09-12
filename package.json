@@ -1,0 +1,77 @@
+{
+  "name": "sereno",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sereno - an always-on-top widget for live Claude Code sessions",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "serve": "node tools/serve.js",
+    "wire": "node tools/wire.js",
+    "unwire": "node tools/unwire.js",
+    "replay": "node tools/replay.js",
+    "test": "node tools/test.js",
+    "dist": "electron-builder --win",
+    "dist:dir": "electron-builder --win --dir",
+    "test:packaged": "node tools/test-packaged.js"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "allowScripts": {
+    "electron@38.8.6": true,
+    "electron-winstaller@5.4.0": true
+  },
+  "build": {
+    "appId": "com.sereno.widget",
+    "productName": "Sereno",
+    "copyright": "Sereno",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "bin/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "bin/**/*",
+      "src/focus-window.ps1"
+    ],
+    "extraResources": [
+      {
+        "from": "bin/emit.cmd",
+        "to": "emit.cmd"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Sereno",
+      "uninstallDisplayName": "Sereno",
+      "include": "build/installer.nsh"
+    }
+  }
+}

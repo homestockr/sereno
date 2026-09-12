@@ -1,0 +1,7 @@
+node_modules/
+dist/
+
+# Discovery captures. These hold real prompt text and absolute paths from the
+# sessions they were recorded in, so they stay local rather than shipping in a
+# published repo. docs/payloads.md carries the findings without the raw data.
+samples/*.jsonl

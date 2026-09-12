@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Sereno</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <article id="window" class="window" aria-label="Sereno">
+
+    <!-- Header. Becomes the amber alert banner when a session is blocked. -->
+    <div id="banner">
+      <div class="top">
+        <!-- The lantern, same mark as the app icon. currentColor so it inverts
+             cleanly on the amber alert banner. -->
+        <svg class="logo" viewBox="0 0 44 60" fill="currentColor" aria-hidden="true" focusable="false">
+          <circle cx="22" cy="4.2" r="3.9"/>
+          <path d="M22 5.6c-7.9 0-14.4 6.2-15.5 14.1H3.3a2.7 2.7 0 0 0 0 5.4h37.4a2.7 2.7 0 0 0 0-5.4h-3.2C36.4 11.8 29.9 5.6 22 5.6z"/>
+          <path fill-rule="evenodd" d="M7.4 24.6h29.2v27.6H7.4V24.6zm14.6 4.6a7.7 7.7 0 0 0-7.7 7.7v13.1h15.4V36.9a7.7 7.7 0 0 0-7.7-7.7z"/>
+          <circle cx="22" cy="40.6" r="5.3"/>
+          <rect x="3.1" y="51.4" width="37.8" height="6.2" rx="2.7"/>
+        </svg>
+        <span class="brand">Sereno</span>
+        <span class="grip" title="Drag to move">&#10287;</span>
+        <button id="zoom-out" class="icon-button no-drag" type="button" aria-label="Smaller" title="Smaller (Ctrl -)">&minus;</button>
+        <button id="zoom-in" class="icon-button no-drag" type="button" aria-label="Larger" title="Larger (Ctrl +)">+</button>
+        <button id="close" class="icon-button no-drag" type="button" aria-label="Quit Sereno" title="Quit Sereno">&times;</button>
+      </div>
+
+      <div id="headline" class="headline">
+        <h2 id="headline-title">Waiting for sessions</h2>
+        <p id="headline-sub">Nothing is reporting yet.</p>
+      </div>
+
+      <div id="alert-heading" class="alert-heading" hidden>
+        <span class="beacon" aria-hidden="true">!</span>
+        <div>
+          <h2 id="alert-title">One session needs you.</h2>
+          <p>Waiting for approval</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- The blocked session, promoted out of the list. -->
+    <div id="request" class="request" hidden>
+      <div class="request-label">
+        <span class="project" id="request-project"></span>
+        <span class="timer">Waiting <span id="request-timer">00:00</span></span>
+      </div>
+      <p class="request-desc" id="request-desc"></p>
+      <div class="command"><span aria-hidden="true">&rsaquo;</span><code id="request-command"></code></div>
+      <button id="review" class="review no-drag" type="button">
+        <span>Review in terminal</span><span aria-hidden="true">&#8599;</span>
+      </button>
+      <div id="review-note" class="review-note" hidden role="status"></div>
+      <div class="meta" id="request-meta"></div>
+    </div>
+
+    <!-- Shown until Sereno is wired into Claude Code's settings.json. -->
+    <div id="setup" class="setup" hidden>
+      <p id="setup-body" class="setup-body"></p>
+      <button id="setup-action" class="review no-drag" type="button">
+        <span id="setup-action-label">Connect to Claude Code</span><span aria-hidden="true">&rarr;</span>
+      </button>
+      <p id="setup-note" class="setup-note" hidden></p>
+    </div>
+
+    <div id="rows" class="rows"></div>
+
+    <footer id="footer" class="footer" hidden>
+      <div class="usage-line">
+        <span class="usage-value"><span id="usage-pct">0</span>% <span>used</span></span>
+        <span class="usage-label" id="usage-label">5-hour allowance</span>
+      </div>
+      <div id="usage-track" class="usage-track" role="meter"
+           aria-label="Allowance consumed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+      <div class="bottomline">
+        <span id="usage-reset"></span>
+        <span id="usage-cost"></span>
+      </div>
+    </footer>
+
+    <div id="offline" class="offline" hidden>Collector offline &mdash; reconnecting</div>
+    <div id="size-grip" class="size-grip no-drag" title="Drag to resize"></div>
+  </article>
+
+  <script src="app.js"></script>
+</body>
+</html>
