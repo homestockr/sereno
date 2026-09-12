@@ -1,0 +1,69 @@
+name: build
+
+# SignPath Foundation requires that released binaries are built from source in a
+# verifiable way, so releases are produced here rather than on a laptop. The
+# signing step is added once the SignPath application is approved; until then the
+# artifacts this produces are unsigned and say so.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The suite is GUI-free: state machine, collector, shim safety, wiring.
+      - name: Unit and acceptance tests
+        run: npm test
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build installer and zip
+        run: npm run dist
+        env:
+          # Never let a missing certificate silently produce an unsigned build
+          # once signing is configured; until then there is nothing to enforce.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      # Proves the shipped shim runs without Node on the machine, which is the
+      # property the whole packaging design rests on.
+      - name: Verify the packaged shim
+        run: npm run test:packaged
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sereno-windows
+          retention-days: 14
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.blockmap

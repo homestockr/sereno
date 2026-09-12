@@ -170,6 +170,48 @@ invocation. The uninstaller disconnects from Claude Code before removing files,
 because dead hook paths would otherwise fire on every tool call forever. Builds
 are unsigned and will trip SmartScreen until you add a certificate.
 
+## Privacy
+
+Sereno moves no data off the machine it runs on.
+
+The collector binds to `127.0.0.1` only and is never exposed to the network.
+Session state — project name, tool being run, cost, context, rate limits — is held
+in memory for as long as the session is alive and is never written to disk, never
+transmitted, and never sent to any third party. Transcripts are not parsed. The
+only files Sereno writes are its own window position (`%APPDATA%/sereno`) and, when
+you connect it, its entries in Claude Code's `settings.json`.
+
+This program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it.
+
+Sereno can be removed completely: **Disconnect** in the app, or `npm run unwire`,
+restores Claude Code's settings; the uninstaller does it for you.
+
+## Code signing policy
+
+Free code signing on Windows is provided by [SignPath.io](https://about.signpath.io/),
+with a certificate from the [SignPath Foundation](https://signpath.org/).
+
+Roles, as a solo project:
+
+- **Author / committer** — [@vaulkerdoc](https://github.com/vaulkerdoc)
+- **Reviewer** — [@vaulkerdoc](https://github.com/vaulkerdoc); external contributions
+  are reviewed before merge
+- **Approver** — [@vaulkerdoc](https://github.com/vaulkerdoc); every signed release
+  is approved manually
+
+Released binaries are built from source by GitHub Actions
+([`.github/workflows/build.yml`](.github/workflows/build.yml)), not on a developer
+machine.
+
+> **Current status:** the code signing application is pending, so the binaries on
+> the releases page are **unsigned** and Windows SmartScreen will warn. See
+> [docs/distributing.md](docs/distributing.md).
+
+## License
+
+[MIT](LICENSE) © 2026 Roberto Rosado
+
 ## Layout
 
 ```

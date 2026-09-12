@@ -3,6 +3,27 @@
   "version": "1.0.0",
   "private": true,
   "description": "Sereno - an always-on-top widget for live Claude Code sessions",
+  "author": {
+    "name": "Roberto Rosado",
+    "email": "roberto.d.rosado@gmail.com"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/vaulkerdoc/sereno",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vaulkerdoc/sereno.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vaulkerdoc/sereno/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "electron",
+    "widget",
+    "hud",
+    "always-on-top",
+    "windows"
+  ],
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
@@ -26,7 +47,7 @@
   "build": {
     "appId": "com.sereno.widget",
     "productName": "Sereno",
-    "copyright": "Sereno",
+    "copyright": "Copyright (c) 2026 Roberto Rosado",
     "directories": {
       "output": "dist",
       "buildResources": "build"
