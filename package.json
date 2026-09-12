@@ -37,7 +37,7 @@
     "test:packaged": "node tools/test-packaged.js"
   },
   "devDependencies": {
-    "electron": "^38.0.0",
+    "electron": "^39.8.10",
     "electron-builder": "^26.15.3"
   },
   "allowScripts": {
