@@ -46,8 +46,13 @@ jobs:
 
       - run: npm ci
 
+      # `--publish never` is load-bearing: electron-builder detects CI and
+      # publishes a GitHub Release by itself unless told not to. Without it, a
+      # token in the environment would cut an unsigned, unreviewed release on
+      # every push to main - and SignPath requires that every signed release be
+      # approved by a human. Releases here are always made deliberately.
       - name: Build installer and zip
-        run: npm run dist
+        run: npm run dist -- --publish never
         env:
           # Never let a missing certificate silently produce an unsigned build
           # once signing is configured; until then there is nothing to enforce.
