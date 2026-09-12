@@ -98,9 +98,39 @@ Zip users should disconnect from inside the app before deleting the folder.
 - Some corporate policies block unsigned executables outright.
 - Browsers may warn on download.
 
-To sign, get an Authenticode certificate — an **EV or OV certificate from a CA**;
-a self-signed one does not help, because SmartScreen trusts reputation, not
-signatures alone. Then:
+### Signing does not remove the warning on day one
+
+This is the part that surprises people, so it is worth being blunt: **no signing
+option makes the SmartScreen warning disappear immediately.** SmartScreen trusts
+*reputation*, which accrues to a consistent publisher identity as downloads
+accumulate. Signing is what lets reputation accumulate at all — an unsigned
+binary starts from zero forever, because there is no identity to attach it to.
+
+EV certificates used to bypass SmartScreen outright on first download. **Microsoft
+removed that behaviour in 2024.** An EV certificate now behaves exactly like an OV
+one for SmartScreen purposes, so paying the EV premium for that reason alone is no
+longer justified.
+
+### The options, as of September 2026
+
+| Option | Cost | Hardware token | Notes |
+|---|---|---|---|
+| **SignPath Foundation** | free | no | OV-level signing for qualifying **open-source** projects |
+| **Azure Artifact Signing** (was Trusted Signing) | ~$9.99/mo | no | Individuals: **USA/Canada only**. Orgs: +EU/UK |
+| **OV certificate** (DigiCert, Sectigo…) | $150–300/yr | **yes** | Worldwide. HSM/USB token required since June 2023 |
+| **EV certificate** | $400+/yr | yes | No SmartScreen advantage over OV any more |
+| Self-signed | free | no | Dev/testing or managed enterprise only — blocks public users |
+
+Sereno is a public repository, so **SignPath Foundation is worth applying to
+first** — it is free and purpose-built for this case. Azure Artifact Signing is
+the cheapest paid route and needs no USB token, which matters for automated
+builds.
+
+### Wiring it into the build
+
+electron-builder 26 exposes two paths under `win`:
+
+**Traditional certificate** (`signtoolOptions`, or just the env vars):
 
 ```sh
 set CSC_LINK=C:\path\to\cert.pfx
@@ -108,9 +138,25 @@ set CSC_KEY_PASSWORD=...
 npm run dist
 ```
 
-electron-builder picks those up automatically. Even signed, a new certificate has
-no SmartScreen reputation and warns until it accumulates downloads; an EV
-certificate gets reputation immediately.
+**Azure Artifact Signing** (`win.azureSignOptions` in `package.json`, credentials
+from `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET`):
+
+```json
+"win": {
+  "azureSignOptions": {
+    "endpoint": "https://eus.codesigning.azure.net",
+    "codeSigningAccountName": "<account>",
+    "certificateProfileName": "<profile>",
+    "publisherName": "<validated name>"
+  }
+}
+```
+
+Whichever you pick, **sign every release with the same identity**. Switching
+certificates or providers restarts reputation from zero. Worth knowing: a silent
+CA rotation on the Azure service in March 2026 did exactly that to its customers,
+and releases started warning again despite valid signatures — so budget for the
+possibility rather than assuming signed means silent.
 
 If you are only sharing this with a few people, unsigned is fine — tell them to
 expect the warning, which is far better than them hitting it unprepared.
