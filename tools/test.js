@@ -15,6 +15,7 @@ const http = require('node:http');
 
 const { Store } = require('../src/store.js');
 const { createCollector } = require('../src/collector.js');
+const wiring = require('../src/wiring.js');
 
 const ROOT = path.join(__dirname, '..');
 const EMIT = path.join(ROOT, 'bin', 'emit.js');
@@ -360,6 +361,75 @@ test('the session pid comes from CLAUDE_PID, not the transient shell', () => {
   assert.ok(!/ppid:\s*process\.ppid/.test(src), 'emit.js must not report process.ppid as the session pid');
 });
 
+test('a denied tool cannot leak pending entries forever', () => {
+  // Denied tools never produce a PostToolUse, so the map only ever grew.
+  const s = new Store();
+  for (let i = 0; i < 100; i++) {
+    feed(s, [H('PreToolUse', sid('x', { tool_name: 'Bash', tool_input: { command: 'c' + i }, tool_use_id: 't' + i }))]);
+  }
+  assert.ok(s.sessions.get('x')._pending.size <= 32, 'pending grew to ' + s.sessions.get('x')._pending.size);
+  feed(s, [H('Stop', sid('x'))]);
+  assert.strictEqual(s.sessions.get('x')._pending.size, 0, 'Stop must clear pending tools');
+});
+
+test('subagents cannot outlive the turn', () => {
+  // A missed SubagentStop used to leave the row claiming agents were running.
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'a', agent_id: 'ag1' })),
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'b', agent_id: 'ag2' })),
+  ]);
+  assert.strictEqual(s.sessions.get('x').subagents, 2);
+  feed(s, [H('Stop', sid('x'))]);          // no SubagentStop ever arrived
+  assert.strictEqual(s.sessions.get('x').subagents, 0, 'phantom subagents survived Stop');
+});
+
+test('statusline prints a line even if stdin never closes', () => {
+  // Rule 4 of the shim: exactly one line, always. The hard-timeout path used to
+  // exit silently, leaving the user with a blank statusline.
+  const r = spawnSync(process.execPath, ['-e',
+    'const {spawn}=require("child_process");' +
+    'const p=spawn(process.execPath,[' + JSON.stringify(EMIT) + ',"statusline"],' +
+    '{env:Object.assign({},process.env,{CLAUDE_HUD_PORT:"9"})});' +
+    'let o="";p.stdout.on("data",d=>o+=d);' +
+    'p.on("close",c=>console.log(JSON.stringify({c,o})));'
+  ], { encoding: 'utf8', timeout: 20000 });
+  const last = (r.stdout || '').trim().split('\n').pop();
+  const got = JSON.parse(last);
+  assert.strictEqual(got.c, 0, 'exit code ' + got.c);
+  assert.strictEqual(got.o.split('\n').filter((l) => l.length).length, 1,
+    'expected exactly one line, got ' + JSON.stringify(got.o));
+});
+
+test('uninstall never removes another tool\'s hooks', () => {
+  // isOurs() once matched any command mentioning emit.js, so uninstalling
+  // Sereno deleted unrelated tools' entries and wiring hijacked them.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-ident-'));
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = tmp;
+  try {
+    const foreign = {
+      statusLine: { type: 'command', command: 'node "C:/other-tool/emit.js" statusline' },
+      hooks: { PreToolUse: [{ matcher: '*', hooks: [
+        { type: 'command', command: 'node "C:/some/vendor/emit.js" hook PreToolUse' },
+      ] }] },
+    };
+    fs.writeFileSync(path.join(tmp, 'settings.json'), JSON.stringify(foreign, null, 2));
+
+    const r = wiring.removeEntries(['C:/sereno/bin/emit.js']);
+    const after = JSON.parse(fs.readFileSync(path.join(tmp, 'settings.json'), 'utf8'));
+
+    assert.ok(after.statusLine, 'deleted an unrelated statusLine');
+    assert.strictEqual(after.hooks.PreToolUse.length, 1, 'deleted an unrelated hook');
+    assert.strictEqual(r.changed, false);
+    assert.ok(r.skipped.length >= 2, 'unrecognised shim entries should be reported, not deleted');
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = prev;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('the window is resized with setBounds, never setSize', () => {
   // On Windows a transparent window grows via setSize but silently refuses to
   // shrink, which left the widget stuck at its widest after zooming out.
@@ -452,6 +522,64 @@ test('missing rate_limits degrades instead of throwing', () => {
     await new Promise((r) => setTimeout(r, 80));
     const snap = JSON.parse(await get('/state'));
     assert.ok(snap.sessions.find((x) => x.id === 'slowbody'), 'the delayed body was dropped');
+  });
+
+  /* ---- hardening: the collector trusts the local user, not the network ---- */
+
+  function raw(opts, body) {
+    return new Promise((resolve) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port: 8799 }, opts), (res) => {
+        let d = '';
+        res.on('data', (c) => { d += c; });
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: d }));
+      });
+      r.on('error', () => resolve({ status: 0, headers: {}, body: '' }));
+      r.end(body);
+    });
+  }
+
+  await atest('a cross-origin POST cannot inject sessions', async () => {
+    // text/plain is a CORS "simple request": no preflight, so any page the user
+    // visits could once fire fake permission alerts into the widget.
+    const res = await raw({
+      method: 'POST', path: '/hook',
+      headers: { 'content-type': 'text/plain', origin: 'https://evil.example' },
+    }, JSON.stringify({ event: 'Notification', payload: sid('evil', { notification_type: 'permission_prompt' }) }));
+    assert.ok(res.status === 403 || res.status === 415, 'accepted with ' + res.status);
+    await new Promise((r) => setTimeout(r, 60));
+    const snap = JSON.parse(await get('/state'));
+    assert.ok(!snap.sessions.find((s) => s.id === 'evil'), 'a foreign page injected a session');
+  });
+
+  await atest('a foreign Host header is refused (DNS rebinding)', async () => {
+    const res = await raw({ method: 'GET', path: '/state', headers: { host: 'attacker.example.com' } });
+    assert.strictEqual(res.status, 403, 'served state to a rebound hostname');
+  });
+
+  await atest('no CORS headers, so a foreign page cannot read state', async () => {
+    const res = await raw({ method: 'GET', path: '/state', headers: { origin: 'https://evil.example' } });
+    assert.ok(!res.headers['access-control-allow-origin'], 'state is readable cross-origin');
+  });
+
+  await atest('traversal into a sibling directory is refused', async () => {
+    // path.join + startsWith once matched "…/renderer-anything" as being inside
+    // "…/renderer", which served files from outside the served directory.
+    const probe = path.join(ROOT, 'src', 'renderer-regression-probe');
+    fs.mkdirSync(probe, { recursive: true });
+    fs.writeFileSync(path.join(probe, 'x.txt'), 'ESCAPED');
+    try {
+      const res = await raw({ method: 'GET', path: '/../renderer-regression-probe/x.txt' });
+      assert.ok(!/ESCAPED/.test(res.body), 'escaped the renderer directory (HTTP ' + res.status + ')');
+    } finally {
+      fs.rmSync(probe, { recursive: true, force: true });
+    }
+  });
+
+  await atest('the shim POST still works (guards did not break ingest)', async () => {
+    await post('/hook', { mode: 'hook', event: 'SessionStart', payload: sid('guarded') });
+    await new Promise((r) => setTimeout(r, 60));
+    const snap = JSON.parse(await get('/state'));
+    assert.ok(snap.sessions.find((s) => s.id === 'guarded'), 'legitimate shim traffic was rejected');
   });
 
   await atest('garbage body does not kill the collector', async () => {

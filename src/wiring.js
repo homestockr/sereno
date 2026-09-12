@@ -7,6 +7,14 @@
  *
  * Everything here merges. Existing hooks are preserved and ours are appended; an
  * existing statusLine is reported so the caller can confirm before replacing it.
+ *
+ * IDENTITY IS PATH-BASED AND DELIBERATELY STRICT. An earlier version recognised
+ * its own entries by matching /emit\.(js|cmd)/ against the command string, which
+ * matched ANY tool whose shim happened to be called emit.js: uninstalling Sereno
+ * deleted that tool's hooks, and wiring Sereno repointed them at itself. An entry
+ * now counts as ours only when the shim path it references is one we know we
+ * installed - this install's own paths, plus whatever earlier installs recorded
+ * in the ledger below.
  */
 
 const fs = require('node:fs');
@@ -20,6 +28,11 @@ const EVENTS = [
 // Events whose config entries carry a matcher field.
 const MATCHED = new Set(['PreToolUse', 'PostToolUse', 'PreCompact', 'SessionStart', 'SessionEnd']);
 
+// Remembers which shim paths this machine has ever wired, so an install that has
+// moved (dev checkout -> packaged build) still recognises and cleans up its own
+// entries instead of orphaning them.
+const LEDGER = path.join(os.homedir(), '.sereno', 'wired.json');
+
 function configDir() {
   return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 }
@@ -27,9 +40,48 @@ function settingsPath() {
   return path.join(configDir(), 'settings.json');
 }
 
-/** Recognises our own entries across both dev and packaged forms. */
-function isOurs(cmd) {
-  return typeof cmd === 'string' && /emit\.(js|cmd)/i.test(cmd);
+const norm = (p) => String(p || '').replace(/\\/g, '/').toLowerCase();
+
+/** The shim path a command string invokes, or null if it does not look like one. */
+function shimPathOf(cmd) {
+  const s = String(cmd || '');
+  const quoted = s.match(/"([^"]*emit\.(?:js|cmd))"/i);
+  if (quoted) return norm(quoted[1]);
+  const bare = s.match(/([^\s"]*emit\.(?:js|cmd))/i);
+  return bare ? norm(bare[1]) : null;
+}
+
+function readLedger() {
+  try {
+    const j = JSON.parse(fs.readFileSync(LEDGER, 'utf8'));
+    return Array.isArray(j.shims) ? j.shims.map(norm) : [];
+  } catch (_) { return []; }
+}
+
+function rememberShims(paths) {
+  try {
+    const all = new Set(readLedger());
+    for (const p of paths) if (p) all.add(norm(p));
+    fs.mkdirSync(path.dirname(LEDGER), { recursive: true });
+    fs.writeFileSync(LEDGER, JSON.stringify({ shims: [...all] }, null, 2));
+  } catch (_) { /* the ledger is an optimisation, never a requirement */ }
+}
+
+/** Every shim path we are entitled to claim. */
+function ownShims(extra) {
+  const own = new Set(readLedger());
+  for (const p of extra || []) if (p) own.add(norm(p));
+  return [...own];
+}
+
+/**
+ * Is this command one of ours?
+ * Strict by design: an unknown path is somebody else's, never ours.
+ */
+function isOurs(cmd, own) {
+  const p = shimPathOf(cmd);
+  if (!p || !own || !own.length) return false;
+  return own.includes(p);
 }
 
 /**
@@ -41,10 +93,10 @@ function isOurs(cmd) {
  */
 function buildCommands(opts) {
   const o = opts || {};
-  const base = o.packaged
-    ? `"${o.emitCmdPath}"`
-    : `node "${String(o.emitJsPath).split(path.sep).join('/')}"`;
+  const shim = o.packaged ? o.emitCmdPath : String(o.emitJsPath).split(path.sep).join('/');
+  const base = o.packaged ? `"${shim}"` : `node "${shim}"`;
   return {
+    shimPath: shim,
     statusLine: base + ' statusline',
     hook: (ev) => base + ' hook ' + ev,
   };
@@ -63,22 +115,26 @@ function readSettings() {
   return { file, existed, raw, settings: parsed };
 }
 
-/** Is the HUD currently installed? Cheap enough to poll. */
-function status() {
+/** Is Sereno currently installed? Cheap enough to poll. */
+function status(extraShims) {
   let s;
   try { s = readSettings(); } catch (e) { return { ok: false, error: e.message, wired: false }; }
+  const own = ownShims(extraShims);
+
   const sl = s.settings.statusLine;
-  const statusWired = !!(sl && isOurs(sl.command));
+  const statusWired = !!(sl && isOurs(sl.command, own));
   const hooks = s.settings.hooks || {};
   const wiredEvents = EVENTS.filter((ev) =>
-    (Array.isArray(hooks[ev]) ? hooks[ev] : []).some((g) => (g.hooks || []).some((h) => isOurs(h.command))));
+    (Array.isArray(hooks[ev]) ? hooks[ev] : [])
+      .some((g) => (g.hooks || []).some((h) => isOurs(h.command, own))));
+
   return {
     ok: true,
     file: s.file,
     exists: s.existed,
     wired: statusWired && wiredEvents.length === EVENTS.length,
     statusLineWired: statusWired,
-    foreignStatusLine: !!(sl && !isOurs(sl.command)) ? sl : null,
+    foreignStatusLine: sl && !isOurs(sl.command, own) ? sl : null,
     wiredEvents,
     missingEvents: EVENTS.filter((e) => !wiredEvents.includes(e)),
   };
@@ -87,18 +143,18 @@ function status() {
 /**
  * Merges our entries in.
  * `replaceStatusLine` must be true to displace someone else's statusLine.
- * Returns { changes[], backup, needsStatusLineConfirm }.
  */
 function wire(commands, options) {
   const opt = options || {};
   const s = readSettings();
   const settings = s.settings;
   const changes = [];
+  const own = ownShims([commands.shimPath].concat(opt.extraShims || []));
 
   const cur = settings.statusLine;
   let needsStatusLineConfirm = false;
 
-  if (cur && isOurs(cur.command)) {
+  if (cur && isOurs(cur.command, own)) {
     if (cur.command !== commands.statusLine) {
       settings.statusLine = { type: 'command', command: commands.statusLine, padding: 0 };
       changes.push('statusLine: repointed at this build');
@@ -118,12 +174,15 @@ function wire(commands, options) {
   settings.hooks = settings.hooks || {};
   for (const ev of EVENTS) {
     const list = Array.isArray(settings.hooks[ev]) ? settings.hooks[ev] : [];
-    const mine = list.find((g) => (g.hooks || []).some((h) => isOurs(h.command)));
+    const mine = list.find((g) => (g.hooks || []).some((h) => isOurs(h.command, own)));
     if (mine) {
       // Repoint a stale path (dev -> packaged, or a moved install).
       let touched = false;
       for (const h of mine.hooks) {
-        if (isOurs(h.command) && h.command !== commands.hook(ev)) { h.command = commands.hook(ev); touched = true; }
+        if (isOurs(h.command, own) && h.command !== commands.hook(ev)) {
+          h.command = commands.hook(ev);
+          touched = true;
+        }
       }
       if (touched) changes.push('hooks.' + ev + ': repointed at this build');
       settings.hooks[ev] = list;
@@ -136,11 +195,7 @@ function wire(commands, options) {
     changes.push('hooks.' + ev + ': added');
   }
 
-  if (needsStatusLineConfirm && !changes.length) {
-    return { changes: [], backup: null, needsStatusLineConfirm: true };
-  }
   if (!changes.length) return { changes: [], backup: null, needsStatusLineConfirm };
-
   if (opt.dryRun) return { changes, backup: null, needsStatusLineConfirm, dryRun: true };
 
   let backup = null;
@@ -151,24 +206,34 @@ function wire(commands, options) {
     fs.mkdirSync(path.dirname(s.file), { recursive: true });
   }
   fs.writeFileSync(s.file, JSON.stringify(settings, null, 2) + '\n');
+  rememberShims([commands.shimPath]);
   return { changes, backup, needsStatusLineConfirm };
 }
 
 /**
- * Surgically removes only our own entries, leaving everything else untouched.
+ * Removes only our own entries, leaving everything else untouched.
  *
  * This is what uninstall needs. Restoring a backup would also roll back any
  * unrelated settings changed since, and would not help at all if the newest
  * backup happens to predate a second wiring.
+ *
+ * Returns `skipped` for shim-looking entries we could not prove were ours; the
+ * caller should surface them rather than deleting on suspicion.
  */
-function removeEntries() {
+function removeEntries(extraShims) {
   const s = readSettings();
   const settings = s.settings;
+  const own = ownShims(extraShims);
   const removed = [];
+  const skipped = [];
 
-  if (settings.statusLine && isOurs(settings.statusLine.command)) {
-    delete settings.statusLine;
-    removed.push('statusLine');
+  if (settings.statusLine) {
+    if (isOurs(settings.statusLine.command, own)) {
+      delete settings.statusLine;
+      removed.push('statusLine');
+    } else if (shimPathOf(settings.statusLine.command)) {
+      skipped.push('statusLine: ' + settings.statusLine.command);
+    }
   }
 
   const hooks = settings.hooks || {};
@@ -176,7 +241,11 @@ function removeEntries() {
     if (!Array.isArray(hooks[ev])) continue;
     const kept = hooks[ev]
       .map((group) => {
-        const inner = (group.hooks || []).filter((h) => !isOurs(h.command));
+        const inner = (group.hooks || []).filter((h) => {
+          if (isOurs(h.command, own)) return false;
+          if (shimPathOf(h.command)) skipped.push(ev + ': ' + h.command);
+          return true;
+        });
         return inner.length ? Object.assign({}, group, { hooks: inner }) : null;
       })
       .filter(Boolean);
@@ -186,9 +255,9 @@ function removeEntries() {
   }
   if (settings.hooks && !Object.keys(settings.hooks).length) delete settings.hooks;
 
-  if (!removed.length) return { removed: [], changed: false };
+  if (!removed.length) return { removed: [], skipped, changed: false };
   fs.writeFileSync(s.file, JSON.stringify(settings, null, 2) + '\n');
-  return { removed, changed: true };
+  return { removed, skipped, changed: true };
 }
 
 function backups() {
@@ -217,6 +286,6 @@ function unwire() {
 }
 
 module.exports = {
-  EVENTS, configDir, settingsPath, buildCommands,
-  status, wire, unwire, removeEntries, backups, isOurs,
+  EVENTS, LEDGER, configDir, settingsPath, buildCommands,
+  status, wire, unwire, removeEntries, backups, isOurs, shimPathOf, ownShims,
 };

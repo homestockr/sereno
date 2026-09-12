@@ -23,9 +23,19 @@ const REQUEST_TIMEOUT_MS = 250;
 const HARD_EXIT_MS = 1500;   // ceiling for the whole process, stdin included
 
 let exited = false;
+let printed = false;
+
 function bail() {
   if (exited) return;
   exited = true;
+  // Rule 4: in statusline mode exactly one line must reach stdout. If we are
+  // leaving before the payload was read - stdin never closed, the hard timeout
+  // fired - the line still has to be printed, or the user's statusline shows
+  // nothing at all.
+  if (MODE === 'statusline' && !printed) {
+    printed = true;
+    try { process.stdout.write(' \n'); } catch (_) {}
+  }
   try { process.exit(0); } catch (_) {}
 }
 
@@ -72,6 +82,8 @@ function renderStatusline(p) {
 }
 
 function emitLine(text) {
+  if (printed) return;
+  printed = true;
   try { process.stdout.write(String(text).split('\n')[0] + '\n'); } catch (_) {}
 }
 

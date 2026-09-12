@@ -42,7 +42,7 @@ async function main() {
 
   // Ask before displacing someone else's statusLine.
   let replaceStatusLine = false;
-  const st = wiring.status();
+  const st = wiring.status([emitJs]);
   if (st.foreignStatusLine) {
     console.log('\nA statusLine is already configured:\n  ' + JSON.stringify(st.foreignStatusLine) + '\n');
     replaceStatusLine = await ask('Replace it with the Sereno statusline?');

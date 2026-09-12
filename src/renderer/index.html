@@ -4,6 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
+  <!-- Everything here is local and self-contained: no remote origin, no inline
+       script, no eval. Session data is escaped before it reaches the DOM, and
+       this is the backstop if that ever slips. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
   <title>Sereno</title>
   <link rel="stylesheet" href="app.css">
 </head>

@@ -17,6 +17,9 @@
 const STALE_MS = 5 * 60 * 1000;
 const DROP_MS = 30 * 60 * 1000;
 
+// Denied tools never produce a PostToolUse, so the pending map needs a ceiling.
+const MAX_PENDING = 32;
+
 // Only this notification_type may turn a row red. An unknown type must not, or the
 // HUD cries wolf on idle pings. Text match is the spec's defensive fallback.
 const PERMISSION_TYPE = 'permission_prompt';
@@ -136,7 +139,15 @@ class Store {
 
       case 'PreToolUse': {
         const d = describeTool(payload.tool_name, payload.tool_input);
-        if (payload.tool_use_id) s._pending.set(payload.tool_use_id, d);
+        if (payload.tool_use_id) {
+          // A denied tool never produces a PostToolUse, so entries can pile up
+          // within a single turn. Keep only the most recent few - all the
+          // blocked detail ever needs is the last one.
+          if (s._pending.size >= MAX_PENDING) {
+            s._pending.delete(s._pending.keys().next().value);
+          }
+          s._pending.set(payload.tool_use_id, d);
+        }
         this._setState(s, 'running', d.tool, d.arg);
         break;
       }
@@ -162,6 +173,13 @@ class Store {
       }
 
       case 'Stop':
+        // The turn is over: nothing can still be pending, and no subagent can
+        // outlive it. Without this, a denied tool or a missed SubagentStop
+        // leaves entries that never expire - the row kept claiming subagents
+        // were running long after the session went idle.
+        s._pending.clear();
+        s._agents.clear();
+        s.subagents = 0;
         this._setState(s, 'idle');
         break;
 

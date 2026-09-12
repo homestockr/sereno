@@ -164,7 +164,28 @@ function createWindow() {
   win.on('moved', saveUi);
   win.on('closed', () => { win = null; });
 
-  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+  /*
+   * The widget only ever shows our own page from 127.0.0.1. Anything trying to
+   * leave that is a bug or an attack, so both exits are nailed shut:
+   *
+   *  - a new window may only hand http(s) to the OS browser. Without the scheme
+   *    check, shell.openExternal would happily launch file:// or any registered
+   *    protocol handler on the machine.
+   *  - navigation away from the collector origin is refused outright, since the
+   *    destination would inherit this window's preload bridge.
+   */
+  const isWebUrl = (u) => { try { return /^https?:$/.test(new URL(u).protocol); } catch (_) { return false; } };
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isWebUrl(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith(`http://127.0.0.1:${PORT}/`)) event.preventDefault();
+  });
+
+  win.webContents.on('will-attach-webview', (event) => event.preventDefault());
 }
 
 /* ---------- toast ---------- */
@@ -186,13 +207,24 @@ function toastBlocked(session) {
 
 /* ---------- boot ---------- */
 
+/* The shim paths this build owns. Wiring identity is path-based, so these are
+   what let Sereno recognise its own settings entries and nobody else's. */
+function shimCommands() {
+  return wiring.buildCommands({
+    packaged: app.isPackaged,
+    // Packaged: resources/emit.cmd sits beside app.asar.unpacked/bin/emit.js.
+    emitCmdPath: path.join(process.resourcesPath || "", "emit.cmd"),
+    emitJsPath: path.join(__dirname, "..", "bin", "emit.js"),
+  });
+}
+
 // The uninstaller runs `Sereno.exe --unwire` while the files still exist, so a
 // removed install never leaves Claude Code calling a shim that is no longer there.
 const CLI_UNWIRE = process.argv.includes('--unwire');
 
 if (CLI_UNWIRE) {
   app.whenReady().then(() => {
-    try { wiring.removeEntries(); } catch (_) {}
+    try { wiring.removeEntries([shimCommands().shimPath]); } catch (_) {}
     app.exit(0);
   });
 } else if (!app.requestSingleInstanceLock()) {
@@ -261,17 +293,9 @@ if (CLI_UNWIRE) {
 
   /* Wiring, driven from the UI: a packaged install has no npm scripts to run. */
 
-  function shimCommands() {
-    return wiring.buildCommands({
-      packaged: app.isPackaged,
-      // Packaged: resources/emit.cmd sits beside app.asar.unpacked/bin/emit.js.
-      emitCmdPath: path.join(process.resourcesPath || '', 'emit.cmd'),
-      emitJsPath: path.join(__dirname, '..', 'bin', 'emit.js'),
-    });
-  }
 
   ipcMain.handle('sereno:wiring-status', () => {
-    const st = wiring.status();
+    const st = wiring.status([shimCommands().shimPath]);
     return Object.assign({ packaged: app.isPackaged }, st);
   });
 
@@ -285,7 +309,7 @@ if (CLI_UNWIRE) {
   });
 
   ipcMain.handle('sereno:unwire', () => {
-    try { return Object.assign({ ok: true }, wiring.unwire()); }
+    try { return Object.assign({ ok: true }, wiring.removeEntries([shimCommands().shimPath])); }
     catch (e) { return { ok: false, error: e.message }; }
   });
 
