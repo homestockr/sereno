@@ -184,8 +184,10 @@ you connect it, its entries in Claude Code's `settings.json`.
 This program will not transfer any information to other networked systems unless
 specifically requested by the user or the person installing or operating it.
 
-Sereno can be removed completely: **Disconnect** in the app, or `npm run unwire`,
-restores Claude Code's settings; the uninstaller does it for you.
+Sereno can be removed completely. **Disconnect** in the widget removes its
+statusline and hooks and leaves the rest of your settings alone; `npm run unwire`
+restores the pre-install backup instead; and the uninstaller disconnects for you.
+Entries it cannot prove are its own are reported, never deleted.
 
 ## Code signing policy
 

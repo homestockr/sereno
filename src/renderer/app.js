@@ -298,30 +298,57 @@ async function refreshWiring() {
   try { st = await api.wiringStatus(); } catch (_) { return; }
 
   wired = !!st.wired;
-  // Never cover live sessions with a setup panel: if events are arriving, it works.
-  ui.setup.hidden = wired || (snapshot.sessions || []).length > 0;
+  // Never cover live sessions: if events are arriving, it is plainly working.
+  ui.setup.hidden = (snapshot.sessions || []).length > 0;
 
   if (!ui.setup.hidden) {
-    ui.setupBody.textContent = st.foreignStatusLine
-      ? 'Sereno adds a statusline and nine hooks to Claude Code’s settings. You already have a statusline configured — connecting replaces it. Your settings file is backed up first.'
-      : 'Sereno adds a statusline and nine hooks to Claude Code’s settings. Existing entries are kept, and your settings file is backed up first.';
-    ui.setupActionLabel.textContent = st.foreignStatusLine
-      ? 'Connect and replace my statusline'
-      : 'Connect to Claude Code';
-    ui.setupAction.dataset.replace = st.foreignStatusLine ? '1' : '';
+    if (wired) {
+      ui.setupBody.textContent =
+        'Connected to Claude Code. Disconnecting removes Sereno’s statusline and hooks and leaves everything else in your settings untouched.';
+      ui.setupActionLabel.textContent = 'Disconnect';
+      ui.setupAction.dataset.mode = 'disconnect';
+      ui.setupAction.dataset.replace = '';
+    } else {
+      ui.setupBody.textContent = st.foreignStatusLine
+        ? 'Sereno adds a statusline and nine hooks to Claude Code’s settings. You already have a statusline configured — connecting replaces it. Your settings file is backed up first.'
+        : 'Sereno adds a statusline and nine hooks to Claude Code’s settings. Existing entries are kept, and your settings file is backed up first.';
+      ui.setupActionLabel.textContent = st.foreignStatusLine
+        ? 'Connect and replace my statusline'
+        : 'Connect to Claude Code';
+      ui.setupAction.dataset.mode = 'connect';
+      ui.setupAction.dataset.replace = st.foreignStatusLine ? '1' : '';
+    }
   }
   render();
 }
 
 ui.setupAction.addEventListener('click', async () => {
-  if (!api || !api.connect) return;
+  if (!api) return;
+  const disconnecting = ui.setupAction.dataset.mode === 'disconnect';
+  if (disconnecting ? !api.disconnect : !api.connect) return;
+
   ui.setupAction.disabled = true;
-  const res = await api.connect({ replaceStatusLine: !!ui.setupAction.dataset.replace });
+  const res = disconnecting
+    ? await api.disconnect()
+    : await api.connect({ replaceStatusLine: !!ui.setupAction.dataset.replace });
   ui.setupAction.disabled = false;
 
   ui.setupNote.hidden = false;
   if (!res || !res.ok) {
-    ui.setupNote.textContent = 'Could not write settings: ' + ((res && res.error) || 'unknown error');
+    ui.setupNote.textContent = (disconnecting ? 'Could not update settings: ' : 'Could not write settings: ')
+      + ((res && res.error) || 'unknown error');
+  } else if (disconnecting) {
+    let msg = res.changed
+      ? 'Disconnected. Restart any running Claude Code session.'
+      : 'Nothing of Sereno’s was found in your settings.';
+    // Entries we could not prove were ours are never deleted on suspicion, so
+    // say so rather than leaving the user to wonder what was left behind.
+    if (res.skipped && res.skipped.length) {
+      msg += ' Left alone (not ours): ' + res.skipped.length
+        + (res.skipped.length === 1 ? ' entry.' : ' entries.');
+    }
+    ui.setupNote.textContent = msg;
+    await refreshWiring();
   } else {
     ui.setupNote.textContent = 'Connected. Restart any running Claude Code session to pick it up.'
       + (res.backup ? ' Backup: ' + res.backup : '');

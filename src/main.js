@@ -50,18 +50,29 @@ function loadUi() {
 }
 
 let saveTimer = null;
+
+function writeUi() {
+  try {
+    if (win && !win.isDestroyed()) {
+      const [x, y] = win.getPosition();
+      ui.x = x; ui.y = y;
+    }
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(stateFile, JSON.stringify(ui));
+  } catch (_) {}
+}
+
+/** Debounced: 'moved' fires continuously while a window is being dragged. */
 function saveUi() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    try {
-      if (win && !win.isDestroyed()) {
-        const [x, y] = win.getPosition();
-        ui.x = x; ui.y = y;
-      }
-      fs.mkdirSync(stateDir, { recursive: true });
-      fs.writeFileSync(stateFile, JSON.stringify(ui));
-    } catch (_) {}
-  }, 400);
+  saveTimer = setTimeout(writeUi, 400);
+}
+
+/** Quitting inside the debounce window would otherwise lose the last move. */
+function flushUi() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  writeUi();
 }
 
 /* ---------- geometry ---------- */
@@ -331,5 +342,8 @@ if (CLI_UNWIRE) {
   });
 
   app.on('window-all-closed', () => app.quit());
-  app.on('before-quit', () => { if (collector) collector.close(); });
+  app.on('before-quit', () => {
+    flushUi();
+    if (collector) collector.close();
+  });
 }
