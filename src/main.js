@@ -66,13 +66,20 @@ function saveUi() {
 
 /* ---------- geometry ---------- */
 
-/** Window pixels are content pixels times the zoom factor. */
+/**
+ * Window pixels are content pixels times the zoom factor.
+ *
+ * setBounds, not setSize: on Windows a `transparent: true` window will GROW via
+ * setSize but silently refuse to shrink, so zooming out left the widget stuck at
+ * its widest. setBounds is not subject to that, verified across the flag matrix.
+ * Do not "simplify" this back to setSize.
+ */
 function applySize() {
   if (!win || win.isDestroyed()) return;
   const w = Math.round(ui.width * ui.zoom);
   const h = Math.max(MIN_HEIGHT, Math.round(lastCssHeight * ui.zoom));
   const [cw, ch] = win.getSize();
-  if (cw !== w || ch !== h) win.setSize(w, h);
+  if (cw !== w || ch !== h) win.setBounds({ width: w, height: h });
 }
 
 function setZoom(z) {

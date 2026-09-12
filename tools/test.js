@@ -360,6 +360,16 @@ test('the session pid comes from CLAUDE_PID, not the transient shell', () => {
   assert.ok(!/ppid:\s*process\.ppid/.test(src), 'emit.js must not report process.ppid as the session pid');
 });
 
+test('the window is resized with setBounds, never setSize', () => {
+  // On Windows a transparent window grows via setSize but silently refuses to
+  // shrink, which left the widget stuck at its widest after zooming out.
+  // This is runtime behaviour no unit test can exercise, so guard the source.
+  const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  assert.ok(/win\.setBounds\(\{\s*width/.test(main), 'applySize must use setBounds');
+  assert.ok(!/win\.setSize\(/.test(main),
+    'win.setSize cannot shrink a transparent window on Windows - use setBounds');
+});
+
 test('a long tool argument is shortened for the row but kept whole for the command block', () => {
   const s = new Store();
   const long = 'npm run build -- --verbose --output ./dist/some/deeply/nested/path/bundle.js';
