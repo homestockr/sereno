@@ -4,9 +4,10 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 1.0.x   | ✅        |
+| 1.1.x   | ✅        |
+| < 1.1   | ❌        |
 
-Sereno is pre-1.1; fixes land on the latest release.
+Fixes land on the latest release; older versions are not backported.
 
 ## Reporting a vulnerability
 
