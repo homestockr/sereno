@@ -500,7 +500,10 @@ test('focus picks a window by title, not the process-wide MainWindowHandle', () 
 
   // Comments are stripped first: the file explains at length why MainWindowHandle
   // is wrong, and that prose must not trip the check that we stopped calling it.
-  const code = ps.split('\n').map((l) => l.replace(/#.*$/, '')).join('\n');
+  // Split on either ending: .gitattributes checks .ps1 out as CRLF, and a
+  // trailing \r stops /#.*$/ matching - which let the comment through on CI
+  // while still passing on a working copy that happened to hold LF.
+  const code = ps.split(/\r?\n/).map((l) => l.replace(/#.*$/, '')).join('\n');
 
   assert.ok(/EnumWindows/.test(code), 'must enumerate the terminal\'s windows itself');
   assert.ok(/ConsoleTitleOf/.test(code), 'must read the target console title to disambiguate');
