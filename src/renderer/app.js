@@ -262,7 +262,13 @@ function tick() {
 let lastHeight = 0;
 function reportHeight() {
   if (!api || !api.reportHeight) return;
-  const h = Math.ceil(ui.window.getBoundingClientRect().height);
+  // The rows list is the only thing allowed to scroll, so the height we want is
+  // what is rendered plus whatever is currently clipped out of it. Reporting the
+  // rendered height alone would let a clamped window latch at its clamp: the
+  // clamp shrinks the list, the shorter list reports a smaller height, and it
+  // never grows back when sessions end.
+  const hidden = Math.max(0, ui.rows.scrollHeight - ui.rows.clientHeight);
+  const h = Math.ceil(ui.window.getBoundingClientRect().height + hidden);
   if (h && h !== lastHeight) { lastHeight = h; api.reportHeight(h); }
 }
 

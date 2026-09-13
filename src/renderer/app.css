@@ -375,3 +375,29 @@ button:focus-visible { outline: 2px solid #f3cc91; outline-offset: 3px; }
 }
 /* The cost line keeps its own spacing above the last meter. */
 .footer .bottomline { margin-top: 10px; }
+
+/* ---------- tall lists ---------- */
+
+/* Past roughly nine expanded sessions the natural height outgrows the display.
+   The window has no chrome and nothing here scrolled, so everything below the
+   bottom edge - the allowances among it - was simply unreachable.
+   Only the session list scrolls. The alert, the promoted request and the footer
+   stay put, because those are the parts you opened the widget to look at. */
+html, body { height: 100%; }
+
+.window {
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+}
+
+#banner, #request, #setup, #footer, #offline { flex: none; }
+
+.rows {
+  flex: 1 1 auto;
+  min-height: 0;            /* a flex child will not shrink below content without this */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #4a4f55 transparent;
+}

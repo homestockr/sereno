@@ -30,6 +30,12 @@ const DEFAULT_WIDTH = 380;        // CSS px, matches the mockup
 const MIN_WIDTH = 300;
 const MAX_WIDTH = 820;
 const MIN_HEIGHT = 60;
+// Breathing room kept clear of the work area's edges, matching the gap the
+// window is first placed at.
+const SCREEN_MARGIN = 48;
+// A ceiling on what the renderer may ask for. Not a layout constraint - the work
+// area below is - just a guard against a nonsense value over IPC.
+const MAX_REQUESTED_HEIGHT = 20000;
 const SWEEP_MS = 30 * 1000;
 
 // Discrete steps beat free-form zoom: every stop stays on a crisp pixel grid.
@@ -100,7 +106,16 @@ function flushUi() {
 function applySize() {
   if (!win || win.isDestroyed()) return;
   const w = Math.round(ui.width * ui.zoom);
-  const h = Math.max(MIN_HEIGHT, Math.round(lastCssHeight * ui.zoom));
+  const want = Math.max(MIN_HEIGHT, Math.round(lastCssHeight * ui.zoom));
+
+  // Never taller than the display can actually show. A fixed 1400px ceiling used
+  // to leave the footer hanging off the bottom of a long session list with no way
+  // to reach it - the widget has no chrome and nothing scrolled. The renderer
+  // scrolls its row list against whatever height it ends up with.
+  const area = screen.getDisplayMatching(win.getBounds()).workArea;
+  const ceiling = Math.max(MIN_HEIGHT, area.height - SCREEN_MARGIN);
+  const h = Math.min(want, ceiling);
+
   const [cw, ch] = win.getSize();
   if (cw !== w || ch !== h) win.setBounds({ width: w, height: h });
 }
@@ -137,6 +152,8 @@ function reassertOnTop() {
   if (!win || win.isDestroyed()) return;
   win.setAlwaysOnTop(true, 'screen-saver');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // The height ceiling comes from the display, so a display change can move it.
+  applySize();
   clampToVisible();
 }
 
@@ -326,8 +343,10 @@ if (CLI_UNWIRE) {
   ipcMain.on('sereno:height', (_e, height) => {
     const h = Number(height);
     if (!Number.isFinite(h) || h <= 0) return;
-    lastCssHeight = Math.min(1400, h);
+    lastCssHeight = Math.min(MAX_REQUESTED_HEIGHT, h);
     applySize();
+    // A window that just grew can hang off the bottom of the screen.
+    clampToVisible();
   });
 
   ipcMain.on('sereno:width-by', (_e, dx) => {

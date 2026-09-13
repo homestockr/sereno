@@ -491,6 +491,54 @@ test('the window is resized with setBounds, never setSize', () => {
     'win.setSize cannot shrink a transparent window on Windows - use setBounds');
 });
 
+test('the window is bounded by the display, not by a fixed number', () => {
+  // A hard 1400px ceiling left the footer hanging off the bottom of a long
+  // session list on a 1440px screen, with no chrome and nothing scrolled to
+  // reach it. Runtime geometry no unit test can exercise, so guard the source.
+  const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const code = main.split(/\r?\n/).map((l) => l.replace(/^\s*\/\/.*$/, '')).join('\n');
+
+  assert.ok(!/Math\.min\(1400/.test(code), 'the fixed 1400px ceiling must be gone');
+  assert.ok(/workArea/.test(code) && /ceiling/.test(code),
+    'applySize must clamp against the display work area');
+  assert.ok(/SCREEN_MARGIN/.test(code), 'leave the work area edges clear');
+
+  // A display change moves the ceiling, so the size has to be re-applied, not
+  // just the position.
+  const reassert = code.match(/function reassertOnTop[\s\S]*?\n}/)[0];
+  assert.ok(/applySize\(\)/.test(reassert),
+    'reassertOnTop must re-apply the size ceiling when displays change');
+});
+
+test('the reported height survives being clamped', () => {
+  // Reporting only what is rendered would let a clamped window latch: the clamp
+  // shrinks the list, the shorter list reports less, and it never grows back.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const fn = app.match(/function reportHeight[\s\S]*?\n}/)[0];
+  assert.ok(/scrollHeight\s*-\s*ui\.rows\.clientHeight/.test(fn),
+    'reportHeight must add back what the row list is currently hiding');
+
+  // Exercise the arithmetic itself.
+  const desired = (rendered, scrollH, clientH) =>
+    Math.ceil(rendered + Math.max(0, scrollH - clientH));
+  assert.strictEqual(desired(1654, 700, 700), 1654, 'unclamped: rendered height is the answer');
+  assert.strictEqual(desired(1271, 700, 317), 1654, 'clamped: still asks for its full height');
+  assert.strictEqual(desired(600, 200, 400), 600, 'a list shorter than its box adds nothing');
+});
+
+test('only the session list scrolls', () => {
+  // The alert, the promoted request and the allowances are the parts you opened
+  // the widget to look at; they must not scroll away with the list.
+  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+  const rows = css.match(/\.rows \{[^}]*flex: 1 1 auto;[^}]*\}/);
+  assert.ok(rows, '.rows must be the flexible row of the column');
+  assert.ok(/min-height: 0/.test(rows[0]),
+    'a flex child will not shrink below its content without min-height:0');
+  assert.ok(/overflow-y: auto/.test(rows[0]), '.rows must scroll');
+  assert.ok(/#banner, #request, #setup, #footer, #offline \{ flex: none; \}/.test(css),
+    'everything outside the list stays put');
+});
+
 test('focus picks a window by title, not the process-wide MainWindowHandle', () => {
   // Windows Terminal hosts every window it has opened in ONE process, so
   // .MainWindowHandle returns the same arbitrary handle for every session and
