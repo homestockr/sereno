@@ -607,20 +607,37 @@ test('the window is bounded by the display, not by a fixed number', () => {
     'reassertOnTop must re-apply the size ceiling when displays change');
 });
 
-test('the reported height survives being clamped', () => {
-  // Reporting only what is rendered would let a clamped window latch: the clamp
-  // shrinks the list, the shorter list reports less, and it never grows back.
+test('the window can grow from its minimum height', () => {
+  // This shipped broken in 1.2.1. The window is created at MIN_HEIGHT and grows
+  // ONLY by measuring itself and reporting back, so a measurement that reads the
+  // clamped box deadlocks on the first pass: 60px clips every section, measures
+  // 60, asks for 60, and stays there. The widget came up as a bare title bar.
+  //
+  // The earlier version of this test asserted the broken formula, because it was
+  // written from the same wrong assumption - that only the row list could ever
+  // be the part getting clipped.
   const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
   const fn = app.match(/function reportHeight[\s\S]*?\n}/)[0];
-  assert.ok(/scrollHeight\s*-\s*ui\.rows\.clientHeight/.test(fn),
-    'reportHeight must add back what the row list is currently hiding');
 
-  // Exercise the arithmetic itself.
-  const desired = (rendered, scrollH, clientH) =>
-    Math.ceil(rendered + Math.max(0, scrollH - clientH));
-  assert.strictEqual(desired(1654, 700, 700), 1654, 'unclamped: rendered height is the answer');
-  assert.strictEqual(desired(1271, 700, 317), 1654, 'clamped: still asks for its full height');
-  assert.strictEqual(desired(600, 200, 400), 600, 'a list shorter than its box adds nothing');
+  assert.ok(!/ui\.window\.getBoundingClientRect\(\)\.height/.test(fn),
+    'measuring the window itself is precisely what deadlocked 1.2.1');
+  assert.ok(/for \(const el of ui\.window\.children\)/.test(fn),
+    'height must be summed from the children, which keep their natural size');
+  assert.ok(/el\.scrollHeight : el\.offsetHeight/.test(fn),
+    'the row list contributes its full content, everything else its own height');
+
+  // The children are flex:none, so they keep their natural height even while
+  // overflowing a window too short to hold them: the sum cannot depend on the
+  // height the window happens to have been given.
+  const measure = (fixed, rowsContent, border) =>
+    Math.ceil(fixed.reduce((a, b) => a + b, 0) + rowsContent + border);
+
+  const atStartup = measure([117], 0, 2);          // banner only, nothing reporting
+  assert.strictEqual(atStartup, 119);
+  assert.ok(atStartup > 60, 'must ask for more than MIN_HEIGHT or it can never grow');
+
+  // Same layout, same answer, whatever the window was clamped to.
+  assert.strictEqual(measure([117, 130], 1450, 2), 1699);
 });
 
 test('only the session list scrolls', () => {

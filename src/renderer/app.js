@@ -281,13 +281,27 @@ function tick() {
 let lastHeight = 0;
 function reportHeight() {
   if (!api || !api.reportHeight) return;
-  // The rows list is the only thing allowed to scroll, so the height we want is
-  // what is rendered plus whatever is currently clipped out of it. Reporting the
-  // rendered height alone would let a clamped window latch at its clamp: the
-  // clamp shrinks the list, the shorter list reports a smaller height, and it
-  // never grows back when sessions end.
-  const hidden = Math.max(0, ui.rows.scrollHeight - ui.rows.clientHeight);
-  const h = Math.ceil(ui.window.getBoundingClientRect().height + hidden);
+
+  // Measure what the layout WANTS, never what it was given.
+  //
+  // The window is created at MIN_HEIGHT and grows only by reporting a height
+  // back to main, so any measurement that reads the clamped box deadlocks on
+  // the very first pass: a 60px window clips everything, measures 60, asks for
+  // 60, and stays there forever. That is exactly what shipped in 1.2.1.
+  //
+  // Summing the children avoids the loop entirely. They are flex:none, so they
+  // keep their natural height even while overflowing a window too short to hold
+  // them, and the row list contributes its full scrollHeight rather than the
+  // box it has been squeezed into.
+  let content = 0;
+  for (const el of ui.window.children) {
+    if (el.hidden) continue;
+    if (el === ui.grip) continue;             // absolutely positioned, not in flow
+    content += (el === ui.rows) ? el.scrollHeight : el.offsetHeight;
+  }
+  const chrome = ui.window.offsetHeight - ui.window.clientHeight;   // borders
+
+  const h = Math.ceil(content + chrome);
   if (h && h !== lastHeight) { lastHeight = h; api.reportHeight(h); }
 }
 
