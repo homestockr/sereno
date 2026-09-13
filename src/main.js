@@ -11,8 +11,20 @@ const path = require('node:path');
 const { Store } = require('./store.js');
 const { createCollector } = require('./collector.js');
 const wiring = require('./wiring.js');
+const config = require('./config.js');
 
 const PORT = Number(process.env.CLAUDE_HUD_PORT) || 8787;
+
+// Must stay in sync with build.appId in package.json — electron-builder stamps
+// exactly this onto the Start Menu and desktop shortcuts it creates.
+const APP_USER_MODEL_ID = 'com.sereno.widget';
+
+// A dev run MUST NOT answer to the installed app's identity. Electron stamps
+// whatever id is set here onto a Start Menu shortcut of its own, pointing at a
+// bare electron.exe with no app path; if that shortcut shares an id with the
+// real install, Windows resolves toast clicks to it and the user gets Electron's
+// welcome screen instead of the widget. Suffixing keeps the two apart for good.
+const DEV_APP_USER_MODEL_ID = APP_USER_MODEL_ID + '.dev';
 
 const DEFAULT_WIDTH = 380;        // CSS px, matches the mockup
 const MIN_WIDTH = 300;
@@ -245,13 +257,41 @@ if (CLI_UNWIRE) {
     if (win && !win.isDestroyed()) { win.showInactive(); reassertOnTop(); }
   });
 
-  // Windows shows toasts only for a known AppUserModelID. Without this the
-  // Notification silently never appears, which kills the whole point of the app.
-  if (process.platform === 'win32') app.setAppUserModelId('Sereno');
+  // Windows keys both toast delivery and taskbar identity off the AppUserModelID,
+  // and only honours one that a Start Menu shortcut actually carries. The NSIS
+  // installer stamps its shortcuts with build.appId, so the running app has to
+  // claim that same string: mismatch, and Windows treats the pinned shortcut and
+  // the live window as two unrelated apps, and drops every toast on the floor.
+  //
+  // Never set this to a file path. Windows happily accepts one, then launches
+  // that executable when a toast is clicked - which for electron.exe means the
+  // welcome screen, not the widget.
+  if (process.platform === 'win32') {
+    app.setAppUserModelId(app.isPackaged ? APP_USER_MODEL_ID : DEV_APP_USER_MODEL_ID);
+  }
 
   app.whenReady().then(() => {
     const store = new Store();
     store.onBlocked = toastBlocked;
+
+    // Refresh the launch command on every boot, so auto-launch keeps pointing at
+    // this build after an update, a reinstall, or a move out of the dev tree.
+    try {
+      config.recordLaunch(app.isPackaged
+        ? { exe: process.execPath, args: [] }
+        // Unpackaged, electron.exe needs to be told which app to run.
+        : { exe: process.execPath, args: [app.getAppPath()] });
+    } catch (_) { /* a read-only home must not stop the widget starting */ }
+
+    // Whatever the shim captured while we were booting. Done before the collector
+    // accepts anyone, so the first snapshot a client sees already has it.
+    for (const rec of config.drainPending()) {
+      try {
+        store.applyHook(rec.event, rec.payload,
+          { ppid: typeof rec.ppid === 'number' ? rec.ppid : null });
+      } catch (_) { /* one bad replay must not cost the rest */ }
+    }
+    config.clearLaunchLock();
 
     collector = createCollector(store, PORT);
     collector.listen((err, addr) => {
@@ -304,6 +344,16 @@ if (CLI_UNWIRE) {
 
   /* Wiring, driven from the UI: a packaged install has no npm scripts to run. */
 
+
+  ipcMain.handle('sereno:settings', () => {
+    try { return Object.assign({ ok: true }, config.read()); }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  ipcMain.handle('sereno:set-auto-launch', (_e, on) => {
+    try { return Object.assign({ ok: true }, config.write({ autoLaunch: !!on })); }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
 
   ipcMain.handle('sereno:wiring-status', () => {
     const st = wiring.status([shimCommands().shimPath]);

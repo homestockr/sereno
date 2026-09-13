@@ -18,4 +18,8 @@ contextBridge.exposeInMainWorld('sereno', {
   wiringStatus: () => ipcRenderer.invoke('sereno:wiring-status'),
   connect: (opts) => ipcRenderer.invoke('sereno:wire', opts || {}),
   disconnect: () => ipcRenderer.invoke('sereno:unwire'),
+
+  // Sereno's own settings, which live nowhere near Claude Code's.
+  settings: () => ipcRenderer.invoke('sereno:settings'),
+  setAutoLaunch: (on) => ipcRenderer.invoke('sereno:set-auto-launch', !!on),
 });

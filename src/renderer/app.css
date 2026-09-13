@@ -328,3 +328,32 @@ button:focus-visible { outline: 2px solid #f3cc91; outline-offset: 3px; }
     linear-gradient(135deg, transparent 72%, #9aa0a8 72%, #9aa0a8 84%, transparent 84%);
 }
 .size-grip:hover { opacity: .8; }
+
+/* ---------- settings toggle ---------- */
+
+.toggle-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #ffffff14;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #f3eee5;
+}
+.toggle-row input {
+  flex: none;
+  width: 15px; height: 15px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+.toggle-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+/* The gear is a mode, so it reads as pressed while the panel is open. */
+.icon-button[aria-expanded="true"] { background: #ffffff1f; color: #fff; }

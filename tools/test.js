@@ -663,6 +663,201 @@ test('missing rate_limits degrades instead of throwing', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
+  /* ============================================================ *
+   * 8. Auto-launch: the shim starting the app on a cold session
+   * ============================================================ */
+  console.log('\n[8] auto-launch on a cold SessionStart');
+
+  // Every case here runs against a throwaway SERENO_HOME, so the suite can
+  // never read the developer's real config or spawn their real widget.
+  function launchFixture(cfg) {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-home-'));
+    const marker = path.join(home, 'launched.txt');
+    if (cfg) {
+      fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(Object.assign({
+        // A stand-in for Sereno.exe: it records that it ran, and what it
+        // inherited, then exits. What the real app would do is beside the point.
+        launch: {
+          exe: process.execPath,
+          args: ['-e', 'require("fs").writeFileSync(process.argv[1], String(process.env.ELECTRON_RUN_AS_NODE))', marker],
+        },
+      }, cfg)));
+    }
+    return { home, marker };
+  }
+
+  function emitIn(home, args, input, extraEnv) {
+    // Port 9 again: the discard port refuses instantly, which is exactly the
+    // cold-start signal the shim keys off.
+    return spawnSync(process.execPath, [EMIT].concat(args), {
+      input,
+      encoding: 'utf8',
+      env: Object.assign({}, process.env, { CLAUDE_HUD_PORT: '9', SERENO_HOME: home }, extraEnv || {}),
+      timeout: 10000,
+    });
+  }
+
+  const waitFor = async (file, ms) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (fs.existsSync(file)) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  };
+
+  const pendingOf = (home) => {
+    try { return fs.readdirSync(path.join(home, 'pending')).filter((f) => f.endsWith('.json')); }
+    catch (_) { return []; }
+  };
+
+  const drainIn = (home) => {
+    const prev = process.env.SERENO_HOME;
+    process.env.SERENO_HOME = home;
+    try { return require('../src/config.js').drainPending(); }
+    finally { if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev; }
+  };
+
+  await atest('opted out (no config at all) never spawns anything', async () => {
+    const { home, marker } = launchFixture(null);
+    const r = emitIn(home, ['hook', 'SessionStart'], JSON.stringify(sid('cold')));
+    assert.strictEqual(r.status, 0, 'exit code ' + r.status);
+    assert.strictEqual(await waitFor(marker, 400), false, 'launched without being asked to');
+    assert.strictEqual(pendingOf(home).length, 0, 'queued an event with auto-launch off');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('autoLaunch false is respected even with a launch command on file', async () => {
+    const { home, marker } = launchFixture({ autoLaunch: false });
+    emitIn(home, ['hook', 'SessionStart'], JSON.stringify(sid('cold')));
+    assert.strictEqual(await waitFor(marker, 400), false, 'launched while switched off');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('autoLaunch true starts the app on SessionStart', async () => {
+    const { home, marker } = launchFixture({ autoLaunch: true });
+    const r = emitIn(home, ['hook', 'SessionStart'], JSON.stringify(sid('cold')));
+    assert.strictEqual(r.status, 0, 'exit code ' + r.status);
+    assert.strictEqual(r.stderr, '', 'shim wrote to stderr: ' + r.stderr);
+    assert.ok(await waitFor(marker, 5000), 'the app was never started');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('the launched app does not inherit ELECTRON_RUN_AS_NODE', async () => {
+    // emit.cmd sets it so Electron runs as Node. Passing it on would start
+    // Sereno headless: a node process, no widget, and no way to tell why.
+    const { home, marker } = launchFixture({ autoLaunch: true });
+    emitIn(home, ['hook', 'SessionStart'], JSON.stringify(sid('cold')), { ELECTRON_RUN_AS_NODE: '1' });
+    assert.ok(await waitFor(marker, 5000), 'the app was never started');
+    assert.strictEqual(fs.readFileSync(marker, 'utf8'), 'undefined', 'ELECTRON_RUN_AS_NODE leaked into the app');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('the triggering event is queued so the widget does not come up empty', async () => {
+    const { home } = launchFixture({ autoLaunch: true });
+    emitIn(home, ['hook', 'SessionStart'], JSON.stringify(sid('cold')), { CLAUDE_PID: '4242' });
+
+    const queued = pendingOf(home);
+    assert.strictEqual(queued.length, 1, 'expected exactly one queued event, got ' + queued.length);
+    const rec = JSON.parse(fs.readFileSync(path.join(home, 'pending', queued[0]), 'utf8'));
+    assert.strictEqual(rec.event, 'SessionStart');
+    assert.strictEqual(rec.payload.session_id, 'cold');
+    assert.strictEqual(rec.ppid, 4242, 'the pid needed to focus the terminal was lost');
+
+    // And the app picks it up: this is the half that makes the replay worth doing.
+    const drained = drainIn(home);
+    assert.strictEqual(drained.length, 1, 'drainPending did not return the queued event');
+    assert.strictEqual(pendingOf(home).length, 0, 'drainPending left the queue behind');
+
+    const store = new Store();
+    store.applyHook(drained[0].event, drained[0].payload, { ppid: drained[0].ppid });
+    assert.strictEqual(store.snapshot().sessions.length, 1, 'the replayed event did not reach the store');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('several sessions starting at once launch the app only once', async () => {
+    const { home } = launchFixture({ autoLaunch: true });
+    for (let i = 0; i < 4; i++) emitIn(home, ['hook', 'SessionStart'], JSON.stringify(sid('s' + i)));
+    assert.strictEqual(pendingOf(home).length, 1, 'the debounce let a spawn storm through');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('only SessionStart may launch: no other event spawns', async () => {
+    for (const ev of ['PreToolUse', 'Notification', 'Stop', 'SessionEnd']) {
+      const { home, marker } = launchFixture({ autoLaunch: true });
+      emitIn(home, ['hook', ev], JSON.stringify(sid('cold')));
+      assert.strictEqual(await waitFor(marker, 300), false, ev + ' launched the app');
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  await atest('statusline mode never launches, and still prints its one line', async () => {
+    const { home, marker } = launchFixture({ autoLaunch: true });
+    const r = emitIn(home, ['statusline'], JSON.stringify({ model: { display_name: 'Opus' } }));
+    assert.strictEqual(r.status, 0);
+    assert.strictEqual(r.stdout.split('\n').length, 2, 'expected exactly one line');
+    assert.strictEqual(await waitFor(marker, 300), false, 'the statusline launched the app');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('a stale queue is discarded rather than replayed into a new boot', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-home-'));
+    const dir = path.join(home, 'pending');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, Date.now() + '-1.json');
+    fs.writeFileSync(file, JSON.stringify({ event: 'SessionStart', payload: sid('old'), ppid: null }));
+    const old = (Date.now() - 60 * 60 * 1000) / 1000;
+    fs.utimesSync(file, old, old);
+
+    assert.strictEqual(drainIn(home).length, 0, 'an hour-old session was replayed as live');
+    assert.strictEqual(pendingOf(home).length, 0, 'the stale entry was left to rot');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('what the app records is what the shim can launch', async () => {
+    // The seam most likely to drift in silence: main.js writes the launch spec
+    // through src/config.js, bin/emit.js reads it back with its own inlined copy
+    // of those paths, and nothing else connects the two halves.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-home-'));
+    const marker = path.join(home, 'launched.txt');
+    const config = require('../src/config.js');
+
+    const prev = process.env.SERENO_HOME;
+    process.env.SERENO_HOME = home;
+    try {
+      config.recordLaunch({
+        exe: process.execPath,
+        args: ['-e', 'require("fs").writeFileSync(process.argv[1], "up")', marker],
+      });
+      config.write({ autoLaunch: true });
+    } finally {
+      if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+    }
+
+    emitIn(home, ['hook', 'SessionStart'], JSON.stringify(sid('cold')));
+    assert.ok(await waitFor(marker, 5000), 'the shim could not launch what the app recorded');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('the app clears the debounce marker once it is up', async () => {
+    // Otherwise quitting and starting a session inside the window would be
+    // swallowed by a lock this very launch left behind.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-home-'));
+    const config = require('../src/config.js');
+    const prev = process.env.SERENO_HOME;
+    process.env.SERENO_HOME = home;
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(config.launchLock(), String(Date.now()));
+      config.clearLaunchLock();
+      assert.strictEqual(fs.existsSync(config.launchLock()), false, 'the marker outlived the launch');
+      config.clearLaunchLock();   // absent is not an error
+    } finally {
+      if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

@@ -31,6 +31,7 @@
         <span class="grip" title="Drag to move">&#10287;</span>
         <button id="zoom-out" class="icon-button no-drag" type="button" aria-label="Smaller" title="Smaller (Ctrl -)">&minus;</button>
         <button id="zoom-in" class="icon-button no-drag" type="button" aria-label="Larger" title="Larger (Ctrl +)">+</button>
+        <button id="settings-toggle" class="icon-button no-drag" type="button" aria-label="Settings" title="Settings" aria-expanded="false">&#9881;</button>
         <button id="close" class="icon-button no-drag" type="button" aria-label="Quit Sereno" title="Quit Sereno">&times;</button>
       </div>
 
@@ -70,6 +71,14 @@
         <span id="setup-action-label">Connect to Claude Code</span><span aria-hidden="true">&rarr;</span>
       </button>
       <p id="setup-note" class="setup-note" hidden></p>
+
+      <label id="autolaunch-row" class="toggle-row no-drag" hidden>
+        <input id="autolaunch" class="no-drag" type="checkbox">
+        <span>
+          Start Sereno automatically
+          <small>Opens the widget when a Claude Code session begins.</small>
+        </span>
+      </label>
     </div>
 
     <div id="rows" class="rows"></div>

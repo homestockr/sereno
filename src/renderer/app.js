@@ -25,6 +25,8 @@ const ui = {
   offline: el('offline'), grip: el('size-grip'),
   setup: el('setup'), setupBody: el('setup-body'), setupAction: el('setup-action'),
   setupActionLabel: el('setup-action-label'), setupNote: el('setup-note'),
+  settingsToggle: el('settings-toggle'),
+  autoLaunchRow: el('autolaunch-row'), autoLaunch: el('autolaunch'),
 };
 
 // null until the first status check; only false means "definitely not wired".
@@ -299,7 +301,9 @@ async function refreshWiring() {
 
   wired = !!st.wired;
   // Never cover live sessions: if events are arriving, it is plainly working.
-  ui.setup.hidden = (snapshot.sessions || []).length > 0;
+  // Asking for the panel outranks that - it is the only way back to the
+  // settings once sessions start reporting.
+  ui.setup.hidden = !settingsOpen && (snapshot.sessions || []).length > 0;
 
   if (!ui.setup.hidden) {
     if (wired) {
@@ -349,10 +353,63 @@ ui.setupAction.addEventListener('click', async () => {
     }
     ui.setupNote.textContent = msg;
     await refreshWiring();
+    await refreshSettings();
   } else {
     ui.setupNote.textContent = 'Connected. Restart any running Claude Code session to pick it up.'
       + (res.backup ? ' Backup: ' + res.backup : '');
     await refreshWiring();
+    await refreshSettings();
+  }
+  reportHeight();
+});
+
+/* ---------- settings ---------- */
+
+/**
+ * The setup panel doubles as the settings panel: it is already the one place
+ * that talks to the outside world, and a second panel would cost the widget
+ * height it does not have to spare.
+ */
+let settingsOpen = false;
+
+async function refreshSettings() {
+  if (!api || !api.settings) { ui.autoLaunchRow.hidden = true; return; }
+  // A write is in flight. The 15s re-check would otherwise read the old value
+  // back off disk and flip the box under the user mid-click.
+  if (ui.autoLaunch.disabled) return;
+  let st;
+  try { st = await api.settings(); } catch (_) { return; }
+  if (!st || !st.ok) { ui.autoLaunchRow.hidden = true; return; }
+  ui.autoLaunch.checked = !!st.autoLaunch;
+  // Auto-launch rides on the SessionStart hook, so it can do nothing at all
+  // until Sereno is connected. Offering it before then would just be a lie.
+  ui.autoLaunchRow.hidden = !wired;
+}
+
+ui.settingsToggle.addEventListener('click', async () => {
+  settingsOpen = !settingsOpen;
+  ui.settingsToggle.setAttribute('aria-expanded', settingsOpen ? 'true' : 'false');
+  ui.setupNote.hidden = true;
+  await refreshWiring();
+  await refreshSettings();
+  reportHeight();
+});
+
+ui.autoLaunch.addEventListener('change', async () => {
+  if (!api || !api.setAutoLaunch) return;
+  const want = ui.autoLaunch.checked;
+  ui.autoLaunch.disabled = true;
+  const res = await api.setAutoLaunch(want);
+  ui.autoLaunch.disabled = false;
+
+  ui.setupNote.hidden = false;
+  if (!res || !res.ok) {
+    ui.autoLaunch.checked = !want;   // the box must not claim a setting that failed
+    ui.setupNote.textContent = 'Could not save the setting: ' + ((res && res.error) || 'unknown error');
+  } else {
+    ui.setupNote.textContent = want
+      ? 'Sereno will start itself the next time a Claude Code session begins.'
+      : 'Sereno will only start when you open it.';
   }
   reportHeight();
 });
@@ -372,8 +429,8 @@ function connect() {
 
 connect();
 render();
-refreshWiring();
+refreshWiring().then(refreshSettings);
 setInterval(tick, 500);
 // Cheap enough to re-check: it also catches an unwire done outside the app.
-setInterval(refreshWiring, 15000);
+setInterval(() => { refreshWiring().then(refreshSettings); }, 15000);
 window.addEventListener('resize', reportHeight);

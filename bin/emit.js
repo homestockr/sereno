@@ -87,6 +87,108 @@ function emitLine(text) {
   try { process.stdout.write(String(text).split('\n')[0] + '\n'); } catch (_) {}
 }
 
+/* ------------------------------------------------------------------ *
+ * Cold start (opt-in)
+ *
+ * A refused connection on SessionStart means one specific thing: a session is
+ * beginning and the collector is not running. If the user asked for it, that is
+ * exactly when Sereno should start itself.
+ *
+ * Only SessionStart may do this. Any other event would turn a deliberate quit
+ * into a spawn storm on the user's very next tool call.
+ *
+ * The paths and shapes here duplicate src/config.js on purpose: this shim runs
+ * from the unpacked tree and must never reach into app.asar, and rule 2 says it
+ * must not grow anything that can fail or stall on the hook path.
+ * ------------------------------------------------------------------ */
+
+const AUTO_LAUNCH_EVENT = 'SessionStart';
+const LAUNCH_DEBOUNCE_MS = 20000;
+
+function serenoHome() {
+  if (process.env.SERENO_HOME) return process.env.SERENO_HOME;
+  return require('node:path').join(require('node:os').homedir(), '.sereno');
+}
+
+function readConfig() {
+  try {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    return JSON.parse(fs.readFileSync(path.join(serenoHome(), 'config.json'), 'utf8'));
+  } catch (_) { return null; }
+}
+
+/**
+ * One launch per window. A reboot or a restored terminal can start several
+ * sessions at once, and each would otherwise spawn its own Electron; the app's
+ * single-instance lock makes the extras harmless but not free.
+ */
+function claimLaunch(fs, path, home) {
+  const lock = path.join(home, 'launching');
+  try {
+    if (Date.now() - fs.statSync(lock).mtimeMs < LAUNCH_DEBOUNCE_MS) return false;
+  } catch (_) { /* no marker yet, so the slot is ours */ }
+  try {
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(lock, String(Date.now()));
+    return true;
+  } catch (_) { return false; }
+}
+
+/**
+ * Hands the triggering event to the app, which drains it on boot. Electron takes
+ * seconds to come up and rule 2 forbids waiting for it, so without this the
+ * widget would appear empty and stay empty until the next tool call - the
+ * opposite of what starting on a session start is for.
+ *
+ * Written under a dot-name and renamed into place: rename is atomic, so the app
+ * can never read a half-written file.
+ */
+function queuePending(fs, path, home, payload) {
+  try {
+    const dir = path.join(home, 'pending');
+    fs.mkdirSync(dir, { recursive: true });
+    const name = Date.now() + '-' + process.pid + '.json';
+    const tmp = path.join(dir, '.' + name + '.tmp');
+    fs.writeFileSync(tmp, JSON.stringify({
+      event: EVENT,
+      receivedAt: Date.now(),
+      ppid: Number(process.env.CLAUDE_PID) || null,
+      payload,
+    }));
+    fs.renameSync(tmp, path.join(dir, name));
+  } catch (_) { /* a lost replay is never worth failing a hook over */ }
+}
+
+function autoLaunch(payload) {
+  if (MODE !== 'hook' || EVENT !== AUTO_LAUNCH_EVENT) return;
+
+  const cfg = readConfig();
+  if (!cfg || cfg.autoLaunch !== true) return;
+  const spec = cfg.launch;
+  if (!spec || typeof spec.exe !== 'string' || !spec.exe) return;
+
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const home = serenoHome();
+  if (!claimLaunch(fs, path, home)) return;
+  queuePending(fs, path, home, payload);
+
+  try {
+    const env = Object.assign({}, process.env);
+    // emit.cmd sets this so Electron runs as Node. A child inheriting it would
+    // come up as a bare Node process with no window at all.
+    delete env.ELECTRON_RUN_AS_NODE;
+    const child = require('node:child_process').spawn(
+      spec.exe,
+      Array.isArray(spec.args) ? spec.args : [],
+      { detached: true, stdio: 'ignore', windowsHide: true, env },
+    );
+    child.on('error', () => {});   // a stale exe path must not reach stderr
+    child.unref();                 // outlives this process, which exits in ms
+  } catch (_) {}
+}
+
 /* ------------------------------------------------------------------ */
 
 function post(payload) {
@@ -117,7 +219,13 @@ function post(payload) {
   } catch (_) { return bail(); }
 
   // Collector down, firewalled, mid-restart: all of it is fine, all of it is silent.
-  req.on('error', bail);
+  // ECONNREFUSED is the one case worth acting on - nothing is listening, so the
+  // app is not merely busy, it is absent. A timeout or a reset means it IS there
+  // and struggling, and a second process would not help.
+  req.on('error', (err) => {
+    if (err && err.code === 'ECONNREFUSED') { try { autoLaunch(payload); } catch (_) {} }
+    bail();
+  });
   req.setTimeout(REQUEST_TIMEOUT_MS, () => { try { req.destroy(); } catch (_) {} bail(); });
   req.on('response', (res) => { res.resume(); bail(); });  // drain, never parse
 

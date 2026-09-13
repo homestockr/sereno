@@ -44,10 +44,45 @@ one interruption that matters gets warm amber rather than alarm red.
 
 ## Install
 
-**From a build** — run `Sereno Setup 1.0.0.exe`, or unzip `Sereno-1.0.0-win.zip`
-somewhere permanent and run `Sereno.exe`. On first launch it offers to connect
-itself to Claude Code; no Node required. The installer is unsigned, so SmartScreen
-will warn — see [docs/distributing.md](docs/distributing.md).
+**From a build** — run `Sereno Setup <version>.exe`, or unzip
+`Sereno-<version>-win.zip` somewhere permanent and run `Sereno.exe`. On first
+launch it offers to connect itself to Claude Code; no Node required. The installer
+is unsigned, so SmartScreen will warn — see
+[docs/distributing.md](docs/distributing.md).
+
+The installer is per-user, lets you choose the directory, and creates Start Menu
+and desktop shortcuts. It registers an uninstaller under **Settings → Apps →
+Installed apps**, which disconnects Sereno from Claude Code before removing
+anything — dead hook paths would otherwise fire on every tool call forever.
+
+### Pinning to the taskbar
+
+Right-click **Sereno** in the Start Menu (or its desktop shortcut) and choose
+**Pin to taskbar**. Clicking the pinned icon starts Sereno, or brings the widget
+back to the front if it is already running.
+
+The widget itself never takes a taskbar button of its own: it is an always-on-top
+HUD, so it deliberately stays out of both the taskbar and Alt+Tab. The pin is a
+launcher, and will not show a running indicator.
+
+Pinning depends on the app and its shortcuts agreeing on one AppUserModelID —
+`com.sereno.widget`, set from `build.appId`, which the installer stamps onto every
+shortcut and `src/main.js` claims at startup. Windows keys toast notifications off
+the same identity, so if the two ever drift apart, pinning *and* every alert break
+together. Change one and you change the other.
+
+### Starting automatically
+
+Off by default. Open the **⚙** menu in the widget and tick **Start Sereno
+automatically** to have it open whenever a Claude Code session begins.
+
+It works through the `SessionStart` hook Sereno already installs: when that hook
+fires and finds nothing listening, the shim starts the app and hands it the event
+that triggered the launch, so the widget comes up with the session already on it
+rather than empty. Only `SessionStart` may do this, and only one launch is allowed
+per 20-second window — otherwise opening four terminals at once would start four
+copies. The setting needs Sereno connected to Claude Code, since without the hook
+there is nothing to start it.
 
 **From source:**
 
@@ -67,7 +102,7 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 |---|---|
 | `npm start` | the widget |
 | `npm run serve` | collector only — open `http://127.0.0.1:8787/` in a browser tab |
-| `npm test` | 35 acceptance + regression tests, no GUI needed |
+| `npm test` | 56 acceptance + regression tests, no GUI needed |
 | `npm run replay` | replays `samples/*.jsonl` through the state machine |
 | `npm run wire` / `unwire` | install / uninstall (`--dry-run`, `--yes`, `--list`) |
 | `npm run dist` | build the Windows installer + zip |
@@ -178,8 +213,9 @@ The collector binds to `127.0.0.1` only and is never exposed to the network.
 Session state — project name, tool being run, cost, context, rate limits — is held
 in memory for as long as the session is alive and is never written to disk, never
 transmitted, and never sent to any third party. Transcripts are not parsed. The
-only files Sereno writes are its own window position (`%APPDATA%/sereno`) and, when
-you connect it, its entries in Claude Code's `settings.json`.
+only files Sereno writes are its own window position (`%APPDATA%/sereno`), its own
+settings (`~/.sereno` — the auto-start preference and the command used to start
+itself) and, when you connect it, its entries in Claude Code's `settings.json`.
 
 This program will not transfer any information to other networked systems unless
 specifically requested by the user or the person installing or operating it.
@@ -221,6 +257,7 @@ bin/emit.js             the shim; must never break Claude Code
 src/main.js             Electron main: window, zoom, toast, lifecycle
 src/collector.js        node:http server — /hook /status /events /state /
 src/store.js            session state machine
+src/config.js           Sereno's own settings; the app/shim auto-start contract
 src/renderer/           the widget page (works in a plain browser tab too)
 src/focus-window.ps1    walks the process tree to raise a session's terminal
 tools/wire.js           install / uninstall
