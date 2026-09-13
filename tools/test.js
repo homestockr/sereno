@@ -288,6 +288,57 @@ test('worst rate limit across sessions wins, with its reset time', () => {
   assert.strictEqual(snap.windows.seven_day.usedPct, 44, 'the 7-day window must survive separately');
 });
 
+test('every rate-limit window survives separately, not collapsed to the worst', () => {
+  // The footer shows one meter per window. Collapsing them to max() hid the one
+  // you were not about to hit, which is the one worth seeing before starting
+  // something long.
+  const s = new Store();
+  s.applyStatus(sid('a', {
+    rate_limits: {
+      five_hour: { used_percentage: 8, resets_at: 1789330800 },
+      seven_day: { used_percentage: 55.00000000000001, resets_at: 1789462800 },
+    },
+  }));
+  const w = s.snapshot().windows;
+  assert.deepStrictEqual(Object.keys(w).sort(), ['five_hour', 'seven_day']);
+  assert.strictEqual(w.five_hour.usedPct, 8);
+  assert.strictEqual(w.seven_day.usedPct, 55, 'the float must be rounded, not rendered raw');
+  assert.strictEqual(w.five_hour.resetsAt, 1789330800);
+  assert.strictEqual(w.seven_day.resetsAt, 1789462800, 'each window keeps its own reset time');
+});
+
+test('the footer orders windows for reading, and names only what it knows', () => {
+  // Payload key order is not guaranteed, and an unrecognised window must still
+  // appear rather than vanish - including any per-model figure that may show up
+  // one day, which today's payload does not carry.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  assert.ok(/WINDOW_ORDER\s*=\s*\['five_hour',\s*'seven_day'\]/.test(app),
+    'session before weekly, regardless of payload order');
+  assert.ok(/five_hour:\s*'5-hour session'/.test(app) && /seven_day:\s*'7-day weekly'/.test(app),
+    'both windows must be labelled in the user\'s terms');
+  // orderedWindows appends unknown keys rather than dropping them.
+  const m = app.match(/function orderedWindows[\s\S]*?\n}/);
+  assert.ok(m && /rest/.test(m[0]) && /concat\(rest\)/.test(m[0]),
+    'an unrecognised window must still be rendered, after the known ones');
+});
+
+test('a reset more than a day out is counted in days', () => {
+  // untilReset only ever had to describe a 5-hour window. With the 7-day window
+  // on screen it would otherwise count down from "Resets in 167h 59m".
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const src = app.match(/function untilReset[\s\S]*?\n}/)[0];
+  // eslint-disable-next-line no-new-func
+  const untilReset = new Function('return ' + src)();
+
+  const now = Math.floor(Date.now() / 1000);
+  assert.match(untilReset(now + 45 * 60), /^Resets in 45m$/);
+  assert.match(untilReset(now + 2 * 3600 + 13 * 60), /^Resets in 2h 13m$/);
+  assert.match(untilReset(now + 3 * 86400), /^Resets in (2d 23h|3d 0h)$/);
+  assert.match(untilReset(now + 7 * 86400 - 60), /^Resets in 6d 23h$/);
+  assert.strictEqual(untilReset(now - 5), 'Resetting now');
+  assert.strictEqual(untilReset(null), '');
+});
+
 test('float percentages are rounded, never rendered raw', () => {
   // Live payloads carry 57.99999999999999, which rendered verbatim in the header
   // and in the user's own statusline until this was fixed.
@@ -438,6 +489,48 @@ test('the window is resized with setBounds, never setSize', () => {
   assert.ok(/win\.setBounds\(\{\s*width/.test(main), 'applySize must use setBounds');
   assert.ok(!/win\.setSize\(/.test(main),
     'win.setSize cannot shrink a transparent window on Windows - use setBounds');
+});
+
+test('focus picks a window by title, not the process-wide MainWindowHandle', () => {
+  // Windows Terminal hosts every window it has opened in ONE process, so
+  // .MainWindowHandle returns the same arbitrary handle for every session and
+  // "Review in terminal" raised whichever window happened to be it. Real
+  // window resolution needs a live desktop, so guard the source instead.
+  const ps = fs.readFileSync(path.join(ROOT, 'src', 'focus-window.ps1'), 'utf8');
+
+  // Comments are stripped first: the file explains at length why MainWindowHandle
+  // is wrong, and that prose must not trip the check that we stopped calling it.
+  const code = ps.split('\n').map((l) => l.replace(/#.*$/, '')).join('\n');
+
+  assert.ok(/EnumWindows/.test(code), 'must enumerate the terminal\'s windows itself');
+  assert.ok(/ConsoleTitleOf/.test(code), 'must read the target console title to disambiguate');
+  assert.ok(!/MainWindowHandle/.test(code),
+    'MainWindowHandle is process-wide and cannot distinguish two terminal windows');
+
+  // The console probe detaches the caller's own console, so it must stay behind
+  // the ambiguity check: with a single window there is nothing to resolve.
+  const single = code.indexOf('$windows.Count -eq 1');
+  const probe = code.indexOf('ConsoleTitleOf([uint32]$TargetPid)');
+  assert.ok(single > -1 && probe > -1 && single < probe,
+    'the single-window fast path must come before the console probe');
+});
+
+test('window titles compare without their spinner glyph', () => {
+  // Claude Code prefixes the title with a spinner that differs between two
+  // reads of the same window, so a literal comparison never matches.
+  const ps = fs.readFileSync(path.join(ROOT, 'src', 'focus-window.ps1'), 'utf8');
+  const m = ps.match(/\$t = \$s -replace '([^']+)', ''/);
+  assert.ok(m, 'Normalize must strip a leading non-word run');
+
+  // Exercise the regex itself through JS, which shares the \p{L}\p{N} syntax.
+  const strip = new RegExp(m[1].replace(/^\^/, '^'), 'u');
+  const norm = (s) => s.replace(strip, '').trim().toLowerCase();
+  assert.strictEqual(norm('◐ Installer and taskbar pinning'), 'installer and taskbar pinning');
+  assert.strictEqual(norm('◑ Installer and taskbar pinning'), 'installer and taskbar pinning');
+  assert.strictEqual(norm('◐ Installer and taskbar pinning'), norm('◑ Installer and taskbar pinning'),
+    'two spinner frames of one title must compare equal');
+  // A title that is already clean must survive untouched.
+  assert.strictEqual(norm('Take the whole list'), 'take the whole list');
 });
 
 test('a long tool argument is shortened for the row but kept whole for the command block', () => {

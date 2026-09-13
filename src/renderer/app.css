@@ -357,3 +357,21 @@ button:focus-visible { outline: 2px solid #f3cc91; outline-offset: 3px; }
 }
 /* The gear is a mode, so it reads as pressed while the panel is open. */
 .icon-button[aria-expanded="true"] { background: #ffffff1f; color: #fff; }
+
+/* ---------- rate-limit windows ---------- */
+
+/* Each window is its own block, so two of them read as two separate
+   allowances rather than one meter with an ambiguous label. */
+.usage-window + .usage-window {
+  margin-top: 11px;
+  padding-top: 11px;
+  border-top: 1px solid #ffffff0f;
+}
+.usage-window .usage-track { margin: 7px 0 5px; }
+.usage-reset {
+  color: #b0b5bd;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+/* The cost line keeps its own spacing above the last meter. */
+.footer .bottomline { margin-top: 10px; }

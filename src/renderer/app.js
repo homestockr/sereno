@@ -20,8 +20,7 @@ const ui = {
   reqDesc: el('request-desc'), reqCommand: el('request-command'), reqMeta: el('request-meta'),
   review: el('review'), reviewNote: el('review-note'),
   rows: el('rows'), footer: el('footer'),
-  usagePct: el('usage-pct'), usageLabel: el('usage-label'), usageTrack: el('usage-track'),
-  usageReset: el('usage-reset'), usageCost: el('usage-cost'),
+  usageWindows: el('usage-windows'), usageNote: el('usage-note'), usageCost: el('usage-cost'),
   offline: el('offline'), grip: el('size-grip'),
   setup: el('setup'), setupBody: el('setup-body'), setupAction: el('setup-action'),
   setupActionLabel: el('setup-action-label'), setupNote: el('setup-note'),
@@ -54,9 +53,40 @@ function untilReset(epochSeconds) {
   if (!epochSeconds) return '';
   const secs = epochSeconds - Math.floor(Date.now() / 1000);
   if (secs <= 0) return 'Resetting now';
-  const h = Math.floor(secs / 3600);
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
   const m = Math.floor((secs % 3600) / 60);
-  return 'Resets in ' + (h ? h + 'h ' + String(m).padStart(2, '0') + 'm' : m + 'm');
+  // Days matter once the 7-day window is on screen: it would otherwise count
+  // down from 'Resets in 167h 59m', which nobody can read at a glance.
+  if (d) return 'Resets in ' + d + 'd ' + h + 'h';
+  if (h) return 'Resets in ' + h + 'h ' + String(m).padStart(2, '0') + 'm';
+  return 'Resets in ' + m + 'm';
+}
+
+/*
+ * The rate-limit windows, in the order they should be read rather than the order
+ * the payload happens to list them in. Anything unrecognised is shown after
+ * these, so a new window Anthropic adds appears by itself instead of silently
+ * going missing.
+ *
+ * Only these two have ever been observed. A per-model figure - the Fable weekly
+ * allowance the desktop app shows - is NOT in the statusline payload, and there
+ * is nothing here to derive it from, so it is not displayed rather than guessed.
+ */
+const WINDOW_ORDER = ['five_hour', 'seven_day'];
+const WINDOW_LABELS = {
+  five_hour: '5-hour session',
+  seven_day: '7-day weekly',
+};
+
+function windowLabel(key) {
+  return WINDOW_LABELS[key] || key.replace(/_/g, ' ');
+}
+
+function orderedWindows(windows) {
+  const known = WINDOW_ORDER.filter((k) => windows[k]);
+  const rest = Object.keys(windows).filter((k) => !WINDOW_ORDER.includes(k)).sort();
+  return known.concat(rest);
 }
 
 /** Stale is a presentation state: it overrides whatever the session was doing. */
@@ -183,33 +213,37 @@ function render() {
   }
   ui.rows.innerHTML = html;
 
-  // Footer: name the window that is actually binding rather than assuming 5-hour.
+  // Footer: every window the payload reports, each named and metered on its own.
+  // Collapsing them to max() used to hide the one you were not about to hit,
+  // which is exactly the one worth watching before starting something long.
   const windows = snapshot.windows || {};
-  const keys = Object.keys(windows);
+  const keys = orderedWindows(windows);
   if (keys.length) {
-    const key = keys.reduce((a, b) => (windows[b].usedPct > windows[a].usedPct ? b : a));
-    const w = windows[key];
-    const label = key === 'five_hour' ? '5-hour allowance'
-      : key === 'seven_day' ? '7-day allowance'
-      : key.replace(/_/g, ' ') + ' allowance';
-
     ui.footer.hidden = false;
-    ui.usagePct.textContent = w.usedPct;
-    ui.usageLabel.textContent = label;
-    ui.usageTrack.setAttribute('aria-valuenow', String(w.usedPct));
-    ui.usageTrack.setAttribute('aria-label', label + ' consumed');
-    const filled = Math.round(w.usedPct / 5);
-    ui.usageTrack.innerHTML = Array.from({ length: 20 },
-      (_, i) => `<i class="${i < filled ? 'filled' : ''}"></i>`).join('');
-    ui.usageReset.textContent = untilReset(w.resetsAt);
+    ui.usageWindows.innerHTML = keys.map((key) => {
+      const w = windows[key];
+      const label = windowLabel(key);
+      const filled = Math.round(w.usedPct / 5);
+      const cells = Array.from({ length: 20 },
+        (_, i) => `<i class="${i < filled ? 'filled' : ''}"></i>`).join('');
+      const reset = untilReset(w.resetsAt);
+      return `<div class="usage-window">
+        <div class="usage-line">
+          <span class="usage-value">${w.usedPct}% <span>used</span></span>
+          <span class="usage-label">${esc(label)}</span>
+        </div>
+        <div class="usage-track" role="meter" aria-valuemin="0" aria-valuemax="100"
+             aria-valuenow="${w.usedPct}" aria-label="${esc(label)} consumed">${cells}</div>
+        <div class="usage-reset">${esc(reset)}</div>
+      </div>`;
+    }).join('');
+    ui.usageNote.textContent = '';
     ui.usageCost.textContent = money(snapshot.totalCost) + ' list-price est.';
   } else {
     ui.footer.hidden = snapshot.totalCost <= 0;
     if (!ui.footer.hidden) {
-      ui.usagePct.textContent = '—';
-      ui.usageLabel.textContent = 'no allowance data';
-      ui.usageTrack.innerHTML = '';
-      ui.usageReset.textContent = '';
+      ui.usageWindows.innerHTML = '';
+      ui.usageNote.textContent = 'no allowance data';
       ui.usageCost.textContent = money(snapshot.totalCost) + ' list-price est.';
     }
   }

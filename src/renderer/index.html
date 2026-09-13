@@ -83,15 +83,11 @@
 
     <div id="rows" class="rows"></div>
 
+    <!-- One block per rate-limit window the payload reports, built by app.js. -->
     <footer id="footer" class="footer" hidden>
-      <div class="usage-line">
-        <span class="usage-value"><span id="usage-pct">0</span>% <span>used</span></span>
-        <span class="usage-label" id="usage-label">5-hour allowance</span>
-      </div>
-      <div id="usage-track" class="usage-track" role="meter"
-           aria-label="Allowance consumed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+      <div id="usage-windows"></div>
       <div class="bottomline">
-        <span id="usage-reset"></span>
+        <span id="usage-note"></span>
         <span id="usage-cost"></span>
       </div>
     </footer>

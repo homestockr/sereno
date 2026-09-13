@@ -31,9 +31,13 @@ Windows 11 · Node + Electron · no build step, no framework, no deps beyond Ele
 │ Bash · npm run build        +2 subagents │
 │  ▬▬▭ Context 34%             $1.88 est.  │
 ├──────────────────────────────────────────┤
-│ 61% used                 5-hour allowance│
+│ 61% used                  5-hour session │
 │ ▬▬▬▬▬▬▬▬▬▬▬▬▭▭▭▭▭▭▭▭                     │
-│ Resets in 1h 40m     $17.47 list-price   │
+│ Resets in 1h 40m                         │
+│ 44% used                    7-day weekly │
+│ ▬▬▬▬▬▬▬▬▬▭▭▭▭▭▭▭▭▭▭▭                     │
+│ Resets in 4d 02h                         │
+│                      $17.47 list-price   │
 └──────────────────────────────────────────┘
 ```
 
@@ -102,7 +106,7 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 |---|---|
 | `npm start` | the widget |
 | `npm run serve` | collector only — open `http://127.0.0.1:8787/` in a browser tab |
-| `npm test` | 56 acceptance + regression tests, no GUI needed |
+| `npm test` | 61 acceptance + regression tests, no GUI needed |
 | `npm run replay` | replays `samples/*.jsonl` through the state machine |
 | `npm run wire` / `unwire` | install / uninstall (`--dry-run`, `--yes`, `--list`) |
 | `npm run dist` | build the Windows installer + zip |
@@ -161,11 +165,21 @@ the last `PreToolUse` with no matching `PostToolUse`. It does carry a structured
 `notification_type: "permission_prompt"`, a better discriminator than a text match;
 the text match is kept as a fallback for unknown types.
 
-**Rate limits are real.** The statusline carries `rate_limits.five_hour` and
-`.seven_day` with `used_percentage` and `resets_at`. The footer names whichever
-window is actually binding rather than assuming the 5-hour one. No hook payload
-carries cost, model or context — all of it comes from the statusline, which is why
-wiring the statusline matters as much as the hooks.
+**Rate limits are real, and there are exactly two.** The statusline carries
+`rate_limits.five_hour` and `.seven_day`, each with `used_percentage` and
+`resets_at`. The footer meters both, separately. Collapsing them to whichever was
+higher hid the other one, and the other one is precisely what you want to see
+before starting something long.
+
+**There is no per-model allowance in the payload.** The desktop app shows a weekly
+figure for Opus/Fable; nothing in any hook or statusline payload carries it, and
+neither cost nor `model.display_name` can be used to derive it. Sereno shows the
+two windows it is actually given rather than a third one it would have to invent.
+An unrecognised window renders on its own row, so if that figure ever does arrive
+it appears instead of being silently dropped.
+
+No hook payload carries cost, model or context — all of it comes from the
+statusline, which is why wiring the statusline matters as much as the hooks.
 
 **Percentages are dirty floats.** A live session returned `57.99999999999999`,
 which rendered verbatim in the header and in the user's own statusline until every
@@ -195,6 +209,13 @@ found by walking up the process tree to the first window handle.
 - **"Review in terminal" focuses the terminal, not the prompt.** Approval always
   happens in Claude Code; the button only brings that window forward, and says so
   if it cannot find one.
+- **Which window it brings forward is decided by title.** Windows Terminal hosts
+  every window it has opened inside one process, so `.MainWindowHandle` names an
+  arbitrary one and every session used to raise the same terminal. Sereno now
+  enumerates that process's windows and matches the target's console title, read
+  by attaching to its console — never by reading the transcript. A terminal that
+  sets no distinct title per session cannot be disambiguated this way, and falls
+  back to raising the first window it owns.
 
 ## Distributing
 
