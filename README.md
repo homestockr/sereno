@@ -48,8 +48,8 @@ one interruption that matters gets warm amber rather than alarm red.
 
 ## Install
 
-**From a build** — run `Sereno Setup <version>.exe`, or unzip
-`Sereno-<version>-win.zip` somewhere permanent and run `Sereno.exe`. On first
+**From a build** — run `Sereno-Setup-<version>.exe`, or unzip
+`Sereno-<version>-win-portable.zip` somewhere permanent and run `Sereno.exe`. On first
 launch it offers to connect itself to Claude Code; no Node required. The installer
 is unsigned, so SmartScreen will warn — see
 [docs/distributing.md](docs/distributing.md).

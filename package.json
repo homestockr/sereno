@@ -82,7 +82,8 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "artifactName": "${productName}-${version}-${os}-portable.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -92,7 +93,8 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Sereno",
       "uninstallDisplayName": "Sereno",
-      "include": "build/installer.nsh"
+      "include": "build/installer.nsh",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
     }
   }
 }

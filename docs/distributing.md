@@ -10,8 +10,13 @@ Artifacts land in `dist/`:
 
 | file | what it is | size |
 |---|---|---|
-| `Sereno Setup 1.0.0.exe` | NSIS installer, per-user, no admin needed | ~90 MB |
-| `Sereno-1.0.0-win.zip` | unpacked folder, no install | ~126 MB |
+| `Sereno-Setup-<version>.exe` | NSIS installer, per-user, no admin needed | ~106 MB |
+| `Sereno-<version>-win-portable.zip` | unpacked folder, no install | ~146 MB |
+
+The zip carries `portable` in its name deliberately. The two sat side by side as
+`Sereno-<version>-win.zip` and `Sereno Setup <version>.exe` — which GitHub renders
+with the spaces as dots — and were told apart only by a dash versus a dot. The zip
+got downloaded in place of the installer twice in one afternoon.
 | `win-unpacked/` | what the zip contains |  |
 
 They are large because each carries a full Electron runtime. That is the price of
