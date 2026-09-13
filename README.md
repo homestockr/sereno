@@ -106,7 +106,7 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 |---|---|
 | `npm start` | the widget |
 | `npm run serve` | collector only — open `http://127.0.0.1:8787/` in a browser tab |
-| `npm test` | 61 acceptance + regression tests, no GUI needed |
+| `npm test` | 67 acceptance + regression tests, no GUI needed |
 | `npm run replay` | replays `samples/*.jsonl` through the state machine |
 | `npm run wire` / `unwire` | install / uninstall (`--dry-run`, `--yes`, `--list`) |
 | `npm run dist` | build the Windows installer + zip |
@@ -208,7 +208,8 @@ found by walking up the process tree to the first window handle.
   Node process start that any statusline command pays regardless.
 - **"Review in terminal" focuses the terminal, not the prompt.** Approval always
   happens in Claude Code; the button only brings that window forward, and says so
-  if it cannot find one.
+  if it cannot find one. Every blocked session carries its own button, because
+  only one of them can be promoted into the alert block at a time.
 - **Which window it brings forward is decided by title.** Windows Terminal hosts
   every window it has opened inside one process, so `.MainWindowHandle` names an
   arbitrary one and every session used to raise the same terminal. Sereno now

@@ -134,6 +134,21 @@ function sessionHtml(s) {
   const agents = s.subagents > 0
     ? `<span class="agents">+${s.subagents} subagent${s.subagents > 1 ? 's' : ''}</span>`
     : '';
+
+  // Only one blocked session can be promoted into the alert block, so any other
+  // one used to sit here as a row that said "Blocked" and offered nothing. With
+  // several sessions running, several can block at once; each needs its own way
+  // in, or you can only ever answer whichever happened to be promoted.
+  // Disabled without a pid, for the same reason the promoted button is: the shim
+  // may not have posted one, and a button that cannot work must not pretend.
+  const canFocus = !!(api && api.focusSession && s.pid);
+  const action = s.state === 'blocked'
+    ? `<button class="row-review no-drag" type="button" data-pid="${s.pid || ''}"${canFocus ? '' : ' disabled'}>
+         <span>Review in terminal</span><span aria-hidden="true">&#8599;</span>
+       </button>
+       <div class="review-note row-note" role="status" hidden></div>`
+    : '';
+
   return `<div class="session ${label.toLowerCase()}">
     <div class="row-top">
       <span class="project">${esc(s.projectName)}</span>
@@ -141,6 +156,7 @@ function sessionHtml(s) {
     </div>
     <div class="activity"><span>${esc(activityText(s))}</span>${agents}</div>
     ${metaHtml(s)}
+    ${action}
   </div>`;
 }
 
@@ -278,14 +294,19 @@ document.addEventListener('click', (ev) => {
   const more = ev.target.closest('.more');
   if (more) { expanded = !expanded; render(); return; }
 
-  const review = ev.target.closest('#review');
+  // The promoted request and every blocked row use the same button, so they use
+  // the same handler; the note is whichever one belongs to the button pressed.
+  const review = ev.target.closest('#review, .row-review');
   if (review && !review.disabled) {
     const pid = Number(review.dataset.pid);
+    const note = review.id === 'review'
+      ? ui.reviewNote
+      : review.parentElement.querySelector('.row-note');
     if (api && api.focusSession && pid) {
       api.focusSession(pid).then((ok) => {
-        if (ok) return;
-        ui.reviewNote.hidden = false;
-        ui.reviewNote.textContent =
+        if (ok || !note) return;
+        note.hidden = false;
+        note.textContent =
           'Could not find a window for that session. Approval always stays in Claude Code — switch to its terminal to answer.';
         reportHeight();
       });

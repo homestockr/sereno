@@ -491,6 +491,43 @@ test('the window is resized with setBounds, never setSize', () => {
     'win.setSize cannot shrink a transparent window on Windows - use setBounds');
 });
 
+test('every blocked session is answerable, not just the promoted one', () => {
+  // Only one blocked session is promoted into the alert block. Any other used to
+  // render as a row reading "Blocked" with nothing to press, so with several
+  // sessions running you could only ever answer whichever was promoted.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const fn = app.match(/function sessionHtml[\s\S]*?\n}/)[0];
+
+  assert.ok(/s\.state === 'blocked'/.test(fn), 'the row action is conditional on being blocked');
+  assert.ok(/row-review/.test(fn), 'a blocked row must offer its own review button');
+  assert.ok(/data-pid="\$\{s\.pid \|\| ''\}"/.test(fn), 'the button carries that session\'s own pid');
+
+  // A button that cannot work must not pretend it can - same rule the promoted
+  // button already follows when the shim never posted a pid.
+  assert.ok(/canFocus/.test(fn) && /disabled/.test(fn),
+    'no pid means the row button is disabled, not silently broken');
+});
+
+test('one handler serves the promoted button and the row buttons', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  assert.ok(/closest\('#review, \.row-review'\)/.test(app),
+    'both kinds of review button go through the same click handler');
+  // The failure note has to be the one belonging to the button pressed, or a
+  // failure on one row reports itself under a different session.
+  assert.ok(/review\.parentElement\.querySelector\('\.row-note'\)/.test(app),
+    'a row failure must report under that row');
+});
+
+test('a session that is not blocked gets no review button', () => {
+  // The button is an answer to a permission prompt; on an idle or running row it
+  // would be an action with nothing to act on.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const fn = app.match(/function sessionHtml[\s\S]*?\n}/)[0];
+  const m = fn.match(/const action = s\.state === 'blocked'\s*\?([\s\S]*?):\s*('');/);
+  assert.ok(m, 'the action must be a conditional with an empty alternative');
+  assert.strictEqual(m[2], "''", 'a non-blocked row renders no action at all');
+});
+
 test('the window is bounded by the display, not by a fixed number', () => {
   // A hard 1400px ceiling left the footer hanging off the bottom of a long
   // session list on a 1440px screen, with no chrome and nothing scrolled to
