@@ -4,8 +4,8 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 1.1.x   | ✅        |
-| < 1.1   | ❌        |
+| 1.2.x   | ✅        |
+| < 1.2   | ❌        |
 
 Fixes land on the latest release; older versions are not backported.
 
