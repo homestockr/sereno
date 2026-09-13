@@ -12,7 +12,7 @@ Sereno is pre-1.1; fixes land on the latest release.
 
 Please report privately rather than opening a public issue:
 
-- **Preferred:** [Report a vulnerability](https://github.com/vaulkerdoc/sereno/security/advisories/new)
+- **Preferred:** [Report a vulnerability](https://github.com/homestockr/sereno/security/advisories/new)
   via GitHub's private advisories
 - **Email:** roberto.d.rosado@gmail.com
 

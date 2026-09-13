@@ -8,13 +8,13 @@
     "email": "roberto.d.rosado@gmail.com"
   },
   "license": "MIT",
-  "homepage": "https://github.com/vaulkerdoc/sereno",
+  "homepage": "https://github.com/homestockr/sereno",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vaulkerdoc/sereno.git"
+    "url": "https://github.com/homestockr/sereno.git"
   },
   "bugs": {
-    "url": "https://github.com/vaulkerdoc/sereno/issues"
+    "url": "https://github.com/homestockr/sereno/issues"
   },
   "keywords": [
     "claude-code",

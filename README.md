@@ -232,10 +232,10 @@ with a certificate from the [SignPath Foundation](https://signpath.org/).
 
 Roles, as a solo project:
 
-- **Author / committer** — [@vaulkerdoc](https://github.com/vaulkerdoc)
-- **Reviewer** — [@vaulkerdoc](https://github.com/vaulkerdoc); external contributions
+- **Author / committer** — [@homestockr](https://github.com/homestockr)
+- **Reviewer** — [@homestockr](https://github.com/homestockr); external contributions
   are reviewed before merge
-- **Approver** — [@vaulkerdoc](https://github.com/vaulkerdoc); every signed release
+- **Approver** — [@homestockr](https://github.com/homestockr); every signed release
   is approved manually
 
 Released binaries are built from source by GitHub Actions
