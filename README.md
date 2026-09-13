@@ -106,7 +106,7 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 |---|---|
 | `npm start` | the widget |
 | `npm run serve` | collector only — open `http://127.0.0.1:8787/` in a browser tab |
-| `npm test` | 67 acceptance + regression tests, no GUI needed |
+| `npm test` | 70 acceptance + regression tests, no GUI needed |
 | `npm run replay` | replays `samples/*.jsonl` through the state machine |
 | `npm run wire` / `unwire` | install / uninstall (`--dry-run`, `--yes`, `--list`) |
 | `npm run dist` | build the Windows installer + zip |

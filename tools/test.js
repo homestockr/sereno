@@ -263,6 +263,66 @@ test('stale after 5 min, dropped after 30', () => {
   assert.strictEqual(s.sessions.size, 0);
 });
 
+test('the longest wait is promoted, not the newest block', () => {
+  // The sort used to fall through to lastSeen among blocked sessions. The
+  // statusline stops firing while a session is blocked, so lastSeen is roughly
+  // when it blocked - which put the FRESHEST block in the alert slot and sank
+  // the one that had been ignored longest.
+  const s = new Store();
+  const block = (id, agoMs) => {
+    feed(s, [
+      H('PreToolUse', sid(id, { tool_name: 'Bash', tool_input: { command: 'x' }, tool_use_id: 't' + id })),
+      H('Notification', sid(id, { notification_type: 'permission_prompt' })),
+    ]);
+    const g = s.sessions.get(id);
+    g.stateSince = Date.now() - agoMs;
+    g.lastSeen = Date.now() - agoMs;   // nothing heard since it blocked
+  };
+  block('waited-8m', 8 * 60 * 1000);
+  block('waited-2m', 2 * 60 * 1000);
+  block('just-now', 3 * 1000);
+
+  const order = s.snapshot().sessions.map((x) => x.id);
+  assert.strictEqual(order[0], 'waited-8m', 'the alert block must promote the longest wait');
+  assert.deepStrictEqual(order, ['waited-8m', 'waited-2m', 'just-now'],
+    'blocked sessions read longest-waiting first');
+});
+
+test('blocked still sorts above everything, however long it has waited', () => {
+  // The wait ordering must not accidentally let a busy session outrank a
+  // blocked one.
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('busy', { tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_use_id: 'tb' })),
+    H('PreToolUse', sid('stuck', { tool_name: 'Bash', tool_input: { command: 'rm -rf x' }, tool_use_id: 'ts' })),
+    H('Notification', sid('stuck', { notification_type: 'permission_prompt' })),
+  ]);
+  s.sessions.get('stuck').stateSince = Date.now() - 30 * 60 * 1000;
+  assert.strictEqual(s.snapshot().sessions[0].id, 'stuck');
+});
+
+test('a long wait is not mistaken for inactivity', () => {
+  // Past five minutes a session goes stale, and stale used to win the row label
+  // outright: a session waiting on YOU read "Stale / No activity for 20 minutes"
+  // and lost its beacon. Promoting the longest waits put that right at the top.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const pick = (n) => app.match(new RegExp('function ' + n + '[\\s\\S]*?\\n}'))[0];
+  const fns = new Function('humanMinutes',
+    [pick('stateLabel'), pick('activityText'), pick('symbolFor'),
+      'return { stateLabel, activityText, symbolFor };'].join('\n')
+  )((ms) => Math.round(ms / 60000) + ' minutes');
+
+  const blocked = { state: 'blocked', stale: true, staleForMs: 20 * 60 * 1000 };
+  assert.strictEqual(fns.stateLabel(blocked), 'Blocked', 'stale must not mask blocked');
+  assert.strictEqual(fns.activityText(blocked), 'Waiting for approval');
+  assert.strictEqual(fns.symbolFor(blocked), '!', 'the beacon must survive going stale');
+
+  // A session that really has gone quiet is still reported as such.
+  const idle = { state: 'idle', stale: true, staleForMs: 20 * 60 * 1000 };
+  assert.strictEqual(fns.stateLabel(idle), 'Stale');
+  assert.strictEqual(fns.activityText(idle), 'No activity for 20 minutes');
+});
+
 test('blocked sorts to the top, stale sinks', () => {
   const s = new Store();
   feed(s, [H('SessionStart', sid('quiet')), H('SessionStart', sid('loud'))]);

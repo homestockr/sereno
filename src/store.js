@@ -266,9 +266,17 @@ class Store {
       .map((s) => this.publicSession(s))
       .sort((a, b) => {
         // Blocked first - it is the reason the widget exists.
-        if ((a.state === 'blocked') !== (b.state === 'blocked')) {
-          return a.state === 'blocked' ? -1 : 1;
-        }
+        const aBlocked = a.state === 'blocked';
+        const bBlocked = b.state === 'blocked';
+        if (aBlocked !== bBlocked) return aBlocked ? -1 : 1;
+
+        // Among blocked, longest wait first. This used to fall through to
+        // lastSeen, which put the NEWEST block on top: the statusline stops
+        // firing while a session is blocked, so lastSeen is roughly the moment
+        // it blocked. The session that had been ignored longest therefore sank
+        // down the list, and the alert block promoted the freshest one.
+        if (aBlocked && bBlocked) return a.stateSince - b.stateSince;
+
         if (a.stale !== b.stale) return a.stale ? 1 : -1;
         return b.lastSeen - a.lastSeen;
       });

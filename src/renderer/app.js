@@ -91,12 +91,15 @@ function orderedWindows(windows) {
 
 /** Stale is a presentation state: it overrides whatever the session was doing. */
 function stateLabel(s) {
-  if (s.stale) return 'Stale';
+  // Blocked outranks stale. Waiting on you is not inactivity - we know exactly
+  // what it is doing - and the longest waits are the ones promoted to the top,
+  // where calling them 'Stale' with no beacon is precisely backwards.
+  if (s.stale && s.state !== 'blocked') return 'Stale';
   return s.state.charAt(0).toUpperCase() + s.state.slice(1);
 }
 
 function activityText(s) {
-  if (s.stale) return 'No activity for ' + humanMinutes(s.staleForMs);
+  if (s.stale && s.state !== 'blocked') return 'No activity for ' + humanMinutes(s.staleForMs);
   switch (s.state) {
     case 'running':
       return s.stateTool ? s.stateTool + (s.stateArgShort ? ' · ' + s.stateArgShort : '') : 'Working';
