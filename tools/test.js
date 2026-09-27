@@ -1449,6 +1449,142 @@ test('missing rate_limits degrades instead of throwing', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
+  // The launch slot is decided by identity and usability, never by who wrote it
+  // first. These run against a real temp SERENO_HOME and a real exe on disk,
+  // because "does this path still exist" is the whole question.
+  function slotFixture() {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-home-'));
+    // A stand-in for an installed binary: what matters is that it EXISTS.
+    const installedExe = path.join(home, 'Sereno.exe');
+    fs.writeFileSync(installedExe, 'not really an exe');
+    return {
+      home,
+      INSTALLED: { exe: installedExe, args: [] },
+      DEV: { exe: path.join(home, 'repo', 'electron.exe'), args: [path.join(home, 'repo')] },
+      MOVED: { exe: path.join(home, 'repo2', 'electron.exe'), args: [path.join(home, 'repo2')] },
+    };
+  }
+  function inHome(home, fn) {
+    const prev = process.env.SERENO_HOME;
+    process.env.SERENO_HOME = home;
+    try { return fn(require('../src/config.js')); }
+    finally { if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev; }
+  }
+
+  await atest('a run from source must not steal auto-launch from an install', async () => {
+    // This actually happened: developing Sereno repointed the author's own
+    // auto-launch at the repo's electron.exe, so every later session start
+    // opened a dev build instead of the installed app - toasts titled
+    // "Electron", clicking one opening the welcome screen.
+    const f = slotFixture();
+    inHome(f.home, (config) => {
+      config.recordLaunch(f.INSTALLED);
+      config.recordLaunch(f.DEV, { provisional: true });
+      assert.strictEqual(config.read().launch.exe, f.INSTALLED.exe,
+        'a dev run displaced a real install that is still there');
+    });
+    fs.rmSync(f.home, { recursive: true, force: true });
+  });
+
+  await atest('installing takes the slot back from a dev seed', async () => {
+    // The previous version of this asserted the same thing twice: the slot
+    // already held INSTALLED, so the second call hit the no-change
+    // short-circuit and wrote nothing. It passed whether or not packaged
+    // displacement worked at all.
+    const f = slotFixture();
+    inHome(f.home, (config) => {
+      config.recordLaunch(f.DEV, { provisional: true });
+      assert.strictEqual(config.read().launch.exe, f.DEV.exe, 'an empty slot must be seeded');
+      config.recordLaunch(f.INSTALLED);
+      assert.strictEqual(config.read().launch.exe, f.INSTALLED.exe,
+        'a packaged build must displace a provisional seed');
+      assert.ok(!config.read().launch.provisional, 'and must not stay marked provisional');
+    });
+    fs.rmSync(f.home, { recursive: true, force: true });
+  });
+
+  await atest('a dev seed still heals when the checkout moves', async () => {
+    // Guarding the slot by occupancy alone broke this: a seed could never be
+    // replaced by another dev run, so a renamed or moved checkout left
+    // auto-launch pointing at a path that no longer existed, permanently.
+    // Overwriting used to fix it on the next boot and must keep doing so.
+    const f = slotFixture();
+    inHome(f.home, (config) => {
+      config.recordLaunch(f.DEV, { provisional: true });
+      config.recordLaunch(f.MOVED, { provisional: true });
+      assert.strictEqual(config.read().launch.exe, f.MOVED.exe,
+        'one dev seed must be replaceable by the next');
+    });
+    fs.rmSync(f.home, { recursive: true, force: true });
+  });
+
+  await atest('an install that is no longer there does not lock the slot', async () => {
+    // The uninstaller unwires but never touches ~/.sereno, so the recorded
+    // target outlives the install. Occupancy-based guarding made that
+    // permanent and unreachable - there is no UI that clears it.
+    const f = slotFixture();
+    inHome(f.home, (config) => {
+      config.recordLaunch(f.INSTALLED);
+      fs.rmSync(f.INSTALLED.exe);              // uninstalled
+      config.recordLaunch(f.DEV, { provisional: true });
+      assert.strictEqual(config.read().launch.exe, f.DEV.exe,
+        'a target whose exe is gone is not a target worth protecting');
+    });
+    fs.rmSync(f.home, { recursive: true, force: true });
+  });
+
+  await atest('the provisional marker survives an unrelated write', async () => {
+    // write() rebuilds the file from read(), so anything read() drops is
+    // destroyed by the next unrelated write - and toggling auto-launch in the
+    // UI is exactly such a write. Without this the marker silently vanished
+    // and a dev seed started masquerading as an install.
+    const f = slotFixture();
+    inHome(f.home, (config) => {
+      config.recordLaunch(f.DEV, { provisional: true });
+      config.write({ autoLaunch: true });      // what the settings toggle does
+      assert.strictEqual(config.read().launch.provisional, true,
+        'the marker was stripped by an unrelated write');
+      config.recordLaunch(f.MOVED, { provisional: true });
+      assert.strictEqual(config.read().launch.exe, f.MOVED.exe,
+        'and the seed is still recognised as replaceable afterwards');
+    });
+    fs.rmSync(f.home, { recursive: true, force: true });
+  });
+
+  await atest('the shim does not queue a replay for a target that is not there', async () => {
+    // Trying to spawn a missing exe still took the debounce slot and still
+    // wrote a pending file, which only a booting app deletes - and the app
+    // never boots. One file leaked per session start, forever.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-home-'));
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+      autoLaunch: true,
+      launch: { exe: path.join(home, 'gone', 'Sereno.exe'), args: [] },
+    }));
+    const r = spawnSync(process.execPath, [EMIT, 'hook', 'SessionStart'], {
+      input: JSON.stringify({ session_id: 'x', cwd: 'C:/work/x' }),
+      encoding: 'utf8',
+      env: Object.assign({}, process.env, { CLAUDE_HUD_PORT: '9', SERENO_HOME: home }),
+      timeout: 10000,
+    });
+    assert.strictEqual(r.status, 0, 'the shim must still exit 0');
+    assert.strictEqual(r.stderr, '', 'and never write to stderr');
+    let queued = [];
+    try { queued = fs.readdirSync(path.join(home, 'pending')); } catch (_) { queued = []; }
+    assert.strictEqual(queued.length, 0, 'queued a replay nothing will ever drain');
+    assert.strictEqual(fs.existsSync(path.join(home, 'launching')), false,
+      'and burned the debounce slot for a launch that cannot happen');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  await atest('only a build in a temporary place records provisionally', async () => {
+    const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+    const m = main.match(/config\.recordLaunch\([\s\S]*?\n      \);/);
+    assert.ok(m, 'recordLaunch call site not found - did main.js reformat?');
+    assert.ok(/provisional: !app\.isPackaged \|\| BUILD_OUTPUT\.test/.test(m[0]),
+      'isPackaged is not a proxy for installed: dist/win-unpacked is packaged and disposable');
+    assert.ok(/dist[^\n]*win-unpacked/.test(main), 'the build output directory must be recognised');
+  });
+
   await atest('the app clears the debounce marker once it is up', async () => {
     // Otherwise quitting and starting a session inside the window would be
     // swallowed by a lock this very launch left behind.

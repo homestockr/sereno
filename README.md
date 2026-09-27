@@ -82,6 +82,15 @@ together. Change one and you change the other.
 Off by default. Open the **⚙** menu in the widget and tick **Start Sereno
 automatically** to have it open whenever a Claude Code session begins.
 
+The command it launches is recorded in `~/.sereno` on every boot, so it follows
+the app through an update, a reinstall, or a move. A build that lives somewhere
+temporary — a source checkout, or the `dist/` directory the next build
+recreates — may seed that slot when it is empty, but never takes it from an
+installed copy: running from source once used to silently repoint auto-launch at
+a tree that would not be there tomorrow. The slot heals itself when the target
+stops existing, so an uninstall or a moved checkout cannot strand it, and the
+shim checks the binary is there before it claims anything.
+
 It works through the `SessionStart` hook Sereno already installs: when that hook
 fires and finds nothing listening, the shim starts the app and hands it the event
 that triggered the launch, so the widget comes up with the session already on it
@@ -108,7 +117,7 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 |---|---|
 | `npm start` | the widget |
 | `npm run serve` | collector only — open `http://127.0.0.1:8787/` in a browser tab |
-| `npm test` | 88 acceptance + regression tests, no GUI needed |
+| `npm test` | 95 acceptance + regression tests, no GUI needed |
 | `npm run replay` | replays `samples/*.jsonl` through the state machine |
 | `npm run wire` / `unwire` | install / uninstall (`--dry-run`, `--yes`, `--list`) |
 | `npm run dist` | build the Windows installer + zip |

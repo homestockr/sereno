@@ -170,6 +170,14 @@ function autoLaunch(payload) {
 
   const fs = require('node:fs');
   const path = require('node:path');
+
+  // An exe that is not there cannot be launched, and trying anyway still takes
+  // the debounce slot and still queues a replay file that only a booting app
+  // ever deletes - so an uninstalled or moved target leaked one file per session
+  // start, forever. One stat, on a path that already does statSync and
+  // writeFileSync below.
+  try { if (!fs.statSync(spec.exe).isFile()) return; } catch (_) { return; }
+
   const home = serenoHome();
   if (!claimLaunch(fs, path, home)) return;
   queuePending(fs, path, home, payload);

@@ -36,6 +36,9 @@ const MIN_HEIGHT = 60;
 // Below the puck's own natural width, so it only ever acts as a floor. If it
 // were above it, the expand button would be clipped off the only control the
 // collapsed form has.
+// electron-builder's output directory, which lives in the source tree.
+const BUILD_OUTPUT = /[\/]dist[\/]win-unpacked[\/]/i;
+
 const MIN_COLLAPSED_WIDTH = 64;
 // A puck is a glyph and at most a two-digit count. MAX_WIDTH exists for the
 // dragged widget and would accept an 819px "collapsed" window.
@@ -331,11 +334,20 @@ if (CLI_UNWIRE) {
 
     // Refresh the launch command on every boot, so auto-launch keeps pointing at
     // this build after an update, a reinstall, or a move out of the dev tree.
+    // An unpackaged run only fills the slot if it is empty: see recordLaunch.
     try {
-      config.recordLaunch(app.isPackaged
-        ? { exe: process.execPath, args: [] }
-        // Unpackaged, electron.exe needs to be told which app to run.
-        : { exe: process.execPath, args: [app.getAppPath()] });
+      config.recordLaunch(
+        app.isPackaged
+          ? { exe: process.execPath, args: [] }
+          // Unpackaged, electron.exe needs to be told which app to run.
+          : { exe: process.execPath, args: [app.getAppPath()] },
+        // isPackaged is not a proxy for "installed": dist/win-unpacked is a
+        // packaged build sitting inside the checkout, which the next build
+        // recreates. Launching one to eyeball a change must not claim the slot
+        // either - and that case is harder to undo, since only the real install
+        // can take it back.
+        { provisional: !app.isPackaged || BUILD_OUTPUT.test(process.execPath) },
+      );
     } catch (_) { /* a read-only home must not stop the widget starting */ }
 
     // Whatever the shim captured while we were booting. Done before the collector
