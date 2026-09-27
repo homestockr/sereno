@@ -108,7 +108,7 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 |---|---|
 | `npm start` | the widget |
 | `npm run serve` | collector only — open `http://127.0.0.1:8787/` in a browser tab |
-| `npm test` | 76 acceptance + regression tests, no GUI needed |
+| `npm test` | 80 acceptance + regression tests, no GUI needed |
 | `npm run replay` | replays `samples/*.jsonl` through the state machine |
 | `npm run wire` / `unwire` | install / uninstall (`--dry-run`, `--yes`, `--list`) |
 | `npm run dist` | build the Windows installer + zip |
@@ -159,17 +159,33 @@ with `agent_id` but under the parent session. Applied as written, the spec's sta
 machine let a subagent's `Bash` overwrite the parent row, and a subagent's
 `PostToolUse` clear a blocked parent. Only untagged events drive top-level state.
 There is also no `SubagentStart` event, so the spec's decrement-only counter had
-nothing to increment it; liveness is the membership of a live `agent_id` map,
-which is self-healing.
+nothing to increment it; liveness is the membership of a live `agent_id` map.
 
 Those tagged events carry more than an id. `agent_type` names the agent, and the
-subagent's own `tool_name`/`tool_input` say what it is doing, so each live
-subagent is listed under its parent with what it is running and how long it has
-been going. Between its tool calls it reports as reasoning rather than leaving a
-finished tool on screen claiming to still be busy. Elapsed time counts from the
+subagent's own `tool_name`/`tool_input` say what it is doing, so live subagents
+are listed under their parent with what each is running and how long it has been
+going. Between its tool calls a subagent reports as reasoning rather than leaving
+a finished tool on screen claiming to still be busy. Elapsed time counts from the
 first tagged event, since that is the earliest moment a subagent is knowable at
 all — and because a subagent's detail dies with the turn, the same `Stop` that
 always cleared the count now clears the detail.
+
+Three things that only a missing or late event reveals:
+
+- **The map is capped at 32, and the ceiling drops the stalest entry.** The
+  entries filling it when the cap bites are the ghosts of subagents whose
+  `SubagentStop` never arrived, so rejecting the new arrival instead would keep
+  the dead and hide the living. Past 32 concurrent subagents the list is
+  necessarily partial.
+- **A stopped `agent_id` is remembered for the rest of the turn.** The shim is
+  fire-and-forget with one connection per hook, so a subagent's last
+  `PostToolUse` can arrive after its `SubagentStop`; without the tombstone the
+  straggler re-created the entry and a dead subagent reappeared with a clock
+  started from that moment.
+- **The stopwatches stop when the data does.** They hold while the collector is
+  unreachable, and a stale session renders no subagent lines at all. They are the
+  one element on the page asserting *this is happening right now*, so they must
+  not keep climbing off a snapshot that stopped updating.
 
 **`Notification` does not name the tool.** Its `message` is the fixed string
 "Claude needs your permission". The command shown in the alert block is derived —

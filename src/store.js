@@ -22,7 +22,19 @@ const MAX_PENDING = 32;
 
 // A missed SubagentStop would otherwise accumulate forever. The turn's own Stop
 // clears the map, so this only has to survive one runaway turn.
-const MAX_AGENTS = 16;
+//
+// It drops the STALEST entry, exactly like MAX_PENDING above, and for a sharper
+// reason: the entries filling this map when the ceiling bites are the ghosts of
+// subagents whose SubagentStop went missing. Rejecting the arrival instead would
+// keep the ghosts and hide the live subagent - entrenching the very failure the
+// ceiling exists to contain.
+const MAX_AGENTS = 32;
+
+// An agent_id that has already stopped this turn. The shim is fire-and-forget
+// over one connection per hook, so a subagent's last PostToolUse can arrive
+// AFTER its SubagentStop; without this the late event re-creates the entry and
+// a dead subagent reappears with a freshly started clock.
+const MAX_STOPPED = 64;
 
 // Only this notification_type may turn a row red. An unknown type must not, or the
 // HUD cries wolf on idle pings. Text match is the spec's defensive fallback.
@@ -53,6 +65,16 @@ function describeTool(name, input) {
 function shorten(s, max) {
   if (!s) return '';
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+/** Drops the least recently active entry, to make room for a live one. */
+function evictStalest(map) {
+  let oldestKey = null;
+  let oldest = Infinity;
+  for (const [k, v] of map) {
+    if (v.lastSeen < oldest) { oldest = v.lastSeen; oldestKey = k; }
+  }
+  if (oldestKey !== null) map.delete(oldestKey);
 }
 
 function projectName(cwd) {
@@ -91,6 +113,7 @@ class Store {
         // internal bookkeeping, stripped from the snapshot
         _pending: new Map(),   // tool_use_id -> { tool, arg }
         _agents: new Map(),   // agent_id -> { type, tool, arg, since, lastSeen }
+        _stopped: new Set(),   // agent_ids already stopped this turn
         _blockedNotified: false,
       };
       this.sessions.set(id, s);
@@ -127,13 +150,20 @@ class Store {
     if (agentId) {
       if (event === 'SubagentStop') {
         s._agents.delete(agentId);
+        if (s._stopped.size >= MAX_STOPPED) s._stopped.delete(s._stopped.values().next().value);
+        s._stopped.add(agentId);
+      } else if (s._stopped.has(agentId)) {
+        // A straggler from a subagent that has already stopped. Reviving it here
+        // would show a dead agent with a clock starting from now.
+        this.onChange();
+        return;
       } else {
         // There is no SubagentStart, so the first tagged event we see IS the
         // start as far as we can tell: that is what the elapsed time counts from.
         let a = s._agents.get(agentId);
         if (!a) {
-          if (s._agents.size >= MAX_AGENTS) { this.onChange(); return; }
-          a = { type: '', tool: '', arg: '', since: Date.now() };
+          if (s._agents.size >= MAX_AGENTS) evictStalest(s._agents);
+          a = { type: '', tool: '', arg: '', since: Date.now(), lastSeen: Date.now() };
           s._agents.set(agentId, a);
         }
         // agent_type rides along on every tagged event, but defensively: a
@@ -209,6 +239,7 @@ class Store {
         // were running long after the session went idle.
         s._pending.clear();
         s._agents.clear();
+        s._stopped.clear();
         s.subagents = 0;
         this._setState(s, 'idle');
         break;
@@ -274,17 +305,18 @@ class Store {
       tokens: s.tokens,
       rateLimits: s.rateLimits,
       subagents: s.subagents,
-      // Oldest first, so a subagent does not jump around the row as its
-      // siblings come and go.
-      subagentList: [...s._agents.entries()]
-        .sort((a, b) => a[1].since - b[1].since)
-        .map(([id, a]) => ({
-          id,
-          type: a.type || 'agent',
-          tool: a.tool,
-          arg: shorten(a.arg, 28),
-          since: a.since,
-        })),
+      // Insertion order is already chronological - entries are added when first
+      // seen and since is stamped then - so there is nothing to sort.
+      subagentList: [...s._agents.entries()].map(([id, a]) => ({
+        id,
+        type: a.type || 'agent',
+        tool: a.tool,
+        // A bound on what crosses the wire, not a display width: the row is
+        // user-resizable, so the visible truncation is the renderer's ellipsis.
+        // Cutting to a guessed width here produced a second ellipsis on top.
+        arg: shorten(a.arg, 120),
+        since: a.since,
+      })),
       pid: s.pid,
       lastSeen: s.lastSeen,
       stale: staleFor > STALE_MS,

@@ -235,7 +235,6 @@ button:focus-visible { outline: 2px solid #f3cc91; outline-offset: 3px; }
   font-size: 13px;
 }
 .activity > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agents { white-space: nowrap; color: #b5c9c5; font-size: 12px; }
 
 .meta {
   display: flex;
@@ -442,8 +441,11 @@ html, body { height: 100%; }
   padding-left: 10px;
 }
 .agent-type {
-  flex: none;
-  min-width: 86px;
+  /* flex:none is 0 0 auto - the basis is the CONTENT width and the box never
+     shrinks, so the ellipsis below could never fire and a long agent_type such
+     as claude-code-guide pushed the timer out of the row. A fixed basis makes
+     the overflow reachable. */
+  flex: 0 0 86px;
   color: #e8e4dc;
   font-weight: 600;
   overflow: hidden;

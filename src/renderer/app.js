@@ -39,6 +39,9 @@ let expanded = false;
 const money = (v) => '$' + Number(v || 0).toFixed(2);
 
 function mmss(ms) {
+  // Math.max(0, NaN) is NaN, which used to reach the DOM as the string
+  // "NaN:NaN" and repaint twice a second forever.
+  if (!Number.isFinite(ms)) return '--:--';
   const t = Math.max(0, Math.floor(ms / 1000));
   return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(t % 60).padStart(2, '0');
 }
@@ -148,19 +151,18 @@ function subagentHtml(list) {
     return `<div class="agent">
       <span class="agent-type">${esc(a.type)}</span>
       <span class="agent-doing"${a.tool ? '' : ' data-quiet="1"'}>${esc(doing)}</span>
-      <span class="agent-timer" data-since="${a.since}">${mmss(Date.now() - a.since)}</span>
+      <span class="agent-timer" data-since="${Number(a.since) || 0}">${mmss(Date.now() - a.since)}</span>
     </div>`;
   }).join('') + '</div>';
 }
 
 function sessionHtml(s) {
   const label = stateLabel(s);
-  const agentLines = subagentHtml(s.subagentList);
-  // The count is now spelled out line by line, so the badge is only a fallback
-  // for a snapshot that reports subagents without saying which.
-  const agents = (!agentLines && s.subagents > 0)
-    ? `<span class="agents">+${s.subagents} subagent${s.subagents > 1 ? 's' : ''}</span>`
-    : '';
+  // A stale session has reported nothing for five minutes. Whatever its
+  // subagents were doing, they are not doing it now, and a live-looking list
+  // with running stopwatches under a row labelled Stale is a lie the widget
+  // should not tell. The count is derived from the same map, so it goes too.
+  const agentLines = s.stale ? '' : subagentHtml(s.subagentList);
 
   // Only one blocked session can be promoted into the alert block, so any other
   // one used to sit here as a row that said "Blocked" and offered nothing. With
@@ -181,7 +183,7 @@ function sessionHtml(s) {
       <span class="project">${esc(s.projectName)}</span>
       <span class="state"><span class="state-symbol" aria-hidden="true">${symbolFor(s)}</span>${label}</span>
     </div>
-    <div class="activity"><span>${esc(activityText(s))}</span>${agents}</div>
+    <div class="activity"><span>${esc(activityText(s))}</span></div>
     ${agentLines}
     ${metaHtml(s)}
     ${action}
@@ -303,8 +305,17 @@ function tick() {
   }
   // Subagents are short-lived; a stopwatch that only moved when some other
   // event happened to arrive would sit frozen for most of their life.
+  //
+  // But not while the collector is unreachable. These are the one thing on the
+  // page asserting "this is happening right now", and the snapshot behind them
+  // stopped updating - so they hold until events resume. The blocked timer above
+  // is deliberately not held: a session waiting for approval really does go on
+  // waiting whether or not we can still hear from it.
+  if (!ui.offline.hidden) return;
   for (const el of ui.rows.querySelectorAll('.agent-timer')) {
-    el.textContent = mmss(Date.now() - Number(el.dataset.since));
+    const since = Number(el.dataset.since);
+    if (!since) continue;
+    el.textContent = mmss(Date.now() - since);
   }
 }
 

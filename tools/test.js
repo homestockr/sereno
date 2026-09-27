@@ -545,16 +545,80 @@ test('a subagent keeps its start time as its tools come and go', () => {
     'the stopwatch restarted on the next tool call');
 });
 
-test('a runaway turn cannot fill the subagent map', () => {
-  // A missed SubagentStop would otherwise accumulate without limit.
+test('the subagent ceiling drops the stalest, never the arrival', () => {
+  // A missed SubagentStop would otherwise accumulate without limit - but the
+  // entries filling the map when the ceiling bites ARE those ghosts, so
+  // rejecting the newcomer would keep the dead and hide the living.
+  //
+  // The earlier assertion here was `<= 16`, which passes at zero and never says
+  // which entries survived. It was green while the map dropped every live
+  // subagent past the sixteenth.
   const s = new Store();
   for (let i = 0; i < 40; i++) {
     feed(s, [H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 't' + i,
       agent_id: 'agent-' + i, agent_type: 'Explore', tool_input: { command: 'x' } }))]);
   }
   const g = s.snapshot().sessions[0];
-  assert.ok(g.subagents <= 16, 'expected a ceiling, got ' + g.subagents);
+  assert.strictEqual(g.subagents, 32, 'the ceiling must be reached, not merely respected');
   assert.strictEqual(g.subagentList.length, g.subagents, 'the list and the count must agree');
+  assert.ok(g.subagentList.some((a) => a.id === 'agent-39'),
+    'the most recent subagent must survive; it is the one most likely alive');
+  assert.ok(!g.subagentList.some((a) => a.id === 'agent-0'),
+    'the stalest must be the one evicted');
+});
+
+test('a straggler after SubagentStop does not resurrect a dead subagent', () => {
+  // The shim is fire-and-forget, one connection per hook, so a subagent's last
+  // PostToolUse can arrive AFTER its SubagentStop. Re-creating the entry would
+  // show a dead agent with a clock started from the moment of the straggler.
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1',
+      agent_id: 'a1', agent_type: 'Explore', tool_input: { command: 'npm test' } })),
+    H('SubagentStop', sid('x', { agent_id: 'a1', agent_type: 'Explore' })),
+    H('PostToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1', agent_id: 'a1' })),
+  ]);
+  let g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagents, 0, 'the straggler brought it back from the dead');
+  assert.deepStrictEqual(g.subagentList, []);
+
+  // But the tombstone must not outlive the turn, or a later turn reusing the id
+  // would be invisible.
+  feed(s, [
+    H('Stop', sid('x')),
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c9',
+      agent_id: 'a1', agent_type: 'Explore', tool_input: { command: 'y' } })),
+  ]);
+  assert.strictEqual(s.snapshot().sessions[0].subagents, 1,
+    'a new turn must be able to reuse an agent_id');
+});
+
+test('a stale session stops claiming live subagents', () => {
+  // Five minutes without a word. Whatever its subagents were doing, they are
+  // not doing it now, and a list of running stopwatches under a row labelled
+  // Stale is a claim the widget cannot support.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const fn = app.match(/function sessionHtml[\s\S]*?\n}/)[0];
+  assert.ok(/s\.stale \? '' : subagentHtml/.test(fn),
+    'a stale row must not render subagent lines');
+});
+
+test('the store does not pre-truncate to a width it cannot know', () => {
+  // The row is user-resizable, so the renderer's ellipsis is the only mechanism
+  // that knows the real width. Cutting to a guessed 28 here put a second
+  // ellipsis on top of the first.
+  const s = new Store();
+  const long = 'grep -rn "emit" src/components/really/deeply/nested/path/file.js';
+  feed(s, [H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1',
+    agent_id: 'a1', agent_type: 'Explore', tool_input: { command: long } }))]);
+  const a = s.snapshot().sessions[0].subagentList[0];
+  assert.strictEqual(a.arg, long, 'a 64-char command must cross intact');
+  assert.ok(!a.arg.includes('…'), 'the store must not add an ellipsis of its own');
+
+  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+  const rule = css.match(/\.agent-type \{[\s\S]*?\}/)[0];
+  assert.ok(/flex: 0 0 86px/.test(rule),
+    'flex:none sets the basis to content and never shrinks, so the ellipsis could never fire');
 });
 
 test('subagent detail dies with the turn, like the count always did', () => {
@@ -569,15 +633,40 @@ test('subagent detail dies with the turn, like the count always did', () => {
   assert.deepStrictEqual(g.subagentList, []);
 });
 
-test('subagent timers tick in place, without rebuilding the rows', () => {
+test('subagent timers tick in place, against the markup that carries them', () => {
   // Subagents are short-lived. A stopwatch that only moved when some unrelated
   // event arrived would sit frozen for most of their life - but re-rendering
   // every second to move it would throw away scroll position and hover.
+  //
+  // Both halves are asserted against each other on purpose. Checking only that
+  // tick() mentions the class let a rename of the emitted markup pass green
+  // while every stopwatch silently froze.
   const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
   const fn = app.match(/function tick\(\)[\s\S]*?\n}/)[0];
+  const emit = app.match(/function subagentHtml[\s\S]*?\n}/)[0];
+
+  assert.ok(/class="agent-timer" data-since=/.test(emit),
+    'the rendered timer must carry the class and stamp that tick looks for');
   assert.ok(/agent-timer/.test(fn), 'tick must update the subagent timers');
-  assert.ok(!/render\(\)/.test(fn), 'tick must not re-render to do it');
-  assert.ok(/data-since|dataset\.since/.test(fn), 'timers are driven from their own start stamp');
+  assert.ok(/dataset\.since/.test(fn), 'timers are driven from their own start stamp');
+  assert.ok(!/\brender\s*\(/.test(fn), 'tick must not re-render to do it');
+
+  // And it must stop while the data behind it has stopped arriving.
+  assert.ok(/ui\.offline\.hidden/.test(fn),
+    'timers must hold when the collector is unreachable, not keep climbing');
+});
+
+test('a missing timestamp never reaches the DOM as NaN', () => {
+  // Math.max(0, NaN) is NaN, and the old mmss rendered it as the literal
+  // "NaN:NaN", repainted twice a second forever.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const mmss = new Function('return ' + app.match(/function mmss[\s\S]*?\n}/)[0])();
+  assert.strictEqual(mmss(5000), '00:05');
+  assert.strictEqual(mmss(0), '00:00');
+  assert.strictEqual(mmss(-1), '00:00');
+  assert.strictEqual(mmss(NaN), '--:--');
+  assert.strictEqual(mmss(undefined), '--:--');
+  assert.strictEqual(mmss(Infinity), '--:--');
 });
 
 test('subagents cannot outlive the turn', () => {
