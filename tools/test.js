@@ -483,6 +483,103 @@ test('a denied tool cannot leak pending entries forever', () => {
   assert.strictEqual(s.sessions.get('x')._pending.size, 0, 'Stop must clear pending tools');
 });
 
+test('a subagent reports which agent it is and what it is running', () => {
+  // agent_type and the tagged tool events were both arriving already; the store
+  // kept only a count of ids and threw the rest away.
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('x', { tool_name: 'Agent', tool_use_id: 'p1',
+      tool_input: { description: 'audit the wiring module', subagent_type: 'Explore' } })),
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1',
+      agent_id: 'a1', agent_type: 'Explore', tool_input: { command: 'grep -rn "emit" src/' } })),
+    H('PreToolUse', sid('x', { tool_name: 'Read', tool_use_id: 'c2',
+      agent_id: 'b2', agent_type: 'general-purpose', tool_input: { file_path: 'src/wiring.js' } })),
+  ]);
+
+  const g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagents, 2);
+  assert.deepStrictEqual(g.subagentList.map((a) => a.type), ['Explore', 'general-purpose'],
+    'oldest first, so a subagent does not jump around as siblings come and go');
+  assert.strictEqual(g.subagentList[0].tool, 'Bash');
+  assert.strictEqual(g.subagentList[0].arg, 'grep -rn "emit" src/');
+  assert.strictEqual(g.subagentList[1].tool, 'Read');
+
+  // And none of it disturbed the parent, which is on its own Agent call.
+  assert.strictEqual(g.stateTool, 'Agent');
+  assert.strictEqual(g.stateArg, 'audit the wiring module');
+});
+
+test('between tool calls a subagent is reasoning, not still running', () => {
+  // Leaving the finished tool on screen would claim it is still busy.
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1',
+      agent_id: 'a1', agent_type: 'Explore', tool_input: { command: 'npm test' } })),
+  ]);
+  assert.strictEqual(s.snapshot().sessions[0].subagentList[0].tool, 'Bash');
+
+  feed(s, [H('PostToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1',
+    agent_id: 'a1', agent_type: 'Explore' }))]);
+  const a = s.snapshot().sessions[0].subagentList[0];
+  assert.strictEqual(a.tool, '', 'the finished tool must not linger');
+  assert.strictEqual(a.arg, '');
+  assert.strictEqual(s.snapshot().sessions[0].subagents, 1, 'it is still alive, just quiet');
+});
+
+test('a subagent keeps its start time as its tools come and go', () => {
+  // There is no SubagentStart, so elapsed counts from the first tagged event -
+  // the earliest moment the subagent is knowable at all. A later tool call must
+  // not restart the clock.
+  const s = new Store();
+  feed(s, [H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1',
+    agent_id: 'a1', agent_type: 'Explore', tool_input: { command: 'a' } }))]);
+  const first = s.snapshot().sessions[0].subagentList[0].since;
+
+  s.sessions.get('x')._agents.get('a1').since = first - 5000;   // pretend 5s passed
+  feed(s, [
+    H('PostToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1', agent_id: 'a1' })),
+    H('PreToolUse', sid('x', { tool_name: 'Read', tool_use_id: 'c2',
+      agent_id: 'a1', agent_type: 'Explore', tool_input: { file_path: 'b.js' } })),
+  ]);
+  assert.strictEqual(s.snapshot().sessions[0].subagentList[0].since, first - 5000,
+    'the stopwatch restarted on the next tool call');
+});
+
+test('a runaway turn cannot fill the subagent map', () => {
+  // A missed SubagentStop would otherwise accumulate without limit.
+  const s = new Store();
+  for (let i = 0; i < 40; i++) {
+    feed(s, [H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 't' + i,
+      agent_id: 'agent-' + i, agent_type: 'Explore', tool_input: { command: 'x' } }))]);
+  }
+  const g = s.snapshot().sessions[0];
+  assert.ok(g.subagents <= 16, 'expected a ceiling, got ' + g.subagents);
+  assert.strictEqual(g.subagentList.length, g.subagents, 'the list and the count must agree');
+});
+
+test('subagent detail dies with the turn, like the count always did', () => {
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1',
+      agent_id: 'a1', agent_type: 'Explore', tool_input: { command: 'x' } })),
+    H('Stop', sid('x')),
+  ]);
+  const g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagents, 0);
+  assert.deepStrictEqual(g.subagentList, []);
+});
+
+test('subagent timers tick in place, without rebuilding the rows', () => {
+  // Subagents are short-lived. A stopwatch that only moved when some unrelated
+  // event arrived would sit frozen for most of their life - but re-rendering
+  // every second to move it would throw away scroll position and hover.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const fn = app.match(/function tick\(\)[\s\S]*?\n}/)[0];
+  assert.ok(/agent-timer/.test(fn), 'tick must update the subagent timers');
+  assert.ok(!/render\(\)/.test(fn), 'tick must not re-render to do it');
+  assert.ok(/data-since|dataset\.since/.test(fn), 'timers are driven from their own start stamp');
+});
+
 test('subagents cannot outlive the turn', () => {
   // A missed SubagentStop used to leave the row claiming agents were running.
   const s = new Store();

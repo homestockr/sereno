@@ -20,6 +20,10 @@ const DROP_MS = 30 * 60 * 1000;
 // Denied tools never produce a PostToolUse, so the pending map needs a ceiling.
 const MAX_PENDING = 32;
 
+// A missed SubagentStop would otherwise accumulate forever. The turn's own Stop
+// clears the map, so this only has to survive one runaway turn.
+const MAX_AGENTS = 16;
+
 // Only this notification_type may turn a row red. An unknown type must not, or the
 // HUD cries wolf on idle pings. Text match is the spec's defensive fallback.
 const PERMISSION_TYPE = 'permission_prompt';
@@ -86,7 +90,7 @@ class Store {
         lastSeen: Date.now(),
         // internal bookkeeping, stripped from the snapshot
         _pending: new Map(),   // tool_use_id -> { tool, arg }
-        _agents: new Set(),
+        _agents: new Map(),   // agent_id -> { type, tool, arg, since, lastSeen }
         _blockedNotified: false,
       };
       this.sessions.set(id, s);
@@ -121,8 +125,34 @@ class Store {
 
     // --- subagent bookkeeping: tagged events never touch top-level state ---
     if (agentId) {
-      if (event === 'SubagentStop') s._agents.delete(agentId);
-      else s._agents.add(agentId);
+      if (event === 'SubagentStop') {
+        s._agents.delete(agentId);
+      } else {
+        // There is no SubagentStart, so the first tagged event we see IS the
+        // start as far as we can tell: that is what the elapsed time counts from.
+        let a = s._agents.get(agentId);
+        if (!a) {
+          if (s._agents.size >= MAX_AGENTS) { this.onChange(); return; }
+          a = { type: '', tool: '', arg: '', since: Date.now() };
+          s._agents.set(agentId, a);
+        }
+        // agent_type rides along on every tagged event, but defensively: a
+        // subagent with no type still has to render as something.
+        if (payload.agent_type) a.type = String(payload.agent_type);
+        a.lastSeen = Date.now();
+
+        // PreToolUse says what it just started. PostToolUse says that finished,
+        // and until the next PreToolUse it is reasoning rather than running, so
+        // the tool is cleared rather than left claiming to still be going.
+        if (event === 'PreToolUse') {
+          const d = describeTool(payload.tool_name, payload.tool_input);
+          a.tool = d.tool;
+          a.arg = d.arg;
+        } else if (event === 'PostToolUse') {
+          a.tool = '';
+          a.arg = '';
+        }
+      }
       s.subagents = s._agents.size;
       this.onChange();
       return;
@@ -244,6 +274,17 @@ class Store {
       tokens: s.tokens,
       rateLimits: s.rateLimits,
       subagents: s.subagents,
+      // Oldest first, so a subagent does not jump around the row as its
+      // siblings come and go.
+      subagentList: [...s._agents.entries()]
+        .sort((a, b) => a[1].since - b[1].since)
+        .map(([id, a]) => ({
+          id,
+          type: a.type || 'agent',
+          tool: a.tool,
+          arg: shorten(a.arg, 28),
+          since: a.since,
+        })),
       pid: s.pid,
       lastSeen: s.lastSeen,
       stale: staleFor > STALE_MS,

@@ -132,9 +132,33 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
+/**
+ * One line per live subagent: which agent it is, what it is running, how long
+ * it has been going.
+ *
+ * There is no SubagentStart event, so "how long" counts from the first tagged
+ * event we saw - the earliest moment the subagent is knowable. Between its tool
+ * calls it is reasoning rather than running, and says so instead of leaving the
+ * last tool on screen pretending to still be busy.
+ */
+function subagentHtml(list) {
+  if (!list || !list.length) return '';
+  return '<div class="agents-list">' + list.map((a) => {
+    const doing = a.tool ? a.tool + (a.arg ? ' · ' + a.arg : '') : 'reasoning';
+    return `<div class="agent">
+      <span class="agent-type">${esc(a.type)}</span>
+      <span class="agent-doing"${a.tool ? '' : ' data-quiet="1"'}>${esc(doing)}</span>
+      <span class="agent-timer" data-since="${a.since}">${mmss(Date.now() - a.since)}</span>
+    </div>`;
+  }).join('') + '</div>';
+}
+
 function sessionHtml(s) {
   const label = stateLabel(s);
-  const agents = s.subagents > 0
+  const agentLines = subagentHtml(s.subagentList);
+  // The count is now spelled out line by line, so the badge is only a fallback
+  // for a snapshot that reports subagents without saying which.
+  const agents = (!agentLines && s.subagents > 0)
     ? `<span class="agents">+${s.subagents} subagent${s.subagents > 1 ? 's' : ''}</span>`
     : '';
 
@@ -158,6 +182,7 @@ function sessionHtml(s) {
       <span class="state"><span class="state-symbol" aria-hidden="true">${symbolFor(s)}</span>${label}</span>
     </div>
     <div class="activity"><span>${esc(activityText(s))}</span>${agents}</div>
+    ${agentLines}
     ${metaHtml(s)}
     ${action}
   </div>`;
@@ -270,11 +295,16 @@ function render() {
   reportHeight();
 }
 
-/** Ticks only the waiting timer, so the DOM is not rebuilt every second. */
+/** Ticks the timers in place, so the DOM is not rebuilt every second. */
 function tick() {
   const node = ui.reqTimer;
   if (!ui.request.hidden && node && node.dataset.since) {
     node.textContent = mmss(Date.now() - Number(node.dataset.since));
+  }
+  // Subagents are short-lived; a stopwatch that only moved when some other
+  // event happened to arrive would sit frozen for most of their life.
+  for (const el of ui.rows.querySelectorAll('.agent-timer')) {
+    el.textContent = mmss(Date.now() - Number(el.dataset.since));
   }
 }
 

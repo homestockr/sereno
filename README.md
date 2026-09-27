@@ -28,7 +28,9 @@ Windows 11 · Node + Electron · no build step, no framework, no deps beyond Ele
 │  ▬▭▭ Context 12%              $0.53 est. │
 ├──────────────────────────────────────────┤
 │ homestockr                  ▮▮▮ Running  │
-│ Bash · npm run build        +2 subagents │
+│ Agent · audit the wiring module          │
+│   Explore    Bash · grep -rn "emit"  0:12│
+│   general    reasoning               0:08│
 │  ▬▬▭ Context 34%             $1.88 est.  │
 ├──────────────────────────────────────────┤
 │ 61% used                  5-hour session │
@@ -106,7 +108,7 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 |---|---|
 | `npm start` | the widget |
 | `npm run serve` | collector only — open `http://127.0.0.1:8787/` in a browser tab |
-| `npm test` | 70 acceptance + regression tests, no GUI needed |
+| `npm test` | 76 acceptance + regression tests, no GUI needed |
 | `npm run replay` | replays `samples/*.jsonl` through the state machine |
 | `npm run wire` / `unwire` | install / uninstall (`--dry-run`, `--yes`, `--list`) |
 | `npm run dist` | build the Windows installer + zip |
@@ -157,7 +159,17 @@ with `agent_id` but under the parent session. Applied as written, the spec's sta
 machine let a subagent's `Bash` overwrite the parent row, and a subagent's
 `PostToolUse` clear a blocked parent. Only untagged events drive top-level state.
 There is also no `SubagentStart` event, so the spec's decrement-only counter had
-nothing to increment it; the count is the size of a live `agent_id` set.
+nothing to increment it; liveness is the membership of a live `agent_id` map,
+which is self-healing.
+
+Those tagged events carry more than an id. `agent_type` names the agent, and the
+subagent's own `tool_name`/`tool_input` say what it is doing, so each live
+subagent is listed under its parent with what it is running and how long it has
+been going. Between its tool calls it reports as reasoning rather than leaving a
+finished tool on screen claiming to still be busy. Elapsed time counts from the
+first tagged event, since that is the earliest moment a subagent is knowable at
+all — and because a subagent's detail dies with the turn, the same `Stop` that
+always cleared the count now clears the detail.
 
 **`Notification` does not name the tool.** Its `message` is the fixed string
 "Claude needs your permission". The command shown in the alert block is derived —
