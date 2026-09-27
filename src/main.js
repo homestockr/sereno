@@ -3,13 +3,16 @@
  * Sereno — Electron main process. Owns the collector, the window, and the toast.
  */
 
-const { app, BrowserWindow, ipcMain, Notification, screen, powerMonitor, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Notification, Tray,
+  nativeImage, nativeTheme, screen, powerMonitor, shell } = require('electron');
 const { execFile } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const { Store } = require('./store.js');
-const { createCollector } = require('./collector.js');
+// The tray shares the collector's coalescing window rather than keeping its
+// own copy of the number: they throttle the same flood for the same reason.
+const { createCollector, BROADCAST_COALESCE_MS } = require('./collector.js');
 const wiring = require('./wiring.js');
 const config = require('./config.js');
 
@@ -30,23 +33,8 @@ const DEFAULT_WIDTH = 380;        // CSS px, matches the mockup
 const MIN_WIDTH = 300;
 const MAX_WIDTH = 820;
 const MIN_HEIGHT = 60;
-// Collapsed, the window is a puck barely wider than its glyph, so MIN_WIDTH -
-// which exists to keep a session row readable - must not apply. The renderer
-// measures the puck and reports what it needs.
-// Below the puck's own natural width, so it only ever acts as a floor. If it
-// were above it, the expand button would be clipped off the only control the
-// collapsed form has.
-// electron-builder's output directory, which lives in the source tree.
-const BUILD_OUTPUT = /[\/]dist[\/]win-unpacked[\/]/i;
-
-const MIN_COLLAPSED_WIDTH = 64;
-// A puck is a glyph and at most a two-digit count. MAX_WIDTH exists for the
-// dragged widget and would accept an 819px "collapsed" window.
-const MAX_COLLAPSED_WIDTH = 200;
-// MIN_HEIGHT is the floor for a widget with a header in it. Applied to the puck
-// it leaves transparent window above and below that still swallows clicks, so
-// the collapsed form gets its own, much lower floor.
-const MIN_COLLAPSED_HEIGHT = 20;
+// electron-builder output directory, which lives inside the source tree.
+const BUILD_OUTPUT = /[\\/]dist[\\/]win-unpacked[\\/]/i;
 // Breathing room kept clear of the work area's edges, matching the gap the
 // window is first placed at.
 const SCREEN_MARGIN = 48;
@@ -64,7 +52,12 @@ const legacyStateFile = path.join(app.getPath('appData'), 'claude-hud', 'window.
 
 let win = null;
 let collector = null;
-let ui = { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1, collapsed: false, collapsedWidth: null };
+let ui = { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1, collapsed: false, trayHintShown: false };
+let tray = null;
+let trayState = null;      // '<state>/<theme>', so a theme flip repaints too
+let trayTip = null;
+let trayCounts = { total: 0, blocked: 0, active: 0, quiet: 0 };
+let trayTimer = null;
 let lastCssHeight = MIN_HEIGHT;
 
 /* ---------- persistence ---------- */
@@ -79,13 +72,11 @@ function loadUi() {
         width: typeof b.width === 'number' ? b.width : DEFAULT_WIDTH,
         zoom: typeof b.zoom === 'number' ? b.zoom : 1,
         collapsed: b.collapsed === true,
-        // Remembered so a collapsed restart can build the window at puck size
-        // rather than at widget size and then clamp itself sideways.
-        collapsedWidth: typeof b.collapsedWidth === 'number' ? b.collapsedWidth : null,
+        trayHintShown: b.trayHintShown === true,
       };
     } catch (_) { /* try the next one */ }
   }
-  return { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1, collapsed: false, collapsedWidth: null };
+  return { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1, collapsed: false, trayHintShown: false };
 }
 
 let saveTimer = null;
@@ -124,24 +115,10 @@ function flushUi() {
  * its widest. setBounds is not subject to that, verified across the flag matrix.
  * Do not "simplify" this back to setSize.
  */
-/**
- * How wide the window should be, in CSS pixels.
- *
- * Collapsed the width is content-driven, not the width the user dragged the
- * full widget to; that width is left untouched so expanding restores it.
- * createWindow uses this too - it used to compute its own initial size, which
- * was the one copy that did not know about collapse, and a collapsed restart
- * therefore built a widget-sized window and let clampToVisible drag it sideways.
- */
-function cssWidthNow() {
-  if (!ui.collapsed) return ui.width;
-  return Math.max(MIN_COLLAPSED_WIDTH, ui.collapsedWidth || MIN_COLLAPSED_WIDTH);
-}
-
 function applySize() {
   if (!win || win.isDestroyed()) return;
-  const w = Math.round(cssWidthNow() * ui.zoom);
-  const floor = ui.collapsed ? MIN_COLLAPSED_HEIGHT : MIN_HEIGHT;
+  const w = Math.round(ui.width * ui.zoom);
+  const floor = MIN_HEIGHT;
   const want = Math.max(floor, Math.round(lastCssHeight * ui.zoom));
 
   // Never taller than the display can actually show. A fixed 1400px ceiling used
@@ -196,11 +173,9 @@ function reassertOnTop() {
 /* ---------- window ---------- */
 
 function createWindow() {
-  ui = loadUi();
-
   win = new BrowserWindow({
-    width: Math.round(cssWidthNow() * ui.zoom),
-    height: ui.collapsed ? MIN_COLLAPSED_HEIGHT : MIN_HEIGHT,
+    width: Math.round(ui.width * ui.zoom),
+    height: MIN_HEIGHT,
     x: ui.x === null ? undefined : ui.x,
     y: ui.y === null ? undefined : ui.y,
     frame: false,
@@ -234,14 +209,11 @@ function createWindow() {
     clampToVisible();
   }
 
-  // The collapsed flag rides in the URL rather than arriving as a message after
-  // did-finish-load. A message cannot land before first paint, so a collapsed
-  // start used to flash the expanded widget and then snap to a puck - and if the
-  // page never got around to subscribing, the two sides disagreed about what
-  // size the window should be, with main winning and the renderer off-screen.
-  win.loadURL(`http://127.0.0.1:${PORT}/${ui.collapsed ? '?collapsed=1' : ''}`);
+  win.loadURL(`http://127.0.0.1:${PORT}/`);
   win.webContents.on('did-finish-load', () => win.webContents.setZoomFactor(ui.zoom));
-  win.once('ready-to-show', () => win.show());
+  // Collapsed means the window is not on screen at all; the tray carries the
+  // state instead. Showing it first and hiding it would flash the widget.
+  win.once('ready-to-show', () => { if (!ui.collapsed) win.show(); });
   win.on('moved', saveUi);
   win.on('closed', () => { win = null; });
 
@@ -269,6 +241,165 @@ function createWindow() {
   win.webContents.on('will-attach-webview', (event) => event.preventDefault());
 }
 
+/* ---------- tray ---------- */
+
+/*
+ * The collapsed form. It lives in the notification area rather than floating on
+ * screen, so it is always in the same place and costs no room at all.
+ *
+ * Created once, at startup, and never destroyed: Windows treats a re-created
+ * tray icon as a new one and can drop it back into the overflow flyout, so a
+ * tray that came and went would need promoting out of the overflow every time.
+ * It also doubles as the way back if the window ever ends up somewhere
+ * unreachable.
+ *
+ * The marks are the row vocabulary at tray scale - see tools/make-tray-icons.js.
+ * Shape carries the state; the count cannot survive 16px and lives in the
+ * tooltip instead.
+ */
+/*
+ * Windows does not invert a tray icon for you - that is a macOS template-image
+ * behaviour - so each theme gets its own drawn set. Measured, a single
+ * light-on-transparent set sat at 1.02:1 against Windows 11's light taskbar,
+ * which is to say invisible, and 'busy' is the state that means work is
+ * happening.
+ */
+function trayTheme() {
+  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
+}
+
+/*
+ * Built from buffers rather than createFromPath so both scale factors come off
+ * one image: 16px at 1x and 32px at 2x, which is what a DPI-scaled taskbar
+ * asks for.
+ */
+function trayIcon(state) {
+  const theme = trayTheme();
+  const img = nativeImage.createEmpty();
+  for (const [size, scale] of [[16, 1], [32, 2]]) {
+    const file = path.join(__dirname, 'tray', state + '-' + theme + '-' + size + '.png');
+    try {
+      img.addRepresentation({ scaleFactor: scale, width: size, height: size, buffer: fs.readFileSync(file) });
+    } catch (e) {
+      console.error('[sereno] tray icon unreadable: ' + file + ' (' + e.message + ')');
+    }
+  }
+  // An empty image is an invisible tray icon, and the tray is now the only way
+  // back to a hidden window - so anything is better than nothing.
+  if (img.isEmpty()) {
+    const px = Buffer.alloc(16 * 16 * 4, 0xb0);
+    return nativeImage.createFromBitmap(px, { width: 16, height: 16 });
+  }
+  return img;
+}
+
+function trayStateFor(counts) {
+  if (counts.blocked > 0) return 'needs';
+  if (counts.active > 0) return 'busy';
+  return 'quiet';
+}
+
+function trayTooltip(counts) {
+  if (counts.blocked > 0) {
+    return 'Sereno — ' + counts.blocked +
+      (counts.blocked === 1 ? ' session needs you' : ' sessions need you');
+  }
+  if (counts.active > 0) return 'Sereno — ' + counts.active + ' active';
+  return counts.total > 0 ? 'Sereno — nothing waiting' : 'Sereno';
+}
+
+function showWindow(focus) {
+  if (!win || win.isDestroyed()) return;
+  if (ui.collapsed) { ui.collapsed = false; saveUi(); }
+  // A toast click and a second launch used to call showInactive() directly and
+  // leave ui.collapsed set, so the window was on screen while the state said
+  // otherwise - the next tray click did nothing, and the next restart hid a
+  // widget that had been in use all along.
+  if (focus === false) win.showInactive(); else win.show();
+  reassertOnTop();
+}
+
+/*
+ * Said once, the first time the window goes away.
+ *
+ * Windows 11 puts a tray icon it has not seen before into the overflow flyout,
+ * and an application cannot promote itself out of it - that is the user's
+ * choice to make, and there is no API for it. So the one moment this can be
+ * explained is the moment the window vanishes and the icon is not where the
+ * user is looking. A toast is the right shape for it: it appears exactly then,
+ * and it goes through the same AppUserModelID the permission alerts do.
+ */
+function trayHint() {
+  if (ui.trayHintShown) return;
+  // Marked before showing, so a toast that throws cannot nag on every collapse.
+  // The cost is that an environment with notifications switched off spends the
+  // one explanation without ever displaying it; the README carries the same
+  // instruction for exactly that reason.
+  ui.trayHintShown = true;
+  saveUi();
+  if (!Notification.isSupported()) return;
+  try {
+    new Notification({
+      title: 'Sereno is in the notification area',
+      body: 'Windows hides new icons behind the ⌃ arrow. Drag Sereno out of it once and it stays put.',
+    }).show();
+  } catch (_) { /* a failed hint must never take the app down */ }
+}
+
+function hideWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (!ui.collapsed) { ui.collapsed = true; saveUi(); }
+  win.hide();
+  // After hiding, so the toast does not appear over a window that is about to
+  // disappear from under it.
+  trayHint();
+}
+
+function paintTray() {
+  if (!tray || tray.isDestroyed()) return;
+  // Both of these are Shell_NotifyIcon calls, so both are guarded: the tray is
+  // repainted only when what it shows actually differs.
+  const key = trayStateFor(trayCounts) + '/' + trayTheme();
+  if (key !== trayState) { trayState = key; tray.setImage(trayIcon(trayStateFor(trayCounts))); }
+  const tip = trayTooltip(trayCounts);
+  if (tip !== trayTip) { trayTip = tip; tray.setToolTip(tip); }
+}
+
+/*
+ * Coalesced on the same footing as the collector's broadcast, and for the same
+ * reason its comment gives: the statusline fires roughly per session per 1.5s,
+ * and building a full snapshot on each one - sorting every session, mapping
+ * every subagent - to read four integers off it is work nobody asked for.
+ */
+function updateTray(counts) {
+  trayCounts = counts;
+  if (trayTimer) return;
+  trayTimer = setTimeout(() => { trayTimer = null; paintTray(); }, BROADCAST_COALESCE_MS);
+  if (trayTimer.unref) trayTimer.unref();
+}
+
+function createTray(store) {
+  tray = new Tray(trayIcon('quiet'));
+  trayState = 'quiet';
+  tray.setToolTip('Sereno');
+
+  // Left click only ever shows. The tray exists to get the widget back, and a
+  // toggle here can land on hidden: Windows users double-click by habit, and
+  // the second click of a double-click has historically arrived as a plain
+  // click. Hiding stays on the header button and the menu item below.
+  tray.on('click', () => showWindow());
+  tray.on('double-click', () => showWindow());
+
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Show Sereno', click: showWindow },
+    { label: 'Hide to tray', click: hideWindow },
+    { type: 'separator' },
+    { label: 'Quit Sereno', click: () => app.quit() },
+  ]));
+
+  updateTray(store.snapshot().counts);
+}
+
 /* ---------- toast ---------- */
 
 function toastBlocked(session) {
@@ -281,7 +412,7 @@ function toastBlocked(session) {
       urgency: 'critical',
       timeoutType: 'never',
     });
-    n.on('click', () => { if (win && !win.isDestroyed()) { win.showInactive(); reassertOnTop(); } });
+    n.on('click', () => showWindow(false));
     n.show();
   } catch (_) { /* a failed toast must never take the HUD down */ }
 }
@@ -311,9 +442,9 @@ if (CLI_UNWIRE) {
 } else if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (win && !win.isDestroyed()) { win.showInactive(); reassertOnTop(); }
-  });
+  // Launching it again is the natural "where did it go?" move, so it has to
+  // properly un-collapse rather than just put a window on screen.
+  app.on('second-instance', () => showWindow(false));
 
   // Windows keys both toast delivery and taskbar identity off the AppUserModelID,
   // and only honours one that a Start Menu shortcut actually carries. The NSIS
@@ -360,7 +491,27 @@ if (CLI_UNWIRE) {
     }
     config.clearLaunchLock();
 
+    // Before the tray, so it reads the persisted state rather than the module
+    // defaults - on a collapsed restart the click handler would otherwise be
+    // wrong about what a click should do.
+    ui = loadUi();
+
+    // A tray is a nicety; the widget is not. An icon Windows refuses must not
+    // take the rest of this callback - collector, window, everything - with it.
+    try {
+      createTray(store);
+      nativeTheme.on('updated', () => { trayState = null; paintTray(); });
+    } catch (e) {
+      tray = null;
+      console.error('[sereno] running without a tray: ' + e.message);
+    }
+
     collector = createCollector(store, PORT);
+
+    // createCollector takes store.onChange for its broadcast; chain the tray on
+    // rather than replacing it, so both stay in step with every event.
+    const broadcast = store.onChange;
+    store.onChange = () => { broadcast(); updateTray(store.snapshot().counts); };
     collector.listen((err, addr) => {
       if (err) {
         console.error('[sereno] cannot listen on ' + PORT + ': ' + err.code);
@@ -376,6 +527,9 @@ if (CLI_UNWIRE) {
       // on its own even when no events are arriving.
       store.sweep();
       collector.broadcast();
+      // sweep() ages sessions out on a timer rather than on an event, so the
+      // tray would otherwise keep claiming work that has gone quiet.
+      updateTray(store.snapshot().counts);
     }, SWEEP_MS);
     sweep.unref();
 
@@ -390,27 +544,12 @@ if (CLI_UNWIRE) {
 
   ipcMain.on('sereno:quit', () => app.quit());
 
+  // Collapsing takes the window off screen entirely; the tray carries the state
+  // from then on. Nothing is resized, which is why none of the puck's geometry
+  // - its own floors, its measured width, the creep it caused at a screen edge
+  // - needs to exist any more.
   ipcMain.on('sereno:collapse', (_e, collapsed) => {
-    const next = !!collapsed;
-    if (next === ui.collapsed) return;
-    ui.collapsed = next;
-    // Resize here rather than relying on the width and height reports that
-    // follow to each happen to differ from the last ones. The renderer sends its
-    // fresh puck measurement before this message, so the size is already known.
-    applySize();
-    clampToVisible();
-    saveUi();
-  });
-
-  // Width only means anything collapsed; expanded, the user owns it.
-  ipcMain.on('sereno:collapsed-width', (_e, width) => {
-    const w = Number(width);
-    if (!Number.isFinite(w) || w <= 0) return;
-    const next = Math.min(MAX_COLLAPSED_WIDTH, Math.max(MIN_COLLAPSED_WIDTH, Math.round(w)));
-    if (next === ui.collapsedWidth) return;
-    ui.collapsedWidth = next;
-    saveUi();
-    if (ui.collapsed) { applySize(); clampToVisible(); }
+    if (collapsed) hideWindow(); else showWindow();
   });
 
   ipcMain.on('sereno:height', (_e, height) => {
@@ -486,6 +625,7 @@ if (CLI_UNWIRE) {
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', () => {
     flushUi();
+    if (tray && !tray.isDestroyed()) { tray.destroy(); tray = null; }
     if (collector) collector.close();
   });
 }

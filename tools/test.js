@@ -334,162 +334,245 @@ test('blocked sorts to the top, stale sinks', () => {
 });
 
 /* ============================================================ *
- * Collapsed indicator
+ * Collapsed = the tray
  * ============================================================ */
-console.log('\n[*] collapsed indicator');
+console.log('\n[*] tray');
 
-test('the puck carries state in its glyph, not its colour', () => {
-  // Sereno's rule is that shape carries state and colour only reinforces it -
-  // the README's reason being a daltonized theme, which this user runs. A
-  // stoplight puck would be the one element in the app to break that.
-  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
-  const puckState = new Function('return ' + app.match(/function puckState[\s\S]*?\n}/)[0])();
+// The tray functions are plain and self-contained, so they are extracted and
+// run rather than grepped.
+function trayFns() {
+  const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const pick = (n) => main.match(new RegExp('function ' + n + '[\\s\\S]*?\\n}'))[0];
+  return new Function(
+    [pick('trayStateFor'), pick('trayTooltip'),
+      'return { trayStateFor, trayTooltip };'].join('\n')
+  )();
+}
 
-  const needs = puckState({ total: 5, blocked: 2, active: 1, quiet: 2 });
-  const busy = puckState({ total: 3, blocked: 0, active: 3, quiet: 0 });
-  const quiet = puckState({ total: 2, blocked: 0, active: 0, quiet: 2 });
-
-  // Every state is told apart by symbol alone, with colour stripped out.
-  const symbols = [needs.symbol, busy.symbol, quiet.symbol];
-  assert.strictEqual(new Set(symbols).size, 3, 'two states share a glyph: ' + JSON.stringify(symbols));
-  assert.strictEqual(needs.symbol, '!');
-  assert.strictEqual(quiet.symbol, '\u25cb');
-  assert.strictEqual(busy.symbol, '', 'busy renders the equalizer bars, not a character');
-
-  // Blocked outranks active, the same precedence the alert banner uses.
-  assert.strictEqual(needs.cls, 'needs');
-  assert.strictEqual(needs.count, 2, 'the count must name the blocked sessions, not the total');
-  assert.strictEqual(busy.count, 3);
-  assert.strictEqual(quiet.count, 0, 'quiet shows no number at all');
+test('the tray mark follows the same precedence as the alert banner', () => {
+  const { trayStateFor } = trayFns();
+  assert.strictEqual(trayStateFor({ total: 5, blocked: 2, active: 3, quiet: 0 }), 'needs',
+    'anything blocked outranks anything running');
+  assert.strictEqual(trayStateFor({ total: 3, blocked: 0, active: 3, quiet: 0 }), 'busy');
+  assert.strictEqual(trayStateFor({ total: 2, blocked: 0, active: 0, quiet: 2 }), 'quiet');
+  assert.strictEqual(trayStateFor({ total: 0, blocked: 0, active: 0, quiet: 0 }), 'quiet',
+    'nothing reporting is quiet, not an error state');
 });
 
-test('collapsed geometry is computed in one place, and bypasses the row floors', () => {
-  // MIN_WIDTH keeps a session row readable and MIN_HEIGHT fits a header.
-  // Neither applies to a pill barely wider than its glyph, and applied anyway
-  // they leave transparent window around it that still swallows clicks.
-  //
-  // This is run, not grepped: the width rule had four copies and the one in
-  // createWindow was the only one that did not know about collapse, which is
-  // how a collapsed restart moved the window sideways.
+test('the count survives in the tooltip, since it cannot survive 16px', () => {
+  // The puck could show "! 2". A tray icon cannot, so the number has to live
+  // somewhere - and the tooltip is the only place left.
+  const { trayTooltip } = trayFns();
+  assert.match(trayTooltip({ total: 4, blocked: 2, active: 1, quiet: 1 }), /2 sessions need you/);
+  assert.match(trayTooltip({ total: 2, blocked: 1, active: 1, quiet: 0 }), /1 session needs you/,
+    'singular, not "1 sessions"');
+  assert.match(trayTooltip({ total: 3, blocked: 0, active: 3, quiet: 0 }), /3 active/);
+  assert.match(trayTooltip({ total: 2, blocked: 0, active: 0, quiet: 2 }), /nothing waiting/i);
+  assert.strictEqual(trayTooltip({ total: 0, blocked: 0, active: 0, quiet: 0 }), 'Sereno');
+});
+
+// Decoding the committed PNGs back is the only way to assert what they
+// actually look like, and the marks are the whole feature.
+function decodePng(file) {
+  const zlib = require('node:zlib');
+  const b = fs.readFileSync(file);
+  let off = 8, w = 0, h = 0;
+  const idat = [];
+  while (off < b.length) {
+    const len = b.readUInt32BE(off);
+    const type = b.toString('ascii', off + 4, off + 8);
+    const data = b.subarray(off + 8, off + 8 + len);
+    if (type === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); }
+    else if (type === 'IDAT') idat.push(data);
+    off += 12 + len;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = w * 4;
+  return { w, h, at: (x, y) => {
+    const i = y * (stride + 1) + 1 + x * 4;
+    return [raw[i], raw[i + 1], raw[i + 2], raw[i + 3]];
+  } };
+}
+
+const luminance = (r, g, b) => {
+  const f = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+};
+const contrast = (a, b) => {
+  const hi = Math.max(a, b), lo = Math.min(a, b);
+  return (hi + 0.05) / (lo + 0.05);
+};
+
+test('every state has an icon, at both scales and for both taskbars', () => {
+  const gen = require('../tools/make-tray-icons.js');
+  const dir = path.join(ROOT, 'src', 'tray');
+
+  for (const state of gen.STATES) {
+    for (const theme of Object.keys(gen.PALETTE)) {
+      for (const size of [16, 32]) {
+        const f = path.join(dir, gen.iconName(state, theme, size));
+        assert.ok(fs.existsSync(f), 'missing ' + path.basename(f));
+        const b = fs.readFileSync(f);
+        assert.deepStrictEqual([...b.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+          path.basename(f) + ' is not a PNG');
+        assert.strictEqual(b.readUInt32BE(16), size, 'wrong width in ' + path.basename(f));
+        assert.strictEqual(b.readUInt32BE(20), size, 'wrong height in ' + path.basename(f));
+      }
+    }
+  }
+
+  // Nothing ships that nothing asks for, and nothing stale lingers.
+  const shipped = fs.readdirSync(dir).filter((f) => f.endsWith('.png')).sort();
+  assert.deepStrictEqual(shipped, [...gen.buildAll().keys()].sort(),
+    'src/tray does not match what the generator produces');
+});
+
+test('the committed icons are exactly what the generator draws', () => {
+  // Otherwise the script can rot, or the assets drift from it, and neither
+  // shows up until someone regenerates and gets a surprise diff.
+  const gen = require('../tools/make-tray-icons.js');
+  for (const [name, buf] of gen.buildAll()) {
+    const on = fs.readFileSync(path.join(ROOT, 'src', 'tray', name));
+    assert.ok(buf.equals(on), name + ' differs from the generator - re-run tools/make-tray-icons.js');
+  }
+});
+
+test('a mark stays visible on the taskbar it was drawn for', () => {
+  // Windows only auto-inverts template images on macOS. A single light set
+  // measured 1.02:1 against Windows 11's light taskbar - invisible - and the
+  // state it erased was 'busy', which is the one that means work is happening.
+  const gen = require('../tools/make-tray-icons.js');
+  const BG = { dark: luminance(0x20, 0x20, 0x20), light: luminance(0xf3, 0xf3, 0xf3) };
+
+  for (const state of gen.STATES) {
+    for (const theme of Object.keys(gen.PALETTE)) {
+      const img = decodePng(path.join(ROOT, 'src', 'tray', gen.iconName(state, theme, 16)));
+      const tally = new Map();
+      for (let y = 0; y < img.h; y++) {
+        for (let x = 0; x < img.w; x++) {
+          const [r, g, b, a] = img.at(x, y);
+          if (a < 250) continue;
+          const k = r + ',' + g + ',' + b;
+          tally.set(k, (tally.get(k) || 0) + 1);
+        }
+      }
+      assert.ok(tally.size, state + '/' + theme + ' drew nothing opaque');
+      const [dominant] = [...tally].sort((a, b) => b[1] - a[1])[0];
+      const [r, g, b] = dominant.split(',').map(Number);
+      const ratio = contrast(luminance(r, g, b), BG[theme]);
+      assert.ok(ratio >= 3, state + '/' + theme + ' is ' + ratio.toFixed(2) +
+        ':1 against its own taskbar (needs 3:1) - rgb(' + dominant + ')');
+    }
+  }
+});
+
+test('the shapes are told apart with the colour stripped out', () => {
+  // The project rule, applied at 16px: needs is solid, quiet is a hollow ring,
+  // busy is bars that do not reach the middle. None of that needs colour.
+  const gen = require('../tools/make-tray-icons.js');
+  for (const theme of Object.keys(gen.PALETTE)) {
+    const at = (state, x, y) =>
+      decodePng(path.join(ROOT, 'src', 'tray', gen.iconName(state, theme, 16))).at(x, y);
+    assert.ok(at('needs', 8, 8)[3] > 200, 'needs must be filled at its centre');
+    assert.ok(at('quiet', 8, 8)[3] < 64, 'quiet must be hollow at its centre');
+    assert.ok(at('quiet', 8, 2)[3] > 128, 'quiet must have a stroke at its top');
+    assert.ok(at('busy', 8, 1)[3] < 64, 'busy bars must not reach the top edge');
+  }
+});
+
+test('the tray is created once, not per collapse', () => {
+  // Windows treats a re-created tray icon as a new one and can drop it back
+  // into the overflow flyout, so a tray that came and went would need
+  // promoting out of the overflow every single time.
   const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-  const src = main.match(/function cssWidthNow[\s\S]*?\n}/)[0];
-
-  const run = (state) => {
-    const ui = Object.assign({ width: 380, collapsed: false, collapsedWidth: null }, state);
-    return new Function('ui', 'MIN_COLLAPSED_WIDTH',
-      src + '\nreturn cssWidthNow();')(ui, 64);
-  };
-
-  assert.strictEqual(run({}), 380, 'expanded uses the width the user dragged to');
-  assert.strictEqual(run({ collapsed: true, collapsedWidth: 72 }), 72, 'collapsed uses the puck');
-  assert.strictEqual(run({ collapsed: true, collapsedWidth: null }), 64,
-    'with nothing measured yet it must still be wide enough to show the expand button');
-  assert.strictEqual(run({ collapsed: true, collapsedWidth: 10 }), 64, 'floored');
-  // The dragged width survives being collapsed, because nothing consults it.
-  assert.strictEqual(run({ collapsed: true, collapsedWidth: 72, width: 674 }), 72);
-  assert.strictEqual(run({ collapsed: false, collapsedWidth: 72, width: 674 }), 674,
-    'expanding restores exactly the width that was dragged');
-
   const code = main.split(/\r?\n/).map((l) => l.replace(/^\s*\/\/.*$/, '')).join('\n');
-  const apply = code.match(/function applySize[\s\S]*?\n}/)[0];
-  assert.ok(/ui\.collapsed \? MIN_COLLAPSED_HEIGHT : MIN_HEIGHT/.test(apply),
-    'the height floor must depend on whether it is collapsed');
-  assert.ok(/Math\.max\(floor,/.test(apply),
-    'the ceiling must respect the same floor, or a tiny work area inverts them');
-  assert.ok(/cssWidthNow\(\)/.test(apply), 'applySize must use the shared width rule');
 
-  // createWindow is the copy that caused the teleport; it must use it too.
-  const create = code.match(/win = new BrowserWindow\(\{[\s\S]*?\}\);/)[0];
-  assert.ok(/cssWidthNow\(\)/.test(create),
-    'the initial window must be built at collapsed size, or clampToVisible drags it');
-  assert.ok(/ui\.collapsed \? MIN_COLLAPSED_HEIGHT : MIN_HEIGHT/.test(create),
-    'and at collapsed height');
+  assert.strictEqual((code.match(/new Tray\(/g) || []).length, 1, 'exactly one Tray is constructed');
+  const collapse = code.match(/ipcMain\.on\('sereno:collapse'[\s\S]*?\n  \}\);/)[0];
+  assert.ok(!/Tray|destroy/.test(collapse), 'collapsing must not touch the tray object');
+  assert.ok(/hideWindow\(\)/.test(collapse) && /showWindow\(\)/.test(collapse),
+    'collapsing hides the window rather than resizing it');
+
+  // The click handler ran before createWindow existed and dereferenced a null
+  // win; and a toggle could leave the user hidden after a double-click, on the
+  // one control whose job is getting the window back.
+  const click = code.match(/tray\.on\('click'[\s\S]*?\);/)[0];
+  assert.ok(!/win\./.test(click), 'the click handler must not touch win directly');
+  assert.ok(/showWindow\(\)/.test(click) && !/hideWindow/.test(click),
+    'a left click must only ever show');
+
+  // ui has to be loaded before the tray reads it, or a collapsed restart builds
+  // the tray against the module defaults.
+  // The semicolon matters: without it this finds 'function createTray(store) {',
+  // which is defined long before it is called, and the assertion is vacuous.
+  assert.ok(code.indexOf('ui = loadUi();') < code.indexOf('createTray(store);'),
+    'loadUi must run before createTray');
+  assert.ok(/try \{\s*createTray\(store\);/.test(code),
+    'a tray that will not construct must not take the collector and window with it');
+  assert.ok(!/applySize/.test(collapse), 'nothing is resized any more');
+
+  // But it must be released on quit, or the icon lingers until hovered.
+  const quit = code.match(/app\.on\('before-quit'[\s\S]*?\n  \}\);/)[0];
+  assert.ok(/tray\.destroy\(\)/.test(quit), 'a tray left behind survives the process');
 });
 
-test('the puck measurement is clamped to something a puck could be', () => {
-  // MAX_WIDTH is the ceiling for a dragged widget; it would accept an 819px
-  // "collapsed" window from a renderer that got it wrong.
+test('the tray keeps up with the store, including the timed sweep', () => {
+  // The collector takes store.onChange for its broadcast. Replacing it would
+  // silence the widget; not chaining onto it would freeze the tray.
   const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-  const handler = main.match(/ipcMain\.on\('sereno:collapsed-width'[\s\S]*?\n  \}\);/)[0];
-  assert.ok(!/ui\.width\s*=/.test(handler), 'the puck measurement must not overwrite ui.width');
-  assert.ok(/MAX_COLLAPSED_WIDTH/.test(handler) && !/MAX_WIDTH\b/.test(handler),
-    'clamp to a puck-sized ceiling, not the dragged-widget one');
-  assert.ok(/Number\.isFinite/.test(handler), 'a non-numeric report must be rejected');
+  assert.ok(/const broadcast = store\.onChange;[\s\S]*?store\.onChange = \(\) => \{ broadcast\(\); updateTray/.test(main),
+    'the tray must chain onto the broadcast, not replace it');
+  // ...but coalesced, like the broadcast it rides beside: building a whole
+  // snapshot per statusline tick to read four integers is work nobody asked for.
+  const upd = main.match(/function updateTray[\s\S]*?\n}/)[0];
+  assert.ok(/BROADCAST_COALESCE_MS/.test(upd), 'the tray update must be coalesced');
+  assert.ok(/require\('\.\/collector\.js'\)/.test(main) && !/const BROADCAST_COALESCE_MS =/.test(main),
+    'and must share the collector\'s window rather than keeping a second copy');
+  // sweep() ages sessions out on a timer, with no event behind it.
+  const sweep = main.match(/const sweep = setInterval\([\s\S]*?\}, SWEEP_MS\);/)[0];
+  assert.ok(/updateTray/.test(sweep), 'the tray would keep claiming work that has gone quiet');
 });
 
-test('expanding shows the current snapshot, not the one it collapsed on', () => {
-  // render() bails while collapsed, so every broadcast during that time updates
-  // nothing but the puck. Unhiding without re-rendering brought back a stale
-  // project, a stale command and a Review button bound to a dead pid - and the
-  // next broadcast could be a 30s sweep away.
-  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
-  const fn = app.match(/function setCollapsed[\s\S]*?\n}/)[0];
-  const body = fn.split(/\r?\n/).map((l) => l.replace(/\/\/.*$/, '')).join('\n');
-  const elseBranch = body.match(/\} else \{([\s\S]*?)\}/)[1];
-  assert.ok(/render\(\)/.test(elseBranch),
-    'the expand path must re-render from the current snapshot');
+test('the overflow is explained once, and only once', () => {
+  // Windows 11 files an unfamiliar tray icon behind the chevron, and an app
+  // cannot promote itself out of it - so the only chance to say so is the
+  // moment the window disappears and the icon is not where the user looks.
+  const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const hint = main.match(/function trayHint[\s\S]*?\n}/)[0];
+
+  assert.ok(/if \(ui\.trayHintShown\) return;/.test(hint), 'it must be said once');
+  assert.ok(/ui\.trayHintShown = true;[\s\S]*?saveUi\(\)/.test(hint),
+    'and remembered before the toast, so a failed toast does not repeat forever');
+  assert.ok(/Notification\.isSupported\(\)/.test(hint), 'guarded like every other toast');
+
+  // It fires on an explicit collapse, not on a restart that happens to be
+  // collapsed - otherwise it would greet the user on every launch.
+  const hide = main.match(/function hideWindow[\s\S]*?\n}/)[0];
+  assert.ok(/trayHint\(\)/.test(hide), 'the hint belongs to the act of hiding');
+  const ready = main.match(/win\.once\('ready-to-show'[\s\S]*?\);/)[0];
+  assert.ok(!/trayHint/.test(ready), 'a collapsed restart must not re-explain it');
+
+  const loadUi = main.match(/function loadUi[\s\S]*?\n}/)[0];
+  assert.ok(/trayHintShown: b\.trayHintShown === true/.test(loadUi),
+    'an older window.json must read as not-yet-shown');
 });
 
-test('the puck can say the collector is gone', () => {
-  // Collapsed there is no offline banner - it lives inside the hidden widget -
-  // and the busy state animates, so a lost collector would leave three bars
-  // pulsing a claim nothing supports.
-  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
-  const puckState = new Function('return ' + app.match(/function puckState[\s\S]*?\n}/)[0])();
-
-  const busy = { total: 3, blocked: 0, active: 3, quiet: 0 };
-  assert.strictEqual(puckState(busy, false).cls, 'busy');
-  assert.strictEqual(puckState(busy, true).cls, 'offline',
-    'offline must outrank every live state, including a blocked one');
-  assert.strictEqual(puckState({ total: 1, blocked: 1, active: 0, quiet: 0 }, true).cls, 'offline');
-  assert.notStrictEqual(puckState(busy, true).symbol, puckState(busy, false).symbol,
-    'offline needs its own mark, not the same one dimmed');
-
-  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
-  assert.ok(/\.puck\.offline \.puck-symbol i \{ animation: none; \}/.test(css),
-    'the bars must not keep animating once there is nothing behind them');
-});
-
-test('the puck is a fixed width, so activity cannot move the window', () => {
-  // The window is sized from this measurement. A width that changes with the
-  // glyph or the digit count made main resize it, and a resize against a screen
-  // edge slides the window and saves the new position - a ratchet driven by
-  // session activity, in a feature specified never to move on its own.
-  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
-  const sym = css.match(/\.puck-symbol \{[\s\S]*?\}/)[0];
-  const count = css.match(/\.puck-count \{[\s\S]*?\}/)[0];
-  assert.ok(/width: 12px/.test(sym), 'the glyph box must not size to its glyph');
-  assert.ok(/min-width: 2ch/.test(count), '1 and 12 must not be different window widths');
-});
-
-test('the collapsed choice survives a restart, and an old file defaults to open', () => {
+test('collapsed means hidden, and is remembered', () => {
   const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   const loadUi = main.match(/function loadUi[\s\S]*?\n}/)[0];
-  assert.ok(/collapsed: b\.collapsed === true/.test(loadUi),
-    'a window.json written before this feature must read as expanded, not undefined');
-  // Scoped to loadUi's own fallback return. Matched against the whole file this
-  // also hit the "let ui = ..." initializer, so it passed whether or not the
-  // default branch existed at all.
   const fallback = loadUi.slice(loadUi.lastIndexOf('return {'));
-  assert.ok(/collapsed: false/.test(fallback), 'the no-file default is expanded');
+  assert.ok(/collapsed: b\.collapsed === true/.test(loadUi),
+    'a window.json written before this feature must read as expanded');
+  assert.ok(/collapsed: false/.test(fallback), 'the no-file default is a visible window');
 
-  const handler = main.match(/ipcMain\.on\('sereno:collapse'[\s\S]*?\n  \}\);/)[0];
-  assert.ok(/ui\.collapsed = next/.test(handler) && /saveUi\(\)/.test(handler),
-    'the toggle must persist through the same saveUi path as position and zoom');
-  assert.ok(/applySize\(\)/.test(handler),
-    'the toggle must resize, not rely on two separate reports happening to differ');
-});
+  // Left collapsed, it must not flash on screen and then vanish.
+  const ready = main.match(/win\.once\('ready-to-show'[\s\S]*?\);/)[0];
+  assert.ok(/if \(!ui\.collapsed\)/.test(ready), 'a collapsed start must not show the window');
 
-test('collapsed, the row machinery is skipped rather than rendered unseen', () => {
-  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
-  const render = app.match(/function render\(\)[\s\S]*?\n}/)[0];
-  assert.ok(/if \(collapsed\)/.test(render) && /renderPuck\(\)/.test(render),
-    'render must bail before rebuilding rows nobody can see');
-
-  // And the height measurement has to measure the puck, not the hidden window.
-  const rh = app.match(/function reportHeight[\s\S]*?\n}/)[0];
-  assert.ok(/if \(collapsed\)/.test(rh) && /ui\.puck/.test(rh),
-    'collapsed, the puck is the window; measuring the hidden .window reports 0');
+  for (const fn of ['showWindow', 'hideWindow']) {
+    const body = main.match(new RegExp('function ' + fn + '[\\s\\S]*?\\n}'))[0];
+    assert.ok(/saveUi\(\)/.test(body), fn + ' must persist the change');
+  }
 });
 
 /* ============================================================ *
@@ -818,8 +901,6 @@ test('subagent timers tick in place, against the markup that carries them', () =
   // render() has stopped updating the DOM it is ticking.
   assert.ok(/ui\.offline\.hidden/.test(fn),
     'timers must hold when the collector is unreachable, not keep climbing');
-  assert.ok(/if \(collapsed\) return;/.test(fn),
-    'collapsed, tick would advance timers on a frozen snapshot in a hidden widget');
 });
 
 test('a missing timestamp never reaches the DOM as NaN', () => {
@@ -1582,7 +1663,22 @@ test('missing rate_limits degrades instead of throwing', () => {
     assert.ok(m, 'recordLaunch call site not found - did main.js reformat?');
     assert.ok(/provisional: !app\.isPackaged \|\| BUILD_OUTPUT\.test/.test(m[0]),
       'isPackaged is not a proxy for installed: dist/win-unpacked is packaged and disposable');
-    assert.ok(/dist[^\n]*win-unpacked/.test(main), 'the build output directory must be recognised');
+
+    // RUN the pattern. The previous version of this only checked that the
+    // string "dist ... win-unpacked" appeared somewhere, which was true both
+    // before and after the regex was broken - it shipped as /[\/].../, where
+    // the escape makes it a plain slash, so it could never match a Windows
+    // execPath and the protection it guards did nothing on the only platform
+    // Sereno runs on.
+    const line = main.split(/\r?\n/).find((l) => l.startsWith('const BUILD_OUTPUT'));
+    assert.ok(line, 'BUILD_OUTPUT not found');
+    const re = new Function('return ' + line.replace('const BUILD_OUTPUT = ', '').replace(/;$/, ''))();
+    const bs = String.fromCharCode(92);
+    assert.ok(re.test('C:' + bs + 'src' + bs + 'app' + bs + 'dist' + bs + 'win-unpacked' + bs + 'Sereno.exe'),
+      'must match a Windows build-output path');
+    assert.ok(re.test('/home/u/app/dist/win-unpacked/Sereno'), 'and a posix one');
+    assert.ok(!re.test('C:' + bs + 'Program Files' + bs + 'Sereno' + bs + 'Sereno.exe'),
+      'but not an installed path');
   });
 
   await atest('the app clears the debounce marker once it is up', async () => {

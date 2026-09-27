@@ -117,7 +117,7 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 |---|---|
 | `npm start` | the widget |
 | `npm run serve` | collector only — open `http://127.0.0.1:8787/` in a browser tab |
-| `npm test` | 95 acceptance + regression tests, no GUI needed |
+| `npm test` | 97 acceptance + regression tests, no GUI needed |
 | `npm run replay` | replays `samples/*.jsonl` through the state machine |
 | `npm run wire` / `unwire` | install / uninstall (`--dry-run`, `--yes`, `--list`) |
 | `npm run dist` | build the Windows installer + zip |
@@ -125,34 +125,44 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 
 ## Collapsing
 
-The widget folds down to an indicator of about 80x39 px — a fiftieth of its
-expanded area — with the **⌃** button, and unfolds again from the chevron on the
-indicator itself. Drag it anywhere; it stays where you put it, and it comes back
-collapsed after a restart.
+The **⌃** button hides the widget to the Windows notification area. The tray
+icon carries the state from there, and clicking it brings the widget back.
 
 ```
-needs you     working      quiet       offline
- [ ! 2 ]      [ =|| 3 ]    [ o ]       [ ... ]
+needs you        working         quiet
+ amber disc       equalizer       hollow ring
+ with a bang        bars
 ```
 
-It obeys the same rule as the rows: **the glyph carries the state and colour only
-reinforces it.** A literal red/amber/green light would be the one element in the
-app that a daltonized theme flattens to three identical circles. Amber appears
-for the case that interrupts you and for nothing else, behind a `!` that already
-said so.
+It follows the same rule as the session rows: **the mark carries the state and
+colour only reinforces it.** A count cannot survive 16 pixels, so the number of
+sessions lives in the tooltip instead. There are two sets of marks, one per
+taskbar theme — Windows only auto-inverts tray icons on macOS, and measured
+against a light Windows 11 taskbar a single light set came out at 1.02:1, which
+is to say invisible. Every mark now clears 3:1 against the taskbar it is drawn
+for, and `npm test` asserts it.
 
-Two things it deliberately does not do:
+The icons are drawn by `tools/make-tray-icons.js`, which writes PNGs by hand
+through `node:zlib`. Sereno ships no runtime dependencies and adding an image
+toolchain to produce three shapes would be a poor trade. The suite runs the
+generator and byte-compares its output against the committed files, so the two
+cannot drift apart.
 
-- **It never moves by itself.** The indicator is a fixed width, so a count going
-  from 1 to 12 cannot change the window size — and a window resized against a
-  screen edge is a window that slides sideways and saves the new position. Left
-  content-sized, it ratcheted leftwards as sessions came and went.
-- **It never collapses or expands on its own.** It is where you left it, in the
-  state you left it in.
+> **Windows will hide it at first.** Windows 11 files an unfamiliar tray icon
+> into the overflow behind the **⌃** arrow, and an application cannot promote
+> itself out of it — there is no API for that, by design. Drag Sereno out of the
+> overflow once and it stays. Sereno says so in a notification the first time it
+> hides, but only once.
 
-Collapsed it still tells the truth about what it cannot see: the bars stop
-animating and the mark becomes a dashed rule when the collector is unreachable,
-rather than pulsing away at a snapshot that stopped arriving.
+The tray icon is created at startup and lives for as long as the app does,
+rather than appearing and disappearing with the widget: Windows treats a
+re-created icon as a new one and can file it back into the overflow, so a tray
+that came and went would need rescuing every time. It also means there is always
+a way back if the window ends up somewhere unreachable.
+
+While hidden, the widget announces nothing to a screen reader — the permission
+toast is the only accessible notification in that state, and it fires only when
+a session first blocks.
 
 ## Sizing
 

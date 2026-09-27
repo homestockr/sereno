@@ -211,4 +211,4 @@ function createCollector(store, port) {
   };
 }
 
-module.exports = { createCollector };
+module.exports = { createCollector, BROADCAST_COALESCE_MS };
