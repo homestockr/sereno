@@ -334,6 +334,165 @@ test('blocked sorts to the top, stale sinks', () => {
 });
 
 /* ============================================================ *
+ * Collapsed indicator
+ * ============================================================ */
+console.log('\n[*] collapsed indicator');
+
+test('the puck carries state in its glyph, not its colour', () => {
+  // Sereno's rule is that shape carries state and colour only reinforces it -
+  // the README's reason being a daltonized theme, which this user runs. A
+  // stoplight puck would be the one element in the app to break that.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const puckState = new Function('return ' + app.match(/function puckState[\s\S]*?\n}/)[0])();
+
+  const needs = puckState({ total: 5, blocked: 2, active: 1, quiet: 2 });
+  const busy = puckState({ total: 3, blocked: 0, active: 3, quiet: 0 });
+  const quiet = puckState({ total: 2, blocked: 0, active: 0, quiet: 2 });
+
+  // Every state is told apart by symbol alone, with colour stripped out.
+  const symbols = [needs.symbol, busy.symbol, quiet.symbol];
+  assert.strictEqual(new Set(symbols).size, 3, 'two states share a glyph: ' + JSON.stringify(symbols));
+  assert.strictEqual(needs.symbol, '!');
+  assert.strictEqual(quiet.symbol, '\u25cb');
+  assert.strictEqual(busy.symbol, '', 'busy renders the equalizer bars, not a character');
+
+  // Blocked outranks active, the same precedence the alert banner uses.
+  assert.strictEqual(needs.cls, 'needs');
+  assert.strictEqual(needs.count, 2, 'the count must name the blocked sessions, not the total');
+  assert.strictEqual(busy.count, 3);
+  assert.strictEqual(quiet.count, 0, 'quiet shows no number at all');
+});
+
+test('collapsed geometry is computed in one place, and bypasses the row floors', () => {
+  // MIN_WIDTH keeps a session row readable and MIN_HEIGHT fits a header.
+  // Neither applies to a pill barely wider than its glyph, and applied anyway
+  // they leave transparent window around it that still swallows clicks.
+  //
+  // This is run, not grepped: the width rule had four copies and the one in
+  // createWindow was the only one that did not know about collapse, which is
+  // how a collapsed restart moved the window sideways.
+  const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const src = main.match(/function cssWidthNow[\s\S]*?\n}/)[0];
+
+  const run = (state) => {
+    const ui = Object.assign({ width: 380, collapsed: false, collapsedWidth: null }, state);
+    return new Function('ui', 'MIN_COLLAPSED_WIDTH',
+      src + '\nreturn cssWidthNow();')(ui, 64);
+  };
+
+  assert.strictEqual(run({}), 380, 'expanded uses the width the user dragged to');
+  assert.strictEqual(run({ collapsed: true, collapsedWidth: 72 }), 72, 'collapsed uses the puck');
+  assert.strictEqual(run({ collapsed: true, collapsedWidth: null }), 64,
+    'with nothing measured yet it must still be wide enough to show the expand button');
+  assert.strictEqual(run({ collapsed: true, collapsedWidth: 10 }), 64, 'floored');
+  // The dragged width survives being collapsed, because nothing consults it.
+  assert.strictEqual(run({ collapsed: true, collapsedWidth: 72, width: 674 }), 72);
+  assert.strictEqual(run({ collapsed: false, collapsedWidth: 72, width: 674 }), 674,
+    'expanding restores exactly the width that was dragged');
+
+  const code = main.split(/\r?\n/).map((l) => l.replace(/^\s*\/\/.*$/, '')).join('\n');
+  const apply = code.match(/function applySize[\s\S]*?\n}/)[0];
+  assert.ok(/ui\.collapsed \? MIN_COLLAPSED_HEIGHT : MIN_HEIGHT/.test(apply),
+    'the height floor must depend on whether it is collapsed');
+  assert.ok(/Math\.max\(floor,/.test(apply),
+    'the ceiling must respect the same floor, or a tiny work area inverts them');
+  assert.ok(/cssWidthNow\(\)/.test(apply), 'applySize must use the shared width rule');
+
+  // createWindow is the copy that caused the teleport; it must use it too.
+  const create = code.match(/win = new BrowserWindow\(\{[\s\S]*?\}\);/)[0];
+  assert.ok(/cssWidthNow\(\)/.test(create),
+    'the initial window must be built at collapsed size, or clampToVisible drags it');
+  assert.ok(/ui\.collapsed \? MIN_COLLAPSED_HEIGHT : MIN_HEIGHT/.test(create),
+    'and at collapsed height');
+});
+
+test('the puck measurement is clamped to something a puck could be', () => {
+  // MAX_WIDTH is the ceiling for a dragged widget; it would accept an 819px
+  // "collapsed" window from a renderer that got it wrong.
+  const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const handler = main.match(/ipcMain\.on\('sereno:collapsed-width'[\s\S]*?\n  \}\);/)[0];
+  assert.ok(!/ui\.width\s*=/.test(handler), 'the puck measurement must not overwrite ui.width');
+  assert.ok(/MAX_COLLAPSED_WIDTH/.test(handler) && !/MAX_WIDTH\b/.test(handler),
+    'clamp to a puck-sized ceiling, not the dragged-widget one');
+  assert.ok(/Number\.isFinite/.test(handler), 'a non-numeric report must be rejected');
+});
+
+test('expanding shows the current snapshot, not the one it collapsed on', () => {
+  // render() bails while collapsed, so every broadcast during that time updates
+  // nothing but the puck. Unhiding without re-rendering brought back a stale
+  // project, a stale command and a Review button bound to a dead pid - and the
+  // next broadcast could be a 30s sweep away.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const fn = app.match(/function setCollapsed[\s\S]*?\n}/)[0];
+  const body = fn.split(/\r?\n/).map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  const elseBranch = body.match(/\} else \{([\s\S]*?)\}/)[1];
+  assert.ok(/render\(\)/.test(elseBranch),
+    'the expand path must re-render from the current snapshot');
+});
+
+test('the puck can say the collector is gone', () => {
+  // Collapsed there is no offline banner - it lives inside the hidden widget -
+  // and the busy state animates, so a lost collector would leave three bars
+  // pulsing a claim nothing supports.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const puckState = new Function('return ' + app.match(/function puckState[\s\S]*?\n}/)[0])();
+
+  const busy = { total: 3, blocked: 0, active: 3, quiet: 0 };
+  assert.strictEqual(puckState(busy, false).cls, 'busy');
+  assert.strictEqual(puckState(busy, true).cls, 'offline',
+    'offline must outrank every live state, including a blocked one');
+  assert.strictEqual(puckState({ total: 1, blocked: 1, active: 0, quiet: 0 }, true).cls, 'offline');
+  assert.notStrictEqual(puckState(busy, true).symbol, puckState(busy, false).symbol,
+    'offline needs its own mark, not the same one dimmed');
+
+  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+  assert.ok(/\.puck\.offline \.puck-symbol i \{ animation: none; \}/.test(css),
+    'the bars must not keep animating once there is nothing behind them');
+});
+
+test('the puck is a fixed width, so activity cannot move the window', () => {
+  // The window is sized from this measurement. A width that changes with the
+  // glyph or the digit count made main resize it, and a resize against a screen
+  // edge slides the window and saves the new position - a ratchet driven by
+  // session activity, in a feature specified never to move on its own.
+  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+  const sym = css.match(/\.puck-symbol \{[\s\S]*?\}/)[0];
+  const count = css.match(/\.puck-count \{[\s\S]*?\}/)[0];
+  assert.ok(/width: 12px/.test(sym), 'the glyph box must not size to its glyph');
+  assert.ok(/min-width: 2ch/.test(count), '1 and 12 must not be different window widths');
+});
+
+test('the collapsed choice survives a restart, and an old file defaults to open', () => {
+  const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+  const loadUi = main.match(/function loadUi[\s\S]*?\n}/)[0];
+  assert.ok(/collapsed: b\.collapsed === true/.test(loadUi),
+    'a window.json written before this feature must read as expanded, not undefined');
+  // Scoped to loadUi's own fallback return. Matched against the whole file this
+  // also hit the "let ui = ..." initializer, so it passed whether or not the
+  // default branch existed at all.
+  const fallback = loadUi.slice(loadUi.lastIndexOf('return {'));
+  assert.ok(/collapsed: false/.test(fallback), 'the no-file default is expanded');
+
+  const handler = main.match(/ipcMain\.on\('sereno:collapse'[\s\S]*?\n  \}\);/)[0];
+  assert.ok(/ui\.collapsed = next/.test(handler) && /saveUi\(\)/.test(handler),
+    'the toggle must persist through the same saveUi path as position and zoom');
+  assert.ok(/applySize\(\)/.test(handler),
+    'the toggle must resize, not rely on two separate reports happening to differ');
+});
+
+test('collapsed, the row machinery is skipped rather than rendered unseen', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const render = app.match(/function render\(\)[\s\S]*?\n}/)[0];
+  assert.ok(/if \(collapsed\)/.test(render) && /renderPuck\(\)/.test(render),
+    'render must bail before rebuilding rows nobody can see');
+
+  // And the height measurement has to measure the puck, not the hidden window.
+  const rh = app.match(/function reportHeight[\s\S]*?\n}/)[0];
+  assert.ok(/if \(collapsed\)/.test(rh) && /ui\.puck/.test(rh),
+    'collapsed, the puck is the window; measuring the hidden .window reports 0');
+});
+
+/* ============================================================ *
  * Header numbers
  * ============================================================ */
 console.log('\n[*] header aggregation');
@@ -642,7 +801,11 @@ test('subagent timers tick in place, against the markup that carries them', () =
   // tick() mentions the class let a rename of the emitted markup pass green
   // while every stopwatch silently froze.
   const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
-  const fn = app.match(/function tick\(\)[\s\S]*?\n}/)[0];
+  // Comments are stripped first. tick() now explains in prose why it returns
+  // early when collapsed, and that prose names render() - which is exactly the
+  // call the assertion below is checking for the absence of.
+  const strip = (t) => t.split(/\r?\n/).map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  const fn = strip(app.match(/function tick\(\)[\s\S]*?\n}/)[0]);
   const emit = app.match(/function subagentHtml[\s\S]*?\n}/)[0];
 
   assert.ok(/class="agent-timer" data-since=/.test(emit),
@@ -651,9 +814,12 @@ test('subagent timers tick in place, against the markup that carries them', () =
   assert.ok(/dataset\.since/.test(fn), 'timers are driven from their own start stamp');
   assert.ok(!/\brender\s*\(/.test(fn), 'tick must not re-render to do it');
 
-  // And it must stop while the data behind it has stopped arriving.
+  // And it must stop while the data behind it has stopped arriving - or while
+  // render() has stopped updating the DOM it is ticking.
   assert.ok(/ui\.offline\.hidden/.test(fn),
     'timers must hold when the collector is unreachable, not keep climbing');
+  assert.ok(/if \(collapsed\) return;/.test(fn),
+    'collapsed, tick would advance timers on a frozen snapshot in a hidden widget');
 });
 
 test('a missing timestamp never reaches the DOM as NaN', () => {

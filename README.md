@@ -108,11 +108,42 @@ twice does nothing. `npm run unwire` restores the most recent backup byte for by
 |---|---|
 | `npm start` | the widget |
 | `npm run serve` | collector only — open `http://127.0.0.1:8787/` in a browser tab |
-| `npm test` | 80 acceptance + regression tests, no GUI needed |
+| `npm test` | 88 acceptance + regression tests, no GUI needed |
 | `npm run replay` | replays `samples/*.jsonl` through the state machine |
 | `npm run wire` / `unwire` | install / uninstall (`--dry-run`, `--yes`, `--list`) |
 | `npm run dist` | build the Windows installer + zip |
 | `npm run test:packaged` | verify the built shim runs without Node |
+
+## Collapsing
+
+The widget folds down to an indicator of about 80x39 px — a fiftieth of its
+expanded area — with the **⌃** button, and unfolds again from the chevron on the
+indicator itself. Drag it anywhere; it stays where you put it, and it comes back
+collapsed after a restart.
+
+```
+needs you     working      quiet       offline
+ [ ! 2 ]      [ =|| 3 ]    [ o ]       [ ... ]
+```
+
+It obeys the same rule as the rows: **the glyph carries the state and colour only
+reinforces it.** A literal red/amber/green light would be the one element in the
+app that a daltonized theme flattens to three identical circles. Amber appears
+for the case that interrupts you and for nothing else, behind a `!` that already
+said so.
+
+Two things it deliberately does not do:
+
+- **It never moves by itself.** The indicator is a fixed width, so a count going
+  from 1 to 12 cannot change the window size — and a window resized against a
+  screen edge is a window that slides sideways and saves the new position. Left
+  content-sized, it ratcheted leftwards as sessions came and went.
+- **It never collapses or expands on its own.** It is where you left it, in the
+  state you left it in.
+
+Collapsed it still tells the truth about what it cannot see: the bars stop
+animating and the mark becomes a dashed rule when the collector is unreachable,
+rather than pulsing away at a snapshot that stopped arriving.
 
 ## Sizing
 

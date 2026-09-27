@@ -30,6 +30,20 @@ const DEFAULT_WIDTH = 380;        // CSS px, matches the mockup
 const MIN_WIDTH = 300;
 const MAX_WIDTH = 820;
 const MIN_HEIGHT = 60;
+// Collapsed, the window is a puck barely wider than its glyph, so MIN_WIDTH -
+// which exists to keep a session row readable - must not apply. The renderer
+// measures the puck and reports what it needs.
+// Below the puck's own natural width, so it only ever acts as a floor. If it
+// were above it, the expand button would be clipped off the only control the
+// collapsed form has.
+const MIN_COLLAPSED_WIDTH = 64;
+// A puck is a glyph and at most a two-digit count. MAX_WIDTH exists for the
+// dragged widget and would accept an 819px "collapsed" window.
+const MAX_COLLAPSED_WIDTH = 200;
+// MIN_HEIGHT is the floor for a widget with a header in it. Applied to the puck
+// it leaves transparent window above and below that still swallows clicks, so
+// the collapsed form gets its own, much lower floor.
+const MIN_COLLAPSED_HEIGHT = 20;
 // Breathing room kept clear of the work area's edges, matching the gap the
 // window is first placed at.
 const SCREEN_MARGIN = 48;
@@ -47,7 +61,7 @@ const legacyStateFile = path.join(app.getPath('appData'), 'claude-hud', 'window.
 
 let win = null;
 let collector = null;
-let ui = { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1 };
+let ui = { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1, collapsed: false, collapsedWidth: null };
 let lastCssHeight = MIN_HEIGHT;
 
 /* ---------- persistence ---------- */
@@ -61,10 +75,14 @@ function loadUi() {
         y: typeof b.y === 'number' ? b.y : null,
         width: typeof b.width === 'number' ? b.width : DEFAULT_WIDTH,
         zoom: typeof b.zoom === 'number' ? b.zoom : 1,
+        collapsed: b.collapsed === true,
+        // Remembered so a collapsed restart can build the window at puck size
+        // rather than at widget size and then clamp itself sideways.
+        collapsedWidth: typeof b.collapsedWidth === 'number' ? b.collapsedWidth : null,
       };
     } catch (_) { /* try the next one */ }
   }
-  return { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1 };
+  return { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1, collapsed: false, collapsedWidth: null };
 }
 
 let saveTimer = null;
@@ -103,17 +121,32 @@ function flushUi() {
  * its widest. setBounds is not subject to that, verified across the flag matrix.
  * Do not "simplify" this back to setSize.
  */
+/**
+ * How wide the window should be, in CSS pixels.
+ *
+ * Collapsed the width is content-driven, not the width the user dragged the
+ * full widget to; that width is left untouched so expanding restores it.
+ * createWindow uses this too - it used to compute its own initial size, which
+ * was the one copy that did not know about collapse, and a collapsed restart
+ * therefore built a widget-sized window and let clampToVisible drag it sideways.
+ */
+function cssWidthNow() {
+  if (!ui.collapsed) return ui.width;
+  return Math.max(MIN_COLLAPSED_WIDTH, ui.collapsedWidth || MIN_COLLAPSED_WIDTH);
+}
+
 function applySize() {
   if (!win || win.isDestroyed()) return;
-  const w = Math.round(ui.width * ui.zoom);
-  const want = Math.max(MIN_HEIGHT, Math.round(lastCssHeight * ui.zoom));
+  const w = Math.round(cssWidthNow() * ui.zoom);
+  const floor = ui.collapsed ? MIN_COLLAPSED_HEIGHT : MIN_HEIGHT;
+  const want = Math.max(floor, Math.round(lastCssHeight * ui.zoom));
 
   // Never taller than the display can actually show. A fixed 1400px ceiling used
   // to leave the footer hanging off the bottom of a long session list with no way
   // to reach it - the widget has no chrome and nothing scrolled. The renderer
   // scrolls its row list against whatever height it ends up with.
   const area = screen.getDisplayMatching(win.getBounds()).workArea;
-  const ceiling = Math.max(MIN_HEIGHT, area.height - SCREEN_MARGIN);
+  const ceiling = Math.max(floor, area.height - SCREEN_MARGIN);
   const h = Math.min(want, ceiling);
 
   const [cw, ch] = win.getSize();
@@ -163,8 +196,8 @@ function createWindow() {
   ui = loadUi();
 
   win = new BrowserWindow({
-    width: Math.round(ui.width * ui.zoom),
-    height: MIN_HEIGHT,
+    width: Math.round(cssWidthNow() * ui.zoom),
+    height: ui.collapsed ? MIN_COLLAPSED_HEIGHT : MIN_HEIGHT,
     x: ui.x === null ? undefined : ui.x,
     y: ui.y === null ? undefined : ui.y,
     frame: false,
@@ -198,7 +231,12 @@ function createWindow() {
     clampToVisible();
   }
 
-  win.loadURL(`http://127.0.0.1:${PORT}/`);
+  // The collapsed flag rides in the URL rather than arriving as a message after
+  // did-finish-load. A message cannot land before first paint, so a collapsed
+  // start used to flash the expanded widget and then snap to a puck - and if the
+  // page never got around to subscribing, the two sides disagreed about what
+  // size the window should be, with main winning and the renderer off-screen.
+  win.loadURL(`http://127.0.0.1:${PORT}/${ui.collapsed ? '?collapsed=1' : ''}`);
   win.webContents.on('did-finish-load', () => win.webContents.setZoomFactor(ui.zoom));
   win.once('ready-to-show', () => win.show());
   win.on('moved', saveUi);
@@ -339,6 +377,29 @@ if (CLI_UNWIRE) {
   /* ---------- ipc ---------- */
 
   ipcMain.on('sereno:quit', () => app.quit());
+
+  ipcMain.on('sereno:collapse', (_e, collapsed) => {
+    const next = !!collapsed;
+    if (next === ui.collapsed) return;
+    ui.collapsed = next;
+    // Resize here rather than relying on the width and height reports that
+    // follow to each happen to differ from the last ones. The renderer sends its
+    // fresh puck measurement before this message, so the size is already known.
+    applySize();
+    clampToVisible();
+    saveUi();
+  });
+
+  // Width only means anything collapsed; expanded, the user owns it.
+  ipcMain.on('sereno:collapsed-width', (_e, width) => {
+    const w = Number(width);
+    if (!Number.isFinite(w) || w <= 0) return;
+    const next = Math.min(MAX_COLLAPSED_WIDTH, Math.max(MIN_COLLAPSED_WIDTH, Math.round(w)));
+    if (next === ui.collapsedWidth) return;
+    ui.collapsedWidth = next;
+    saveUi();
+    if (ui.collapsed) { applySize(); clampToVisible(); }
+  });
 
   ipcMain.on('sereno:height', (_e, height) => {
     const h = Number(height);

@@ -9,6 +9,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('sereno', {
   quit: () => ipcRenderer.send('sereno:quit'),
   reportHeight: (height) => ipcRenderer.send('sereno:height', height),
+  setCollapsed: (on) => ipcRenderer.send('sereno:collapse', !!on),
+  reportCollapsedWidth: (w) => ipcRenderer.send('sereno:collapsed-width', w),
   resizeWidthBy: (dx) => ipcRenderer.send('sereno:width-by', dx),
   nudgeZoom: (dir) => ipcRenderer.send('sereno:zoom-by', dir),
   setZoom: (z) => ipcRenderer.send('sereno:zoom-set', z),

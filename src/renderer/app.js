@@ -24,7 +24,10 @@ const ui = {
   offline: el('offline'), grip: el('size-grip'),
   setup: el('setup'), setupBody: el('setup-body'), setupAction: el('setup-action'),
   setupActionLabel: el('setup-action-label'), setupNote: el('setup-note'),
-  settingsToggle: el('settings-toggle'),
+  settingsToggle: el('settings-toggle'), collapse: el('collapse'),
+  puck: el('puck'), puckSymbol: el('puck-symbol'), puckCount: el('puck-count'),
+  puckLabel: el('puck-label'),
+  expand: el('expand'),
   autoLaunchRow: el('autolaunch-row'), autoLaunch: el('autolaunch'),
 };
 
@@ -190,9 +193,96 @@ function sessionHtml(s) {
   </div>`;
 }
 
+/* ---------- collapsed ---------- */
+
+/*
+ * The widget folded down to a single indicator.
+ *
+ * It obeys the same rule as the rows: the GLYPH carries the state and the
+ * colour only reinforces it, because a coloured dot is exactly what a
+ * daltonized theme flattens. Amber appears for the one case that interrupts
+ * you and for nothing else.
+ */
+// Main puts this in the URL rather than sending it after load: a message cannot
+// arrive before first paint, so the page would paint expanded and snap, and if
+// this script threw before subscribing the two sides would disagree about the
+// window size with the renderer off-screen.
+let collapsed = new URLSearchParams(location.search).get('collapsed') === '1';
+
+function puckState(counts, offline) {
+  // Offline first. Collapsed there is no banner to show it - #offline lives
+  // inside the hidden widget - and the busy state ANIMATES, so a lost collector
+  // would leave three bars pulsing a claim nothing is backing. A dashed rule is
+  // already this app's mark for "we have lost contact".
+  if (offline) return { cls: 'offline', symbol: '⋯', count: 0 };
+  if (counts.blocked > 0) return { cls: 'needs', symbol: '!', count: counts.blocked };
+  if (counts.active > 0) return { cls: 'busy', symbol: '', count: counts.active };
+  return { cls: 'quiet', symbol: '○', count: 0 };
+}
+
+function renderPuck() {
+  const counts = snapshot.counts || { total: 0, blocked: 0, active: 0, quiet: 0 };
+  const st = puckState(counts, !ui.offline.hidden);
+
+  ui.puck.classList.remove('needs', 'busy', 'quiet', 'offline');
+  ui.puck.classList.add(st.cls);
+
+  // The equalizer is three bars, the same mark a running row uses.
+  ui.puckSymbol.innerHTML = st.cls === 'busy' ? '<i></i><i></i><i></i>' : esc(st.symbol);
+  ui.puckCount.textContent = st.count > 0 ? String(st.count) : '';
+
+  // The collapsed form exists to tell you a session needs approval. Said only in
+  // a title attribute it says it silently: the puck is a drag region, which
+  // Windows hit-tests as caption, so even the native tooltip is unreliable.
+  const said = st.cls === 'offline' ? 'Collector offline'
+    : counts.blocked > 0
+      ? counts.blocked + (counts.blocked === 1 ? ' session needs you' : ' sessions need you')
+      : counts.active > 0 ? counts.active + ' active' : 'Nothing waiting';
+  ui.puck.title = said;
+  ui.puckLabel.textContent = said;
+
+  // The puck's width is content-driven - a two-digit count is wider than none -
+  // so main is told what it measured rather than guessing a constant.
+  if (api && api.reportCollapsedWidth) {
+    const w = Math.ceil(ui.puck.getBoundingClientRect().width);
+    if (w > 0 && w !== lastPuckWidth) { lastPuckWidth = w; api.reportCollapsedWidth(w); }
+  }
+}
+
+let lastPuckWidth = 0;
+
+/** Makes the DOM agree with the flag. Startup needs this without telling main
+    anything: main already knows, which is how the flag reached the URL. */
+function syncCollapsedDom() {
+  ui.window.hidden = collapsed;
+  ui.puck.hidden = !collapsed;
+}
+
+function setCollapsed(on) {
+  collapsed = !!on;
+  syncCollapsedDom();
+
+  if (collapsed) {
+    lastPuckWidth = 0;          // force a fresh measurement for the new content
+    renderPuck();
+    reportHeight();
+  } else {
+    // render() ends in reportHeight(). Without this the widget comes back
+    // showing whatever it showed when it was collapsed - a stale project, a
+    // stale command, a Review button bound to a dead pid - until the next
+    // broadcast, which may be a 30s sweep away.
+    render();
+  }
+  if (api && api.setCollapsed) api.setCollapsed(collapsed);
+}
+
 /* ---------- rendering ---------- */
 
 function render() {
+  // Collapsed, none of the row machinery is on screen; rebuilding it would be
+  // work nobody can see.
+  if (collapsed) { renderPuck(); reportHeight(); return; }
+
   const sessions = snapshot.sessions || [];
   const counts = snapshot.counts || { total: 0, blocked: 0, active: 0, quiet: 0 };
   const blocked = sessions.filter((s) => s.state === 'blocked');
@@ -299,6 +389,11 @@ function render() {
 
 /** Ticks the timers in place, so the DOM is not rebuilt every second. */
 function tick() {
+  // Collapsed, render() does not run, so every timer below would be counting
+  // against a frozen snapshot inside a hidden widget - and still be counting
+  // when it is unhidden.
+  if (collapsed) return;
+
   const node = ui.reqTimer;
   if (!ui.request.hidden && node && node.dataset.since) {
     node.textContent = mmss(Date.now() - Number(node.dataset.since));
@@ -334,6 +429,13 @@ function reportHeight() {
   // keep their natural height even while overflowing a window too short to hold
   // them, and the row list contributes its full scrollHeight rather than the
   // box it has been squeezed into.
+  // Collapsed, the puck IS the window.
+  if (collapsed) {
+    const h = Math.ceil(ui.puck.getBoundingClientRect().height);
+    if (h && h !== lastHeight) { lastHeight = h; api.reportHeight(h); }
+    return;
+  }
+
   let content = 0;
   for (const el of ui.window.children) {
     if (el.hidden) continue;
@@ -372,6 +474,9 @@ document.addEventListener('click', (ev) => {
   }
 });
 
+ui.collapse.addEventListener('click', () => setCollapsed(true));
+ui.expand.addEventListener('click', () => setCollapsed(false));
+
 el('close').addEventListener('click', () => api && api.quit && api.quit());
 el('zoom-in').addEventListener('click', () => api && api.nudgeZoom && api.nudgeZoom(+1));
 el('zoom-out').addEventListener('click', () => api && api.nudgeZoom && api.nudgeZoom(-1));
@@ -407,7 +512,7 @@ ui.grip.addEventListener('pointercancel', endDrag);
 
 if (!api) {
   // Plain browser tab: nothing to quit, zoom, or resize.
-  for (const id of ['close', 'zoom-in', 'zoom-out']) el(id).hidden = true;
+  for (const id of ['close', 'zoom-in', 'zoom-out', 'collapse']) el(id).hidden = true;
   ui.grip.hidden = true;
 }
 
@@ -537,14 +642,20 @@ ui.autoLaunch.addEventListener('change', async () => {
 
 function connect() {
   const es = new EventSource('/events');
-  es.onopen = () => { ui.offline.hidden = true; };
+  es.onopen = () => { ui.offline.hidden = true; if (collapsed) renderPuck(); };
   es.onmessage = (ev) => {
     try { snapshot = JSON.parse(ev.data); } catch (_) { return; }
     ui.offline.hidden = true;
     render();
   };
-  es.onerror = () => { ui.offline.hidden = false; };   // EventSource retries on its own
+  es.onerror = () => {                                 // EventSource retries on its own
+    ui.offline.hidden = false;
+    if (collapsed) renderPuck();
+  };
 }
+
+// The URL carried the flag; the DOM has to start out matching it.
+syncCollapsedDom();
 
 connect();
 render();
