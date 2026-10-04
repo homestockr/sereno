@@ -7,6 +7,8 @@
  *   POST /status  <- bin/emit.js statusline
  *   GET  /events  -> SSE stream of snapshots
  *   GET  /state   -> one snapshot as JSON
+ *   POST /v1/logs, /v1/traces <- OTLP/JSON (only with a ledger; else 200 and drop)
+ *   GET  /ledger/summary -> ledger totals
  *   GET  /        -> the widget page (also works in a plain browser tab)
  *
  * Bound to 127.0.0.1 only. Nothing here is authenticated because nothing here
@@ -16,11 +18,14 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
+const otlp = require('./otlp.js');
 
 const RENDERER_DIR = path.join(__dirname, 'renderer');
 const BROADCAST_COALESCE_MS = 120;   // statusline fires ~1.5s/session; do not flood
 const HEARTBEAT_MS = 15000;
 const MAX_BODY = 1024 * 1024;
+const MAX_OTLP_BODY = 8 * 1024 * 1024;   // /v1/*: raw cap, and the gunzip output cap
 const MAX_SSE_CLIENTS = 16;
 
 const TYPES = {
@@ -49,7 +54,27 @@ function readBody(req, cb) {
   req.on('aborted', () => finish(null));
 }
 
-function createCollector(store, port) {
+// Raw (Buffer) body reader for /v1. cb(err, buf); err is 'big' or 'aborted'.
+// Unlike readBody it never touches the request after the cap trips: the caller
+// answers 413 and closes.
+function readRaw(req, cap, cb) {
+  const chunks = [];
+  let n = 0;
+  let done = false;
+  const finish = (e, v) => { if (done) return; done = true; cb(e, v); };
+  req.on('data', (c) => {
+    if (done) return;
+    n += c.length;
+    if (n > cap) { chunks.length = 0; finish('big'); return; }
+    chunks.push(c);
+  });
+  req.on('end', () => finish(null, Buffer.concat(chunks)));
+  req.on('error', () => finish('aborted'));
+  req.on('aborted', () => finish('aborted'));
+}
+
+function createCollector(store, port, opts) {
+  const ledger = (opts && opts.ledger) || null;
   const clients = new Set();
   let timer = null;
 
@@ -128,11 +153,90 @@ function createCollector(store, port) {
         try { res.writeHead(204).end(); } catch (_) {}
         if (!msg || !msg.payload) return;
         const meta = { ppid: typeof msg.ppid === 'number' ? msg.ppid : null };
+        const event = msg.event || msg.payload.hook_event_name;
         try {
-          if (url === '/hook') store.applyHook(msg.event || msg.payload.hook_event_name, msg.payload, meta);
+          if (url === '/hook') store.applyHook(event, msg.payload, meta);
           else store.applyStatus(msg.payload, meta);
         } catch (_) { /* a bad payload must never take the HUD down */ }
+        // The ledger is a record, not the live view: its failures stay here.
+        if (ledger) {
+          try {
+            if (url === '/hook') ledger.recordHook(event, msg.payload);
+            else {
+              const p = msg.payload;
+              const cost = p.cost && p.cost.total_cost_usd;
+              if (typeof p.session_id === 'string' && typeof cost === 'number') {
+                ledger.recordStatus(p.session_id, cost, Date.now());
+              }
+            }
+          } catch (_) { /* never affects the store or the response */ }
+        }
       });
+      return;
+    }
+
+    // --- OTLP/JSON ingest ---------------------------------------------
+    if (req.method === 'POST' && (url === '/v1/logs' || url === '/v1/traces')) {
+      const ctype = String(req.headers['content-type'] || '');
+      if (!/^application\/json\s*(;|$)/i.test(ctype)) {
+        res.writeHead(415, { 'content-type': 'text/plain' })
+          .end('expected application/json; OTLP protobuf is not supported (use OTEL_EXPORTER_OTLP_PROTOCOL=http/json)');
+        return;
+      }
+      const enc = String(req.headers['content-encoding'] || '').toLowerCase().trim();
+      if (enc && enc !== 'gzip' && enc !== 'identity') {
+        res.writeHead(415, { 'content-type': 'text/plain' }).end('unsupported content-encoding');
+        return;
+      }
+      const reply = (code, text) => {
+        try {
+          if (code === 200) res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+          else res.writeHead(code, { 'content-type': 'text/plain', connection: 'close' }).end(text || '');
+        } catch (_) {}
+      };
+      readRaw(req, MAX_OTLP_BODY, (err, buf) => {
+        if (err === 'big') { reply(413, 'body too large'); res.on('finish', () => req.destroy()); return; }
+        if (err) return;
+        const handle = (raw) => {
+          let body;
+          try { body = JSON.parse(raw.toString('utf8')); } catch (_) { return reply(400, 'invalid json'); }
+          if (!ledger) return reply(200);   // ledger off: accept and drop, nothing touches disk
+          try {
+            if (url === '/v1/logs') {
+              const rows = otlp.parseLogs(body);
+              if (rows.length) ledger.ingestRequests(rows);
+            } else {
+              const spans = otlp.parseTraces(body);
+              if (spans.length) ledger.ingestSpans(spans);
+            }
+          } catch (_) { return reply(503, 'ledger write failed'); }
+          reply(200);
+        };
+        if (enc !== 'gzip') return handle(buf);
+        zlib.gunzip(buf, { maxOutputLength: MAX_OTLP_BODY }, (e, out) => {
+          if (e) return reply(e.code === 'ERR_BUFFER_TOO_LARGE' ? 413 : 400, e.code === 'ERR_BUFFER_TOO_LARGE' ? 'body too large' : 'invalid gzip');
+          handle(out);
+        });
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && url === '/ledger/summary') {
+      if (!ledger) {
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ enabled: false }));
+        return;
+      }
+      let sp;
+      try { sp = new URL(req.url, 'http://x').searchParams; } catch (_) { sp = new URLSearchParams(); }
+      const range = {};
+      for (const k of ['since', 'until']) {
+        const v = sp.get(k);
+        if (v !== null && v.trim() !== '' && Number.isFinite(Number(v))) range[k] = Number(v);
+      }
+      let out;
+      try { out = JSON.stringify(Object.assign({ enabled: true }, ledger.totals(range))); }
+      catch (_) { res.writeHead(503, { 'content-type': 'text/plain' }).end('ledger unavailable'); return; }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(out);
       return;
     }
 

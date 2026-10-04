@@ -2501,6 +2501,138 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 1 step 3: collector /v1 ---- */
+  {
+    const zlib = require('node:zlib');
+    const { openLedger } = require('../src/ledger.js');
+    const logsFx = fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-logs.json'), 'utf8');
+    const tracesFx = fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-traces.json'), 'utf8');
+    const PORT = 8798;
+    const rq = (opts, body) => new Promise((resolve) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port: PORT, agent: false }, opts), (res) => {
+        let d = '';
+        res.on('data', (c) => { d += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      });
+      r.on('error', () => resolve({ status: 0, body: '' }));
+      r.end(body);
+    });
+    const J = { 'content-type': 'application/json' };
+    const postJ = (p, body, headers) => rq({ method: 'POST', path: p, headers: Object.assign({}, J, headers) }, body);
+    const getJ = async (p) => JSON.parse((await rq({ method: 'GET', path: p })).body);
+    const start = async (ledger) => {
+      const st = new Store();
+      const c = createCollector(st, PORT, { ledger });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return { st, c };
+    };
+    const stop = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+
+    await atest('collector /v1: fixtures posted twice leave totals unchanged', async () => {
+      const ledger = openLedger({ file: ':memory:' });
+      const { c } = await start(ledger);
+      try {
+        for (let i = 0; i < 2; i++) {
+          const a = await postJ('/v1/logs', logsFx);
+          assert.strictEqual(a.status, 200); assert.strictEqual(a.body, '{}');
+          assert.strictEqual((await postJ('/v1/traces', tracesFx)).status, 200);
+          if (i === 0) {
+            const t1 = await getJ('/ledger/summary');
+            assert.strictEqual(t1.enabled, true);
+            assert.strictEqual(t1.requests, 5);
+            assert.ok(t1.costMicros > 0);
+          }
+        }
+        const t2 = await getJ('/ledger/summary');
+        assert.strictEqual(t2.requests, 5);
+        assert.strictEqual(t2.costMicros, ledger.totals().costMicros);
+        const none = await getJ('/ledger/summary?since=' + (Date.now() + 1e9) + '&until=bogus');
+        assert.strictEqual(none.requests, 0);
+      } finally { await stop(c); ledger.close(); }
+    });
+
+    await atest('collector /v1: Host 403, Origin 403, text/plain and protobuf 415', async () => {
+      const ledger = openLedger({ file: ':memory:' });
+      const { c } = await start(ledger);
+      try {
+        assert.strictEqual((await rq({ method: 'POST', path: '/v1/logs', headers: Object.assign({ host: 'evil.example' }, J) }, logsFx)).status, 403);
+        assert.strictEqual((await postJ('/v1/logs', logsFx, { origin: 'https://evil.example' })).status, 403);
+        assert.strictEqual((await rq({ method: 'GET', path: '/ledger/summary', headers: { host: 'evil.example' } })).status, 403);
+        const t = await rq({ method: 'POST', path: '/v1/logs', headers: { 'content-type': 'text/plain' } }, logsFx);
+        assert.strictEqual(t.status, 415);
+        const pb = await rq({ method: 'POST', path: '/v1/logs', headers: { 'content-type': 'application/x-protobuf' } }, Buffer.from([1, 2, 3]));
+        assert.strictEqual(pb.status, 415);
+        assert.ok(/protobuf/i.test(pb.body));
+        assert.strictEqual(ledger.totals().requests, 0, 'rejected requests must not write');
+      } finally { await stop(c); ledger.close(); }
+    });
+
+    await atest('collector /v1: gzip accepted, charset suffix allowed, bad gzip and bad json 400', async () => {
+      const ledger = openLedger({ file: ':memory:' });
+      const { c } = await start(ledger);
+      try {
+        const gz = await postJ('/v1/logs', zlib.gzipSync(logsFx), { 'content-type': 'application/json; charset=utf-8', 'content-encoding': 'gzip' });
+        assert.strictEqual(gz.status, 200);
+        assert.strictEqual(ledger.totals().requests, 5);
+        assert.strictEqual((await postJ('/v1/logs', 'not gzip', { 'content-encoding': 'gzip' })).status, 400);
+        assert.strictEqual((await postJ('/v1/logs', '{nope')).status, 400);
+        assert.strictEqual((await postJ('/v1/logs', '{"hello":1}')).status, 200, 'valid json without records is fine');
+        assert.strictEqual((await postJ('/v1/logs', '{}', { 'content-encoding': 'br' })).status, 415);
+        assert.strictEqual((await rq({ method: 'POST', path: '/v1/metrics', headers: J }, '{}')).status, 404);
+      } finally { await stop(c); ledger.close(); }
+    });
+
+    await atest('collector /v1: oversized raw body is 413', async () => {
+      const { c } = await start(openLedger({ file: ':memory:' }));
+      try {
+        const big = Buffer.alloc(8 * 1024 * 1024 + 1024, 32);
+        const r = await rq({ method: 'POST', path: '/v1/logs', headers: Object.assign({ 'content-length': big.length }, J) }, big);
+        assert.ok(r.status === 413 || r.status === 0, 'got ' + r.status);
+      } finally { await stop(c); }
+    });
+
+    await atest('collector /v1: a throwing ledger gives 503 so the exporter retries', async () => {
+      const boom = () => { throw new Error('disk full'); };
+      const { c } = await start({ ingestRequests: boom, ingestSpans: boom, totals: boom });
+      try {
+        assert.strictEqual((await postJ('/v1/logs', logsFx)).status, 503);
+        assert.strictEqual((await postJ('/v1/traces', tracesFx)).status, 503);
+        assert.strictEqual((await rq({ method: 'GET', path: '/ledger/summary' })).status, 503);
+      } finally { await stop(c); }
+    });
+
+    await atest('collector /v1: ledger off accepts and drops; summary says disabled', async () => {
+      const { c } = await start(null);
+      try {
+        const r = await postJ('/v1/logs', logsFx);
+        assert.strictEqual(r.status, 200); assert.strictEqual(r.body, '{}');
+        assert.strictEqual((await postJ('/v1/traces', tracesFx)).status, 200);
+        assert.deepStrictEqual(await getJ('/ledger/summary'), { enabled: false });
+      } finally { await stop(c); }
+    });
+
+    await atest('collector: /hook and /status feed the ledger; a throwing ledger never affects them', async () => {
+      const calls = [];
+      const stub = { recordHook: (e, p) => calls.push(['hook', e, p.session_id]), recordStatus: (s, usd) => calls.push(['status', s, usd]) };
+      const a = await start(stub);
+      try {
+        assert.strictEqual((await postJ('/hook', JSON.stringify({ event: 'SessionStart', payload: sid('lg1', {}) }))).status, 204);
+        assert.strictEqual((await postJ('/status', JSON.stringify({ payload: sid('lg1', { cost: { total_cost_usd: 1.25 } }) }))).status, 204);
+        await new Promise((r) => setTimeout(r, 30));
+        assert.deepStrictEqual(calls, [['hook', 'SessionStart', 'lg1'], ['status', 'lg1', 1.25]]);
+      } finally { await stop(a.c); }
+      const boom = () => { throw new Error('ledger down'); };
+      const b = await start({ recordHook: boom, recordStatus: boom });
+      try {
+        assert.strictEqual((await postJ('/hook', JSON.stringify({ event: 'PreToolUse', payload: sid('lg2', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't1' }) }))).status, 204);
+        assert.strictEqual((await postJ('/status', JSON.stringify({ payload: sid('lg2', { cost: { total_cost_usd: 2 } }) }))).status, 204);
+        await new Promise((r) => setTimeout(r, 30));
+        const s = b.st.snapshot().sessions.find((x) => x.id === 'lg2');
+        assert.ok(s, 'store must still update'); assert.strictEqual(s.costUsd, 2);
+      } finally { await stop(b.c); }
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
