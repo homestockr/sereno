@@ -4078,7 +4078,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(cjs, /state\.attn && state\.attn\.amber\) refreshAttention\(\); \}, 10000\)/);
       assert.match(cjs, /refreshAttention\(\);\n  const token = \+\+state\.token/);
       assert.match(html, /<aside class="attn-col" id="attn"/);
-      assert.match(css, /@media \(max-width: 1200px\)/);
+      assert.match(css, /@media \(max-width: 1359px\)/);
       assert.ok(!/Review in terminal/.test(cjs));
       assert.strictEqual((cjs.match(/\.innerHTML\s*=/g) || []).length, 1);
     });
@@ -4149,6 +4149,242 @@ test('missing rate_limits degrades instead of throwing', () => {
       } finally {
         await new Promise((res) => { c.server.close(() => res()); c.close(); });
       }
+    });
+  }
+
+  /* ---- [spend exit] Phase 2 exit criteria, one end-to-end test each ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const life = require('../src/ledger-life.js');
+    const otlpLogsFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-logs.json'), 'utf8'));
+    const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
+    const W = new Function(['estMoney', 'spendMode'].map((n) => lf(appSrc, n)).join('\n') + '\nreturn { estMoney, spendMode };')();
+    const CN = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry', 'summaryLine',
+      'attributionSplit', 'formatTime', 'projectLabel', 'sparkPoints', 'sw', 'dayLabel', 'chartSvg', 'legendHtml', 'chartTitle',
+      'chartSection', 'projectsSection', 'promptsSection'];
+    const mkCon = (state) => new Function('state', "const RANGES = ['24h', '7d', '30d'];\n"
+      + "const SRC_LABEL = { main: 'Main', subagent: 'Subagent', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };\n"
+      + "const ATTR_LABEL = { explicit: 'Explicit', unknown: 'Unattributed', mixed: 'Mixed' };\n"
+      + CN.map((n) => lf(conSrc, n)).join('\n') + '\nreturn { ' + CN.join(', ') + ' };')(state);
+    const WN = ['estMoney', 'esc', 'largestRemainder', 'sourceSegments', 'barAriaLabel', 'cumulativePoints', 'segmentWidths',
+      'nowPosition', 'spendHtml'];
+    const widget = new Function('const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;\n'
+      + WN.map((n) => lf(appSrc, n)).join('\n') + '\nreturn { spendHtml };')();
+
+    const T0 = new Date(2026, 5, 10, 13, 45).getTime();
+    let clock = T0;
+    const rqx = (port, opts) => new Promise((resolve) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port, agent: false }, opts), (res) => {
+        let d = '';
+        res.on('data', (c) => { d += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      });
+      r.on('error', () => resolve({ status: 0, body: '' }));
+      r.end(opts.body);
+    });
+    const getX = (port, p, headers) => rqx(port, { method: 'GET', path: p, headers: headers || {} });
+    const jsonX = async (port, p) => JSON.parse((await getX(port, p)).body);
+    // the otlp fixture with every record's timestamp replaced, in document order
+    const fixtureAt = (tsFor) => {
+      const fx = JSON.parse(JSON.stringify(otlpLogsFx));
+      let i = 0;
+      for (const rl of fx.resourceLogs) for (const sl of rl.scopeLogs) for (const rec of sl.logRecords) {
+        rec.timeUnixNano = String(BigInt(tsFor(i++)) * 1000000n);
+      }
+      return fx;
+    };
+    const postLogs = (port, fx) => rqx(port, { method: 'POST', path: '/v1/logs', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fx) });
+    const tmpDb = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-exit-')), 'sereno.db');
+    const open = (file) => openLedger({ file, retentionDays: 36500 });
+    const boot = async (port, ledger) => {
+      const c = createCollector(new Store(), port, { ledger, now: () => clock });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return c;
+    };
+    const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const SPEND_ROUTES = ['/api/spend/today', '/api/spend/series?range=7d', '/api/spend/series?range=24h',
+      '/api/spend/projects', '/api/spend/top-prompts'];
+    // every key that may appear in an /api/spend/* body at any depth (the Step 1 documented shapes)
+    const ALLOWED = new Set(['status', 'enabled', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution',
+      'unattributedN', 'range', 'buckets', 'key', 'since', 'until', 'rows', 'unattributed', 'project', 'trend', 'ts',
+      'sessionShort', 'models', 'attribution']);
+    const LEAF_MAPS = { bySource: ['main', 'subagent', 'auxiliary'], byAttribution: ['explicit', 'unknown'] };
+    const walkKeys = (o, where) => {
+      if (Array.isArray(o)) { o.forEach((x, i) => walkKeys(x, where + '[' + i + ']')); return; }
+      if (!o || typeof o !== 'object') return;
+      for (const k of Object.keys(o)) {
+        assert.ok(ALLOWED.has(k), where + ': key outside the allowlist: ' + k);
+        if (LEAF_MAPS[k]) {
+          for (const lk of Object.keys(o[k])) assert.ok(LEAF_MAPS[k].includes(lk), where + '.' + k + ': unexpected ' + lk);
+        } else walkKeys(o[k], where + '.' + k);
+      }
+    };
+    const withTmpHome = async (fn) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-exit-home-'));
+      const prev = process.env.SERENO_HOME;
+      process.env.SERENO_HOME = dir;
+      try { await fn(dir); } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    await atest('[spend exit 1] widget today, /api/spend/today and the Spend tab show one figure', async () => {
+      clock = T0;
+      const file = tmpDb();
+      const l = open(file);
+      const c = await boot(8802, l);
+      try {
+        l.recordHook('SessionStart', { session_id: 'sess-exit-1111', cwd: 'C:\\work\\exit' });
+        assert.strictEqual((await postLogs(8802, fixtureAt((i) => T0 - (i + 1) * 60000))).status, 200);
+        const st = await jsonX(8802, '/state');
+        const today = await jsonX(8802, '/api/spend/today');
+        const projects = await jsonX(8802, '/api/spend/projects');
+        assert.ok(today.costMicros > 0, 'fixture should produce spend');
+        assert.strictEqual(st.spend.todayMicros, today.costMicros);
+        const CN1 = mkCon({});
+        const line = CN1.summaryLine(today, projects);
+        assert.ok(line.startsWith(CN1.estMoney(st.spend.todayMicros) + ' today'), line);
+        assert.strictEqual(CN1.estMoney(st.spend.todayMicros), W.estMoney(st.spend.todayMicros));
+        assert.ok(widget.spendHtml(st.spend, null).includes(W.estMoney(today.costMicros)));
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 2] today survives closing and reopening the ledger on the same file', async () => {
+      clock = T0;
+      const file = tmpDb();
+      let l = open(file);
+      let c = await boot(8803, l);
+      let before;
+      try {
+        await postLogs(8803, fixtureAt((i) => T0 - (i + 1) * 60000));
+        before = await jsonX(8803, '/api/spend/today');
+        assert.ok(before.costMicros > 0);
+      } finally { await halt(c); l.close(); }
+      l = open(file);
+      c = await boot(8803, l);
+      try {
+        assert.deepStrictEqual(await jsonX(8803, '/api/spend/today'), before);
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 3] 23:59 and 00:01 land on different days and different hour buckets', async () => {
+      const day1 = new Date(2026, 5, 10, 23, 59).getTime();
+      const day2 = new Date(2026, 5, 11, 0, 1).getTime();
+      clock = new Date(2026, 5, 11, 0, 30).getTime();
+      const file = tmpDb();
+      const l = open(file);
+      const c = await boot(8804, l);
+      try {
+        // fixture record 0 at 23:59, the rest at 00:01
+        await postLogs(8804, fixtureAt((i) => (i === 0 ? day1 : day2)));
+        const nonzero = (s) => s.buckets.map((b, i) => [i, b.costMicros]).filter((x) => x[1] > 0).map((x) => x[0]);
+        const week = await jsonX(8804, '/api/spend/series?range=7d');
+        const wi = nonzero(week);
+        assert.deepStrictEqual(wi, [5, 6], 'two adjacent local days, got ' + JSON.stringify(wi));
+        assert.notStrictEqual(week.buckets[5].key, week.buckets[6].key);
+        const hours = await jsonX(8804, '/api/spend/series?range=24h');
+        const hi = nonzero(hours);
+        assert.strictEqual(hi.length, 2, 'two hour buckets, got ' + JSON.stringify(hi));
+        assert.strictEqual(hours.buckets[hi[1]].since - hours.buckets[hi[0]].since, 3600000);
+        assert.ok(day1 >= hours.buckets[hi[0]].since && day1 < hours.buckets[hi[0]].until);
+        assert.ok(day2 >= hours.buckets[hi[1]].since && day2 < hours.buckets[hi[1]].until);
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 4] ledger off: every spend route is { enabled:false }, widget mode off, no database file', async () => {
+      await withTmpHome(async (dir) => {
+        const r = life.startLedger({ ledger: { enabled: false, retentionDays: 90 } });
+        assert.strictEqual(r.ledger, null);
+        const c = await boot(8805, null);
+        try {
+          for (const p of SPEND_ROUTES) {
+            const res = await getX(8805, p);
+            assert.strictEqual(res.status, 200, p);
+            assert.deepStrictEqual(JSON.parse(res.body), { enabled: false }, p);
+          }
+          const st = await jsonX(8805, '/state');
+          assert.deepStrictEqual(st.spend, { enabled: false });
+          assert.strictEqual(W.spendMode(st.spend), 'off');
+        } finally { await halt(c); }
+        const left = fs.readdirSync(dir).filter((f) => /^sereno\.db/.test(f));
+        assert.deepStrictEqual(left, [], 'database files: ' + left.join(', '));
+      });
+    });
+
+    await atest('[spend exit 5] every /api/spend/* response uses only allowlisted keys; sessionShort is at most 8 chars', async () => {
+      clock = T0;
+      const file = tmpDb();
+      const l = open(file);
+      const c = await boot(8806, l);
+      try {
+        l.recordHook('SessionStart', { session_id: 'sess-exit-5555-long-session-id', cwd: 'C:\\work\\exit5' });
+        await postLogs(8806, fixtureAt((i) => T0 - (i + 1) * 60000));
+        let shorts = 0;
+        for (const p of SPEND_ROUTES) {
+          const body = await jsonX(8806, p);
+          assert.strictEqual(body.enabled, true, p);
+          walkKeys(body, p);
+          for (const r of body.rows || []) if ('sessionShort' in r) { shorts++; assert.ok(r.sessionShort.length <= 8, r.sessionShort); }
+        }
+        assert.ok(shorts > 0, 'top-prompts should have produced rows');
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 6] every money string in widget and console markup ends in est. (y-axis ticks excepted)', async () => {
+      clock = T0;
+      const file = tmpDb();
+      const l = open(file);
+      const c = await boot(8807, l);
+      try {
+        l.recordHook('SessionStart', { session_id: 'sess-exit-6666', cwd: 'C:\\work\\exit6' });
+        await postLogs(8807, fixtureAt((i) => T0 - (i + 1) * 60000));
+        const st = await jsonX(8807, '/state');
+        const h24 = await jsonX(8807, '/api/spend/series?range=24h');
+        const state = { range: '7d', series: await jsonX(8807, '/api/spend/series?range=7d'),
+          today: await jsonX(8807, '/api/spend/today'), projects: await jsonX(8807, '/api/spend/projects'),
+          top: await jsonX(8807, '/api/spend/top-prompts') };
+        const CN6 = mkCon(state);
+        const markups = {
+          widget: widget.spendHtml(st.spend, h24),
+          'console summary': CN6.summaryLine(state.today, state.projects),
+          'console sidebar': CN6.estMoney(state.today.costMicros) + ' today',
+          'console chart 7d': CN6.chartSvg(state.series, 640),
+          'console chart 24h': CN6.chartSvg(h24, 640),
+          'console projects': CN6.projectsSection(),
+          'console prompts': CN6.promptsSection(),
+        };
+        // The one exception: y-axis tick labels are bare dollar amounts ("$10") inside <text ... text-anchor="end">
+        // elements in the chart svg; the chart caption says "USD · estimated" and tooltips carry est. figures.
+        const TICK = /<text [^>]*text-anchor="end">\$[0-9][0-9.]*<\/text>/g;
+        let money = 0, ticks = 0;
+        for (const [name, html] of Object.entries(markups)) {
+          const rest = html.replace(TICK, () => { ticks++; return ''; });
+          for (const m of rest.matchAll(/\$[0-9][0-9.,]*/g)) {
+            money++;
+            assert.strictEqual(rest.slice(m.index + m[0].length, m.index + m[0].length + 5), ' est.',
+              name + ': ' + rest.slice(Math.max(0, m.index - 20), m.index + 30));
+          }
+        }
+        assert.ok(money >= 10, 'expected a populated state, saw ' + money + ' money strings');
+        assert.ok(ticks >= 6, 'the tick exception should have been exercised, saw ' + ticks);
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 7] foreign Host and foreign Origin get 403 on /console, its script and every /api/spend/* route', async () => {
+      clock = T0;
+      const l = open(':memory:');
+      const c = await boot(8808, l);
+      try {
+        const paths = ['/console', '/console/console.js'].concat(SPEND_ROUTES);
+        for (const p of paths) {
+          assert.strictEqual((await getX(8808, p)).status, 200, 'control ' + p);
+          assert.strictEqual((await getX(8808, p, { host: 'evil.example' })).status, 403, 'host ' + p);
+          assert.strictEqual((await getX(8808, p, { origin: 'http://evil.example' })).status, 403, 'origin ' + p);
+        }
+      } finally { await halt(c); l.close(); }
     });
   }
 
