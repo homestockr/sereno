@@ -314,18 +314,6 @@ test('Stop prunes subagents that its background_tasks does not list as running',
   assert.strictEqual(s.snapshot().sessions[0].subagents, 0);
 });
 
-test('a Stop never revives a subagent whose SubagentStop already arrived', () => {
-  const s = new Store();
-  feed(s, [
-    H('SubagentStart', sid('x', { agent_id: 'a9ee', agent_type: 'general-purpose' })),
-    H('SubagentStop', sid('x', { agent_id: 'a9ee', agent_type: 'general-purpose' })),
-    bgStop('x', [bgTask('a9ee')]),   // stale list
-  ]);
-  const g = s.snapshot().sessions[0];
-  assert.strictEqual(g.subagents, 0);
-  assert.deepStrictEqual(g.subagentList, []);
-});
-
 test('a Stop that lists a running subagent we never saw adds it with its type', () => {
   const s = new Store();
   feed(s, [
@@ -448,19 +436,43 @@ test('a resumed subagent without SubagentStart is re-created by its first tagged
   assert.ok(!s.sessions.get('x')._stopped.has('A'), 'the old tombstone must be gone');
 });
 
-test('a Stop list re-adds an old-tombstoned id but not a fresh-tombstoned one', () => {
+test('a Stop list is authoritative: it re-adds a listed id however fresh its tombstone', () => {
   const s = new Store();
   feed(s, [
     H('SubagentStop', sid('x', { agent_id: 'old', agent_type: 'Explore' })),
     H('SubagentStop', sid('x', { agent_id: 'fresh', agent_type: 'Explore' })),
+    H('SubagentStop', sid('x', { agent_id: 'done', agent_type: 'Explore' })),
   ]);
   ageTombstone(s, 'x', 'old', STRAGGLER_AGE);
   feed(s, [bgStop('x', [bgTask('old', { agent_type: 'Explore' }), bgTask('fresh', { agent_type: 'Explore' })])]);
   const g = s.snapshot().sessions[0];
-  assert.deepStrictEqual(g.subagentList.map((a) => a.id), ['old'],
-    'only the resumed one is live; the other just stopped and the list is stale');
-  assert.ok(!s.sessions.get('x')._stopped.has('old'), 'the consumed tombstone must be dropped');
-  assert.ok(s.sessions.get('x')._stopped.has('fresh'));
+  assert.deepStrictEqual(g.subagentList.map((a) => a.id).sort(), ['fresh', 'old'],
+    'both are resumed runs the Stop reports as running');
+  const st = s.sessions.get('x')._stopped;
+  assert.ok(!st.has('old') && !st.has('fresh'), 'listed ids lose their tombstones');
+  assert.ok(st.has('done'), 'an unlisted id keeps its tombstone');
+});
+
+test('a resume within 30 s and without SubagentStart still shows once the Stop lists it', () => {
+  const s = new Store();
+  feed(s, [
+    H('SubagentStart', sid('x', { agent_id: 'A', agent_type: 'general-purpose' })),
+    H('SubagentStop', sid('x', { agent_id: 'A', agent_type: 'general-purpose' })),
+    bgStop('x', []),
+    H('UserPromptSubmit', sid('x', { prompt: 'follow up' })),
+    // Resumed run, no SubagentStart: inside the window this reads as a straggler.
+    H('PreToolUse', sid('x', { tool_name: 'Read', tool_use_id: 'r1', agent_id: 'A',
+      agent_type: 'general-purpose', tool_input: { file_path: 'a.txt' } })),
+  ]);
+  assert.strictEqual(s.snapshot().sessions[0].subagents, 0, 'hidden until the Stop speaks');
+  feed(s, [bgStop('x', [bgTask('A', { agent_type: 'general-purpose' })])]);
+  const snap = s.snapshot();
+  assert.strictEqual(snap.sessions[0].subagents, 1);
+  assert.strictEqual(snap.counts.active, 1);
+  // ...and its next tool call is no longer dropped.
+  feed(s, [H('PreToolUse', sid('x', { tool_name: 'Grep', tool_use_id: 'r2', agent_id: 'A',
+    agent_type: 'general-purpose', tool_input: { pattern: 'x' } }))]);
+  assert.strictEqual(s.snapshot().sessions[0].subagentList[0].tool, 'Grep');
 });
 
 test('a kept subagent keeps its in-flight tool across a Stop that lists it', () => {

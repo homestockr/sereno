@@ -176,7 +176,10 @@ class Store {
       } else {
         if (event === 'SubagentStart') {
           // A start is never a straggler: it is a new run, even of an id that
-          // stopped a moment ago (a resume). Begin from a clean entry.
+          // stopped a moment ago (a resume). Begin from a clean entry. Trade-off:
+          // a Start reordered after its own Stop would leave a ghost until the
+          // next Stop with a list or the stale timer; the shim's 250 ms cap
+          // makes that reorder implausible across a subagent's lifetime.
           s._stopped.delete(agentId);
           s._agents.delete(agentId);
         } else if (s._stopped.has(agentId)) {
@@ -276,12 +279,11 @@ class Store {
         // background_tasks (docs/payloads.md §6). When that list is present it
         // is authoritative: keep exactly the subagents it reports as running and
         // drop the rest (this is what clears a missed SubagentStop). Anything it
-        // lists that we never saw is added, typed from agent_type. An id whose
-        // tombstone is younger than STRAGGLER_MS is skipped - the list can be
-        // stale, and a SubagentStop that just arrived is the more recent word.
-        // An older tombstone means the subagent was resumed (a resume starts a
-        // new run under the same agent_id), so it is added and the tombstone
-        // dropped.
+        // lists that we never saw is added, typed from agent_type, and its
+        // tombstone dropped whatever its age: a resume starts a new run under
+        // the same agent_id, possibly seconds after it stopped. The only stale
+        // list ever captured rode on a SubagentStop payload, which is not read;
+        // Stop's own list has always matched reality (docs/payloads.md §6).
         //
         // With no list (2.1.270 and earlier) nothing can outlive the turn, so
         // _agents is cleared as before. _stopped is deliberately kept either
@@ -306,11 +308,9 @@ class Store {
           }
           for (const id of running) {
             if (s._agents.has(id)) continue;
-            const stoppedAt = s._stopped.get(id);
-            if (stoppedAt !== undefined) {
-              if (Date.now() - stoppedAt < STRAGGLER_MS) continue;
-              s._stopped.delete(id);   // resumed since it stopped
-            }
+            // Listed as running at Stop time: that is current, even for an id
+            // that stopped moments ago (a resume can reuse it within seconds).
+            s._stopped.delete(id);
             if (s._agents.size >= MAX_AGENTS) evictStalest(s._agents);
             const now = Date.now();
             s._agents.set(id, { type: types.get(id), tool: '', arg: '', since: now, lastSeen: now });
