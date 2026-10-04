@@ -3994,6 +3994,74 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 2: render fixes ---- */
+  {
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const cjs = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
+    const W = new Function('const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;\n' + [lf(app, 'segmentWidths'), lf(app, 'nowPosition'),
+      'return { segmentWidths, nowPosition };'].join('\n'))();
+
+    test('widget: no inline style attributes in generated markup; geometry via data-* + CSSOM', () => {
+      const spendBlock = app.slice(app.indexOf('function spendHtml'), app.indexOf('function renderSpend'));
+      assert.ok(!/style=/.test(spendBlock), 'style= in spendHtml');
+      assert.match(spendBlock, /data-w="/);
+      assert.match(app, /el\.style\.width = /);
+      assert.match(app, /el\.style\.left = /);
+      assert.match(app, /applySpendLayout\(ui\.spend\)/);
+    });
+
+    test('segmentWidths and nowPosition: pure geometry', () => {
+      assert.deepStrictEqual(W.segmentWidths([{ micros: 78 }, { micros: 22 }]), ['78.000', '22.000']);
+      assert.deepStrictEqual(W.segmentWidths([{ micros: 0 }]), ['0.000']);
+      const p = W.nowPosition(162, 10);
+      assert.strictEqual(p.left, '50.00');
+      assert.strictEqual(p.top, (22 / 44 * 100).toFixed(2));
+    });
+
+    test('widget chart: non-scaling strokes and an HTML dot of fixed size', () => {
+      assert.ok((app.match(/vector-effect="non-scaling-stroke"/g) || []).length >= 2);
+      assert.ok(!/<circle/.test(app));
+      assert.match(app, /class="spend-dot"/);
+    });
+
+    test('console chart title and subtitle follow the range', () => {
+      const t = new Function(lf(cjs, 'chartTitle') + '\nreturn chartTitle;')();
+      assert.deepStrictEqual(t('24h'), { title: 'Hourly usage cost', sub: 'hourly · estimated' });
+      for (const r of ['7d', '30d']) assert.deepStrictEqual(t(r), { title: 'Daily usage cost', sub: 'daily · estimated' });
+      assert.match(cjs, /getElementById\('chart-title'\)/);
+    });
+
+    test('console main column is capped at 1180px', () => {
+      const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
+      assert.match(css, /\.main \{[^}]*max-width: 1180px/);
+    });
+
+    await atest('static responses: nosniff everywhere, frame-ancestors header on html', async () => {
+      const PORT = 8796;
+      const c = createCollector(new Store(), PORT);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const get = (p) => new Promise((resolve) => {
+        http.get({ host: '127.0.0.1', port: PORT, path: p, agent: false }, (r) => { r.resume(); r.on('end', () => resolve(r)); })
+          .on('error', () => resolve({ statusCode: 0, headers: {} }));
+      });
+      try {
+        for (const p of ['/', '/console']) {
+          const r = await get(p);
+          assert.strictEqual(r.statusCode, 200, p);
+          assert.strictEqual(r.headers['content-security-policy'], "frame-ancestors 'none'", p);
+          assert.strictEqual(r.headers['x-content-type-options'], 'nosniff', p);
+        }
+        const js = await get('/console/console.js');
+        assert.strictEqual(js.statusCode, 200);
+        assert.strictEqual(js.headers['x-content-type-options'], 'nosniff');
+        assert.ok(!js.headers['content-security-policy']);
+      } finally {
+        await new Promise((res) => { c.server.close(() => res()); c.close(); });
+      }
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

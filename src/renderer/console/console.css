@@ -47,7 +47,7 @@ h1, h2, p { margin: 0; }
 .top { height: 48px; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
 .crumb span { color: var(--text); }
 .sync { color: var(--quiet); }
-.main { flex: 1; padding: 24px 28px 20px; min-width: 0; }
+.main { flex: 1; padding: 24px 28px 20px; min-width: 0; max-width: 1180px; }
 .foot { border-top: 1px solid var(--line); margin: 0 28px; padding: 10px 0 14px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; font-size: 11px; color: var(--quiet); }
 
 h1 { font-size: 30px; line-height: 38px; font-weight: 600; letter-spacing: -.6px; }

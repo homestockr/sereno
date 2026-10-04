@@ -261,11 +261,16 @@ function legendHtml() {
     .map((k) => '<span class="item">' + sw(k) + esc(SRC_LABEL[k]) + '</span>').join('');
 }
 
+function chartTitle(range) {
+  const hourly = range === '24h';
+  return { title: hourly ? 'Hourly usage cost' : 'Daily usage cost', sub: (hourly ? 'hourly' : 'daily') + ' · estimated' };
+}
+
 function chartSection() {
   const toggle = RANGES.map((r) => '<button type="button" data-range="' + r + '" class="' + (r === state.range ? 'on' : '')
     + '" aria-pressed="' + (r === state.range) + '">' + r + '</button>').join('');
-  const sub = state.range === '24h' ? 'hourly' : 'daily';
-  return '<div class="section-top"><h2>' + (state.range === '24h' ? 'Hourly' : 'Daily') + ' usage cost<span class="sub">' + sub + ' · estimated</span></h2>'
+  const t = chartTitle(state.range);
+  return '<div class="section-top"><h2><span id="chart-title">' + t.title + '</span><span class="sub" id="chart-sub">' + t.sub + '</span></h2>'
     + '<div class="legend">' + legendHtml() + '</div><div class="range" role="group" aria-label="Range">' + toggle + '</div></div>'
     + '<div class="chart-box" id="chart-box"></div>';
 }
@@ -415,6 +420,10 @@ function boot() {
       const on = x.getAttribute('data-range') === r;
       x.classList.toggle('on', on); x.setAttribute('aria-pressed', String(on));
     });
+    const t = chartTitle(r);
+    const ti = document.getElementById('chart-title'), su = document.getElementById('chart-sub');
+    if (ti) ti.textContent = t.title;
+    if (su) su.textContent = t.sub;
     refreshSeries();
   });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });

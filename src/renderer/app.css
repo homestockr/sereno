@@ -498,9 +498,9 @@ html, body { height: 100%; }
 .spend-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
 .spend-base { stroke: #40454b; stroke-width: 1; }
 .spend-line { fill: none; stroke: #e6e8ec; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
-.spend-dot { fill: #e6e8ec; }
-.spend-now { position: absolute; margin-left: 8px; font-size: 11px; line-height: 16px; color: #c2c6cc; }
-.spend-now.flip { margin-left: -8px; transform: translateX(-100%); }
+.spend-dot { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: #e6e8ec; transform: translate(-50%, -50%); }
+.spend-now { position: absolute; margin-left: 8px; transform: translateY(-50%); font-size: 11px; line-height: 16px; color: #c2c6cc; }
+.spend-now.flip { margin-left: -8px; transform: translate(-100%, -50%); }
 .spend-axis {
   display: flex;
   justify-content: space-between;

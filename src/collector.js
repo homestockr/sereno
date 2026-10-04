@@ -90,10 +90,15 @@ function serveStatic(res, dir, rel) {
   }
   fs.readFile(file, (err, buf) => {
     if (err) { res.writeHead(404).end('not found'); return; }
-    res.writeHead(200, {
-      'content-type': TYPES[path.extname(file)] || 'application/octet-stream',
+    const ext = path.extname(file);
+    const headers = {
+      'content-type': TYPES[ext] || 'application/octet-stream',
       'cache-control': 'no-store',
-    });
+      'x-content-type-options': 'nosniff',
+    };
+    // frame-ancestors is ignored in a meta CSP, so HTML needs it as a real header.
+    if (ext === '.html') headers['content-security-policy'] = "frame-ancestors 'none'";
+    res.writeHead(200, headers);
     res.end(buf);
   });
 }

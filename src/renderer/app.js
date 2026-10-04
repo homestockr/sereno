@@ -416,6 +416,28 @@ function spendMode(sp) {
   return sp.hasTelemetry === true ? 'on' : 'waiting';
 }
 
+/** Percent widths of the source bar segments (summing to 100). */
+function segmentWidths(segs) {
+  const sum = segs.reduce((a, b) => a + b.micros, 0);
+  return segs.map((x) => (sum > 0 ? x.micros / sum * 100 : 0).toFixed(3));
+}
+
+/** The "now" marker as percentages of the chart box, so it survives any width. */
+function nowPosition(x, y) {
+  const H = SPEND_H + SPEND_TOP + 2;
+  return { left: (x / SPEND_W * 100).toFixed(2), top: ((SPEND_TOP + y) / H * 100).toFixed(2) };
+}
+
+// The page CSP drops inline style attributes, so geometry rides in data-* and is
+// applied through the CSSOM (allowed) right after the markup is inserted.
+function applySpendLayout(root) {
+  root.querySelectorAll('[data-w]').forEach((el) => { el.style.width = el.getAttribute('data-w') + '%'; });
+  root.querySelectorAll('[data-left]').forEach((el) => {
+    el.style.left = el.getAttribute('data-left') + '%';
+    el.style.top = el.getAttribute('data-top') + '%';
+  });
+}
+
 function spendHtml(sp, series) {
   const segs = sourceSegments(sp);
   const total = Number(sp.todayMicros) > 0 ? Number(sp.todayMicros) : 0;
@@ -432,23 +454,24 @@ function spendHtml(sp, series) {
     const pts = cumulativePoints(buckets, midnight, asOf, SPEND_W, SPEND_H);
     const last = pts.split(' ').pop().split(',').map(Number);
     const flip = last[0] > SPEND_W * 0.8;
+    const np = nowPosition(last[0], last[1]);
     chart = `<div class="spend-chart" role="img" aria-label="${esc(chartLabel)}">
       <svg viewBox="0 0 ${SPEND_W} ${SPEND_H + SPEND_TOP + 2}" focusable="false" aria-hidden="true">
-        <line class="spend-base" x1="0" y1="${SPEND_TOP + SPEND_H}" x2="${SPEND_W}" y2="${SPEND_TOP + SPEND_H}"/>
+        <line class="spend-base" x1="0" y1="${SPEND_TOP + SPEND_H}" x2="${SPEND_W}" y2="${SPEND_TOP + SPEND_H}" vector-effect="non-scaling-stroke"/>
         <g transform="translate(0 ${SPEND_TOP})">
-          <polyline class="spend-line" points="${pts}"/>
-          <circle class="spend-dot" cx="${last[0]}" cy="${last[1]}" r="3"/>
+          <polyline class="spend-line" points="${pts}" vector-effect="non-scaling-stroke"/>
         </g>
       </svg>
-      <span class="spend-now${flip ? ' flip' : ''}" style="left:${(last[0] / SPEND_W * 100).toFixed(2)}%;top:${(SPEND_TOP + last[1] - 8).toFixed(1)}px">Now</span>
+      <span class="spend-dot" aria-hidden="true" data-left="${np.left}" data-top="${np.top}"></span>
+      <span class="spend-now${flip ? ' flip' : ''}" data-left="${np.left}" data-top="${np.top}">Now</span>
     </div>
     <div class="spend-axis"><span>00:00</span><span>24:00</span></div>`;
   }
 
-  const sum = segs.reduce((a, b) => a + b.micros, 0);
+  const widths = segmentWidths(segs);
   const bar = segs.length
-    ? `<div class="spend-bar" role="img" aria-label="${esc(barAriaLabel(segs))}">${segs.map((x) =>
-        `<span class="seg seg-${x.key}" style="width:${(x.micros / sum * 100).toFixed(3)}%"></span>`).join('')}</div>
+    ? `<div class="spend-bar" role="img" aria-label="${esc(barAriaLabel(segs))}">${segs.map((x, i) =>
+        `<span class="seg seg-${x.key}" data-w="${widths[i]}"></span>`).join('')}</div>
       <div class="spend-legend">${segs.map((x) =>
         `<span><i class="sw seg-${x.key}" aria-hidden="true"></i>${esc(x.label)} ${x.pct}%</span>`).join('')}</div>`
     : '';
@@ -463,7 +486,7 @@ function renderSpend() {
   if (mode === 'off') { ui.spend.innerHTML = ''; return; }
   if (mode === 'unavailable') ui.spend.innerHTML = '<p class="spend-hint">Spend history unavailable</p>';
   else if (mode === 'waiting') ui.spend.innerHTML = '<p class="spend-hint">Waiting for telemetry from new Claude Code sessions</p>';
-  else ui.spend.innerHTML = spendHtml(snapshot.spend, spendSeries);
+  else { ui.spend.innerHTML = spendHtml(snapshot.spend, spendSeries); applySpendLayout(ui.spend); }
 }
 
 /**
