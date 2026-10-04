@@ -2204,6 +2204,303 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 1 step 2: ledger.js ---- */
+  {
+    const { openLedger, LedgerUnavailableError } = require('../src/ledger.js');
+    const otlp = require('../src/otlp.js');
+    const logsFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-logs.json'), 'utf8'));
+    const tracesFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-traces.json'), 'utf8'));
+    // shift fixture timestamps to "now" so prune-on-open never eats them as the calendar moves
+    const BASE = Date.now() - 60000;
+    const shiftReqs = () => otlp.parseLogs(logsFx).map((r, i) => Object.assign({}, r, { ts: BASE + i * 1000 }));
+    const shiftSpans = () => otlp.parseTraces(tracesFx).map((s, i) => Object.assign({}, s, { ts: BASE + i * 1000 }));
+    const tmpFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-ledger-')), 'sereno.db');
+    const rmDir = f => fs.rmSync(path.dirname(f), { recursive: true, force: true });
+    const mem = () => openLedger({ file: ':memory:' });
+    const rq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's', promptId: null, ts: Date.now(),
+      model: 'm', querySource: null, source: 'main', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100, durationMs: 0 }, o);
+    const row = (l, id) => l._db.prepare('SELECT * FROM requests WHERE request_id=?').get(id);
+
+    test('ledger: LedgerUnavailableError is typed', () => {
+      const e = new LedgerUnavailableError('x');
+      assert.ok(e instanceof Error); assert.strictEqual(e.code, 'LEDGER_UNAVAILABLE');
+    });
+
+    test('ledger: WAL mode and user_version 1 on a file db', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        assert.strictEqual(l._db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
+        assert.strictEqual(l._db.prepare('PRAGMA user_version').get().user_version, 1);
+        l.close();
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: default file lives under SERENO_HOME', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-ledger-home-'));
+      const prev = process.env.SERENO_HOME;
+      process.env.SERENO_HOME = dir;
+      try {
+        const l = openLedger();
+        assert.strictEqual(l.file, path.join(dir, 'sereno.db'));
+        l.close();
+        assert.ok(fs.existsSync(path.join(dir, 'sereno.db')));
+      } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test('ledger: replaying the same fixtures twice leaves totals unchanged', () => {
+      const l = mem();
+      l.ingestRequests(shiftReqs()); l.ingestSpans(shiftSpans());
+      const a = JSON.stringify(l.totals());
+      l.ingestRequests(shiftReqs()); l.ingestSpans(shiftSpans());
+      assert.strictEqual(JSON.stringify(l.totals()), a);
+      const t = l.totals();
+      assert.strictEqual(t.requests, 5);
+      assert.strictEqual(t.costMicros, 12345 + 3100 + 777 + 500 + 7611);
+      assert.strictEqual(t.byAttribution.explicit, 12345 + 3100 + 500 + 7611);
+      assert.strictEqual(t.byAttribution.unknown, 777);
+      assert.strictEqual(t.bySource.subagent, 3100 + 777);
+      assert.ok(Number.isInteger(t.costMicros));
+      l.close();
+    });
+
+    test('ledger: close + reopen preserves totals', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        l.ingestRequests(shiftReqs()); l.ingestSpans(shiftSpans());
+        const a = JSON.stringify(l.totals());
+        l.close();
+        const l2 = openLedger({ file: f });
+        assert.strictEqual(JSON.stringify(l2.totals()), a);
+        l2.close();
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: methods throw a clear error after close', () => {
+      const l = mem(); l.close();
+      assert.throws(() => l.totals(), /closed/);
+    });
+
+    test('ledger: request-before-span and span-before-request both end explicit with agent_id', () => {
+      const l = mem();
+      l.ingestRequests([rq({ requestKey: 'a', requestId: 'ra', source: 'subagent' })]);
+      assert.strictEqual(row(l, 'ra').attribution, 'unknown');
+      l.ingestSpans([{ requestId: 'ra', sessionId: 's', agentId: 'ag1', ts: 1 }]);
+      assert.strictEqual(row(l, 'ra').attribution, 'explicit');
+      assert.strictEqual(row(l, 'ra').agent_id, 'ag1');
+      l.ingestSpans([{ requestId: 'rb', sessionId: 's', agentId: 'ag2', ts: 1 }]);
+      l.ingestRequests([rq({ requestKey: 'b', requestId: 'rb', source: 'subagent' })]);
+      assert.strictEqual(row(l, 'rb').attribution, 'explicit');
+      assert.strictEqual(row(l, 'rb').agent_id, 'ag2');
+      l.close();
+    });
+
+    test('ledger: subagent without span stays unknown; main-thread span does not change it', () => {
+      const l = mem();
+      l.ingestRequests([rq({ requestKey: 'a', requestId: 'ra', source: 'subagent' })]);
+      l.ingestSpans([{ requestId: 'ra', sessionId: 's', agentId: null, ts: 1 }]);
+      assert.strictEqual(row(l, 'ra').attribution, 'unknown');
+      assert.strictEqual(row(l, 'ra').agent_id, null);
+      l.ingestSpans([{ requestId: null, sessionId: 's', agentId: 'x', ts: 1 }]);
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM spans').get().n, 1);
+      l.close();
+    });
+
+    test('ledger: spans never reassign an already-explicit row', () => {
+      const l = mem();
+      l.ingestRequests([rq({ requestKey: 'a', requestId: 'ra', source: 'main' })]);
+      l.ingestSpans([{ requestId: 'ra', sessionId: 's', agentId: 'ag', ts: 1 }]);
+      assert.strictEqual(row(l, 'ra').agent_id, null);
+      assert.strictEqual(row(l, 'ra').attribution, 'explicit');
+      l.close();
+    });
+
+    test('ledger: telemetry without hooks creates a session row; null session creates none', () => {
+      const l = mem();
+      l.ingestRequests(shiftReqs());
+      const s = l._db.prepare('SELECT * FROM sessions').all();
+      assert.strictEqual(s.length, 1);
+      assert.strictEqual(s[0].session_id, 'sess-fake-0001');
+      assert.strictEqual(s[0].first_seen, BASE);
+      assert.strictEqual(s[0].last_seen, BASE + 4000);
+      l.ingestRequests([rq({ requestKey: 'n', requestId: 'rn', sessionId: null })]);
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM sessions').get().n, 1);
+      assert.strictEqual(l.totals().requests, 6);
+      l.close();
+    });
+
+    test('ledger: SessionStart sets cwd/project/model; telemetry does not clobber them', () => {
+      const l = mem();
+      l.recordHook('SessionStart', { session_id: 's', cwd: 'C:\\work\\proj-a', model: 'opus' });
+      l.ingestRequests([rq({ requestId: 'r1' })]);
+      const s = l._db.prepare('SELECT * FROM sessions WHERE session_id=?').get('s');
+      assert.strictEqual(s.cwd, 'C:\\work\\proj-a');
+      assert.strictEqual(s.project, 'proj-a');
+      assert.strictEqual(s.model, 'opus');
+      assert.strictEqual(l.totals().sessions[0].project, 'proj-a');
+      l.close();
+    });
+
+    test('ledger: recordHook ignores forbidden fields (canary absent from db and wal bytes)', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        const canary = 'SERENO-CANARY-LEDGER-9f3a';
+        const forbidden = { prompt: canary + 'p', tool_input: { command: canary + 'c' }, tool_response: canary + 'r',
+          transcript_path: canary + 't', last_assistant_message: canary + 'm', user_email: canary + 'e' };
+        l.recordHook('SessionStart', Object.assign({ session_id: 's', cwd: 'C:\\w\\p', model: 'm' }, forbidden));
+        l.recordHook('SubagentStart', Object.assign({ session_id: 's', agent_id: 'a1', agent_type: 'builder' }, forbidden));
+        l.recordHook('SubagentStop', Object.assign({ session_id: 's', agent_id: 'a1', agent_type: 'builder' }, forbidden));
+        l.recordHook('UserPromptSubmit', Object.assign({ session_id: 's' }, forbidden));
+        assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM agents').get().n, 1);
+        l.close();
+        for (const p of [f, f + '-wal']) {
+          if (fs.existsSync(p)) assert.ok(!fs.readFileSync(p).includes(canary), 'canary leaked into ' + p);
+        }
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: agents upsert; resume clears stopped; stop for unseen id with empty type ignored', () => {
+      const l = mem();
+      l.recordHook('SubagentStop', { session_id: 's', agent_id: 'ghost', agent_type: '' });
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM agents').get().n, 0);
+      l.recordHook('SubagentStart', { session_id: 's', agent_id: 'a1', agent_type: 'builder' });
+      let a = l._db.prepare('SELECT * FROM agents').get();
+      assert.strictEqual(a.agent_type, 'builder'); assert.strictEqual(a.stopped, null);
+      assert.ok(a.started > 0);
+      l.recordHook('SubagentStop', { session_id: 's', agent_id: 'a1', agent_type: '' });
+      a = l._db.prepare('SELECT * FROM agents').get();
+      assert.ok(a.stopped > 0); assert.strictEqual(a.agent_type, 'builder');
+      l.recordHook('SubagentStart', { session_id: 's', agent_id: 'a1', agent_type: 'builder' });
+      assert.strictEqual(l._db.prepare('SELECT stopped FROM agents').get().stopped, null);
+      l.close();
+    });
+
+    test('ledger: recordStatus stores micros and dedupes unchanged cost', () => {
+      const l = mem();
+      l.recordStatus('s', 1.234567, 1000);
+      l.recordStatus('s', 1.234567, 2000);
+      let st = l._db.prepare('SELECT * FROM status').get();
+      assert.strictEqual(st.cost_micros, 1234567); assert.strictEqual(st.ts, 1000);
+      l.recordStatus('s', 2, 3000);
+      st = l._db.prepare('SELECT * FROM status').get();
+      assert.strictEqual(st.cost_micros, 2000000); assert.strictEqual(st.ts, 3000);
+      l.recordStatus('s', NaN, 4000);
+      assert.strictEqual(l._db.prepare('SELECT ts FROM status').get().ts, 3000);
+      l.close();
+    });
+
+    test('ledger: reconcile ok, lag (later request excluded), drift, and no-status cases', () => {
+      const l = mem();
+      assert.deepStrictEqual(l.reconcile('s'), { ledgerMicros: 0, statusMicros: null, deltaPct: null, ok: false });
+      l.ingestRequests([rq({ requestKey: 'a', requestId: 'a', ts: 1000, costMicros: 600000 }),
+        rq({ requestKey: 'b', requestId: 'b', ts: 2000, costMicros: 400000 })]);
+      assert.strictEqual(l.reconcile('s').ledgerMicros, 1000000);
+      assert.strictEqual(l.reconcile('s').ok, false);
+      l.recordStatus('s', 1.0, 2000);
+      assert.deepStrictEqual(l.reconcile('s'), { ledgerMicros: 1000000, statusMicros: 1000000, deltaPct: 0, ok: true });
+      l.ingestRequests([rq({ requestKey: 'c', requestId: 'c', ts: 3000, costMicros: 900000 })]);
+      assert.strictEqual(l.reconcile('s').ledgerMicros, 1000000, 'request after status.ts excluded');
+      assert.strictEqual(l.reconcile('s').ok, true);
+      l.recordStatus('s', 0.9, 4000);
+      const d = l.reconcile('s');
+      assert.strictEqual(d.deltaPct, 111.1); assert.strictEqual(d.ok, false);
+      l.recordStatus('s', 1.019, 5000);
+      const e = l.reconcile('s');
+      assert.strictEqual(e.deltaPct, 86.5);
+      l.close();
+    });
+
+    test('ledger: reconcile rounds deltaPct to 1 decimal and allows 2 percent', () => {
+      const l = mem();
+      l.ingestRequests([rq({ ts: 1, costMicros: 1000000 })]);
+      l.recordStatus('s', 1.02, 10);
+      const r = l.reconcile('s');
+      assert.strictEqual(r.deltaPct, -2); assert.strictEqual(r.ok, true);
+      l.recordStatus('s', 1.03, 11);
+      const r2 = l.reconcile('s');
+      assert.strictEqual(r2.deltaPct, -2.9); assert.strictEqual(r2.ok, false);
+      l.close();
+    });
+
+    test('ledger: totals respects since (inclusive) and until (exclusive), sessions sorted desc', () => {
+      const l = mem();
+      l.ingestRequests([
+        rq({ requestKey: 'a', requestId: 'a', sessionId: 's1', ts: 1000, costMicros: 10 }),
+        rq({ requestKey: 'b', requestId: 'b', sessionId: 's2', ts: 2000, costMicros: 30 }),
+        rq({ requestKey: 'c', requestId: 'c', sessionId: 's1', ts: 3000, costMicros: 5 })]);
+      assert.strictEqual(l.totals({ since: 1000, until: 3000 }).costMicros, 40);
+      assert.strictEqual(l.totals({ since: 2000 }).costMicros, 35);
+      const t = l.totals();
+      assert.deepStrictEqual(t.sessions.map(s => s.sessionId), ['s2', 's1']);
+      assert.strictEqual(t.sessions[1].costMicros, 15);
+      l.close();
+    });
+
+    test('ledger: prune removes old requests and spans, keeps sessions and recent rows', () => {
+      const l = mem();
+      const old = Date.now() - 100 * 86400000;
+      l.ingestRequests([rq({ requestKey: 'o', requestId: 'o', ts: old }), rq({ requestKey: 'n', requestId: 'n', ts: Date.now() - 1000 })]);
+      l.ingestSpans([{ requestId: 'o', sessionId: 's', agentId: 'a', ts: old }, { requestId: 'n', sessionId: 's', agentId: 'a', ts: Date.now() }]);
+      l.prune();
+      assert.strictEqual(l.totals().requests, 1);
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM spans').get().n, 1);
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM sessions').get().n, 1);
+      l.prune(0);
+      assert.strictEqual(l.totals().requests, 0);
+      l.close();
+    });
+
+    test('ledger: ts 0 is stored as ingest time and survives close + reopen', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        l.ingestRequests([rq({ requestKey: 'z', requestId: 'z', ts: 0, costMicros: 42 })]);
+        l.ingestSpans([{ requestId: 'z', sessionId: 's', agentId: 'a', ts: 0 }]);
+        assert.ok(l._db.prepare('SELECT ts FROM spans').get().ts > 0);
+        l.close();
+        const l2 = openLedger({ file: f });
+        assert.strictEqual(l2.totals().costMicros, 42);
+        l2.close();
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: retentionDays option drives prune-on-open; bad values fall back to 90', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        const d = n => Date.now() - n * 86400000;
+        l.ingestRequests([rq({ requestKey: 'a', requestId: 'a', ts: d(10) }), rq({ requestKey: 'b', requestId: 'b', ts: d(2) })]);
+        l.close();
+        for (const bad of [NaN, 0, -5, Infinity, undefined]) {
+          const x = openLedger({ file: f, retentionDays: bad }); assert.strictEqual(x.totals().requests, 2); x.close();
+        }
+        const l3 = openLedger({ file: f, retentionDays: 5 });
+        assert.strictEqual(l3.totals().requests, 1);
+        l3.close();
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: schema has no prompt/response/command/tool_input/email columns', () => {
+      const l = mem();
+      const tables = l._db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+      assert.deepStrictEqual(tables.sort(), ['agents', 'requests', 'sessions', 'spans', 'status']);
+      for (const t of tables) {
+        for (const c of l._db.prepare('PRAGMA table_info(' + t + ')').all()) {
+          assert.ok(c.name === 'prompt_id' || !/prompt|response|command|tool_input|email/i.test(c.name), t + '.' + c.name);
+        }
+      }
+      const idx = l._db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='requests' AND name NOT LIKE 'sqlite_%'").all();
+      assert.strictEqual(idx.length, 3);
+      l.close();
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
