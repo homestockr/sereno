@@ -4169,7 +4169,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       + "const ATTR_LABEL = { explicit: 'Explicit', unknown: 'Unattributed', mixed: 'Mixed' };\n"
       + CN.map((n) => lf(conSrc, n)).join('\n') + '\nreturn { ' + CN.join(', ') + ' };')(state);
     const WN = ['estMoney', 'esc', 'largestRemainder', 'sourceSegments', 'barAriaLabel', 'cumulativePoints', 'segmentWidths',
-      'nowPosition', 'spendHtml'];
+      'nowPosition', 'nowMarkerX', 'spendHtml'];
     const widget = new Function('const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;\n'
       + WN.map((n) => lf(appSrc, n)).join('\n') + '\nreturn { spendHtml };')();
 
@@ -4385,6 +4385,183 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual((await getX(8808, p, { origin: 'http://evil.example' })).status, 403, 'origin ' + p);
         }
       } finally { await halt(c); l.close(); }
+    });
+  }
+
+  /* ---- Phase 2: red-team fixes ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const spendtime = require('../src/spendtime.js');
+    const rawGet = (port, p) => new Promise((resolve) => {
+      http.get({ host: '127.0.0.1', port, path: p, agent: false }, (r) => {
+        let d = ''; r.on('data', (c) => { d += c; }); r.on('end', () => resolve({ status: r.statusCode, body: d }));
+      }).on('error', () => resolve({ status: 0, body: '' }));
+    });
+    const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
+    const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+
+    await atest('static: NUL bytes and bad encodings answer 4xx and the server survives', async () => {
+      const PORT = 8860;
+      const c = createCollector(new Store(), PORT);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      try {
+        for (const p of ['/%00', '/console/%00', '/console/index.html%00.js', '/%E0%A4%A']) {
+          const r = await rawGet(PORT, p);
+          assert.ok(r.status >= 400 && r.status < 500, p + ' -> ' + r.status);
+          assert.strictEqual((await rawGet(PORT, '/state')).status, 200, 'alive after ' + p);
+        }
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+    });
+
+    await atest('snapshot spend: a failing ledger never shows yesterday as today (stale only within the day)', async () => {
+      const PORT = 8861;
+      let clock = new Date(2026, 5, 10, 13, 0).getTime();
+      const l = openLedger({ file: ':memory:' });
+      l.ingestRequests([{ requestKey: 'k1', requestId: 'r1', sessionId: 's1', promptId: 'p1', ts: clock - 1000, model: 'm',
+        querySource: 'repl_main_thread', source: 'main', agentName: null, inputTokens: 1, outputTokens: 1,
+        cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 5000, durationMs: 1 }]);
+      const c = createCollector(new Store(), PORT, { ledger: l, now: () => clock });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const spend = async () => JSON.parse((await rawGet(PORT, '/state')).body).spend;
+      try {
+        assert.strictEqual((await spend()).todayMicros, 5000);
+        l.today = () => { throw new Error('boom'); };
+        clock += 3600000;
+        c.setLedger(l);   // same day: keep the last good figure
+        const same = await spend();
+        assert.strictEqual(same.todayMicros, 5000); assert.ok(!same.unavailable);
+        clock += 24 * 3600000;
+        c._tickSpend();   // next day: yesterday must not be presented
+        assert.deepStrictEqual(await spend(), { enabled: true, unavailable: true });
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+
+    // Grouped results vs a per-row reference; self-contained so a TZ child process can run it too.
+    function groupingCheck(ledgerPath, spendtimePath) {
+      const assert = require('node:assert');
+      const { openLedger } = require(ledgerPath);
+      const st = require(spendtimePath);
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      const asOf = new Date(2026, 5, 10, 13, 0).getTime();
+      const at = (dd, h, m, s, ms) => new Date(2026, 5, 10 + dd, h, m, s, ms).getTime();
+      const stamps = [];
+      for (const dd of [-1, 0]) {
+        stamps.push(at(dd, 0, 0, 0, 0), at(dd, 0, 14, 59, 999), at(dd, 0, 15, 0, 0), at(dd, 23, 59, 59, 999),
+          at(dd, 12, 0, 0, 0), at(dd, 12, 59, 59, 999));
+      }
+      const rows = stamps.map((ts, i) => ({
+        requestKey: 'k' + i, requestId: 'r' + i, sessionId: 's' + (i % 3), promptId: i % 4 === 0 ? null : 'p' + (i % 4),
+        ts, model: 'm' + (i % 2), querySource: 'x', source: ['main', 'subagent', 'auxiliary'][i % 3], agentName: null,
+        inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 1000 + i * 7, durationMs: 1,
+      }));
+      l.ingestRequests(rows);
+      l.recordHook('SessionStart', { session_id: 's0', cwd: '/x/alpha' });
+      l.recordHook('SessionStart', { session_id: 's1', cwd: '/x/beta' });   // s2 has no project
+      const raw = l._db.prepare('SELECT r.ts AS ts, r.source AS source, r.attribution AS attribution, r.cost_micros AS c, s.project AS p FROM requests r LEFT JOIN sessions s ON s.session_id = r.session_id').all()
+        .map((r) => ({ ts: Number(r.ts), source: r.source, attribution: r.attribution, c: Number(r.c), p: r.p ?? null }));
+      const idx = (bk, ts) => bk.findIndex((b) => ts >= b.since && ts < b.until);
+      const refSeries = (bk) => {
+        const out = bk.map((b) => ({ key: b.key, costMicros: 0, requests: 0, bySource: {}, byAttribution: {} }));
+        for (const r of raw) {
+          const i = idx(bk, r.ts);
+          if (i < 0) continue;
+          const o = out[i];
+          o.costMicros += r.c; o.requests++;
+          o.bySource[r.source] = (o.bySource[r.source] || 0) + r.c;
+          o.byAttribution[r.attribution] = (o.byAttribution[r.attribution] || 0) + r.c;
+        }
+        return out;
+      };
+      const norm = (bk) => bk.map((b) => ({ key: b.key || b.day, since: b.since, until: b.until }));
+      for (const spec of [st.hourBuckets(asOf), st.lastNDays(3, asOf)]) {
+        const bk = norm(spec);
+        assert.deepStrictEqual(l.series(bk), refSeries(bk));
+        const days = spec.map((b) => ({ since: b.since, until: b.until }));
+        const tr = l.trends({ buckets: days });
+        for (const proj of ['alpha', 'beta', null]) {
+          const exp = days.map(() => 0);
+          for (const r of raw) if (r.p === proj) { const i = idx(days, r.ts); if (i >= 0) exp[i] += r.c; }
+          assert.deepStrictEqual(tr.get(proj) || days.map(() => 0), exp, 'trends ' + proj);
+          assert.deepStrictEqual(l.trend({ project: proj, buckets: days }), exp, 'trend ' + proj);
+        }
+      }
+      const g = new Map();
+      for (const r of rows) {
+        const k = r.promptId || r.requestKey;
+        const e = g.get(k) || { ts: Infinity, c: 0 };
+        e.ts = Math.min(e.ts, r.ts); e.c += r.costMicros; g.set(k, e);
+      }
+      const exp = [...g.values()].sort((a, b) => b.c - a.c || a.ts - b.ts).slice(0, 5).map((e) => [e.c, e.ts]);
+      const got = l.topPrompts({ since: at(-1, 0, 0, 0, 0), until: at(1, 0, 0, 0, 0), limit: 5 }).map((e) => [e.costMicros, e.ts]);
+      assert.deepStrictEqual(got, exp);
+      l.close();
+      return new Date().getTimezoneOffset();
+    }
+
+    test('ledger: 15-minute slot grouping equals the per-row result at slot edges', () => {
+      groupingCheck(path.join(ROOT, 'src', 'ledger.js'), path.join(ROOT, 'src', 'spendtime.js'));
+    });
+
+    test('ledger: slot grouping is exact in Asia/Kolkata (+05:30) when TZ is honoured', () => {
+      const env = Object.assign({}, process.env, { TZ: 'Asia/Kolkata' });
+      const probe = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(new Date().getTimezoneOffset()))'], { env, encoding: 'utf8' });
+      if (probe.stdout !== '-330') { console.log('  note: TZ not honoured here (offset ' + probe.stdout + '); skipping the Kolkata check'); return; }
+      const code = '(' + groupingCheck.toString() + ')(' + JSON.stringify(path.join(ROOT, 'src', 'ledger.js')) + ','
+        + JSON.stringify(path.join(ROOT, 'src', 'spendtime.js')) + ')';
+      const r = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(' + code + '))'], { env, encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(r.stdout, '-330');
+    });
+
+    test('ledger perf guard: 50k requests, 15 projects: every read under 250 ms', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-perf-'));
+      const l = openLedger({ file: path.join(dir, 'sereno.db'), retentionDays: 36500 });
+      try {
+        const now = Date.now(), N = 50000;
+        const rows = [];
+        for (let i = 0; i < N; i++) {
+          rows.push({ requestKey: 'k' + i, requestId: 'r' + i, sessionId: 's' + (i % 150), promptId: 'p' + Math.floor(i / 3),
+            ts: now - ((i * 7919) % (30 * 86400000)), model: 'm' + (i % 3), querySource: 'x',
+            source: ['main', 'subagent', 'auxiliary'][i % 3], agentName: null, inputTokens: 1, outputTokens: 1,
+            cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100 + (i % 977), durationMs: 1 });
+        }
+        l.ingestRequests(rows);
+        for (let s = 0; s < 150; s++) l.recordHook('SessionStart', { session_id: 's' + s, cwd: '/x/proj' + (s % 15) });
+        const days = spendtime.lastNDays(14, now);
+        const since = spendtime.monthStart(now), until = spendtime.dayBounds(now).until;
+        const time = (name, fn) => {
+          const t = process.hrtime.bigint();
+          const r = fn();
+          const ms = Number(process.hrtime.bigint() - t) / 1e6;
+          console.log('  perf ' + name + ': ' + ms.toFixed(1) + ' ms');
+          assert.ok(ms < 250, name + ' took ' + ms.toFixed(1) + ' ms');
+          return r;
+        };
+        const p = time('projects+trends(month)', () => { const r = l.projects({ since, until }); l.trends({ buckets: days }); return r; });
+        assert.ok(p.rows.length >= 1);
+        time('series 30d', () => l.series(spendtime.lastNDays(30, now)));
+        time('series 24h', () => l.series(spendtime.hourBuckets(now)));
+        time('topPrompts 30d', () => l.topPrompts({ since: spendtime.lastNDays(30, now)[0].since, until, limit: 10 }));
+      } finally { l.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+    });
+
+    test('widget: nowMarkerX follows the clock, clamped to the day', () => {
+      const f = new Function(lf(appSrc, 'nowMarkerX') + '\nreturn nowMarkerX;')();
+      const mid = new Date(2026, 5, 10).getTime();
+      assert.strictEqual(f(mid + 12 * 3600000, mid, 324), 162);
+      assert.strictEqual(f(mid - 5, mid, 324), 0);
+      assert.strictEqual(f(mid + 48 * 3600000, mid, 324), 324);
+      assert.strictEqual(f(NaN, mid, 324), 0);
+      assert.match(appSrc, /setInterval\(\(\) => \{ if \(spendMode\(snapshot\.spend\) === 'on'\) renderSpend\(\); \}, 60000\)/);
+    });
+
+    test('widget and console: no inline style attributes anywhere in either renderer script', () => {
+      for (const [name, src] of [['app.js', appSrc], ['console.js', conSrc]]) {
+        assert.ok(!/\bstyle\s*=/.test(src), 'style= found in ' + name);
+      }
+      assert.match(appSrc, /<i data-w="\$\{s\.contextPct\}"><\/i>/);
+      assert.match(appSrc, /applySpendLayout\(ui\.rows\)/);
     });
   }
 

@@ -230,7 +230,23 @@ function openLedger(opts = {}) {
   /** @param {Record<string, number>} o @param {any} k @param {number} c */
   const addTo = (o, k, c) => { const key = String(k); o[key] = (o[key] || 0) + c; };
 
-  // series: ONE query for the whole span; rows are bucketed in JS by binary search over
+  // Rows are pre-aggregated into 15-minute slots (ts - ts % 900000), not per request: the
+  // aggregation is then O(slots), not O(requests). 15 minutes (not a whole hour) is on purpose:
+  // every real UTC offset is a multiple of 15 min (+05:30, +05:45...), so local day AND local
+  // hour boundaries always fall on a slot boundary and bucketing slots is exact. Whole-hour
+  // slots would split buckets in those zones. If a caller passes boundaries that are not
+  // slot-aligned, we fall back to per-request grouping (SLOT = 1) so results stay exact.
+  const SLOT_MS = 900000;
+  /** @param {{ since: number, until: number }[]} buckets */
+  const slotFor = buckets => (buckets.every(b => b.since % SLOT_MS === 0 && b.until % SLOT_MS === 0) ? SLOT_MS : 1);
+  /** @param {{ since: number, until: number }[]} buckets @param {number} ts @returns {number} index or -1 */
+  function bucketIndex(buckets, ts) {
+    let a = 0, b = buckets.length - 1;
+    while (a < b) { const mid = (a + b + 1) >> 1; if (buckets[mid].since <= ts) a = mid; else b = mid - 1; }
+    return ts < buckets[a].since || ts >= buckets[a].until ? -1 : a;
+  }
+
+  // series: ONE query for the whole span; slots are bucketed in JS by binary search over
   // the (contiguous, sorted) bucket list. A boundary ts belongs to the later bucket.
   /** @param {{ key: string, since: number, until: number }[]} buckets */
   function series(buckets) {
@@ -242,14 +258,13 @@ function openLedger(opts = {}) {
     }));
     if (!out.length) return out;
     const lo = buckets[0].since, hi = buckets[buckets.length - 1].until;
-    const rows = db.prepare(`SELECT ts, source, attribution, SUM(cost_micros) AS c, COUNT(*) AS n FROM requests
-      WHERE ts >= ? AND ts < ? GROUP BY ts, source, attribution`).all(lo, hi);
+    const slot = slotFor(buckets);
+    const rows = db.prepare(`SELECT ts - (ts % ${slot}) AS slot, source, attribution, SUM(cost_micros) AS c, COUNT(*) AS n
+      FROM requests WHERE ts >= ? AND ts < ? GROUP BY slot, source, attribution`).all(lo, hi);
     for (const r of rows) {
-      const ts = Number(r.ts);
-      let a = 0, b = buckets.length - 1;
-      while (a < b) { const mid = (a + b + 1) >> 1; if (buckets[mid].since <= ts) a = mid; else b = mid - 1; }
-      if (ts < buckets[a].since || ts >= buckets[a].until) continue;
-      const o = out[a], c = Number(r.c);
+      const i = bucketIndex(buckets, Number(r.slot));
+      if (i < 0) continue;
+      const o = out[i], c = Number(r.c);
       o.costMicros += c; o.requests += Number(r.n);
       addTo(o.bySource, r.source, c); addTo(o.byAttribution, r.attribution, c);
     }
@@ -278,24 +293,35 @@ function openLedger(opts = {}) {
     return { rows: list, unattributed: un };
   }
 
+  // Per-project trend for ALL projects in one query. Map: project (null = no project) -> number[].
+  /** @param {{ buckets: { since: number, until: number }[] }} o */
+  function trends(o) {
+    live();
+    const buckets = o.buckets || [];
+    /** @type {Map<string|null, number[]>} */
+    const m = new Map();
+    if (!buckets.length) return m;
+    const slot = slotFor(buckets);
+    const rows = db.prepare(`SELECT sessions.project AS p, requests.ts - (requests.ts % ${slot}) AS slot,
+      SUM(requests.cost_micros) AS c FROM requests
+      LEFT JOIN sessions ON sessions.session_id = requests.session_id
+      WHERE requests.ts >= ? AND requests.ts < ? GROUP BY p, slot`).all(buckets[0].since, buckets[buckets.length - 1].until);
+    for (const r of rows) {
+      const i = bucketIndex(buckets, Number(r.slot));
+      if (i < 0) continue;
+      const p = r.p ?? null;
+      let arr = m.get(p);
+      if (!arr) { arr = buckets.map(() => 0); m.set(p, arr); }
+      arr[i] += Number(r.c);
+    }
+    return m;
+  }
+
   /** @param {{ project: string|null, buckets: { since: number, until: number }[] }} o */
   function trend(o) {
     live();
     const buckets = o.buckets || [];
-    const out = buckets.map(() => 0);
-    if (!buckets.length) return out;
-    const proj = o.project ?? null;
-    const rows = db.prepare(`SELECT requests.ts AS ts, SUM(requests.cost_micros) AS c FROM requests
-      LEFT JOIN sessions ON sessions.session_id = requests.session_id
-      WHERE requests.ts >= ? AND requests.ts < ? AND ${proj === null ? 'sessions.project IS NULL' : 'sessions.project = ?'}
-      GROUP BY requests.ts`).all(...[buckets[0].since, buckets[buckets.length - 1].until].concat(proj === null ? [] : [proj]));
-    for (const r of rows) {
-      const ts = Number(r.ts);
-      let a = 0, b = buckets.length - 1;
-      while (a < b) { const mid = (a + b + 1) >> 1; if (buckets[mid].since <= ts) a = mid; else b = mid - 1; }
-      if (ts >= buckets[a].since && ts < buckets[a].until) out[a] += Number(r.c);
-    }
-    return out;
+    return trends({ buckets }).get(o.project ?? null) || buckets.map(() => 0);
   }
 
   /** @param {{ since: number, until: number, limit?: number }} o */
@@ -303,13 +329,21 @@ function openLedger(opts = {}) {
     live();
     const rawLim = Math.floor(Number(o.limit ?? 10));
     const lim = Math.min(100, Math.max(1, Number.isFinite(rawLim) ? rawLim : 10));
-    // grouped per (prompt, model) in SQL, merged per prompt in JS so models stay a clean distinct list
+    // 1) rank prompt groups by cost in SQL and keep only the top N group keys
+    const top = db.prepare(`SELECT COALESCE(prompt_id, request_key) AS g FROM requests
+      WHERE ts >= ? AND ts < ? GROUP BY g ORDER BY SUM(cost_micros) DESC, MIN(ts) ASC LIMIT ${lim}`).all(o.since, o.until);
+    if (!top.length) return [];
+    // 2) details only for those N keys; grouped per (prompt, model), merged per prompt in JS
+    //    so models stay a clean distinct list
+    const keys = top.map(r => r.g);
     const rows = db.prepare(`SELECT COALESCE(requests.prompt_id, requests.request_key) AS g, requests.model AS model,
       MIN(requests.ts) AS ts, SUM(requests.cost_micros) AS c, COUNT(*) AS n,
       SUM(requests.attribution='explicit') AS ne, SUM(requests.attribution='unknown') AS nu,
       MIN(sessions.project) AS project, MIN(requests.session_id) AS sid
       FROM requests LEFT JOIN sessions ON sessions.session_id = requests.session_id
-      WHERE requests.ts >= ? AND requests.ts < ? GROUP BY g, requests.model`).all(o.since, o.until);
+      WHERE requests.ts >= ? AND requests.ts < ?
+      AND COALESCE(requests.prompt_id, requests.request_key) IN (${keys.map(() => '?').join(',')})
+      GROUP BY g, requests.model`).all(o.since, o.until, ...keys);
     /** @type {Map<string, any>} */
     const m = new Map();
     for (const r of rows) {
@@ -373,7 +407,7 @@ function openLedger(opts = {}) {
   }
 
   prune(retentionDays);
-  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, topPrompts, today, reconcile, prune, close, _db: db };
+  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, topPrompts, today, reconcile, prune, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }

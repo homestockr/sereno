@@ -122,6 +122,17 @@ function cumulativePoints(buckets, midnight, asOf, w, h) {
   return pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
 }
 
+/**
+ * x of the "Now" marker: the real current time across the local day starting at
+ * `midnight`, clamped to the day (a stale series must not push it off the chart).
+ */
+function nowMarkerX(now, midnight, w) {
+  const d = new Date(midnight);
+  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+  const x = ((now - midnight) / (end - midnight)) * w;
+  return Number.isFinite(x) ? Math.min(w, Math.max(0, x)) : 0;
+}
+
 function setupCopy(st) {
   const n = st && st.hookCount;
   const what = Number.isInteger(n) && n > 0 ? 'a statusline and ' + n + ' hooks' : 'a statusline and its hooks';
@@ -220,7 +231,7 @@ function symbolFor(s) {
 
 function metaHtml(s) {
   const ctx = typeof s.contextPct === 'number'
-    ? `<span class="context"><span class="context-track" aria-hidden="true"><i style="width:${s.contextPct}%"></i></span>Context ${s.contextPct}%</span>`
+    ? `<span class="context"><span class="context-track" aria-hidden="true"><i data-w="${s.contextPct}"></i></span>Context ${s.contextPct}%</span>`
     : '<span class="context">Context —</span>';
   const cost = typeof s.costUsd === 'number' ? money(s.costUsd) + ' est.' : '';
   return `<div class="meta">${ctx}<span>${cost}</span></div>`;
@@ -319,6 +330,7 @@ function render() {
     ui.reqCommand.textContent = b.stateArg || b.stateTool || 'Waiting for approval';
     ui.reqMeta.outerHTML = metaHtml(b).replace('class="meta"', 'class="meta" id="request-meta"');
     ui.reqMeta = el('request-meta');
+    applySpendLayout(ui.request);   // data-w geometry (the CSP drops inline style attributes)
 
     // Focusing a terminal needs the session's pid, which only reaches us when the
     // shim posted one. Without it the button would lie, so it is disabled.
@@ -357,6 +369,7 @@ function render() {
     if (expanded) html += tail.map(sessionHtml).join('');
   }
   ui.rows.innerHTML = html;
+  applySpendLayout(ui.rows);
 
   // Footer: every window the payload reports, each named and metered on its own.
   // Collapsing them to max() used to hide the one you were not about to hit,
@@ -438,7 +451,7 @@ function applySpendLayout(root) {
   });
 }
 
-function spendHtml(sp, series) {
+function spendHtml(sp, series, now) {
   const segs = sourceSegments(sp);
   const total = Number(sp.todayMicros) > 0 ? Number(sp.todayMicros) : 0;
   const asOf = series && Number.isFinite(series.asOf) ? series.asOf : Date.now();
@@ -453,8 +466,10 @@ function spendHtml(sp, series) {
   if (series) {
     const pts = cumulativePoints(buckets, midnight, asOf, SPEND_W, SPEND_H);
     const last = pts.split(' ').pop().split(',').map(Number);
-    const flip = last[0] > SPEND_W * 0.8;
-    const np = nowPosition(last[0], last[1]);
+    // x follows the clock (asOf only moves when spend does); y is today's running total.
+    const nowX = nowMarkerX(Number.isFinite(now) ? now : Date.now(), midnight, SPEND_W);
+    const flip = nowX > SPEND_W * 0.8;
+    const np = nowPosition(nowX, last[1]);
     chart = `<div class="spend-chart" role="img" aria-label="${esc(chartLabel)}">
       <svg viewBox="0 0 ${SPEND_W} ${SPEND_H + SPEND_TOP + 2}" focusable="false" aria-hidden="true">
         <line class="spend-base" x1="0" y1="${SPEND_TOP + SPEND_H}" x2="${SPEND_W}" y2="${SPEND_TOP + SPEND_H}" vector-effect="non-scaling-stroke"/>
@@ -772,6 +787,8 @@ connect();
 render();
 refreshWiring().then(refreshSettings);
 setInterval(tick, 500);
+// The Now marker follows the clock: re-render the Today block (no refetch) once a minute.
+setInterval(() => { if (spendMode(snapshot.spend) === 'on') renderSpend(); }, 60000);
 // Cheap enough to re-check: it also catches an unwire done outside the app.
 setInterval(() => { refreshWiring().then(refreshSettings); }, 15000);
 window.addEventListener('resize', reportHeight);

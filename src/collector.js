@@ -82,25 +82,32 @@ function readRaw(req, cap, cb) {
 // matches SIBLING directories that share the prefix, so "/../renderer-something/x"
 // escaped that check and was served. Requiring the separator confines it.
 function serveStatic(res, dir, rel) {
-  try { rel = decodeURIComponent(rel); } catch (_) { /* keep the raw form */ }
-  const file = path.resolve(dir, rel);
-  if (file !== dir && !file.startsWith(dir + path.sep)) {
-    res.writeHead(403).end('forbidden');
-    return;
+  // No synchronous throw may escape: a NUL byte makes fs.readFile throw ERR_INVALID_ARG_VALUE.
+  let file;
+  try {
+    rel = decodeURIComponent(rel);
+    if (rel.includes('\0')) { res.writeHead(400).end('bad request'); return; }
+    file = path.resolve(dir, rel);
+    if (file !== dir && !file.startsWith(dir + path.sep)) {
+      res.writeHead(403).end('forbidden');
+      return;
+    }
+    fs.readFile(file, (err, buf) => {
+      if (err) { res.writeHead(404).end('not found'); return; }
+      const ext = path.extname(file);
+      const headers = {
+        'content-type': TYPES[ext] || 'application/octet-stream',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      };
+      // frame-ancestors is ignored in a meta CSP, so HTML needs it as a real header.
+      if (ext === '.html') headers['content-security-policy'] = "frame-ancestors 'none'";
+      res.writeHead(200, headers);
+      res.end(buf);
+    });
+  } catch (_) {
+    try { if (!res.headersSent) res.writeHead(400).end('bad request'); else res.end(); } catch (_e) {}
   }
-  fs.readFile(file, (err, buf) => {
-    if (err) { res.writeHead(404).end('not found'); return; }
-    const ext = path.extname(file);
-    const headers = {
-      'content-type': TYPES[ext] || 'application/octet-stream',
-      'cache-control': 'no-store',
-      'x-content-type-options': 'nosniff',
-    };
-    // frame-ancestors is ignored in a meta CSP, so HTML needs it as a real header.
-    if (ext === '.html') headers['content-security-policy'] = "frame-ancestors 'none'";
-    res.writeHead(200, headers);
-    res.end(buf);
-  });
 }
 
 const SPEND_RANGES_SERIES = ['24h', '7d', '30d'];
@@ -131,7 +138,10 @@ function createCollector(store, port, opts) {
       };
       spendDay = spendtime.dayStart(now());
     } catch (_) {
-      if (!spendCache || spendCache.unavailable) spendCache = { enabled: true, unavailable: true };   // nothing to keep yet
+      // Keep a stale figure only within the same local day; never present yesterday's as today's.
+      let sameDay = false;
+      try { sameDay = spendDay !== null && spendtime.dayStart(now()) === spendDay; } catch (_) {}
+      if (!spendCache || spendCache.unavailable || !spendCache.enabled || !sameDay) spendCache = { enabled: true, unavailable: true };
     }
   }
   function spendState() {
@@ -249,12 +259,13 @@ function createCollector(store, port, opts) {
       if (m[1] === 'projects') {
         const p = ledger.projects({ since, until });
         const days = spendtime.lastNDays(14, asOf);
+        const tr = ledger.trends({ buckets: days });
         sendJson(res, 200, {
           enabled: true, asOf, range,
           rows: p.rows.map((r) => ({
             project: r.project, costMicros: r.costMicros, requests: r.requests,
             bySource: pick(r.bySource), byAttribution: pick(r.byAttribution),
-            trend: ledger.trend({ project: r.project, buckets: days }),
+            trend: tr.get(r.project ?? null) || days.map(() => 0),
           })),
           unattributed: { costMicros: p.unattributed.costMicros, requests: p.unattributed.requests },
         });
@@ -276,7 +287,7 @@ function createCollector(store, port, opts) {
     }
   }
 
-  const server = http.createServer((req, res) => {
+  function route(req, res) {
     const url = (req.url || '/').split('?')[0];
 
     if (!localOnly(req, res)) return;
@@ -436,6 +447,13 @@ function createCollector(store, port, opts) {
 
     // --- static widget ------------------------------------------------
     serveStatic(res, RENDERER_DIR, url === '/' ? 'index.html' : url.replace(/^\/+/, ''));
+  }
+  // Last line of defence: nothing thrown while routing may take the process down.
+  const server = http.createServer((req, res) => {
+    try { route(req, res); }
+    catch (_) {
+      try { if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' }).end('internal error'); else res.end(); } catch (_e) {}
+    }
   });
   // Slow-client guards: these bound receiving the request, not long-lived SSE responses.
   server.requestTimeout = 30000;
