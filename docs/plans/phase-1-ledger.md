@@ -30,6 +30,24 @@ agents since v1.3.1) and `StopFailure`. Add both. `SubagentStart` has no matcher
 Re-wiring must be idempotent: running it twice adds no duplicates. Test both.
 Check `bin/emit.js` passes these events through unchanged. Don't otherwise touch emit.js.
 
+### Step 0b — Handle `StopFailure` in the store (small)
+
+Step 0 wires `StopFailure`, but `src/store.js` ignores it. A turn that ends on an API
+error then leaves the session stuck on `thinking` or `running` until the next prompt.
+The payload has never been captured (`docs/payloads.md` §6, Gaps), so read nothing
+from it beyond what routing already reads (`session_id`, `agent_id`).
+
+- An untagged `StopFailure` ends the turn: clear `_pending`, then set the state to `idle`.
+- Leave `_agents` untouched. Background subagents can outlive the turn, and without a
+  `background_tasks` list there is no authority to drop them. The next `Stop` reconciles.
+- A tagged `StopFailure` (with `agent_id`) changes no top-level state.
+- It never raises "needs you" and never calls `onBlocked`. A blocked session that gets a
+  `StopFailure` goes to `idle`, and `_blockedNotified` resets as it does on `Stop`.
+- No new widget state and no error UI. That is Phase 2, once a real payload is captured.
+- Tests: running → `StopFailure` → idle with pending cleared; subagent count unchanged;
+  tagged `StopFailure` is a no-op for top-level state; no `onBlocked` call; unknown
+  extra payload fields are ignored.
+
 ### Step 1 — `src/otlp.js`: OTLP/JSON → normalized records (pure, no I/O)
 
 `// @ts-check` + JSDoc. Exports `parseLogs(body)` and `parseTraces(body)`. Neither
