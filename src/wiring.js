@@ -141,6 +141,7 @@ function status(extraShims) {
     foreignStatusLine: sl && !isOurs(sl.command, own) ? sl : null,
     wiredEvents,
     missingEvents: EVENTS.filter((e) => !wiredEvents.includes(e)),
+    hookCount: EVENTS.length,
   };
 }
 
