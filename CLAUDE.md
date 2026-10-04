@@ -90,9 +90,9 @@ Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
 
 ## Roadmap
 
-1. **Spend ledger (in progress).** Plan: `docs/plans/phase-1-ledger.md`.
-   Branch `feat/otlp-ledger`, ships as `2.0.0-alpha.1`.
-2. **Spend in view.** Widget footer total; console Spend tab.
+1. **Spend ledger (shipped `2.0.0-alpha.1`).** Plan: `docs/plans/phase-1-ledger.md`.
+2. **Spend in view (in progress).** Plan: `docs/plans/phase-2-spend-in-view.md`.
+   Branch `feat/spend-in-view`, ships as `2.0.0-alpha.2`.
 3. **Projects + briefs.** Repo poller; per-branch briefs in `.sereno/briefs/`.
 4. **Pipeline.** `pipeline.json` (configurable models per role, presets, fallback
    policy), agent templates, `/ship`, gate files in `.sereno/gates/<review_run_id>.json`.
