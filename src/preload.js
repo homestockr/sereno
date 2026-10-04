@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('sereno', {
   resizeWidthBy: (dx) => ipcRenderer.send('sereno:width-by', dx),
   nudgeZoom: (dir) => ipcRenderer.send('sereno:zoom-by', dir),
   setZoom: (z) => ipcRenderer.send('sereno:zoom-set', z),
+  openConsole: () => ipcRenderer.send('sereno:open-console'),
   focusSession: (pid) => ipcRenderer.invoke('sereno:focus', pid),
 
   // A packaged install has no npm scripts, so setup happens in the UI.

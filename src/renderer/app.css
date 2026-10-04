@@ -465,3 +465,73 @@ html, body { height: 100%; }
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+
+/* ---------- today · estimated usage ---------- */
+
+/* Source colours for the Today bar. app.css is dark-only today, so there is no
+   light variant to keep in step. Chosen from outside the role palette in
+   docs/design/console/style-sheet.html (roles arrive in Phase 4) and never amber,
+   which only ever means a decision is waiting. Blue / orange-brown / violet-grey
+   stay apart under the common colour-vision simulations, and every segment is
+   also named with its percent in the legend, so colour only reinforces. */
+:root {
+  --src-main: #7da7e0;
+  --src-subagent: #d4845c;
+  --src-auxiliary: #a99fd0;
+  --src-unattributed: #8b94a3;
+  --src-hatch: #202327;
+}
+
+.spend { margin-top: 12px; padding-top: 11px; border-top: 1px solid #ffffff0f; }
+.spend-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  color: #c2c6cc;
+  font-size: 12px;
+}
+.spend-total { color: var(--text); font-variant-numeric: tabular-nums; }
+.spend-hint { margin: 0; color: #b0b5bd; font-size: 11px; }
+
+.spend-chart { position: relative; margin-top: 6px; }
+.spend-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.spend-base { stroke: #40454b; stroke-width: 1; }
+.spend-line { fill: none; stroke: #e6e8ec; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.spend-dot { fill: #e6e8ec; }
+.spend-now { position: absolute; margin-left: 8px; font-size: 11px; line-height: 16px; color: #c2c6cc; }
+.spend-now.flip { margin-left: -8px; transform: translateX(-100%); }
+.spend-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  color: #b0b5bd;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.spend-bar { display: flex; height: 6px; margin-top: 8px; gap: 1px; overflow: hidden; border-radius: 1px; }
+.spend-bar .seg { display: block; height: 100%; flex: none; }
+.seg-main { background: var(--src-main); }
+.seg-subagent { background: var(--src-subagent); }
+.seg-auxiliary { background: var(--src-auxiliary); }
+/* Grey hatch: unattributed spend is never drawn as a solid, attributed colour. */
+.seg-unattributed {
+  background: repeating-linear-gradient(135deg, transparent 0 3px, var(--src-hatch) 3px 4px), var(--src-unattributed);
+}
+.spend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-top: 6px;
+  color: #b0b5bd;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.spend-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.spend-legend .sw { display: inline-block; width: 9px; height: 9px; flex: none; }
+
+.console-line { margin-top: 11px; padding-top: 9px; border-top: 1px solid #ffffff0f; }
+.console-line a { color: #c2c6cc; text-decoration: none; }
+.console-line a:hover { color: #fff; text-decoration: underline; }
+.console-line a:focus-visible { outline: 2px solid #f3cc91; outline-offset: 3px; }

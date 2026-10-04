@@ -19,6 +19,14 @@ const ledgerLife = require('./ledger-life.js');
 
 const PORT = Number(process.env.CLAUDE_HUD_PORT) || 8787;
 
+const isWebUrl = (u) => { try { return /^https?:$/.test(new URL(u).protocol); } catch (_) { return false; } };
+
+/** The console is a browser tab. The URL is built here from PORT; no renderer chooses it. */
+function openConsole() {
+  const url = `http://127.0.0.1:${PORT}/console`;
+  if (isWebUrl(url)) shell.openExternal(url);
+}
+
 // Must stay in sync with build.appId in package.json — electron-builder stamps
 // exactly this onto the Start Menu and desktop shortcuts it creates.
 const APP_USER_MODEL_ID = 'com.sereno.widget';
@@ -232,7 +240,6 @@ function createWindow() {
    *  - navigation away from the collector origin is refused outright, since the
    *    destination would inherit this window's preload bridge.
    */
-  const isWebUrl = (u) => { try { return /^https?:$/.test(new URL(u).protocol); } catch (_) { return false; } };
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isWebUrl(url)) shell.openExternal(url);
@@ -419,6 +426,7 @@ function rebuildTrayMenu() {
       enabled: ledgerOn,
       click: () => (wiring.telemetryWired() ? offerTelemetryUnwiring() : offerTelemetryWiring()),
     },
+    { label: 'Open console', click: openConsole },
     { type: 'separator' },
     { label: 'Quit Sereno', click: () => app.quit() },
   ]);
@@ -700,6 +708,8 @@ if (CLI_UNWIRE) {
 
   /* Wiring, driven from the UI: a packaged install has no npm scripts to run. */
 
+
+  ipcMain.on('sereno:open-console', () => openConsole());
 
   ipcMain.handle('sereno:settings', () => {
     try { return Object.assign({ ok: true }, config.read()); }

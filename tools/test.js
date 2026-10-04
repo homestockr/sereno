@@ -3742,6 +3742,110 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 2 step 2: widget footer ---- */
+  {
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const lift = (name) => app.match(new RegExp('function ' + name + '[\\s\\S]*?\\n}'))[0];
+    const fns = new Function([lift('estMoney'), lift('largestRemainder'), lift('sourceSegments'),
+      lift('barAriaLabel'), lift('cumulativePoints'), lift('spendMode'),
+      'return { estMoney, largestRemainder, sourceSegments, barAriaLabel, cumulativePoints, spendMode };'].join('\n'))();
+
+    test('estMoney: two decimals, always est., bad input is $0.00', () => {
+      assert.strictEqual(fns.estMoney(12340000), '$12.34 est.');
+      assert.strictEqual(fns.estMoney(0), '$0.00 est.');
+      assert.strictEqual(fns.estMoney(4000), '$0.00 est.');
+      assert.strictEqual(fns.estMoney(1250000000), '$1250.00 est.');
+      for (const bad of [NaN, Infinity, undefined, null, 'x', -5]) assert.strictEqual(fns.estMoney(bad), '$0.00 est.');
+    });
+
+    test('largestRemainder sums to exactly 100, or all zero', () => {
+      for (const v of [[1, 1, 1], [1, 2, 3, 4], [33, 33, 34], [1, 0, 0], [5, 5], [0.1, 0.2, 0.7], [1, 1, 1, 1, 1, 1, 1]]) {
+        const r = fns.largestRemainder(v);
+        assert.strictEqual(r.reduce((a, b) => a + b, 0), 100, JSON.stringify(v));
+        assert.ok(r.every(Number.isInteger));
+      }
+      assert.deepStrictEqual(fns.largestRemainder([1, 1, 1]), [34, 33, 33]);
+      assert.deepStrictEqual(fns.largestRemainder([0, 0]), [0, 0]);
+      assert.deepStrictEqual(fns.largestRemainder([]), []);
+    });
+
+    test('sourceSegments: ordered, unattributed last and carved out of source', () => {
+      const segs = fns.sourceSegments({
+        todayMicros: 10000000,
+        bySource: { main: 6000000, subagent: 3000000, auxiliary: 1000000 },
+        byAttribution: { explicit: 8000000, unknown: 2000000 },
+      });
+      assert.deepStrictEqual(segs.map((x) => x.key), ['main', 'subagent', 'auxiliary', 'unattributed']);
+      assert.deepStrictEqual(segs.map((x) => x.micros), [6000000, 1000000, 1000000, 2000000]);
+      assert.strictEqual(segs.reduce((a, b) => a + b.pct, 0), 100);
+      assert.strictEqual(segs.reduce((a, b) => a + b.micros, 0), 10000000);
+      assert.deepStrictEqual(fns.sourceSegments({ todayMicros: 0, bySource: {}, byAttribution: {} }), []);
+      assert.deepStrictEqual(fns.sourceSegments(undefined), []);
+      const only = fns.sourceSegments({ bySource: { main: 5 }, byAttribution: { explicit: 5 } });
+      assert.deepStrictEqual(only.map((x) => [x.key, x.pct]), [['main', 100]]);
+    });
+
+    test('cumulativePoints: monotonic, in range, today only, hours after now undrawn', () => {
+      const mid = new Date(2026, 9, 4).getTime();
+      const H = 3600000;
+      const mk = (hr, c) => ({ since: mid + hr * H, until: mid + (hr + 1) * H, costMicros: c });
+      const buckets = [mk(-3, 9000000), mk(1, 1000000), mk(0, 2000000), mk(5, 0), mk(6, 3000000)];
+      const asOf = mid + 6.5 * H;
+      const pts = fns.cumulativePoints(buckets, mid, asOf, 360, 40)
+        .split(' ').map((p) => p.split(',').map(Number));
+      assert.strictEqual(pts[0][0], 0);
+      assert.strictEqual(pts[0][1], 40);                      // nothing spent at 00:00
+      for (let i = 1; i < pts.length; i++) {
+        assert.ok(pts[i][1] <= pts[i - 1][1], 'y never rises (cumulative never falls)');
+        assert.ok(pts[i][0] >= pts[i - 1][0]);
+      }
+      for (const [x, y] of pts) { assert.ok(x >= 0 && x <= 360); assert.ok(y >= 0 && y <= 40); }
+      const last = pts[pts.length - 1];
+      assert.strictEqual(last[1], 0);                         // yesterday's bucket is not in the total
+      assert.ok(Math.abs(last[0] - 360 * 6.5 / 24) < 0.2);    // ends at "now", not at 24:00
+      const empty = fns.cumulativePoints([], mid, asOf, 360, 40);
+      assert.ok(empty.split(' ').every((p) => p.endsWith(',40.0')));
+    });
+
+    test('every money string the footer can produce ends in est.', () => {
+      for (const m of [0, 1, 999, 10000, 12340000, 987654321, NaN, undefined]) {
+        assert.match(fns.estMoney(m), /^\$\d+\.\d\d est\.$/);
+      }
+      const segs = fns.sourceSegments({ bySource: { main: 3000000, subagent: 1500000, auxiliary: 12 }, byAttribution: { unknown: 700000 } });
+      const label = fns.barAriaLabel(segs);
+      for (const part of label.split('; ')) assert.match(part, /est\.$/);
+      assert.strictEqual((label.match(/\$/g) || []).length, (label.match(/est\./g) || []).length);
+      assert.strictEqual(fns.barAriaLabel([]), 'No estimated spend today');
+      // the list-price line and the Today header are both labelled at the source
+      assert.match(app, /money\(snapshot\.totalCost\) \+ ' list-price est\.'/);
+      assert.match(app, /esc\(estMoney\(total\)\)/);
+    });
+
+    test('footer fallback: copy, gating and a single fetch path', () => {
+      assert.match(app, /Waiting for telemetry from new Claude Code sessions/);
+      assert.match(app, /Spend history unavailable/);
+      assert.strictEqual(fns.spendMode(undefined), 'off');
+      assert.strictEqual(fns.spendMode({ enabled: false }), 'off');
+      assert.strictEqual(fns.spendMode({ enabled: true, unavailable: true }), 'unavailable');
+      assert.strictEqual(fns.spendMode({ enabled: true, hasTelemetry: false }), 'waiting');
+      assert.strictEqual(fns.spendMode({ enabled: true, hasTelemetry: true }), 'on');
+      assert.strictEqual((app.match(/fetch\(/g) || []).length, 1);
+      assert.match(app, /fetch\('\/api\/spend\/series\?range=24h'\)/);
+    });
+
+    test('open console: main builds the URL, preload only signals, tray item exists', () => {
+      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const pre = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+      assert.match(main, /http:\/\/127\.0\.0\.1:\$\{PORT\}\/console/);
+      assert.match(main, /ipcMain\.on\('sereno:open-console'/);
+      assert.match(main, /label: 'Open console'/);
+      assert.match(main, /if \(isWebUrl\(url\)\) shell\.openExternal\(url\)/);
+      assert.match(pre, /openConsole: \(\) => ipcRenderer\.send\('sereno:open-console'\)/);
+      const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+      assert.match(html, /<a id="open-console"[^>]*href="\/console"[^>]*target="_blank"[^>]*rel="noopener"/);
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
