@@ -1998,6 +1998,73 @@ test('missing rate_limits degrades instead of throwing', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
+  /* ---- Phase 1 step 0b: StopFailure ---- */
+  {
+    const sf = (id, extra) => H('StopFailure', sid(id, extra));
+    const running = (st) => feed(st, [H('PreToolUse', sid('x', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't1' }))]);
+
+    test('StopFailure: running -> idle, pending cleared, unknown fields ignored', () => {
+      const s = new Store();
+      running(s);
+      assert.strictEqual(s.sessions.get('x').state, 'running');
+      feed(s, [sf('x', { error: 'rate_limit', unknown_field: { a: 1 } })]);
+      const r = s.sessions.get('x');
+      assert.strictEqual(r.state, 'idle');
+      assert.strictEqual(r._pending.size, 0);
+      assert.strictEqual(r.stateTool, '');
+    });
+
+    test('StopFailure: leaves subagents alone and ignores a background_tasks list', () => {
+      const s = new Store();
+      feed(s, [
+        H('PreToolUse', sid('x', { agent_id: 'a1', agent_type: 'Explore', tool_name: 'Read', tool_use_id: 'u1' })),
+        H('PreToolUse', sid('x', { agent_id: 'a2', agent_type: 'Plan', tool_name: 'Read', tool_use_id: 'u2' })),
+      ]);
+      running(s);
+      feed(s, [sf('x')]);
+      assert.strictEqual(s.sessions.get('x').subagents, 2);
+      feed(s, [sf('x', { background_tasks: [] })]);
+      assert.strictEqual(s.sessions.get('x').subagents, 2, 'an empty list must not prune');
+      feed(s, [sf('x', { background_tasks: [bgTask('a1'), bgTask('a3')] })]);
+      assert.deepStrictEqual([...s.sessions.get('x')._agents.keys()], ['a1', 'a2'], 'a list must not prune or add');
+    });
+
+    test('StopFailure: tagged is a no-op for top-level state and admits no ghost subagent', () => {
+      const s = new Store();
+      running(s);
+      feed(s, [H('PreToolUse', sid('x', { agent_id: 'a1', agent_type: 'Explore', tool_name: 'Read', tool_use_id: 'u1' }))]);
+      const r = s.sessions.get('x');
+      const before = { state: r.state, tool: r.stateTool, since: r.stateSince, pending: r._pending.size };
+      feed(s, [sf('x', { agent_id: 'a1' }), sf('x', { agent_id: 'never-seen' })]);
+      assert.strictEqual(r.state, before.state);
+      assert.strictEqual(r.stateTool, before.tool);
+      assert.strictEqual(r.stateSince, before.since);
+      assert.strictEqual(r._pending.size, before.pending);
+      assert.deepStrictEqual([...r._agents.keys()], ['a1'], 'unseen agent_id must not become a subagent');
+      assert.strictEqual(r.subagents, 1);
+      assert.strictEqual(r._agents.get('a1').tool, 'Read', 'existing entry untouched');
+    });
+
+    test('StopFailure: never calls onBlocked; blocked -> idle, and a later prompt alerts again', () => {
+      const s = new Store();
+      const fired = [];
+      s.onBlocked = (x) => fired.push(x);
+      running(s);
+      feed(s, [sf('x')]);
+      assert.strictEqual(fired.length, 0, 'StopFailure alone must not alert');
+      running(s);
+      feed(s, [H('Notification', sid('x', { notification_type: 'permission_prompt' }))]);
+      assert.strictEqual(fired.length, 1);
+      feed(s, [sf('x')]);
+      assert.strictEqual(s.sessions.get('x').state, 'idle');
+      assert.strictEqual(s.sessions.get('x')._blockedNotified, false);
+      assert.strictEqual(fired.length, 1, 'StopFailure must not alert');
+      running(s);
+      feed(s, [H('Notification', sid('x', { notification_type: 'permission_prompt' }))]);
+      assert.strictEqual(fired.length, 2, 'a new permission prompt after StopFailure alerts again');
+    });
+  }
+
   /* ---- Phase 1 step 1: otlp.js ---- */
   {
     const otlp = require('../src/otlp.js');

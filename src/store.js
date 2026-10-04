@@ -167,6 +167,13 @@ class Store {
 
     // --- subagent bookkeeping: tagged events never touch top-level state ---
     if (agentId) {
+      if (event === 'StopFailure') {
+        // Says nothing about this subagent (the payload was never captured, §6
+        // Gaps), and the generic branch below would admit an unseen agent_id as a
+        // new row. Touch nothing.
+        this.onChange();
+        return;
+      }
       if (event === 'SubagentStop') {
         s._agents.delete(agentId);
         // Re-set so the entry is the newest, keeping eviction oldest-first.
@@ -325,6 +332,18 @@ class Store {
         this._setState(s, 'idle');
         break;
       }
+
+      case 'StopFailure':
+        // The turn ended on an API error. Nothing else is read from the payload
+        // (never captured, docs/payloads.md §6 Gaps). Deliberately not Stop's
+        // case: without an authoritative background_tasks list there is no
+        // grounds to drop subagents, so _agents is left for the next Stop to
+        // reconcile, and any background_tasks on this payload is ignored. Never
+        // raises "needs you"; a blocked session simply goes idle, which also
+        // resets _blockedNotified via _setState.
+        s._pending.clear();
+        this._setState(s, 'idle');
+        break;
 
       case 'SubagentStop':
         // Untagged SubagentStop: nothing reliable to remove, leave state alone.
