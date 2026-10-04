@@ -39,7 +39,7 @@ npm run dist        # Windows installer + zip
 - **Keep the command shim.** Do not switch to HTTP hooks: the shim reads `CLAUDE_PID`
   (for "Review in terminal") and auto-launches on `SessionStart`.
 - **No runtime dependencies beyond Electron.** Planned exceptions only: `uPlot` vendored
-  as one file for charts; `better-sqlite3` only if `node:sqlite` fails in Electron 44.
+  as one file for charts. SQLite comes from the built-in `node:sqlite`.
 - **Collector stays on `127.0.0.1:8787`** with its Host/Origin checks. Not 4318.
 - **Only untagged events drive top-level session state.** Subagent events arrive under
   the parent `session_id` with `agent_id`.
@@ -81,7 +81,10 @@ Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
 
 ### Before starting Phase 1
 
-- Test `node:sqlite` in the packaged Electron build and under `npm run serve`.
+- ~~Test `node:sqlite`~~ Done 2026-10-04: works in Electron 44.3.0 (Node 24.20, SQLite 3.53),
+  both as Node and in the main process, with WAL and checkpoint-then-close. No native dep.
+  `npm run serve` needs Node >= 22.13 (sqlite unflagged there); it logs an
+  ExperimentalWarning, which is fine outside the shim. Still confirm once in a Windows build.
 - Re-probe with `tools/dump.js` on the current Claude Code: `SubagentStart` and
   `StopFailure` (not seen in 2.1.270), and whether hook `agent_id` equals the trace
   span `agent_id`.
