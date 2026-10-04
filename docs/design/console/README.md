@@ -1,8 +1,8 @@
 # Console mockups
 
-Design baseline for the Sereno console (spec phases 2–4). Static HTML at 1440×900:
-open any file in a browser. PNGs are renders of the same files. Sample data is
-illustrative.
+Design baseline for the Sereno console and widget (spec phases 2–4). Static HTML at
+1440×900: open any file in a browser. PNGs are renders of the same files. Sample data
+is illustrative.
 
 | Screen | File | Shows |
 |---|---|---|
@@ -10,8 +10,12 @@ illustrative.
 | Projects, calm | `projects-calm.html` | Nothing needs you: the panel goes quiet and keeps the activity feed |
 | Projects, light theme | `projects-light.html` | Same screen on the light palette |
 | Pipeline | `pipeline.html` | Each task as Plan → Build → Review → Merge, review runs, signals with sample counts, role routing |
+| Pipeline signals | `pipeline-detail.html` | Current gate state per project, 30-day gate runs, outcomes (n=20), spend share by role, Default vs Lean preset |
 | Spend | `spend.html` | Daily cost by role, projects × roles with attribution split, top 10 costliest prompts |
 | Session timeline | `session-timeline.html` | One session as a trace waterfall with permission waits and gate outcomes |
+| Widget | `widget-footer.html` | The 360px widget in three states: calm, repair, decision. Spend joins the footer |
+| Style sheet | `style-sheet.html` | Role colours (dark/light), attribution fills, gate shapes, amber, type, spacing, live-state shapes |
+| Colour check | `role-colour-cvd.png` | Role colours under protan, deutan and tritan simulation (Machado, severity 100) |
 
 ## Rules these mockups settle
 
@@ -31,12 +35,14 @@ illustrative.
 - **Rates and shares carry n.** Pipeline numbers describe; they don't grade.
 - **No prompt text anywhere.** "Top 10 costliest prompts" lists time, project,
   session, first tool, cost, model and attribution.
-- **Minimum text size 11px.**
+- **Minimum text size 11px,** in the console and the widget.
+- **The widget keeps what v1.3 shows** (context bars, 5-hour/7-day limits); estimated
+  spend is an added footer, and the amber banner sits under the header.
 
-## Not yet revised
+## Colour check
 
-The widget footer (keep the existing 5-hour/7-day meters and context bars; the amber
-banner stays under the header) and the one-page style sheet still need a pass in this
-layout.
+Role colours stay distinguishable in all three simulations on dark. On light, Scribe
+and Red team move close together under deutan, so role labels must always accompany
+colour (they do on every screen).
 
 Generated with GPT 6.1 Sol from the spec, then revised in review (2026-10-04).
