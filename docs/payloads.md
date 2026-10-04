@@ -255,13 +255,13 @@ fallback for older versions.
 
 Up to v1.3.0, `store.js` treated `Stop` as "no subagent can outlive the turn": it
 cleared the agent map and set the row idle, so a background subagent's row read idle
-while work continued. Fixed on `fix/background-subagents`: `Stop.background_tasks`
+while work continued. Fixed after v1.3.0: `Stop.background_tasks`
 decides what stays, and is treated as authoritative. The `background_tasks` list on a
 `SubagentStop` payload can be stale (it listed the stopping agent as `running`); the
 one on `Stop` has matched reality in every capture.
 
 **Resumed subagents reuse their `agent_id`.** Per the sub-agents docs, a resume starts
-a new run under the same id. Stop-tombstones therefore expire after 30 s, and a
+a new run under the same id. A stop-tombstone therefore suppresses that id's events for only 30 s, and a
 `SubagentStart` or a `Stop` listing the id re-admits it at once. Whether
 `SubagentStart` fires on resume is not yet captured.
 

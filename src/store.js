@@ -284,6 +284,9 @@ class Store {
         // the same agent_id, possibly seconds after it stopped. The only stale
         // list ever captured rode on a SubagentStop payload, which is not read;
         // Stop's own list has always matched reality (docs/payloads.md §6).
+        // If a stale list ever did revive a finished subagent, the ghost lasts
+        // only until the next Stop: a finished background subagent reports back
+        // as a <task-notification> turn whose Stop carries the updated list.
         //
         // With no list (2.1.270 and earlier) nothing can outlive the turn, so
         // _agents is cleared as before. _stopped is deliberately kept either
