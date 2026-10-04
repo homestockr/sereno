@@ -3505,7 +3505,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual((await post('/v1/logs', FIX())).status, 200);
 
         const t = await getJ('/api/spend/today');
-        checkKeys(t, ['status', 'enabled', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution', 'unattributedN'], 'today');
+        checkKeys(t, ['status', 'enabled', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution', 'unattributedN', 'hasTelemetry'], 'today');
         assert.strictEqual(t.enabled, true); assert.strictEqual(t.asOf, NOW0); assert.strictEqual(t.day, '2026-06-10');
         assert.strictEqual(t.costMicros, 8000); assert.strictEqual(t.requests, 2);
         assert.strictEqual(t.unattributedN, 1);
@@ -3685,7 +3685,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         c._tickSpend();
         assert.strictEqual(calls, before + 1, 'new day: tick recomputes');
         const st = JSON.parse((await get('/state')).body);
-        assert.strictEqual(st.spend.todayMicros, 0); assert.strictEqual(st.spend.hasTelemetry, false);
+        assert.strictEqual(st.spend.todayMicros, 0); assert.strictEqual(st.spend.hasTelemetry, true);   // telemetry has arrived, just none today
         c._tickSpend();
         assert.strictEqual(calls, before + 1, 'the tick recomputes once per day');
         c.setLedger(null);
@@ -3852,7 +3852,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
     const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
     const names = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry',
-      'summaryLine', 'attributionSplit', 'formatTime', 'projectLabel', 'syncLabel', 'sparkPoints', 'pageState'];
+      'summaryLine', 'attributionSplit', 'formatTime', 'projectLabel', 'syncLabel', 'sparkPoints', 'pageState', 'noSpendYet'];
     const lifted = (src) => names.filter((n) => new RegExp('function ' + n + '\\(').test(src))
       .map((n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
     const C = new Function(lifted(cjs).join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
@@ -4207,7 +4207,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const SPEND_ROUTES = ['/api/spend/today', '/api/spend/series?range=7d', '/api/spend/series?range=24h',
       '/api/spend/projects', '/api/spend/top-prompts'];
     // every key that may appear in an /api/spend/* body at any depth (the Step 1 documented shapes)
-    const ALLOWED = new Set(['status', 'enabled', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution',
+    const ALLOWED = new Set(['status', 'enabled', 'hasTelemetry', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution',
       'unattributedN', 'range', 'buckets', 'key', 'since', 'until', 'rows', 'unattributed', 'project', 'trend', 'ts',
       'sessionShort', 'models', 'attribution']);
     const LEAF_MAPS = { bySource: ['main', 'subagent', 'auxiliary'], byAttribution: ['explicit', 'unknown'] };
@@ -4562,6 +4562,92 @@ test('missing rate_limits degrades instead of throwing', () => {
       }
       assert.match(appSrc, /<i data-w="\$\{s\.contextPct\}"><\/i>/);
       assert.match(appSrc, /applySpendLayout\(ui\.rows\)/);
+    });
+  }
+
+  /* ---- Phase 2: red-team re-run fixes ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const lf2 = (src, n) => { const a = src.indexOf('function ' + n + '('); return src.slice(a, src.indexOf('\n}', a) + 2); };
+    const app2 = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const con2 = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const rawGet2 = (port, p) => new Promise((resolve) => {
+      http.get({ host: '127.0.0.1', port, path: p, agent: false }, (r) => {
+        let d = ''; r.on('data', (c) => { d += c; }); r.on('end', () => resolve({ status: r.statusCode, body: d }));
+      }).on('error', () => resolve({ status: 0, body: '' }));
+    });
+
+    test('spendtime: hourBuckets keeps nowMs in the newest bucket on DST fall-back days (skipped if TZ is not honoured)', () => {
+      for (const [tz, iso] of [['America/New_York', '2026-11-01T06:30:00Z'], ['Europe/London', '2026-10-25T01:30:00Z']]) {
+        const code = 'const s=require(' + JSON.stringify(path.join(ROOT, 'src', 'spendtime.js')) + ');'
+          + 'const n=Date.parse(' + JSON.stringify(iso) + ');const b=s.hourBuckets(n);const l=b[b.length-1];'
+          + 'let ok=b.length===24&&n>=l.since&&n<l.until;'
+          + 'for(let i=1;i<b.length;i++)if(b[i].since!==b[i-1].until)ok=false;'
+          + 'const p=s.dayBounds(Date.parse("2026-03-08T12:00:00Z"));console.log(ok,(p.until-p.since)/3600000)';
+        const r = spawnSync(process.execPath, ['-e', code], { env: Object.assign({}, process.env, { TZ: tz }), encoding: 'utf8' });
+        const out = (r.stdout || '').trim();
+        const probe = spawnSync(process.execPath, ['-e', 'console.log(new Date(2026,0,15).getTimezoneOffset())'],
+          { env: Object.assign({}, process.env, { TZ: tz }), encoding: 'utf8' }).stdout.trim();
+        const want = tz === 'Europe/London' ? '0' : '300';
+        if (probe !== want) { console.log('       (note: TZ=' + tz + ' not honoured here, offset "' + probe + '"; DST bucket check skipped)'); continue; }
+        assert.ok(out.startsWith('true'), tz + ': nowMs outside the newest bucket or buckets not contiguous: ' + out);
+      }
+    });
+
+    await atest('collector: /state answers 500, not an empty 200, when snapshot throws', async () => {
+      const PORT = 8862;
+      const store = new Store();
+      store.snapshot = () => { throw new Error('boom'); };
+      const c = createCollector(store, PORT);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      try {
+        const r = await rawGet2(PORT, '/state');
+        assert.strictEqual(r.status, 500);
+        const e = await rawGet2(PORT, '/events');
+        assert.strictEqual(e.status, 500);
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+    });
+
+    await atest('spend: ledger with only yesterday rows is telemetry-on with a $0.00 est. widget footer', async () => {
+      const PORT = 8863;
+      const clock = new Date(2026, 5, 10, 13, 0).getTime();
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      const c = createCollector(new Store(), PORT, { ledger: l, now: () => clock });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      try {
+        assert.strictEqual(l.hasAny(), false);
+        let st = JSON.parse((await rawGet2(PORT, '/state')).body);
+        assert.strictEqual(st.spend.hasTelemetry, false);
+        l.ingestRequests([{ requestKey: 'y1', requestId: 'y1', sessionId: 's', promptId: null, ts: clock - 86400000,
+          model: 'm', querySource: null, source: 'main', agentName: null, inputTokens: 1, outputTokens: 1,
+          cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 5000, durationMs: 0 }]);
+        assert.strictEqual(l.hasAny(), true);
+        c.setLedger(l);   // same trigger as a settings change; recomputes the cached figure
+        st = JSON.parse((await rawGet2(PORT, '/state')).body);
+        assert.strictEqual(st.spend.hasTelemetry, true);
+        assert.strictEqual(st.spend.todayMicros, 0);
+        const t = JSON.parse((await rawGet2(PORT, '/api/spend/today')).body);
+        assert.strictEqual(t.hasTelemetry, true); assert.strictEqual(t.requests, 0);
+
+        const W = new Function('const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;\n'
+          + ['estMoney', 'esc', 'largestRemainder', 'sourceSegments', 'barAriaLabel', 'cumulativePoints', 'segmentWidths',
+            'nowPosition', 'nowMarkerX', 'spendMode', 'spendHtml'].map((n) => lf2(app2, n)).join('\n')
+          + '\nreturn { spendMode, spendHtml };')();
+        assert.strictEqual(W.spendMode(st.spend), 'on');
+        const series = JSON.parse((await rawGet2(PORT, '/api/spend/series?range=24h')).body);
+        assert.ok(W.spendHtml(st.spend, series, clock).includes('$0.00 est.'));
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+
+    test('console: noSpendYet is true only for a ledger with no requests at all', () => {
+      const C = new Function(['pageState', 'noSpendYet'].map((n) => lf2(con2, n)).join('\n') + '\nreturn { pageState, noSpendYet };')();
+      const zero = { enabled: true, hasTelemetry: false, requests: 0 };
+      assert.strictEqual(C.noSpendYet(zero, { buckets: [{ requests: 0 }] }, { rows: [] }), true);
+      assert.strictEqual(C.noSpendYet(zero, { buckets: [] }, { rows: [{ requests: 0 }] }), true);
+      // month empty (new month), 30d series has requests: normal page
+      assert.strictEqual(C.noSpendYet(zero, { buckets: [{ requests: 0 }, { requests: 3 }] }, { rows: [] }), false);
+      assert.strictEqual(C.noSpendYet({ enabled: true, hasTelemetry: true, requests: 0 }, { buckets: [] }, { rows: [] }), false);
+      assert.strictEqual(C.pageState([{ status: 200, body: zero }]), null);
     });
   }
 

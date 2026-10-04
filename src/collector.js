@@ -128,13 +128,14 @@ function createCollector(store, port, opts) {
     if (!ledger) { spendCache = { enabled: false }; spendDay = spendtime.dayStart(now()); return; }
     try {
       const t = ledger.today(now());
+      const any = ledger.hasAny();
       spendCache = {
         enabled: true,
         todayMicros: t.costMicros,
         bySource: Object.assign({}, t.bySource),
         byAttribution: Object.assign({}, t.byAttribution),
         unattributedN: t.unattributedN,
-        hasTelemetry: t.requests > 0,
+        hasTelemetry: any === true,
       };
       spendDay = spendtime.dayStart(now());
     } catch (_) {
@@ -231,8 +232,9 @@ function createCollector(store, port, opts) {
     try {
       if (m[1] === 'today') {
         const t = ledger.today(asOf);
+        const hasTelemetry = ledger.hasAny() === true;
         sendJson(res, 200, {
-          enabled: true, asOf, day: t.day, costMicros: t.costMicros, requests: t.requests,
+          enabled: true, hasTelemetry, asOf, day: t.day, costMicros: t.costMicros, requests: t.requests,
           bySource: pick(t.bySource), byAttribution: pick(t.byAttribution), unattributedN: t.unattributedN,
         });
         return;
@@ -418,6 +420,7 @@ function createCollector(store, port, opts) {
         res.writeHead(503, { 'content-type': 'text/plain' }).end('too many subscribers');
         return;
       }
+      const first = 'data: ' + JSON.stringify(snapshot()) + '\n\n';   // before writeHead: a throw is the router's 500
       res.writeHead(200, {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache, no-transform',
@@ -425,7 +428,7 @@ function createCollector(store, port, opts) {
         'x-accel-buffering': 'no',
       });
       res.write('retry: 2000\n\n');
-      try { res.write('data: ' + JSON.stringify(snapshot()) + '\n\n'); } catch (_) {}
+      try { res.write(first); } catch (_) {}
       clients.add(res);
 
       const hb = setInterval(() => {
@@ -440,8 +443,9 @@ function createCollector(store, port, opts) {
     }
 
     if (url === '/state') {
+      const body = JSON.stringify(snapshot());   // build first: a throw becomes the router's 500
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(snapshot()));
+      res.end(body);
       return;
     }
 

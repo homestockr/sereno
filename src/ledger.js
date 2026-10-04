@@ -374,6 +374,12 @@ function openLedger(opts = {}) {
     };
   }
 
+  /** True once any request has ever been recorded (not just today). */
+  function hasAny() {
+    live();
+    return db.prepare('SELECT 1 FROM requests LIMIT 1').get() !== undefined;
+  }
+
   /** @param {string} sessionId */
   function reconcile(sessionId) {
     live();
@@ -407,7 +413,7 @@ function openLedger(opts = {}) {
   }
 
   prune(retentionDays);
-  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, topPrompts, today, reconcile, prune, close, _db: db };
+  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, topPrompts, today, hasAny, reconcile, prune, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }

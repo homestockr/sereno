@@ -174,6 +174,16 @@ function pageState(resps) {
   return null;
 }
 
+/** True only when the ledger has never recorded a request (not merely none today or this month). */
+function noSpendYet(today, series, projects) {
+  if (today && today.hasTelemetry === true) return false;
+  if (today && Number(today.requests) > 0) return false;
+  const rows = projects && Array.isArray(projects.rows) ? projects.rows : [];
+  if (rows.some((r) => Number(r.requests) > 0)) return false;
+  const buckets = series && Array.isArray(series.buckets) ? series.buckets : [];
+  return !buckets.some((b) => Number(b.requests) > 0);
+}
+
 /** Singular/plural text for the amber pill next to the page title. */
 function pillText(count) {
   const n = Number(count) > 0 ? Math.floor(Number(count)) : 0;
@@ -442,8 +452,7 @@ function render() {
     return;
   }
   setHtml(side, esc(estMoney(state.today.costMicros)) + ' today');
-  const monthRequests = ((state.projects.rows) || []).reduce((a, r) => a + (Number(r.requests) || 0), 0);
-  if (!(Number(state.today.requests) > 0) && monthRequests === 0) {
+  if (noSpendYet(state.today, state.series, state.projects)) {
     setHtml(view, panel('No spend recorded yet', 'Spend appears once Claude Code sessions send telemetry. Wire it from the tray: Wire telemetry…'));
     return;
   }

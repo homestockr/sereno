@@ -48,8 +48,12 @@ function lastNDays(n, nowMs) {
  */
 function hourBuckets(nowMs) {
   const d = new Date(nowMs);
-  const last = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()).getTime();
+  let last = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()).getTime();
   const H = 3600000;
+  // On a DST fall-back day, during the second pass through the repeated hour, the Date
+  // constructor resolves the local hour to its first occurrence, so nowMs would fall
+  // after the newest bucket. Step forward by real hours until nowMs is inside it.
+  while (last + H <= nowMs) last += H;
   const out = [];
   for (let i = 23; i >= 0; i--) {
     const since = last - i * H;
