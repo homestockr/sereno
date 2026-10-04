@@ -3449,6 +3449,299 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 2 step 1: spend API ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const PORT = 8801;
+    const NOW0 = new Date(2026, 5, 10, 13, 45).getTime();
+    let clock = NOW0;
+    const rq = (opts, body) => new Promise((resolve) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port: PORT, agent: false }, opts), (res) => {
+        let d = '';
+        res.on('data', (c) => { d += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d, type: res.headers['content-type'] }));
+      });
+      r.on('error', () => resolve({ status: 0, body: '', type: '' }));
+      r.end(body);
+    });
+    const get = (p, headers) => rq({ method: 'GET', path: p, headers: headers || {} });
+    const getJ = async (p) => { const r = await get(p); return Object.assign({ status: r.status }, r.status === 200 ? JSON.parse(r.body) : {}); };
+    const post = (p, body) => rq({ method: 'POST', path: p, headers: { 'content-type': 'application/json' } }, JSON.stringify(body));
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const sv = (k, v) => ({ key: k, value: { stringValue: v } });
+    const logs = (recs) => ({ resourceLogs: [{ resource: { attributes: [] }, scopeLogs: [{ scope: { name: 'x' }, logRecords: recs.map((r) => ({
+      timeUnixNano: String(BigInt(r.ts) * 1000000n),
+      attributes: [sv('event.name', 'api_request'), sv('request_id', r.id), sv('session.id', r.sess || 'sess-aaaaaaaa-1111'),
+        sv('prompt.id', r.prompt || 'p-' + r.id), sv('model', r.model || 'claude-fake'), sv('query_source', r.qs || 'repl_main_thread'),
+        { key: 'cost_usd_micros', value: { intValue: r.micros } }],
+    })) }] }] });
+    const FIX = () => logs([
+      { id: 'r1', ts: NOW0 - 60000, micros: 5000 },
+      { id: 'r2', ts: NOW0 - 120000, micros: 3000, qs: 'agent:Explore' },
+      { id: 'r3', ts: NOW0 - 3 * 86400000, micros: 7000, qs: 'compact', sess: 'sess-bbbbbbbb-2222' },
+    ]);
+    const mkLedger = () => openLedger({ file: ':memory:', retentionDays: 36500 });
+    const start = async (ledger) => {
+      const c = createCollector(new Store(), PORT, { ledger, now: () => clock });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return c;
+    };
+    const stop = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const boom = () => { throw new Error('boom'); };
+    const throwing = { today: boom, series: boom, projects: boom, trend: boom, topPrompts: boom, totals: boom,
+      ingestRequests: boom, ingestSpans: boom, recordHook() {}, recordStatus() {} };
+    const checkKeys = (o, allowed, where) => {
+      for (const k of Object.keys(o)) assert.ok(allowed.includes(k), where + ': unexpected key ' + k);
+      for (const k of allowed) assert.ok(k in o, where + ': missing key ' + k);
+    };
+    const ROUTES = ['/api/spend/today', '/api/spend/series', '/api/spend/projects', '/api/spend/top-prompts'];
+
+    await atest('spend api: ledger on returns data for every route, with only documented keys', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      const c = await start(l);
+      try {
+        l.recordHook('SessionStart', { session_id: 'sess-aaaaaaaa-1111', cwd: 'C:\\work\\proj' });
+        assert.strictEqual((await post('/v1/logs', FIX())).status, 200);
+
+        const t = await getJ('/api/spend/today');
+        checkKeys(t, ['status', 'enabled', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution', 'unattributedN'], 'today');
+        assert.strictEqual(t.enabled, true); assert.strictEqual(t.asOf, NOW0); assert.strictEqual(t.day, '2026-06-10');
+        assert.strictEqual(t.costMicros, 8000); assert.strictEqual(t.requests, 2);
+        assert.strictEqual(t.unattributedN, 1);
+
+        const s = await getJ('/api/spend/series?range=7d');
+        checkKeys(s, ['status', 'enabled', 'asOf', 'range', 'buckets'], 'series');
+        assert.strictEqual(s.buckets.length, 7);
+        for (const b of s.buckets) checkKeys(b, ['key', 'since', 'until', 'costMicros', 'requests', 'bySource', 'byAttribution'], 'series bucket');
+        assert.strictEqual(s.buckets.reduce((a, b) => a + b.costMicros, 0), 15000);
+        assert.strictEqual(s.buckets[6].costMicros, 8000);
+
+        const h = await getJ('/api/spend/series?range=24h');
+        assert.strictEqual(h.buckets.length, 24);
+        assert.strictEqual(h.buckets.reduce((a, b) => a + b.costMicros, 0), 8000);
+
+        const p = await getJ('/api/spend/projects');
+        checkKeys(p, ['status', 'enabled', 'asOf', 'range', 'rows', 'unattributed'], 'projects');
+        checkKeys(p.unattributed, ['costMicros', 'requests'], 'projects.unattributed');
+        assert.strictEqual(p.range, 'month');
+        assert.ok(p.rows.length >= 1);
+        for (const r of p.rows) {
+          checkKeys(r, ['project', 'costMicros', 'requests', 'bySource', 'byAttribution', 'trend'], 'projects row');
+          assert.strictEqual(r.trend.length, 14);
+        }
+        assert.strictEqual(p.rows.reduce((a, r) => a + r.costMicros, 0), 15000);
+
+        const tp = await getJ('/api/spend/top-prompts');
+        checkKeys(tp, ['status', 'enabled', 'asOf', 'range', 'rows'], 'top-prompts');
+        assert.strictEqual(tp.range, 'month'); assert.strictEqual(tp.rows.length, 3);
+        for (const r of tp.rows) {
+          checkKeys(r, ['ts', 'project', 'sessionShort', 'costMicros', 'models', 'attribution'], 'top-prompts row');
+          assert.strictEqual(r.sessionShort.length, 8);
+        }
+        assert.strictEqual(tp.rows[0].costMicros, 7000);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('spend api: default ranges, range validation and limit passthrough', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      const c = await start(l);
+      try {
+        await post('/v1/logs', FIX());
+        assert.strictEqual((await getJ('/api/spend/series')).range, '30d');
+        assert.strictEqual((await getJ('/api/spend/series')).buckets.length, 30);
+        assert.strictEqual((await getJ('/api/spend/top-prompts?range=7d')).range, '7d');
+        assert.strictEqual((await getJ('/api/spend/projects?range=30d')).range, '30d');
+        assert.strictEqual((await get('/api/spend/series?range=90d')).status, 400);
+        assert.strictEqual((await get('/api/spend/series?range=month')).status, 400);
+        assert.strictEqual((await get('/api/spend/projects?range=24h')).status, 400);
+        assert.strictEqual((await get('/api/spend/top-prompts?range=bogus')).status, 400);
+        assert.strictEqual((await getJ('/api/spend/top-prompts?limit=1')).rows.length, 1);
+        assert.strictEqual((await getJ('/api/spend/top-prompts?limit=2')).rows.length, 2);
+        assert.strictEqual((await getJ('/api/spend/top-prompts?limit=abc')).rows.length, 3);
+        assert.strictEqual((await get('/api/spend/nope')).status, 404);
+        assert.strictEqual((await get('/api/other')).status, 404);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('spend api: ledger off answers enabled:false (200) on every route; ledger throwing answers 503', async () => {
+      const c = await start(null);
+      try {
+        for (const r of ROUTES) {
+          const x = await get(r);
+          assert.strictEqual(x.status, 200, r); assert.deepStrictEqual(JSON.parse(x.body), { enabled: false }, r);
+        }
+      } finally { await stop(c); }
+      const c2 = await start(throwing);
+      try {
+        for (const r of ROUTES) assert.strictEqual((await get(r)).status, 503, r);
+        assert.strictEqual((await get('/state')).status, 200);   // a broken ledger never breaks the snapshot
+      } finally { await stop(c2); }
+    });
+
+    await atest('spend api: non-GET on /api/spend/* is not served', async () => {
+      const c = await start(mkLedger());
+      try {
+        const r = await post('/api/spend/today', {});
+        assert.ok(r.status === 404 || r.status === 403 || r.status === 405, 'got ' + r.status);
+        assert.ok(!/costMicros/.test(r.body));
+      } finally { await stop(c); }
+    });
+
+    await atest('spend exit 7: foreign Host or Origin gets 403 on /console and /api/spend/today', async () => {
+      const c = await start(mkLedger());
+      try {
+        for (const p of ['/console', '/api/spend/today']) {
+          assert.strictEqual((await get(p, { host: 'evil.example' })).status, 403, p + ' host');
+          assert.strictEqual((await get(p, { origin: 'http://evil.example' })).status, 403, p + ' origin');
+          assert.notStrictEqual((await get(p)).status, 403, p + ' ok');
+        }
+      } finally { await stop(c); }
+    });
+
+    await atest('console route: serves the placeholder as html and blocks traversal', async () => {
+      const c = await start(null);
+      try {
+        for (const p of ['/console', '/console/', '/console/index.html']) {
+          const r = await get(p);
+          assert.strictEqual(r.status, 200, p);
+          assert.match(r.type, /^text\/html/); assert.match(r.body, /<title>Sereno console<\/title>/);
+        }
+        assert.strictEqual((await get('/console/missing.js')).status, 404);
+        for (const p of ['/console/../collector.js', '/console/%2e%2e%2fcollector.js', '/console/%2e%2e/%2e%2e/package.json', '/console/..%5c..%5cpackage.json']) {
+          const r = await get(p);
+          assert.ok(r.status === 403 || r.status === 404, p + ' -> ' + r.status);
+          assert.ok(!/createCollector|"name"/.test(r.body), p + ' leaked a file');
+        }
+        assert.strictEqual((await get('/')).status, 200);   // widget route still works
+      } finally { await stop(c); }
+    });
+
+    await atest('snapshot spend: disabled without a ledger; updates after /v1/logs; not recomputed by /status or /hook', async () => {
+      clock = NOW0;
+      const c0 = await start(null);
+      try {
+        const st = JSON.parse((await get('/state')).body);
+        assert.deepStrictEqual(st.spend, { enabled: false });
+      } finally { await stop(c0); }
+
+      const l = mkLedger();
+      let calls = 0;
+      const orig = l.today;
+      l.today = (n) => { calls++; return orig(n); };
+      const c = await start(l);
+      const spend = async () => JSON.parse((await get('/state')).body).spend;
+      try {
+        const a = await spend();
+        assert.deepStrictEqual(Object.keys(a).sort(), ['bySource', 'byAttribution', 'enabled', 'hasTelemetry', 'todayMicros', 'unattributedN'].sort());
+        assert.strictEqual(a.enabled, true); assert.strictEqual(a.todayMicros, 0); assert.strictEqual(a.hasTelemetry, false);
+        assert.strictEqual(calls, 1);
+        await spend(); await spend();
+        assert.strictEqual(calls, 1, 'snapshots must not recompute');
+
+        assert.strictEqual((await post('/v1/logs', FIX())).status, 200);
+        const b = await spend();
+        assert.strictEqual(b.todayMicros, 8000); assert.strictEqual(b.hasTelemetry, true);
+        assert.strictEqual(b.bySource.main, 5000);
+        assert.strictEqual(calls, 2);
+
+        await post('/status', { payload: { session_id: 's-x', cost: { total_cost_usd: 1.5 } } });
+        await post('/hook', { event: 'SessionStart', payload: { session_id: 's-x', cwd: 'C:\\work\\x' } });
+        await wait(60);
+        await spend();
+        assert.strictEqual(calls, 2, '/status and /hook must not recompute spend');
+        // an empty logs post inserts nothing and must not recompute either
+        await post('/v1/logs', { resourceLogs: [] });
+        assert.strictEqual(calls, 2);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('snapshot spend: SSE frames carry spend; setLedger recomputes; day rollover recomputes via the tick', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      let calls = 0;
+      const orig = l.today;
+      l.today = (n) => { calls++; return orig(n); };
+      const c = await start(l);
+      try {
+        await post('/v1/logs', FIX());
+        const first = await new Promise((resolve) => {
+          const r = http.get({ host: '127.0.0.1', port: PORT, path: '/events', agent: false }, (res) => {
+            let d = '';
+            res.on('data', (ch) => {
+              d += ch;
+              const m = /data: (.*)\n\n/.exec(d);
+              if (m) { r.destroy(); resolve(JSON.parse(m[1])); }
+            });
+          });
+          r.on('error', () => {});
+        });
+        assert.strictEqual(first.spend.todayMicros, 8000);
+        const before = calls;
+        c._tickSpend();
+        assert.strictEqual(calls, before, 'same day: tick does nothing');
+        clock = NOW0 + 24 * 3600000;   // past midnight
+        c._tickSpend();
+        assert.strictEqual(calls, before + 1, 'new day: tick recomputes');
+        const st = JSON.parse((await get('/state')).body);
+        assert.strictEqual(st.spend.todayMicros, 0); assert.strictEqual(st.spend.hasTelemetry, false);
+        c._tickSpend();
+        assert.strictEqual(calls, before + 1, 'the tick recomputes once per day');
+        c.setLedger(null);
+        assert.deepStrictEqual(JSON.parse((await get('/state')).body).spend, { enabled: false });
+        c.setLedger(l);
+        assert.strictEqual(JSON.parse((await get('/state')).body).spend.enabled, true);
+        // a throwing today() keeps the previous cache
+        const keep = JSON.parse((await get('/state')).body).spend;
+        l.today = () => { throw new Error('boom'); };
+        c.setLedger(l);
+        assert.deepStrictEqual(JSON.parse((await get('/state')).body).spend, keep);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('snapshot spend: traces ingest with spans recomputes (attribution upgrade); empty traces does not', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      let calls = 0;
+      const orig = l.today;
+      l.today = (n) => { calls++; return orig(n); };
+      const c = await start(l);
+      const spend = async () => JSON.parse((await get('/state')).body).spend;
+      try {
+        await post('/v1/logs', FIX());
+        const a = await spend();
+        assert.strictEqual(a.unattributedN, 1); assert.strictEqual(a.byAttribution.unknown, 3000);
+        const n = calls;
+        await post('/v1/traces', { resourceSpans: [] });
+        assert.strictEqual(calls, n, 'empty traces must not recompute');
+        const span = { startTimeUnixNano: String(BigInt(NOW0 - 120000) * 1000000n), attributes: [sv('span.type', 'llm_request'),
+          sv('request_id', 'r2'), sv('session.id', 'sess-aaaaaaaa-1111'), sv('agent_id', 'agent-1')] };
+        assert.strictEqual((await post('/v1/traces', { resourceSpans: [{ scopeSpans: [{ spans: [span] }] }] })).status, 200);
+        const b = await spend();
+        assert.strictEqual(calls, n + 1);
+        assert.strictEqual(b.unattributedN, 0); assert.strictEqual(b.byAttribution.unknown, undefined);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('snapshot spend: first-use failure is {enabled:true, unavailable:true}; a later success clears it', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      const orig = l.today;
+      l.today = () => { throw new Error('boom'); };
+      const c = await start(l);
+      try {
+        const st = JSON.parse((await get('/state')).body).spend;
+        assert.deepStrictEqual(st, { enabled: true, unavailable: true });
+        l.today = orig;
+        c.setLedger(l);
+        const ok = JSON.parse((await get('/state')).body).spend;
+        assert.strictEqual(ok.enabled, true); assert.ok(!('unavailable' in ok));
+        assert.strictEqual(ok.todayMicros, 0);
+      } finally { await stop(c); l.close(); }
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
