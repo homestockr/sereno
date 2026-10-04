@@ -174,6 +174,91 @@ function pageState(resps) {
   return null;
 }
 
+/** Singular/plural text for the amber pill next to the page title. */
+function pillText(count) {
+  const n = Number(count) > 0 ? Math.floor(Number(count)) : 0;
+  return n === 1 ? '1 decision needs you' : n + ' decisions need you';
+}
+
+/**
+ * What /state says needs the user. Amber iff a top-level session is 'blocked' (the store
+ * only sets that from a permission_prompt notification); nothing else is re-derived.
+ * Tagged subagent rows never count.
+ */
+function attentionState(snapshot) {
+  const list = snapshot && Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
+  const items = list
+    .filter((s) => s && typeof s === 'object' && s.state === 'blocked' && !s.agent_id && !s.agentId)
+    .map((s) => ({
+      project: projectLabel(s.projectName),
+      tool: typeof s.stateTool === 'string' ? s.stateTool : '',
+      arg: typeof s.stateArgShort === 'string' ? s.stateArgShort : '',
+      since: Number.isFinite(Number(s.stateSince)) && Number(s.stateSince) > 0 ? Number(s.stateSince) : null,
+    }));
+  return { amber: items.length > 0, count: items.length, items };
+}
+
+/** 'waiting 3m' / 'waiting 45s'; '' when the start time is unknown. */
+function waitLabel(since, nowMs) {
+  if (since == null || !Number.isFinite(Number(since))) return '';
+  const s = Math.max(0, Math.floor((Number(nowMs) - Number(since)) / 1000));
+  if (s < 60) return 'waiting ' + s + 's';
+  if (s < 3600) return 'waiting ' + Math.floor(s / 60) + 'm';
+  return 'waiting ' + Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+/** Question-ring icon: a shape, so the state reads without colour. */
+function ringIcon() {
+  return '<svg class="q-ring" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/>'
+    + '<path d="M6.2 6.3c0-1.9 3.6-1.9 3.6 0 0 1.3-1.8 1.4-1.8 2.6M8 11.1v.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+}
+
+/** Amber pill markup, or '' when nothing needs the user. */
+function pillHtml(count) {
+  return Number(count) > 0 ? '<span class="pill-amber">' + ringIcon() + esc(pillText(count)) + '</span>' : '';
+}
+
+/** 'Bash npm test' style detail, escaped; '' when /state gave neither. */
+function waitWhat(it) {
+  return [it.tool, it.arg].filter(Boolean).map(esc).join(' ');
+}
+
+/**
+ * Attention panel markup. Input is attentionState() output, or { unavailable: true } when
+ * /state could not be read (neutral grey, never amber). Every API string goes through esc().
+ */
+function attentionHtml(st, nowMs) {
+  if (!st || st.unavailable) {
+    return '<div class="attn attn-off"><div class="attn-head"><span>LIVE STATUS</span></div>'
+      + '<h2 class="attn-title">Live status unavailable</h2></div>';
+  }
+  if (!st.amber) {
+    return '<div class="attn attn-calm"><div class="attn-head"><i class="dot" aria-hidden="true"></i><span>ALL CLEAR</span></div>'
+      + '<p class="attn-body">Nothing needs you right now.</p></div>';
+  }
+  const items = Array.isArray(st.items) ? st.items : [];
+  const title = items.length === 1
+    ? esc(items[0].project) + ' is waiting for permission.'
+    : st.count + ' sessions are waiting for permission.';
+  let list = '';
+  if (items.length > 1) {
+    list = '<ul class="attn-list">' + items.map((it) => {
+      const what = waitWhat(it);
+      const w = waitLabel(it.since, nowMs);
+      return '<li><strong>' + esc(it.project) + '</strong>' + (what ? '<span class="mono">' + what + '</span>' : '')
+        + (w ? '<span class="wait">' + esc(w) + '</span>' : '') + '</li>';
+    }).join('') + '</ul>';
+  } else if (items.length === 1) {
+    const what = waitWhat(items[0]);
+    const w = waitLabel(items[0].since, nowMs);
+    if (what) list += '<div class="attn-what mono">' + what + '</div>';
+    if (w) list += '<div class="wait">' + esc(w) + '</div>';
+  }
+  return '<div class="attn attn-amber"><div class="attn-head">' + ringIcon() + '<span>NEEDS YOUR ATTENTION</span></div>'
+    + '<h2 class="attn-title">' + title + '</h2>' + list
+    + '<p class="attn-body">Answer it in the terminal. Sereno only points you there.</p></div>';
+}
+
 /* ---------- state ---------- */
 
 const RANGES = ['24h', '7d', '30d'];
@@ -183,6 +268,7 @@ const ATTR_LABEL = { explicit: 'Explicit', unknown: 'Unattributed', mixed: 'Mixe
 const state = {
   range: '30d', today: null, series: null, projects: null, top: null,
   mode: 'loading', lastOk: null, token: 0,
+  attn: null, attnToken: 0,   // attn: attentionState() output, { unavailable: true }, or null before the first read
 };
 
 function loadRange() {
@@ -325,8 +411,19 @@ function promptsSection() {
     + '<tbody>' + body + '</tbody></table></div>';
 }
 
+function titleRow() {
+  return '<div class="title-row"><h1>Spend</h1><span id="pill-slot">' + pillHtml(state.attn && state.attn.amber ? state.attn.count : 0) + '</span></div>';
+}
+
+function renderAttention() {
+  const box = document.getElementById('attn');
+  if (box) setHtml(box, attentionHtml(state.attn || { amber: false, count: 0, items: [] }, Date.now()));
+  const slot = document.getElementById('pill-slot');
+  if (slot) setHtml(slot, pillHtml(state.attn && state.attn.amber ? state.attn.count : 0));
+}
+
 function panel(title, text) {
-  return '<h1>Spend</h1><div class="state-panel"><h2>' + esc(title) + '</h2><p>' + esc(text) + '</p></div>';
+  return titleRow() + '<div class="state-panel"><h2>' + esc(title) + '</h2><p>' + esc(text) + '</p></div>';
 }
 
 function render() {
@@ -350,7 +447,7 @@ function render() {
     setHtml(view, panel('No spend recorded yet', 'Spend appears once Claude Code sessions send telemetry. Wire it from the tray: Wire telemetry…'));
     return;
   }
-  setHtml(view, '<h1>Spend</h1><p class="summary">' + esc(summaryLine(state.today, state.projects)) + '</p>'
+  setHtml(view, titleRow() + '<p class="summary">' + esc(summaryLine(state.today, state.projects)) + '</p>'
     + chartSection() + projectsSection() + promptsSection());
   applyWidths(view);
   drawChart();
@@ -369,7 +466,16 @@ async function getJson(url) {
   }
 }
 
+async function refreshAttention() {
+  const token = ++state.attnToken;
+  const r = await getJson('/state');
+  if (token !== state.attnToken) return;
+  state.attn = r.body && Array.isArray(r.body.sessions) ? attentionState(r.body) : { unavailable: true };
+  renderAttention();
+}
+
 async function refresh() {
+  refreshAttention();
   const token = ++state.token;
   const [today, series, projects, top] = await Promise.all([
     getJson('/api/spend/today'),
@@ -428,6 +534,8 @@ function boot() {
   });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
   setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 60000);
+  // While amber, poll faster so a resolved wait clears promptly.
+  setInterval(() => { if (document.visibilityState === 'visible' && state.attn && state.attn.amber) refreshAttention(); }, 10000);
   setInterval(tickSync, 10000);
   let raf = 0;
   window.addEventListener('resize', () => {
@@ -435,7 +543,7 @@ function boot() {
     raf = requestAnimationFrame(() => { raf = 0; drawChart(); });
   });
   render();
-  refresh();
+  refresh();   // also reads /state; the panel stays empty until it answers
 }
 
 if (typeof document !== 'undefined') boot();

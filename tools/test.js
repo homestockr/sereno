@@ -3994,6 +3994,96 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 2 step 4: attention panel ---- */
+  {
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const names = ['esc', 'projectLabel', 'pillText', 'attentionState', 'waitLabel', 'ringIcon', 'pillHtml', 'waitWhat', 'attentionHtml'];
+    const lifted = names.map((n) => cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
+    const A = new Function(lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+    const sess = (o) => Object.assign({ projectName: 'sereno', state: 'idle', stateTool: '', stateArgShort: '', stateSince: 1000 }, o);
+
+    test('attentionState: amber only for top-level blocked sessions', () => {
+      for (const st of ['idle', 'running', 'thinking', 'compacting', 'stale', 'bogus', undefined, null, '']) {
+        const r = A.attentionState({ sessions: [sess({ state: st })] });
+        assert.deepStrictEqual([r.amber, r.count, r.items.length], [false, 0, 0], String(st));
+      }
+      assert.strictEqual(A.attentionState({ sessions: [sess({ state: 'running', stale: true })] }).amber, false);
+      assert.strictEqual(A.attentionState({ sessions: [sess({ state: 'blocked', agent_id: 'a1' })] }).amber, false);
+      for (const bad of [null, undefined, {}, { sessions: 'x' }, { sessions: [null, 5] }]) assert.strictEqual(A.attentionState(bad).amber, false);
+      const r = A.attentionState({ sessions: [sess({ state: 'blocked', projectName: 'api', stateTool: 'Bash', stateArgShort: 'npm test', stateSince: 5000 }), sess()] });
+      assert.deepStrictEqual(r, { amber: true, count: 1, items: [{ project: 'api', tool: 'Bash', arg: 'npm test', since: 5000 }] });
+    });
+
+    test('pillText singular and plural', () => {
+      assert.strictEqual(A.pillText(1), '1 decision needs you');
+      assert.strictEqual(A.pillText(2), '2 decisions need you');
+      assert.strictEqual(A.pillText(5), '5 decisions need you');
+      assert.strictEqual(A.pillHtml(0), '');
+      assert.match(A.pillHtml(2), /2 decisions need you/);
+    });
+
+    test('attentionHtml: amber single, several, calm, unavailable', () => {
+      const one = A.attentionHtml(A.attentionState({ sessions: [sess({ state: 'blocked', projectName: 'api', stateTool: 'Bash', stateArgShort: 'npm test', stateSince: 1000 })] }), 91000);
+      assert.match(one, /attn-amber/);
+      assert.match(one, /NEEDS YOUR ATTENTION/);
+      assert.match(one, /api is waiting for permission\./);
+      assert.match(one, /Bash npm test/);
+      assert.match(one, /waiting 1m/);
+      assert.match(one, /Answer it in the terminal\. Sereno only points you there\./);
+      assert.ok(!/<button|<a /.test(one));
+      const two = A.attentionHtml(A.attentionState({ sessions: [sess({ state: 'blocked', projectName: 'a' }), sess({ state: 'blocked', projectName: 'b', stateTool: 'Edit', stateSince: null })] }), 5000);
+      assert.match(two, /2 sessions are waiting for permission\./);
+      assert.match(two, /<strong>a<\/strong>/);
+      assert.match(two, /<strong>b<\/strong>/);
+      const calm = A.attentionHtml(A.attentionState({ sessions: [sess()] }), 1);
+      assert.match(calm, /ALL CLEAR/);
+      assert.match(calm, /Nothing needs you right now\./);
+      assert.ok(!/Latest activity/i.test(calm + one));
+      const off = A.attentionHtml({ unavailable: true }, 1);
+      assert.match(off, /Live status unavailable/);
+      for (const m of [calm, off]) assert.ok(!/amber|NEEDS YOUR/i.test(m), m);
+      assert.ok(!/amber/i.test(A.attentionHtml(null, 1)));
+    });
+
+    test('attentionHtml escapes every API string and emits no style attribute', () => {
+      const evil = '<img src=x onerror=alert(1)>';
+      const st = A.attentionState({ sessions: [
+        sess({ state: 'blocked', projectName: evil, stateTool: evil, stateArgShort: evil }),
+      ] });
+      const st2 = A.attentionState({ sessions: [
+        sess({ state: 'blocked', projectName: evil, stateTool: evil, stateArgShort: evil }),
+        sess({ state: 'blocked', projectName: evil, stateTool: evil, stateArgShort: '"x"' }),
+      ] });
+      for (const m of [A.attentionHtml(st, 5000), A.attentionHtml(st2, 5000)]) {
+        assert.ok(!m.includes('<img'), m);
+        assert.ok(m.includes('&lt;img src=x onerror=alert(1)&gt;'));
+        assert.ok(!/style=/.test(m));
+      }
+      assert.ok(!/style=/.test(A.pillHtml(3)));
+    });
+
+    test('waitLabel', () => {
+      assert.strictEqual(A.waitLabel(null, 1), '');
+      assert.strictEqual(A.waitLabel(1000, 46000), 'waiting 45s');
+      assert.strictEqual(A.waitLabel(0, 181000), 'waiting 3m');
+      assert.strictEqual(A.waitLabel(0, 3700000), 'waiting 1h 1m');
+      assert.strictEqual(A.waitLabel(9000, 1000), 'waiting 0s');
+    });
+
+    test('console: /state fetched on refresh and every 10s while amber; page has the aside, no action', () => {
+      const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
+      const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+      assert.match(cjs, /getJson\('\/state'\)/);
+      assert.match(cjs, /state\.attn && state\.attn\.amber\) refreshAttention\(\); \}, 10000\)/);
+      assert.match(cjs, /refreshAttention\(\);\n  const token = \+\+state\.token/);
+      assert.match(html, /<aside class="attn-col" id="attn"/);
+      assert.match(css, /@media \(max-width: 1200px\)/);
+      assert.ok(!/Review in terminal/.test(cjs));
+      assert.strictEqual((cjs.match(/\.innerHTML\s*=/g) || []).length, 1);
+    });
+  }
+
   /* ---- Phase 2: render fixes ---- */
   {
     const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');

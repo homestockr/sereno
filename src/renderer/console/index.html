@@ -38,7 +38,10 @@
       <div class="crumb">Workspace / <span>Spend</span></div>
       <div class="sync" id="sync" aria-live="off">Synced just now</div>
     </header>
-    <main class="main" id="view" aria-busy="true"></main>
+    <div class="body">
+      <main class="main" id="view" aria-busy="true"></main>
+      <aside class="attn-col" id="attn" aria-label="Attention" aria-live="polite"></aside>
+    </div>
     <footer class="foot">
       <span>Totals include unattributed usage · every figure is an estimate</span>
       <span id="foot-host">127.0.0.1:8787/console</span>
