@@ -1,0 +1,175 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "claude-code"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "com.anthropic.claude_code.tracing"
+          },
+          "spans": [
+            {
+              "traceId": "aa",
+              "spanId": "bb",
+              "name": "claude_code.llm_request",
+              "startTimeUnixNano": "1790000001000000000",
+              "attributes": [
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "llm_request"
+                  }
+                },
+                {
+                  "key": "request_id",
+                  "value": {
+                    "stringValue": "req_main_1"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "sess-fake-0001"
+                  }
+                },
+                {
+                  "key": "user.id",
+                  "value": {
+                    "stringValue": "fake-user-id-0001"
+                  }
+                },
+                {
+                  "key": "user.email",
+                  "value": {
+                    "stringValue": "fake.person@example.invalid"
+                  }
+                },
+                {
+                  "key": "user.account_id",
+                  "value": {
+                    "stringValue": "fake-acct-id-0002"
+                  }
+                },
+                {
+                  "key": "user.account_uuid",
+                  "value": {
+                    "stringValue": "00000000-fake-0000-0000-account00001"
+                  }
+                },
+                {
+                  "key": "organization.id",
+                  "value": {
+                    "stringValue": "fake-org-id-0003"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "fake-term"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "aa",
+              "spanId": "bb",
+              "name": "claude_code.llm_request",
+              "startTimeUnixNano": "1790000002000000000",
+              "attributes": [
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "llm_request"
+                  }
+                },
+                {
+                  "key": "request_id",
+                  "value": {
+                    "stringValue": "req_sub_span"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "sess-fake-0001"
+                  }
+                },
+                {
+                  "key": "agent_id",
+                  "value": {
+                    "stringValue": "agentfake0000000a1"
+                  }
+                },
+                {
+                  "key": "user.id",
+                  "value": {
+                    "stringValue": "fake-user-id-0001"
+                  }
+                },
+                {
+                  "key": "user.email",
+                  "value": {
+                    "stringValue": "fake.person@example.invalid"
+                  }
+                },
+                {
+                  "key": "user.account_id",
+                  "value": {
+                    "stringValue": "fake-acct-id-0002"
+                  }
+                },
+                {
+                  "key": "user.account_uuid",
+                  "value": {
+                    "stringValue": "00000000-fake-0000-0000-account00001"
+                  }
+                },
+                {
+                  "key": "organization.id",
+                  "value": {
+                    "stringValue": "fake-org-id-0003"
+                  }
+                },
+                {
+                  "key": "terminal.type",
+                  "value": {
+                    "stringValue": "fake-term"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "aa",
+              "spanId": "cc",
+              "name": "claude_code.tool",
+              "startTimeUnixNano": "1790000001500000000",
+              "attributes": [
+                {
+                  "key": "span.type",
+                  "value": {
+                    "stringValue": "tool"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "sess-fake-0001"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

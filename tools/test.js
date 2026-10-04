@@ -1998,6 +1998,145 @@ test('missing rate_limits degrades instead of throwing', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
+  /* ---- Phase 1 step 1: otlp.js ---- */
+  {
+    const otlp = require('../src/otlp.js');
+    const logsFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-logs.json'), 'utf8'));
+    const tracesFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-traces.json'), 'utf8'));
+    const S = (k, v) => ({ key: k, value: { stringValue: v } });
+    const I = (k, v) => ({ key: k, value: { intValue: v } });
+    const D = (k, v) => ({ key: k, value: { doubleValue: v } });
+    const wrapLog = (...recs) => ({ resourceLogs: [{ scopeLogs: [{ logRecords: recs }] }] });
+    const api = (extra) => ({ attributes: [S('event.name', 'api_request')].concat(extra) });
+    const LOG_FIELDS = ['requestKey', 'requestId', 'sessionId', 'promptId', 'ts', 'model', 'querySource', 'source',
+      'agentName', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'costMicros', 'durationMs'];
+
+    test('otlp: bad bodies and missing nested arrays give []', () => {
+      for (const b of [null, undefined, 'x', 42, [], [{}], {}, { resourceLogs: 5 }, { resourceLogs: [null, 1] },
+        { resourceLogs: [{}] }, { resourceLogs: [{ scopeLogs: [{}] }] }, { resourceLogs: [{ scopeLogs: [{ logRecords: 'no' }] }] }]) {
+        assert.deepStrictEqual(otlp.parseLogs(b), []);
+      }
+      for (const b of [null, 'x', [], {}, { resourceSpans: [{ scopeSpans: [{}] }] }, { resourceSpans: [{ scopeSpans: [{ spans: {} }] }] }]) {
+        assert.deepStrictEqual(otlp.parseTraces(b), []);
+      }
+    });
+
+    test('otlp: a garbled attribute list skips that record only', () => {
+      const out = otlp.parseLogs(wrapLog(
+        { attributes: 'garbage' }, { attributes: { key: 'x' } }, null, 7,
+        { attributes: [null, 5, { key: 3 }, { key: 'model' }, S('event.name', 'api_request'), S('request_id', 'ok1')] }));
+      assert.strictEqual(out.length, 1);
+      assert.strictEqual(out[0].requestKey, 'ok1');
+      assert.deepStrictEqual(otlp.parseTraces({ resourceSpans: [{ scopeSpans: [{ spans: [{ attributes: 'bad' }] }] }] }), []);
+    });
+
+    test('otlp: fixture yields the 5 api_requests, user_prompt dropped', () => {
+      const out = otlp.parseLogs(logsFx);
+      assert.deepStrictEqual(out.map(r => r.requestId),
+        ['req_main_1', 'req_sub_span', 'req_sub_nospan', 'req_aux_title', 'req_aux_suggest']);
+      assert.deepStrictEqual(out.map(r => r.source), ['main', 'subagent', 'subagent', 'auxiliary', 'auxiliary']);
+      const m = out[0];
+      assert.strictEqual(m.sessionId, 'sess-fake-0001');
+      assert.strictEqual(m.promptId, 'prompt-fake-01');
+      assert.strictEqual(m.ts, 1790000001000);
+      assert.strictEqual(m.cacheReadTokens, 900);
+      assert.strictEqual(m.cacheCreationTokens, 30);
+      assert.strictEqual(m.durationMs, 800);
+      assert.strictEqual(out[1].agentName, 'general-purpose');
+      assert.strictEqual(m.agentName, null);
+    });
+
+    test('otlp: string intValue parsed to a number', () => {
+      const out = otlp.parseLogs(logsFx);
+      assert.strictEqual(out[1].inputTokens, 2500);
+      assert.strictEqual(typeof out[1].inputTokens, 'number');
+    });
+
+    test('otlp: costMicros is an integer on both paths', () => {
+      const out = otlp.parseLogs(logsFx);
+      assert.strictEqual(out[0].costMicros, 12345);          // micros wins over cost_usd
+      assert.strictEqual(out[1].costMicros, 3100);           // 0.0031 * 1e6, rounded
+      for (const r of out) assert.ok(Number.isInteger(r.costMicros));
+      const f = otlp.parseLogs(wrapLog(api([S('request_id', 'a'), D('cost_usd', 0.1 + 0.2)])));
+      assert.strictEqual(f[0].costMicros, 300000);
+      const none = otlp.parseLogs(wrapLog(api([S('request_id', 'a')])));
+      assert.strictEqual(none[0].costMicros, 0);
+    });
+
+    test('otlp: source mapping covers main, subagent and auxiliary', () => {
+      const src = (qs) => otlp.parseLogs(wrapLog(api([S('request_id', 'r'), S('query_source', qs)])))[0].source;
+      assert.strictEqual(src('repl_main_thread'), 'main');
+      assert.strictEqual(src('agent:builtin:general-purpose'), 'subagent');
+      assert.strictEqual(src('agent:custom'), 'subagent');
+      assert.strictEqual(src('generate_session_title'), 'auxiliary');
+      assert.strictEqual(src('prompt_suggestion'), 'auxiliary');
+      assert.strictEqual(otlp.parseLogs(wrapLog(api([S('request_id', 'r')])))[0].source, 'auxiliary');
+    });
+
+    test('otlp: requestKey is request_id, else session.id:event.sequence', () => {
+      const a = otlp.parseLogs(wrapLog(api([S('request_id', 'rq1'), S('session.id', 's'), I('event.sequence', 9)])));
+      assert.strictEqual(a[0].requestKey, 'rq1');
+      const b = otlp.parseLogs(wrapLog(api([S('session.id', 's9'), I('event.sequence', '12')])));
+      assert.strictEqual(b[0].requestKey, 's9:12');
+      assert.strictEqual(b[0].requestId, null);
+      // no way to build a stable key: skipped rather than invented
+      assert.deepStrictEqual(otlp.parseLogs(wrapLog(api([S('session.id', 's9')]))), []);
+      assert.deepStrictEqual(otlp.parseLogs(wrapLog(api([I('event.sequence', 1)]))), []);
+    });
+
+    test('otlp: resource attributes are read, record wins; ts falls back to event.timestamp', () => {
+      const body = { resourceLogs: [{ resource: { attributes: [S('session.id', 'res-s'), S('model', 'res-m')] },
+        scopeLogs: [{ logRecords: [api([S('request_id', 'r'), S('model', 'rec-m'), S('event.timestamp', '2026-10-04T00:00:00.000Z')])] }] }] };
+      const r = otlp.parseLogs(body)[0];
+      assert.strictEqual(r.sessionId, 'res-s');
+      assert.strictEqual(r.model, 'rec-m');
+      assert.strictEqual(r.ts, Date.parse('2026-10-04T00:00:00.000Z'));
+    });
+
+    test('otlp: absent or unparseable numbers are 0, never NaN', () => {
+      const r = otlp.parseLogs(wrapLog(api([S('request_id', 'r'), S('input_tokens', 'abc'), I('duration_ms', 'zz')])))[0];
+      for (const k of ['ts', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'costMicros', 'durationMs']) {
+        assert.strictEqual(r[k], 0, k);
+      }
+    });
+
+    test('otlp: other events are dropped', () => {
+      const names = ['user_prompt', 'tool_result', 'assistant_response', 'tool_decision', 'hook_registered', 'subagent_completed'];
+      const recs = names.map(n => ({ attributes: [S('event.name', n), S('request_id', 'x'), S('session.id', 's')] }));
+      assert.deepStrictEqual(otlp.parseLogs(wrapLog(...recs)), []);
+    });
+
+    test('otlp: traces keep only llm_request spans, main span has agentId null', () => {
+      const out = otlp.parseTraces(tracesFx);
+      assert.strictEqual(out.length, 2);
+      assert.deepStrictEqual(out[0], { requestId: 'req_main_1', sessionId: 'sess-fake-0001', agentId: null, ts: 1790000001000 });
+      assert.deepStrictEqual(out[1], { requestId: 'req_sub_span', sessionId: 'sess-fake-0001', agentId: 'agentfake0000000a1', ts: 1790000002000 });
+    });
+
+    test('otlp: output carries exactly the documented keys', () => {
+      for (const r of otlp.parseLogs(logsFx)) assert.deepStrictEqual(Object.keys(r), LOG_FIELDS);
+      for (const s of otlp.parseTraces(tracesFx)) assert.deepStrictEqual(Object.keys(s), ['requestId', 'sessionId', 'agentId', 'ts']);
+    });
+
+    test('otlp: no identifier or prompt content survives parsing', () => {
+      const raw = JSON.stringify(logsFx) + JSON.stringify(tracesFx);
+      const secrets = ['fake.person@example.invalid', 'fake-user-id-0001', 'fake-acct-id-0002',
+        '00000000-fake-0000-0000-account00001', 'fake-org-id-0003', 'fake-term', 'SERENO-CANARY-PROMPT'];
+      for (const s of secrets) assert.ok(raw.includes(s), 'fixture must contain ' + s);
+      const out = JSON.stringify(otlp.parseLogs(logsFx)) + JSON.stringify(otlp.parseTraces(tracesFx));
+      for (const s of secrets) assert.ok(!out.includes(s), 'leaked ' + s);
+      const spanOut = otlp.parseTraces({ resourceSpans: [{ scopeSpans: [{ spans: [{ attributes: [
+        S('span.type', 'llm_request'), S('request_id', 'r'), S('model', 'm'), S('user.email', 'e@x')] }] }] }] });
+      assert.deepStrictEqual(Object.keys(spanOut[0]), ['requestId', 'sessionId', 'agentId', 'ts']);
+    });
+
+    test('otlp: module does no I/O (requires nothing)', () => {
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'otlp.js'), 'utf8');
+      assert.ok(!/\brequire\(/.test(src), 'otlp.js should require nothing');
+      assert.ok(!/\bfetch\(|process\.std/.test(src));
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
