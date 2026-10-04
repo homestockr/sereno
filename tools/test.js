@@ -3188,6 +3188,32 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- setup copy: hook count ---- */
+  test('wiring.status() reports hookCount from EVENTS', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-hc-'));
+    const prev = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = tmp;
+    try {
+      assert.strictEqual(wiring.status().hookCount, wiring.EVENTS.length);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = prev;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test('setup copy takes the hook count from status, with a numberless fallback', () => {
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const setupCopy = new Function('return ' + app.match(/function setupCopy[\s\S]*?\n}/)[0])();
+    assert.match(setupCopy({ hookCount: 11 }), /a statusline and 11 hooks/);
+    assert.match(setupCopy({ hookCount: 11, foreignStatusLine: { command: 'x' } }), /11 hooks.*connecting replaces it/);
+    for (const bad of [undefined, 0, -1, 1.5, '11', null]) {
+      assert.match(setupCopy({ hookCount: bad }), /a statusline and its hooks/);
+      assert.match(setupCopy({ hookCount: bad, foreignStatusLine: {} }), /its hooks.*replaces it/);
+    }
+    assert.ok(!/nine/.test(app), 'hard-coded count is gone');
+  });
+
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

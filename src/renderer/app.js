@@ -38,6 +38,14 @@ let expanded = false;
 
 const money = (v) => '$' + Number(v || 0).toFixed(2);
 
+function setupCopy(st) {
+  const n = st && st.hookCount;
+  const what = Number.isInteger(n) && n > 0 ? 'a statusline and ' + n + ' hooks' : 'a statusline and its hooks';
+  return st && st.foreignStatusLine
+    ? 'Sereno adds ' + what + ' to Claude Code’s settings. You already have a statusline configured — connecting replaces it. Your settings file is backed up first.'
+    : 'Sereno adds ' + what + ' to Claude Code’s settings. Existing entries are kept, and your settings file is backed up first.';
+}
+
 function mmss(ms) {
   // Math.max(0, NaN) is NaN, which used to reach the DOM as the string
   // "NaN:NaN" and repaint twice a second forever.
@@ -443,9 +451,7 @@ async function refreshWiring() {
       ui.setupAction.dataset.mode = 'disconnect';
       ui.setupAction.dataset.replace = '';
     } else {
-      ui.setupBody.textContent = st.foreignStatusLine
-        ? 'Sereno adds a statusline and nine hooks to Claude Code’s settings. You already have a statusline configured — connecting replaces it. Your settings file is backed up first.'
-        : 'Sereno adds a statusline and nine hooks to Claude Code’s settings. Existing entries are kept, and your settings file is backed up first.';
+      ui.setupBody.textContent = setupCopy(st);
       ui.setupActionLabel.textContent = st.foreignStatusLine
         ? 'Connect and replace my statusline'
         : 'Connect to Claude Code';
