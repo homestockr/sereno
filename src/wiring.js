@@ -20,6 +20,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const config = require('./config.js');
 
 const EVENTS = [
   'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
@@ -32,7 +33,7 @@ const MATCHED = new Set(['PreToolUse', 'PostToolUse', 'PreCompact', 'SessionStar
 // Remembers which shim paths this machine has ever wired, so an install that has
 // moved (dev checkout -> packaged build) still recognises and cleans up its own
 // entries instead of orphaning them.
-const LEDGER = path.join(os.homedir(), '.sereno', 'wired.json');
+function ledgerPath() { return path.join(config.home(), 'wired.json'); }
 
 function configDir() {
   return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
@@ -54,7 +55,7 @@ function shimPathOf(cmd) {
 
 function readLedger() {
   try {
-    const j = JSON.parse(fs.readFileSync(LEDGER, 'utf8'));
+    const j = JSON.parse(fs.readFileSync(ledgerPath(), 'utf8'));
     return Array.isArray(j.shims) ? j.shims.map(norm) : [];
   } catch (_) { return []; }
 }
@@ -63,8 +64,10 @@ function rememberShims(paths) {
   try {
     const all = new Set(readLedger());
     for (const p of paths) if (p) all.add(norm(p));
-    fs.mkdirSync(path.dirname(LEDGER), { recursive: true });
-    fs.writeFileSync(LEDGER, JSON.stringify({ shims: [...all] }, null, 2));
+    // Read-merge-write: wired.json also holds the telemetry record.
+    const rec = readWiredRecord();
+    rec.shims = [...all];
+    writeWiredRecord(rec);
   } catch (_) { /* the ledger is an optimisation, never a requirement */ }
 }
 
@@ -261,6 +264,136 @@ function removeEntries(extraShims) {
   return { removed, skipped, changed: true };
 }
 
+/* ---------- telemetry (OTLP -> the collector) ---------- */
+
+const TELEMETRY_ENDPOINT = 'http://127.0.0.1:8787';
+
+/** The env block we ask Claude Code to export telemetry with. Never any OTEL_LOG_* key. */
+function telemetryEnv(traces) {
+  const env = {
+    CLAUDE_CODE_ENABLE_TELEMETRY: '1',
+    OTEL_LOGS_EXPORTER: 'otlp',
+    OTEL_EXPORTER_OTLP_PROTOCOL: 'http/json',
+    OTEL_EXPORTER_OTLP_ENDPOINT: TELEMETRY_ENDPOINT,
+  };
+  if (traces) {
+    env.OTEL_TRACES_EXPORTER = 'otlp';
+    env.CLAUDE_CODE_ENHANCED_TELEMETRY_BETA = '1';
+  }
+  return env;
+}
+
+/** Where we remember which env keys we set. Same file as the shim ledger in production. */
+const wiredRecordPath = ledgerPath;
+
+function readWiredRecord() {
+  try {
+    const j = JSON.parse(fs.readFileSync(wiredRecordPath(), 'utf8'));
+    return j && typeof j === 'object' ? j : {};
+  } catch (_) { return {}; }
+}
+
+/** Atomic (tmp + rename), preserving other keys (the shim ledger lives here too). */
+function writeWiredRecord(rec) {
+  const file = wiredRecordPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(rec, null, 2));
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * Merges telemetry env vars into settings.json (backup first, like wire()).
+ *
+ * CONFLICT RULE: any existing OTEL_* key (including OTEL_LOG_*, which are not
+ * ours to judge) that we would not set, or would set to a different value, or a
+ * differing CLAUDE_CODE_ENABLE_TELEMETRY / CLAUDE_CODE_ENHANCED_TELEMETRY_BETA,
+ * means a foreign telemetry setup is present and ours must not be mixed into it.
+ * We change nothing (no backup, no write) and return { conflict: [keys] }.
+ * Identical values are fine (idempotent).
+ *
+ * @param {{traces?: boolean, dryRun?: boolean}} [options]
+ */
+function wireTelemetry(options) {
+  const opt = options || {};
+  const want = telemetryEnv(opt.traces !== false);
+  const s = readSettings();
+  const settings = s.settings;
+  const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : null;
+
+  const conflict = [];
+  if (env) {
+    for (const k of Object.keys(env)) {
+      const isOtel = /^OTEL_/.test(k);
+      const guarded = isOtel || k === 'CLAUDE_CODE_ENABLE_TELEMETRY' || k === 'CLAUDE_CODE_ENHANCED_TELEMETRY_BETA';
+      if (!guarded) continue;
+      if (!(k in want)) { if (isOtel) conflict.push(k); continue; }
+      if (String(env[k]) !== want[k]) conflict.push(k);
+    }
+  }
+  if (conflict.length) return { conflict, changes: [], backup: null };
+
+  const added = Object.keys(want).filter((k) => !env || !(k in env));
+  if (!added.length) return { conflict: null, changes: [], backup: null };
+  const changes = added.map((k) => 'env.' + k + ': added');
+  if (opt.dryRun) return { conflict: null, changes, backup: null, dryRun: true };
+
+  settings.env = env || {};
+  for (const k of added) settings.env[k] = want[k];
+
+  let backup = null;
+  if (s.existed) {
+    backup = s.file + '.bak.' + Date.now();
+    fs.writeFileSync(backup, s.raw);
+  } else {
+    fs.mkdirSync(path.dirname(s.file), { recursive: true });
+  }
+  fs.writeFileSync(s.file, JSON.stringify(settings, null, 2) + '\n');
+
+  // Record only what we added: a key already present with our value is not ours to remove.
+  const rec = readWiredRecord();
+  const mine = Object.assign({}, rec.telemetry && rec.telemetry.env);
+  for (const k of added) mine[k] = want[k];
+  rec.telemetry = { env: mine };
+  writeWiredRecord(rec);
+  return { conflict: null, changes, backup };
+}
+
+/**
+ * Removes the telemetry keys we set, but only those still holding the value we
+ * set (a user-edited value stays), then clears the record. An empty `env` is
+ * dropped. No record (wired.json missing or without telemetry): removes nothing.
+ */
+function unwireTelemetry() {
+  const rec = readWiredRecord();
+  const mine = rec.telemetry && rec.telemetry.env;
+  if (!mine || typeof mine !== 'object') return { removed: [], kept: [], recorded: false };
+
+  const s = readSettings();
+  const settings = s.settings;
+  const removed = [];
+  const kept = [];
+  if (settings.env && typeof settings.env === 'object') {
+    for (const k of Object.keys(mine)) {
+      if (!(k in settings.env)) continue;
+      if (String(settings.env[k]) === mine[k]) { delete settings.env[k]; removed.push(k); }
+      else kept.push(k);
+    }
+    if (!Object.keys(settings.env).length) delete settings.env;
+  }
+  if (removed.length) fs.writeFileSync(s.file, JSON.stringify(settings, null, 2) + '\n');
+
+  delete rec.telemetry;
+  writeWiredRecord(rec);
+  return { removed, kept, recorded: true };
+}
+
+/** Human text for a wireTelemetry conflict, shared by the app and the CLI. */
+function conflictMessage(keys) {
+  return 'settings.json already configures telemetry (' + keys.join(', ') + '). '
+    + 'Nothing was changed. Remove or align those keys to let Sereno wire telemetry.';
+}
+
 function backups() {
   const file = settingsPath();
   const dir = path.dirname(file);
@@ -287,6 +420,7 @@ function unwire() {
 }
 
 module.exports = {
-  EVENTS, LEDGER, configDir, settingsPath, buildCommands,
+  EVENTS, ledgerPath, configDir, settingsPath, buildCommands,
+  wireTelemetry, unwireTelemetry, conflictMessage, telemetryEnv,
   status, wire, unwire, removeEntries, backups, isOurs, shimPathOf, ownShims,
 };

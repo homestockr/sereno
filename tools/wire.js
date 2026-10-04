@@ -6,6 +6,9 @@
  * holds the logic both paths share.
  *
  *   node tools/wire.js [--yes] [--dry-run]
+ *   node tools/wire.js --telemetry [--yes] [--dry-run]   (OTLP env only, no hooks)
+ *
+ * Undo telemetry only with: npm run unwire -- --telemetry
  */
 
 const fs = require('node:fs');
@@ -16,6 +19,7 @@ const wiring = require('../src/wiring.js');
 const argv = process.argv.slice(2);
 const YES = argv.includes('--yes') || argv.includes('-y');
 const DRY = argv.includes('--dry-run');
+const TELEMETRY = argv.includes('--telemetry');
 
 const emitJs = path.resolve(__dirname, '..', 'bin', 'emit.js');
 
@@ -27,11 +31,37 @@ function ask(question) {
   });
 }
 
+async function wireTelemetryOnly() {
+  let r;
+  try { r = wiring.wireTelemetry({ traces: true, dryRun: DRY }); }
+  catch (e) { console.error(e.message); process.exit(1); }
+  if (r.conflict) {
+    console.log('\n' + wiring.conflictMessage(r.conflict));
+    return;
+  }
+  if (!r.changes.length) { console.log('\nNothing to do - telemetry is already wired in ' + wiring.settingsPath()); return; }
+  if (DRY) {
+    console.log('\n--dry-run, nothing written. Would change:');
+    for (const c of r.changes) console.log('  - ' + c);
+    return;
+  }
+  console.log('\nWired telemetry.');
+  console.log('  config : ' + wiring.settingsPath());
+  if (r.backup) console.log('  backup : ' + r.backup);
+  for (const c of r.changes) console.log('  - ' + c);
+  console.log('\nRestart any running Claude Code session to pick this up.');
+  console.log('Undo with: npm run unwire -- --telemetry');
+}
+
 async function main() {
   if (!fs.existsSync(wiring.configDir())) {
     console.error('Claude Code config dir not found: ' + wiring.configDir());
     console.error('Set CLAUDE_CONFIG_DIR, or run Claude Code once to create it.');
     process.exit(1);
+  }
+  if (TELEMETRY) {
+    if (!(await ask('Add telemetry env vars to ' + wiring.settingsPath() + ' (backup first)?'))) { console.log('Aborted.'); return; }
+    return wireTelemetryOnly();
   }
   if (!fs.existsSync(emitJs)) {
     console.error('bin/emit.js not found at ' + emitJs);

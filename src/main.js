@@ -405,6 +405,11 @@ function createTray(store) {
       checked: config.read().ledger.enabled === true,
       click: (item) => setLedgerEnabled(item.checked),
     },
+    {
+      id: 'telemetry', label: 'Wire telemetry…',
+      enabled: config.read().ledger.enabled === true,
+      click: () => offerTelemetryWiring(),
+    },
     { type: 'separator' },
     { label: 'Quit Sereno', click: () => app.quit() },
   ]);
@@ -428,6 +433,8 @@ function applyLedgerConfig() {
   if (collector) collector.setLedger(ledger);
   const item = trayMenu && trayMenu.getMenuItemById('ledger');
   if (item) item.checked = config.read().ledger.enabled === true;
+  const tel = trayMenu && trayMenu.getMenuItemById('telemetry');
+  if (tel) tel.enabled = config.read().ledger.enabled === true;
   paintTray();
 }
 
@@ -459,8 +466,32 @@ function askLedgerOptIn() {
     if (answer === null) return;
     config.write({ ledger: { enabled: answer } });
     applyLedgerConfig();
-    // Step 5: offer telemetry wiring here (separate confirmation).
+    if (answer === true) offerTelemetryWiring();
   }).catch((e) => console.error('[sereno] opt-in dialog failed: ' + e.message));
+}
+
+/**
+ * Separate confirmation (settings.json is Claude Code's, not ours): shown only
+ * after a Yes to the ledger, or from the tray item. Async and parentless.
+ */
+function offerTelemetryWiring() {
+  dialog.showMessageBox({
+    type: 'question',
+    message: "Also send Claude Code's usage telemetry to Sereno?",
+    detail: 'This edits ~/.claude/settings.json (a backup is made first). Only request costs and token counts are kept.',
+    buttons: ['Wire telemetry', 'Not now'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  }).then(({ response }) => {
+    if (response !== 0) return null;
+    const r = wiring.wireTelemetry({ traces: true });
+    if (!r.conflict) return null;
+    return dialog.showMessageBox({
+      type: 'info', message: 'Telemetry not wired',
+      detail: wiring.conflictMessage(r.conflict), buttons: ['OK'], noLink: true,
+    });
+  }).catch((e) => console.error('[sereno] telemetry wiring failed: ' + e.message));
 }
 
 /* ---------- toast ---------- */

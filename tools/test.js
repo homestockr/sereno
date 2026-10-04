@@ -1230,6 +1230,8 @@ test('uninstall never removes another tool\'s hooks', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-ident-'));
   const prev = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_CONFIG_DIR = tmp;
+  const prevHome = process.env.SERENO_HOME;
+  process.env.SERENO_HOME = tmp;
   try {
     const foreign = {
       statusLine: { type: 'command', command: 'node "C:/other-tool/emit.js" statusline' },
@@ -1249,6 +1251,8 @@ test('uninstall never removes another tool\'s hooks', () => {
   } finally {
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = prev;
+    if (prevHome === undefined) delete process.env.SERENO_HOME;
+    else process.env.SERENO_HOME = prevHome;
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -1597,7 +1601,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const original = '{\n  "theme": "dark-daltonized",\n  "tui": "fullscreen"\n}\n';
     fs.writeFileSync(settings, original);
 
-    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp });
+    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, SERENO_HOME: tmp });
     execFileSync(process.execPath, [path.join(ROOT, 'tools', 'wire.js'), '--yes'], { env, encoding: 'utf8' });
 
     const wired = JSON.parse(fs.readFileSync(settings, 'utf8'));
@@ -1622,7 +1626,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hud-wire3-'));
     const settings = path.join(tmp, 'settings.json');
     fs.writeFileSync(settings, '{}\n');
-    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp });
+    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, SERENO_HOME: tmp });
     const run = () => execFileSync(process.execPath, [path.join(ROOT, 'tools', 'wire.js'), '--yes'], { env, encoding: 'utf8' });
     run(); run();
     const w = JSON.parse(fs.readFileSync(settings, 'utf8'));
@@ -1643,7 +1647,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo mine' }] }] },
     }, null, 2));
 
-    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp });
+    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, SERENO_HOME: tmp });
     execFileSync(process.execPath, [path.join(ROOT, 'tools', 'wire.js'), '--yes'], { env, encoding: 'utf8' });
 
     const w = JSON.parse(fs.readFileSync(settings, 'utf8'));
@@ -2743,6 +2747,178 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.deepStrictEqual(await get(), { enabled: false });
       } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
     });
+  }
+
+  /* ---- Phase 1 step 5: telemetry wiring ---- */
+  {
+    const withTmp = (initial, fn) => {
+      const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-tw-claude-'));
+      const hdir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-tw-home-'));
+      const prevC = process.env.CLAUDE_CONFIG_DIR; const prevH = process.env.SERENO_HOME;
+      process.env.CLAUDE_CONFIG_DIR = cdir; process.env.SERENO_HOME = hdir;
+      const file = path.join(cdir, 'settings.json');
+      if (initial !== null) fs.writeFileSync(file, initial);
+      try { return fn({ file, cdir, hdir }); } finally {
+        if (prevC === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevC;
+        if (prevH === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prevH;
+        fs.rmSync(cdir, { recursive: true, force: true }); fs.rmSync(hdir, { recursive: true, force: true });
+      }
+    };
+    const noLogKeys = (file) => {
+      const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.ok(!Object.keys(s.env || {}).some((k) => /^OTEL_LOG_/.test(k)), 'OTEL_LOG_* key written');
+    };
+    const nBackups = (cdir) => fs.readdirSync(cdir).filter((f) => f.includes('.bak.')).length;
+
+    test('wireTelemetry merges env, preserving unrelated env keys and settings, with a backup', () => withTmp(
+      JSON.stringify({ theme: 'dark', env: { FOO: 'bar' } }, null, 2) + '\n', ({ file, cdir }) => {
+        const r = wiring.wireTelemetry({ traces: true });
+        assert.strictEqual(r.conflict, null);
+        assert.ok(r.backup && fs.existsSync(r.backup));
+        const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.strictEqual(s.theme, 'dark');
+        assert.deepStrictEqual(s.env, Object.assign({ FOO: 'bar' }, {
+          CLAUDE_CODE_ENABLE_TELEMETRY: '1', OTEL_LOGS_EXPORTER: 'otlp',
+          OTEL_EXPORTER_OTLP_PROTOCOL: 'http/json', OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:8787',
+          OTEL_TRACES_EXPORTER: 'otlp', CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1',
+        }));
+        noLogKeys(file);
+        assert.strictEqual(nBackups(cdir), 1);
+      }));
+
+    test('wireTelemetry is idempotent: second call makes no backup and no change', () => withTmp('{}\n', ({ file, cdir }) => {
+      wiring.wireTelemetry();
+      const bytes = fs.readFileSync(file, 'utf8');
+      const r = wiring.wireTelemetry();
+      assert.deepStrictEqual(r.changes, []);
+      assert.strictEqual(r.backup, null);
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), bytes);
+      assert.strictEqual(nBackups(cdir), 1);
+      noLogKeys(file);
+    }));
+
+    test('wireTelemetry conflict: a different OTEL value changes nothing at all', () => {
+      const orig = JSON.stringify({ env: { OTEL_EXPORTER_OTLP_ENDPOINT: 'https://corp.example' } }) + '\n';
+      withTmp(orig, ({ file, cdir, hdir }) => {
+        const r = wiring.wireTelemetry();
+        assert.deepStrictEqual(r.conflict, ['OTEL_EXPORTER_OTLP_ENDPOINT']);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), orig);
+        assert.strictEqual(nBackups(cdir), 0);
+        assert.ok(!fs.existsSync(path.join(hdir, 'wired.json')));
+        assert.ok(/OTEL_EXPORTER_OTLP_ENDPOINT/.test(wiring.conflictMessage(r.conflict)));
+      });
+    });
+
+    test('wireTelemetry conflict: foreign OTEL_* keys we do not set (incl. OTEL_LOG_*) also block', () => {
+      for (const key of ['OTEL_METRICS_EXPORTER', 'OTEL_EXPORTER_OTLP_HEADERS', 'OTEL_LOG_USER_PROMPTS']) {
+        const orig = JSON.stringify({ env: { [key]: '1' } }) + '\n';
+        withTmp(orig, ({ file, cdir }) => {
+          assert.deepStrictEqual(wiring.wireTelemetry().conflict, [key]);
+          assert.strictEqual(fs.readFileSync(file, 'utf8'), orig);
+          assert.strictEqual(nBackups(cdir), 0);
+        });
+      }
+    });
+
+    test('wireTelemetry: traces:false omits the two trace keys', () => withTmp('{}\n', ({ file }) => {
+      wiring.wireTelemetry({ traces: false });
+      const env = JSON.parse(fs.readFileSync(file, 'utf8')).env;
+      assert.ok(!('OTEL_TRACES_EXPORTER' in env));
+      assert.ok(!('CLAUDE_CODE_ENHANCED_TELEMETRY_BETA' in env));
+      assert.strictEqual(env.OTEL_LOGS_EXPORTER, 'otlp');
+      noLogKeys(file);
+    }));
+
+    test('wireTelemetry: creates settings.json when absent; dryRun writes nothing', () => withTmp(null, ({ file, hdir }) => {
+      const d = wiring.wireTelemetry({ dryRun: true });
+      assert.ok(d.dryRun && d.changes.length);
+      assert.ok(!fs.existsSync(file) && !fs.existsSync(path.join(hdir, 'wired.json')));
+      wiring.wireTelemetry();
+      assert.ok(fs.existsSync(file));
+      noLogKeys(file);
+    }));
+
+    test('unwireTelemetry removes ours, keeps a user-changed key and unrelated keys, clears the record', () => withTmp(
+      JSON.stringify({ theme: 'dark', env: { FOO: 'bar' } }) + '\n', ({ file, hdir }) => {
+        wiring.wireTelemetry();
+        const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+        s.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'https://mine.example';
+        fs.writeFileSync(file, JSON.stringify(s));
+        const r = wiring.unwireTelemetry();
+        assert.deepStrictEqual(r.kept, ['OTEL_EXPORTER_OTLP_ENDPOINT']);
+        const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.deepStrictEqual(after.env, { FOO: 'bar', OTEL_EXPORTER_OTLP_ENDPOINT: 'https://mine.example' });
+        assert.strictEqual(after.theme, 'dark');
+        assert.ok(!('telemetry' in JSON.parse(fs.readFileSync(path.join(hdir, 'wired.json'), 'utf8'))));
+        noLogKeys(file);
+      }));
+
+    test('unwireTelemetry drops an emptied env; a pre-existing identical key is not ours to remove', () => {
+      withTmp('{}\n', ({ file }) => {
+        wiring.wireTelemetry();
+        wiring.unwireTelemetry();
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')), {});
+      });
+      withTmp(JSON.stringify({ env: { CLAUDE_CODE_ENABLE_TELEMETRY: '1' } }), ({ file }) => {
+        wiring.wireTelemetry();
+        wiring.unwireTelemetry();
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).env, { CLAUDE_CODE_ENABLE_TELEMETRY: '1' });
+      });
+    });
+
+    test('unwireTelemetry with no wired.json record removes nothing and says so', () => {
+      const orig = JSON.stringify({ env: { OTEL_LOGS_EXPORTER: 'otlp' } }) + '\n';
+      withTmp(orig, ({ file }) => {
+        const r = wiring.unwireTelemetry();
+        assert.strictEqual(r.recorded, false);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), orig);
+      });
+    });
+
+    test('wired.json keeps the shim ledger keys when telemetry is recorded and cleared', () => withTmp('{}\n', ({ hdir }) => {
+      const rec = path.join(hdir, 'wired.json');
+      fs.writeFileSync(rec, JSON.stringify({ shims: ['c:/x/emit.js'] }));
+      wiring.wireTelemetry();
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(rec, 'utf8')).shims, ['c:/x/emit.js']);
+      wiring.unwireTelemetry();
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(rec, 'utf8')), { shims: ['c:/x/emit.js'] });
+    }));
+
+    test('wire() after wireTelemetry keeps the telemetry record; unwireTelemetry still removes our keys', () => withTmp('{}\n', ({ file, hdir }) => {
+      wiring.wireTelemetry();
+      wiring.wire(wiring.buildCommands({ packaged: false, emitJsPath: 'C:/x/bin/emit.js' }));
+      const rec = JSON.parse(fs.readFileSync(path.join(hdir, 'wired.json'), 'utf8'));
+      assert.ok(rec.telemetry && rec.shims.length === 1, 'record or shims lost');
+      const r = wiring.unwireTelemetry();
+      assert.ok(r.recorded && r.removed.length === 6);
+      assert.ok(!('env' in JSON.parse(fs.readFileSync(file, 'utf8'))));
+    }));
+
+    test('wireTelemetry after wire() keeps the shims', () => withTmp('{}\n', ({ hdir }) => {
+      wiring.wire(wiring.buildCommands({ packaged: false, emitJsPath: 'C:/x/bin/emit.js' }));
+      wiring.wireTelemetry();
+      const rec = JSON.parse(fs.readFileSync(path.join(hdir, 'wired.json'), 'utf8'));
+      assert.deepStrictEqual(rec.shims, ['c:/x/bin/emit.js']);
+      assert.ok(rec.telemetry);
+    }));
+
+    test('CLI: wire --telemetry wires env only; unwire --telemetry reverses; plain unwire still restores bytes', () => withTmp(
+      '{\n  "theme": "dark"\n}\n', ({ file, cdir, hdir }) => {
+        const orig = fs.readFileSync(file, 'utf8');
+        const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: cdir, SERENO_HOME: hdir });
+        const run = (script, args) => execFileSync(process.execPath, [path.join(ROOT, 'tools', script)].concat(args), { env, encoding: 'utf8' });
+        run('wire.js', ['--telemetry', '--dry-run', '--yes']);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), orig, 'dry-run wrote');
+        run('wire.js', ['--telemetry', '--yes']);
+        const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.ok(s.env.OTEL_LOGS_EXPORTER && !s.hooks && !s.statusLine, 'telemetry flag must not wire hooks');
+        noLogKeys(file);
+        run('unwire.js', ['--telemetry']);
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { theme: 'dark' });
+        run('wire.js', ['--telemetry', '--yes']);
+        run('unwire.js', ['--yes']);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), orig, 'plain unwire must restore the newest backup byte for byte');
+      }));
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
