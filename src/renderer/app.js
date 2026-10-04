@@ -98,11 +98,16 @@ function stateLabel(s) {
   // what it is doing - and the longest waits are the ones promoted to the top,
   // where calling them 'Stale' with no beacon is precisely backwards.
   if (s.stale && s.state !== 'blocked') return 'Stale';
+  // Idle with subagents still working in the background (they can outlive the
+  // parent's Stop): presentation only, the store state stays 'idle'. Inlined,
+  // not a helper, because the tests lift these functions out one by one.
+  if (s.state === 'idle' && s.subagents > 0) return 'Running';
   return s.state.charAt(0).toUpperCase() + s.state.slice(1);
 }
 
 function activityText(s) {
   if (s.stale && s.state !== 'blocked') return 'No activity for ' + humanMinutes(s.staleForMs);
+  if (s.state === 'idle' && s.subagents > 0) return 'Background work · ready for your next prompt';
   switch (s.state) {
     case 'running':
       return s.stateTool ? s.stateTool + (s.stateArgShort ? ' · ' + s.stateArgShort : '') : 'Working';
@@ -139,8 +144,10 @@ function esc(s) {
  * One line per live subagent: which agent it is, what it is running, how long
  * it has been going.
  *
- * There is no SubagentStart event, so "how long" counts from the first tagged
- * event we saw - the earliest moment the subagent is knowable. Between its tool
+ * "How long" counts from the first tagged event we saw (SubagentStart, where
+ * Claude Code sends one, is just that first event; 2.1.270 sends none) - the
+ * earliest moment the subagent is knowable. A subagent seeded from a Stop's
+ * background_tasks counts from when that Stop arrived. Between its tool
  * calls it is reasoning rather than running, and says so instead of leaving the
  * last tool on screen pretending to still be busy.
  */
@@ -250,7 +257,7 @@ function render() {
 
   let html = head.map(sessionHtml).join('');
   if (tail.length) {
-    const allQuiet = tail.every((s) => s.stale || s.state === 'idle');
+    const allQuiet = tail.every((s) => s.stale || (s.state === 'idle' && !(s.subagents > 0)));
     html += `<button class="more no-drag" type="button" aria-expanded="${expanded}">
       <span>${expanded ? 'Show fewer sessions' : '+' + tail.length + ' more session' + (tail.length > 1 ? 's' : '')}</span>
       <span>${expanded ? 'Collapse ⌃' : (allQuiet ? (tail.length === 2 ? 'Both quiet' : 'All quiet') + ' ⌄' : 'Show ⌄')}</span>

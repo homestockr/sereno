@@ -208,8 +208,10 @@ that contradicted the original spec and changed the build:
 with `agent_id` but under the parent session. Applied as written, the spec's state
 machine let a subagent's `Bash` overwrite the parent row, and a subagent's
 `PostToolUse` clear a blocked parent. Only untagged events drive top-level state.
-There is also no `SubagentStart` event, so the spec's decrement-only counter had
-nothing to increment it; liveness is the membership of a live `agent_id` map.
+Claude Code 2.1.270 had no `SubagentStart` event, so the spec's decrement-only
+counter had nothing to increment it; current Claude Code sends one, but it is just
+the first tagged event, so liveness is still the membership of a live `agent_id`
+map (see `docs/payloads.md` §6 for subagents that outlive `Stop`).
 
 Those tagged events carry more than an id. `agent_type` names the agent, and the
 subagent's own `tool_name`/`tool_input` say what it is doing, so live subagents
@@ -217,8 +219,9 @@ are listed under their parent with what each is running and how long it has been
 going. Between its tool calls a subagent reports as reasoning rather than leaving
 a finished tool on screen claiming to still be busy. Elapsed time counts from the
 first tagged event, since that is the earliest moment a subagent is knowable at
-all — and because a subagent's detail dies with the turn, the same `Stop` that
-always cleared the count now clears the detail.
+all. A `Stop` that lists no background subagents clears the count and the detail
+together; one that does list them keeps those subagents, because they can outlive
+the turn.
 
 Three things that only a missing or late event reveals:
 
@@ -227,11 +230,13 @@ Three things that only a missing or late event reveals:
   `SubagentStop` never arrived, so rejecting the new arrival instead would keep
   the dead and hide the living. Past 32 concurrent subagents the list is
   necessarily partial.
-- **A stopped `agent_id` is remembered for the rest of the turn.** The shim is
+- **A stopped `agent_id` is remembered for 30 seconds.** The shim is
   fire-and-forget with one connection per hook, so a subagent's last
   `PostToolUse` can arrive after its `SubagentStop`; without the tombstone the
   straggler re-created the entry and a dead subagent reappeared with a clock
-  started from that moment.
+  started from that moment. Thirty seconds is long enough to absorb stragglers
+  and short enough that a resumed subagent (a new run under the same
+  `agent_id`) reappears.
 - **The stopwatches stop when the data does.** They hold while the collector is
   unreachable, and a stale session renders no subagent lines at all. They are the
   one element on the page asserting *this is happening right now*, so they must

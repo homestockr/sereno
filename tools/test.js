@@ -240,6 +240,262 @@ test('subagent count is self-healing (no SubagentStart exists)', () => {
   assert.strictEqual(s.sessions.get('x').subagents, 0);
 });
 
+console.log('\n[*] background subagents outlive Stop (docs/payloads.md §6)');
+
+const bgStop = (id, tasks) => H('Stop', sid(id, { background_tasks: tasks }));
+const bgTask = (id, extra) => Object.assign({ id, type: 'subagent', status: 'running',
+  description: 'do a thing', agent_type: 'general-purpose' }, extra || {});
+
+test('Stop keeps a running background subagent listed; the session is active, not quiet', () => {
+  const s = new Store();
+  feed(s, [
+    H('UserPromptSubmit', sid('x', { prompt: 'go' })),
+    H('PreToolUse', sid('x', { tool_name: 'Agent', tool_use_id: 't1' })),
+    H('SubagentStart', sid('x', { agent_id: 'a9ee', agent_type: 'general-purpose' })),
+    H('PostToolUse', sid('x', { tool_name: 'Agent', tool_use_id: 't1' })),
+    bgStop('x', [bgTask('a9ee')]),
+  ]);
+  const snap = s.snapshot();
+  const g = snap.sessions[0];
+  assert.strictEqual(g.state, 'idle', 'store state stays idle; the label is presentation');
+  assert.strictEqual(g.subagents, 1);
+  assert.strictEqual(g.subagentList.length, 1);
+  assert.strictEqual(g.subagentList[0].type, 'general-purpose');
+  assert.strictEqual(snap.counts.active, 1);
+  assert.strictEqual(snap.counts.quiet, 0, 'a session is never both active and quiet');
+});
+
+test('a background subagent keeps updating after Stop, and SubagentStop ends it', () => {
+  const s = new Store();
+  feed(s, [
+    H('SubagentStart', sid('x', { agent_id: 'a9ee', agent_type: 'general-purpose' })),
+    bgStop('x', [bgTask('a9ee')]),
+    H('PreToolUse', sid('x', { tool_name: 'Read', tool_use_id: 'r1', agent_id: 'a9ee',
+      agent_type: 'general-purpose', tool_input: { file_path: '/a/b.js' } })),
+  ]);
+  let g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagentList[0].tool, 'Read');
+  assert.strictEqual(g.subagentList[0].arg, '/a/b.js');
+  assert.strictEqual(g.state, 'idle', 'tagged events never drive top-level state');
+  feed(s, [H('PostToolUse', sid('x', { tool_name: 'Read', tool_use_id: 'r1', agent_id: 'a9ee' }))]);
+  g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagentList[0].tool, '');
+  assert.strictEqual(g.subagents, 1);
+
+  feed(s, [H('SubagentStop', sid('x', { agent_id: 'a9ee', agent_type: 'general-purpose' }))]);
+  const snap = s.snapshot();
+  assert.strictEqual(snap.sessions[0].subagents, 0);
+  assert.deepStrictEqual(snap.sessions[0].subagentList, []);
+  assert.strictEqual(snap.counts.active, 0);
+  assert.strictEqual(snap.counts.quiet, 1, 'once the subagent is gone the session is quiet');
+});
+
+test('Stop without background_tasks still clears every subagent (2.1.270)', () => {
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'a', agent_id: 'ag1' })),
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'b', agent_id: 'ag2' })),
+    H('Stop', sid('x')),
+  ]);
+  assert.strictEqual(s.sessions.get('x').subagents, 0);
+  feed(s, [H('Stop', sid('x', { background_tasks: 'nope' }))]);
+  assert.strictEqual(s.sessions.get('x').subagents, 0, 'a non-array list is treated as absent');
+});
+
+test('Stop prunes subagents that its background_tasks does not list as running', () => {
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'a', agent_id: 'ag1', agent_type: 'Explore' })),
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'b', agent_id: 'ag2', agent_type: 'Plan' })),
+    bgStop('x', [bgTask('ag2', { agent_type: 'Plan' })]),
+  ]);
+  assert.deepStrictEqual(s.snapshot().sessions[0].subagentList.map((a) => a.id), ['ag2']);
+  feed(s, [bgStop('x', [])]);
+  assert.strictEqual(s.snapshot().sessions[0].subagents, 0);
+});
+
+test('a Stop never revives a subagent whose SubagentStop already arrived', () => {
+  const s = new Store();
+  feed(s, [
+    H('SubagentStart', sid('x', { agent_id: 'a9ee', agent_type: 'general-purpose' })),
+    H('SubagentStop', sid('x', { agent_id: 'a9ee', agent_type: 'general-purpose' })),
+    bgStop('x', [bgTask('a9ee')]),   // stale list
+  ]);
+  const g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagents, 0);
+  assert.deepStrictEqual(g.subagentList, []);
+});
+
+test('a Stop that lists a running subagent we never saw adds it with its type', () => {
+  const s = new Store();
+  feed(s, [
+    H('UserPromptSubmit', sid('x', { prompt: 'go' })),
+    bgStop('x', [bgTask('never-seen', { agent_type: 'Explore' }), bgTask('no-type', { agent_type: undefined })]),
+  ]);
+  const g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagents, 2);
+  assert.strictEqual(g.subagentList[0].id, 'never-seen');
+  assert.strictEqual(g.subagentList[0].type, 'Explore');
+  assert.strictEqual(g.subagentList[1].type, 'agent', 'a missing type still renders as something');
+  assert.ok(g.subagentList[0].since > 0);
+});
+
+test('a Stop ignores background tasks that are not running subagents', () => {
+  const s = new Store();
+  feed(s, [bgStop('x', [
+    { id: 'sh1', type: 'shell', status: 'running', description: 'npm run dev' },
+    bgTask('done1', { status: 'completed' }),
+    { type: 'subagent', status: 'running' },            // no id
+    null,
+  ])]);
+  const g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagents, 0);
+  assert.deepStrictEqual(g.subagentList, []);
+});
+
+test('a SubagentStop for an agent_id never seen creates no row', () => {
+  const s = new Store();
+  feed(s, [
+    bgStop('x', []),
+    H('SubagentStop', sid('x', { agent_id: 'internal-1', agent_type: '' })),
+    H('SubagentStop', sid('x', { agent_id: 'internal-2', agent_type: '' })),
+  ]);
+  const g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagents, 0);
+  assert.deepStrictEqual(g.subagentList, []);
+});
+
+test('the renderer shows an idle session with background subagents as Running', () => {
+  // app.js is a browser script and cannot be required, so the presentation
+  // functions are lifted out by source, as the mmss test does.
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const grab = (n) => app.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
+  const R = new Function(['stateLabel', 'activityText', 'symbolFor']
+    .map(grab).join('\n') + '\nreturn { stateLabel, activityText, symbolFor };')();
+  const idle = { state: 'idle', stale: false, subagents: 1, stateTool: '', stateArgShort: '' };
+  assert.strictEqual(R.stateLabel(idle), 'Running');
+  assert.strictEqual(R.activityText(idle), 'Background work · ready for your next prompt');
+  assert.strictEqual(R.activityText(Object.assign({}, idle, { subagents: 3 })),
+    'Background work · ready for your next prompt');
+  assert.strictEqual(R.symbolFor(idle), '<i></i><i></i><i></i>');
+  assert.strictEqual(R.stateLabel(Object.assign({}, idle, { subagents: 0 })), 'Idle');
+  assert.strictEqual(R.activityText(Object.assign({}, idle, { subagents: 0 })), 'Ready for your next prompt');
+  assert.strictEqual(R.stateLabel(Object.assign({}, idle, { stale: true })), 'Stale');
+  assert.ok(/s\.state === 'idle' && !\(s\.subagents > 0\)/.test(app),
+    'the "All quiet" check must not treat background work as quiet');
+});
+
+
+console.log('\n[*] resumed subagents reuse their agent_id');
+
+const STRAGGLER_AGE = 31 * 1000;   // just past STRAGGLER_MS
+const ageTombstone = (s, session, id, ms) => s.sessions.get(session)._stopped.set(id, Date.now() - ms);
+
+for (const [label, ageMs] of [['within the straggler window', 0], ['after the straggler window', STRAGGLER_AGE]]) {
+  test('a resumed subagent (SubagentStart ' + label + ') is re-admitted and survives the next Stop', () => {
+    const s = new Store();
+    feed(s, [
+      H('SubagentStart', sid('x', { agent_id: 'A', agent_type: 'general-purpose' })),
+      H('SubagentStop', sid('x', { agent_id: 'A', agent_type: 'general-purpose' })),
+      bgStop('x', []),
+    ]);
+    assert.strictEqual(s.sessions.get('x').subagents, 0);
+    if (ageMs) ageTombstone(s, 'x', 'A', ageMs);
+    feed(s, [
+      H('UserPromptSubmit', sid('x', { prompt: 'resume it' })),
+      H('SubagentStart', sid('x', { agent_id: 'A', agent_type: 'general-purpose' })),
+      H('PreToolUse', sid('x', { tool_name: 'Read', tool_use_id: 'r1', agent_id: 'A',
+        agent_type: 'general-purpose', tool_input: { file_path: '/a.js' } })),
+      bgStop('x', [bgTask('A')]),
+    ]);
+    const snap = s.snapshot();
+    const g = snap.sessions[0];
+    assert.strictEqual(g.subagents, 1);
+    assert.strictEqual(g.subagentList[0].id, 'A');
+    assert.strictEqual(g.subagentList[0].type, 'general-purpose');
+    assert.strictEqual(g.state, 'idle');
+    assert.strictEqual(snap.counts.active, 1);
+    assert.strictEqual(snap.counts.quiet, 0);
+  });
+}
+
+test('a SubagentStart starts a fresh entry: new clock, tool and arg cleared', () => {
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1', agent_id: 'A',
+      agent_type: 'Explore', tool_input: { command: 'old' } })),
+  ]);
+  s.sessions.get('x')._agents.get('A').since -= 60 * 1000;
+  feed(s, [H('SubagentStart', sid('x', { agent_id: 'A', agent_type: 'Explore' }))]);
+  const a = s.snapshot().sessions[0].subagentList[0];
+  assert.strictEqual(a.tool, '');
+  assert.strictEqual(a.arg, '');
+  assert.ok(Date.now() - a.since < 5000, 'the resumed run must not inherit the old clock');
+});
+
+test('a resumed subagent without SubagentStart is re-created by its first tagged event', () => {
+  const s = new Store();
+  feed(s, [
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1', agent_id: 'A', agent_type: 'Explore' })),
+    H('SubagentStop', sid('x', { agent_id: 'A', agent_type: 'Explore' })),
+  ]);
+  ageTombstone(s, 'x', 'A', STRAGGLER_AGE);
+  feed(s, [H('PreToolUse', sid('x', { tool_name: 'Read', tool_use_id: 'c2', agent_id: 'A',
+    agent_type: 'Explore', tool_input: { file_path: '/b.js' } }))]);
+  const g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagents, 1);
+  assert.strictEqual(g.subagentList[0].tool, 'Read');
+  assert.ok(!s.sessions.get('x')._stopped.has('A'), 'the old tombstone must be gone');
+});
+
+test('a Stop list re-adds an old-tombstoned id but not a fresh-tombstoned one', () => {
+  const s = new Store();
+  feed(s, [
+    H('SubagentStop', sid('x', { agent_id: 'old', agent_type: 'Explore' })),
+    H('SubagentStop', sid('x', { agent_id: 'fresh', agent_type: 'Explore' })),
+  ]);
+  ageTombstone(s, 'x', 'old', STRAGGLER_AGE);
+  feed(s, [bgStop('x', [bgTask('old', { agent_type: 'Explore' }), bgTask('fresh', { agent_type: 'Explore' })])]);
+  const g = s.snapshot().sessions[0];
+  assert.deepStrictEqual(g.subagentList.map((a) => a.id), ['old'],
+    'only the resumed one is live; the other just stopped and the list is stale');
+  assert.ok(!s.sessions.get('x')._stopped.has('old'), 'the consumed tombstone must be dropped');
+  assert.ok(s.sessions.get('x')._stopped.has('fresh'));
+});
+
+test('a kept subagent keeps its in-flight tool across a Stop that lists it', () => {
+  const s = new Store();
+  feed(s, [
+    H('SubagentStart', sid('x', { agent_id: 'A', agent_type: 'general-purpose' })),
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c1', agent_id: 'A',
+      agent_type: 'general-purpose', tool_input: { command: 'npm test' } })),
+  ]);
+  const since = s.snapshot().sessions[0].subagentList[0].since;
+  feed(s, [bgStop('x', [bgTask('A')])]);
+  const a = s.snapshot().sessions[0].subagentList[0];
+  assert.strictEqual(a.tool, 'Bash');
+  assert.strictEqual(a.arg, 'npm test');
+  assert.strictEqual(a.since, since, 'a Stop must not restart a kept subagent\'s clock');
+});
+
+test('numeric agent ids compare equal to their string form; object ids are ignored', () => {
+  const s = new Store();
+  feed(s, [bgStop('x', [{ id: 7, type: 'subagent', status: 'running', agent_type: 'Explore' }])]);
+  let g = s.snapshot().sessions[0];
+  assert.deepStrictEqual(g.subagentList.map((a) => a.id), ['7']);
+  feed(s, [H('SubagentStop', sid('x', { agent_id: 7, agent_type: 'Explore' }))]);
+  g = s.snapshot().sessions[0];
+  assert.strictEqual(g.subagents, 0, 'a numeric agent_id must match the string id from the list');
+  assert.deepStrictEqual(g.subagentList, []);
+
+  feed(s, [bgStop('x', [
+    { id: { nested: 1 }, type: 'subagent', status: 'running' },
+    { id: true, type: 'subagent', status: 'running' },
+    { id: NaN, type: 'subagent', status: 'running' },
+  ])]);
+  assert.strictEqual(s.snapshot().sessions[0].subagents, 0);
+});
+
 /* ============================================================ *
  * Eviction
  * ============================================================ */
@@ -824,15 +1080,26 @@ test('a straggler after SubagentStop does not resurrect a dead subagent', () => 
   assert.strictEqual(g.subagents, 0, 'the straggler brought it back from the dead');
   assert.deepStrictEqual(g.subagentList, []);
 
-  // But the tombstone must not outlive the turn, or a later turn reusing the id
-  // would be invisible.
+  // The tombstone survives Stop on purpose: a background subagent's stragglers
+  // can arrive after a later Stop. Inside the straggler window it still holds.
   feed(s, [
     H('Stop', sid('x')),
     H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c9',
       agent_id: 'a1', agent_type: 'Explore', tool_input: { command: 'y' } })),
   ]);
+  assert.strictEqual(s.snapshot().sessions[0].subagents, 0,
+    'a straggler within 30s of the SubagentStop must not revive the subagent');
+
+  // But agent_ids are not unique over time (a resume reuses the id), so once the
+  // window has passed the same id is a new run and must be admitted.
+  s.sessions.get('x')._stopped.set('a1', Date.now() - 31 * 1000);
+  feed(s, [
+    H('Stop', sid('x')),
+    H('PreToolUse', sid('x', { tool_name: 'Bash', tool_use_id: 'c10',
+      agent_id: 'a1', agent_type: 'Explore', tool_input: { command: 'z' } })),
+  ]);
   assert.strictEqual(s.snapshot().sessions[0].subagents, 1,
-    'a new turn must be able to reuse an agent_id');
+    'a later run under a reused agent_id must be visible');
 });
 
 test('a stale session stops claiming live subagents', () => {

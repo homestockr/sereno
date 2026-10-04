@@ -10,8 +10,12 @@
  *      Bash overwrites the parent row and its PostToolUse clears a blocked parent.
  *   2. Notification does not name the tool being requested. We derive it from the
  *      last PreToolUse with no matching PostToolUse.
- *   3. There is no SubagentStart event, so subagent liveness is inferred from
- *      previously unseen agent_ids and cleared by SubagentStop.
+ *   3. Current Claude Code (2.1.289) sends SubagentStart, but it is just the
+ *      first tagged event for that agent_id, so it needs no case of its own.
+ *      Older builds (2.1.270) send no SubagentStart at all, so liveness is
+ *      still inferred from previously unseen agent_ids as the fallback.
+ *      SubagentStop clears the entry. Subagents can also run in the background
+ *      and outlive the parent's Stop; see the Stop case below.
  */
 
 const STALE_MS = 5 * 60 * 1000;
@@ -21,7 +25,8 @@ const DROP_MS = 30 * 60 * 1000;
 const MAX_PENDING = 32;
 
 // A missed SubagentStop would otherwise accumulate forever. The turn's own Stop
-// clears the map, so this only has to survive one runaway turn.
+// prunes the map (to the background_tasks it reports, or entirely on older
+// builds), so this only has to survive one runaway turn.
 //
 // It drops the STALEST entry, exactly like MAX_PENDING above, and for a sharper
 // reason: the entries filling this map when the ceiling bites are the ghosts of
@@ -30,11 +35,23 @@ const MAX_PENDING = 32;
 // ceiling exists to contain.
 const MAX_AGENTS = 32;
 
-// An agent_id that has already stopped this turn. The shim is fire-and-forget
-// over one connection per hook, so a subagent's last PostToolUse can arrive
-// AFTER its SubagentStop; without this the late event re-creates the entry and
-// a dead subagent reappears with a freshly started clock.
+// A tombstone for an agent_id that has stopped: agent_id -> when. The shim is
+// fire-and-forget over one connection per hook, so a subagent's last
+// PostToolUse can arrive AFTER its SubagentStop; without this the late event
+// re-creates the entry and a dead subagent reappears with a freshly started
+// clock.
+//
+// agent_ids are NOT unique over time: resuming a subagent starts a new run under
+// the same ID (code.claude.com/docs/en/sub-agents), so a tombstone that lived
+// forever would hide the resumed run. Tombstones are therefore time-bound, see
+// STRAGGLER_MS.
 const MAX_STOPPED = 64;
+
+// How long a tombstone suppresses events for its agent_id. A straggler is a late
+// hook from the fire-and-forget shim, which arrives within seconds; a resume
+// comes later (a new prompt, a new turn). Inside the window an event is a
+// straggler and is dropped; past it, the event is a new run of the same id.
+const STRAGGLER_MS = 30 * 1000;
 
 // Only this notification_type may turn a row red. An unknown type must not, or the
 // HUD cries wolf on idle pings. Text match is the spec's defensive fallback.
@@ -113,7 +130,7 @@ class Store {
         // internal bookkeeping, stripped from the snapshot
         _pending: new Map(),   // tool_use_id -> { tool, arg }
         _agents: new Map(),   // agent_id -> { type, tool, arg, since, lastSeen }
-        _stopped: new Set(),   // agent_ids already stopped this turn
+        _stopped: new Map(),   // agent_id -> stoppedAt (ms); bounded, survives Stop
         _blockedNotified: false,
       };
       this.sessions.set(id, s);
@@ -144,22 +161,40 @@ class Store {
     // session. Nothing in the payload itself identifies the process.
     if (meta && meta.ppid) s.pid = meta.ppid;
 
-    const agentId = payload.agent_id || null;
+    // Ids are compared as strings everywhere (a number would never match the
+    // string a background_tasks entry carries).
+    const agentId = payload.agent_id == null || payload.agent_id === '' ? null : String(payload.agent_id);
 
     // --- subagent bookkeeping: tagged events never touch top-level state ---
     if (agentId) {
       if (event === 'SubagentStop') {
         s._agents.delete(agentId);
-        if (s._stopped.size >= MAX_STOPPED) s._stopped.delete(s._stopped.values().next().value);
-        s._stopped.add(agentId);
-      } else if (s._stopped.has(agentId)) {
-        // A straggler from a subagent that has already stopped. Reviving it here
-        // would show a dead agent with a clock starting from now.
-        this.onChange();
-        return;
+        // Re-set so the entry is the newest, keeping eviction oldest-first.
+        s._stopped.delete(agentId);
+        if (s._stopped.size >= MAX_STOPPED) s._stopped.delete(s._stopped.keys().next().value);
+        s._stopped.set(agentId, Date.now());
       } else {
-        // There is no SubagentStart, so the first tagged event we see IS the
-        // start as far as we can tell: that is what the elapsed time counts from.
+        if (event === 'SubagentStart') {
+          // A start is never a straggler: it is a new run, even of an id that
+          // stopped a moment ago (a resume). Begin from a clean entry.
+          s._stopped.delete(agentId);
+          s._agents.delete(agentId);
+        } else if (s._stopped.has(agentId)) {
+          // Known limitation: if a SubagentStop is lost, a straggler arriving
+          // after the Stop re-creates the entry and the row reads Running until
+          // the next Stop that carries a list, or the 5-minute stale timer.
+          if (Date.now() - s._stopped.get(agentId) < STRAGGLER_MS) {
+            // A straggler from a subagent that has just stopped. Reviving it
+            // here would show a dead agent with a clock starting from now.
+            this.onChange();
+            return;
+          }
+          // Old tombstone: this is a later run under the same id (a resume).
+          s._stopped.delete(agentId);
+        }
+        // SubagentStart is simply the first tagged event (and is absent on
+        // 2.1.270), so the first tagged event we see IS the start as far as we
+        // can tell: that is what the elapsed time counts from.
         let a = s._agents.get(agentId);
         if (!a) {
           if (s._agents.size >= MAX_AGENTS) evictStalest(s._agents);
@@ -232,17 +267,61 @@ class Store {
         break;
       }
 
-      case 'Stop':
-        // The turn is over: nothing can still be pending, and no subagent can
-        // outlive it. Without this, a denied tool or a missed SubagentStop
-        // leaves entries that never expire - the row kept claiming subagents
-        // were running long after the session went idle.
+      case 'Stop': {
+        // The turn is over: nothing can still be pending. Without this, a denied
+        // tool leaves entries that never expire.
+        //
+        // Subagents are another matter. Since 2.1.289 they can run in the
+        // background and outlive the parent's Stop, which then carries
+        // background_tasks (docs/payloads.md §6). When that list is present it
+        // is authoritative: keep exactly the subagents it reports as running and
+        // drop the rest (this is what clears a missed SubagentStop). Anything it
+        // lists that we never saw is added, typed from agent_type. An id whose
+        // tombstone is younger than STRAGGLER_MS is skipped - the list can be
+        // stale, and a SubagentStop that just arrived is the more recent word.
+        // An older tombstone means the subagent was resumed (a resume starts a
+        // new run under the same agent_id), so it is added and the tombstone
+        // dropped.
+        //
+        // With no list (2.1.270 and earlier) nothing can outlive the turn, so
+        // _agents is cleared as before. _stopped is deliberately kept either
+        // way: it is bounded by MAX_STOPPED and expires by itself, and a
+        // background subagent's stragglers can arrive after a later Stop.
         s._pending.clear();
-        s._agents.clear();
-        s._stopped.clear();
-        s.subagents = 0;
+        if (Array.isArray(payload.background_tasks)) {
+          const running = new Set();
+          const types = new Map();
+          for (const t of payload.background_tasks) {
+            if (!t || t.type !== 'subagent' || t.status !== 'running') continue;
+            // Only strings and finite numbers are ids; an object or boolean is
+            // junk, not something to String() into a row.
+            if (typeof t.id !== 'string' && !(typeof t.id === 'number' && Number.isFinite(t.id))) continue;
+            const id = String(t.id);
+            if (!id) continue;
+            running.add(id);
+            types.set(id, t.agent_type ? String(t.agent_type) : '');
+          }
+          for (const id of [...s._agents.keys()]) {
+            if (!running.has(id)) s._agents.delete(id);
+          }
+          for (const id of running) {
+            if (s._agents.has(id)) continue;
+            const stoppedAt = s._stopped.get(id);
+            if (stoppedAt !== undefined) {
+              if (Date.now() - stoppedAt < STRAGGLER_MS) continue;
+              s._stopped.delete(id);   // resumed since it stopped
+            }
+            if (s._agents.size >= MAX_AGENTS) evictStalest(s._agents);
+            const now = Date.now();
+            s._agents.set(id, { type: types.get(id), tool: '', arg: '', since: now, lastSeen: now });
+          }
+        } else {
+          s._agents.clear();
+        }
+        s.subagents = s._agents.size;
         this._setState(s, 'idle');
         break;
+      }
 
       case 'SubagentStop':
         // Untagged SubagentStop: nothing reliable to remove, leave state alone.
@@ -372,10 +451,15 @@ class Store {
     }
 
     const blocked = sessions.filter((s) => s.state === 'blocked');
-    const active = sessions.filter(
-      (s) => !s.stale && s.state !== 'blocked' && (s.state === 'running' || s.state === 'thinking' || s.state === 'compacting')
+    // An idle session with live subagents is still working in the background,
+    // so it counts as active, never quiet. The two filters are mutually
+    // exclusive: active requires !stale, quiet requires stale or no background work.
+    const isActive = (s) => !s.stale && s.state !== 'blocked' && (
+      s.state === 'running' || s.state === 'thinking' || s.state === 'compacting' ||
+      (s.state === 'idle' && s.subagents > 0)
     );
-    const quiet = sessions.filter((s) => s.state !== 'blocked' && (s.stale || s.state === 'idle'));
+    const active = sessions.filter(isActive);
+    const quiet = sessions.filter((s) => s.state !== 'blocked' && !isActive(s) && (s.stale || s.state === 'idle'));
 
     return {
       now: Date.now(),
