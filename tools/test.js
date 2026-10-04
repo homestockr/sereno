@@ -2633,6 +2633,118 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 1 step 4: config + ledger lifecycle ---- */
+  {
+    const cfgMod = require('../src/config.js');
+    const life = require('../src/ledger-life.js');
+    const { LedgerUnavailableError } = require('../src/ledger.js');
+    const withHome = (fn) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-life-'));
+      const prev = process.env.SERENO_HOME;
+      process.env.SERENO_HOME = dir;
+      try { return fn(dir); } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const rawCfg = (dir, o) => fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(o));
+
+    test('config: no ledger key reads as not-asked with 90 days', () => withHome(() => {
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: null, retentionDays: 90 });
+    }));
+
+    test('config: ledger is validated on read', () => withHome((dir) => {
+      rawCfg(dir, { ledger: { enabled: 'yes', retentionDays: -5 } });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: null, retentionDays: 90 });
+      rawCfg(dir, { ledger: { enabled: 1, retentionDays: 'x' } });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: null, retentionDays: 90 });
+      rawCfg(dir, { ledger: { enabled: false, retentionDays: 30 } });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: false, retentionDays: 30 });
+      rawCfg(dir, { ledger: 'garbage' });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: null, retentionDays: 90 });
+    }));
+
+    test('config: patching ledger.enabled keeps retentionDays and unrelated writes keep ledger', () => withHome((dir) => {
+      rawCfg(dir, { ledger: { enabled: null, retentionDays: 30 } });
+      assert.deepStrictEqual(cfgMod.write({ ledger: { enabled: true } }).ledger, { enabled: true, retentionDays: 30 });
+      cfgMod.write({ autoLaunch: true });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: true, retentionDays: 30 });
+      assert.strictEqual(cfgMod.read().autoLaunch, true);
+      cfgMod.write({ ledger: { enabled: 'bogus' } });
+      assert.strictEqual(cfgMod.read().ledger.enabled, null);
+    }));
+
+    test('opt-in: Yes/Not now map to true/false, dismissal stays null', () => {
+      assert.deepStrictEqual(life.OPT_IN_BUTTONS, ['Yes', 'Not now']);
+      assert.strictEqual(life.optInAnswer(0), true);
+      assert.strictEqual(life.optInAnswer(1), false);
+      assert.strictEqual(life.optInAnswer(2), null);
+      assert.strictEqual(life.optInAnswer(-1), null);
+      assert.strictEqual(life.optInAnswer(undefined), null);
+    });
+
+    test('startLedger: null or false opens nothing and creates no database file', () => withHome((dir) => {
+      for (const enabled of [null, false]) {
+        let opened = 0;
+        const r = life.startLedger({ ledger: { enabled, retentionDays: 90 } }, { open: () => { opened++; } });
+        assert.deepStrictEqual(r, { ledger: null, unavailable: false });
+        assert.strictEqual(opened, 0);
+      }
+      // The real opener too: still nothing on disk.
+      assert.strictEqual(life.startLedger({ ledger: { enabled: null, retentionDays: 90 } }).ledger, null);
+      for (const f of ['sereno.db', 'sereno.db-wal', 'sereno.db-shm']) {
+        assert.ok(!fs.existsSync(path.join(dir, f)), f + ' must not exist');
+      }
+    }));
+
+    test('startLedger: enabled opens the real ledger; close leaves an empty WAL', () => withHome((dir) => {
+      const r = life.startLedger({ ledger: { enabled: true, retentionDays: 30 } });
+      assert.strictEqual(r.unavailable, false);
+      assert.ok(r.ledger);
+      assert.ok(fs.existsSync(path.join(dir, 'sereno.db')));
+      r.ledger.close();
+      const wal = path.join(dir, 'sereno.db-wal');
+      assert.ok(!fs.existsSync(wal) || fs.statSync(wal).size === 0, 'wal checkpointed');
+    }));
+
+    test('startLedger: retentionDays is passed to open', () => {
+      let got = null;
+      life.startLedger({ ledger: { enabled: true, retentionDays: 7 } }, { open: (o) => { got = o; return {}; } });
+      assert.strictEqual(got.retentionDays, 7);
+    });
+
+    test('startLedger: open failure is logged once and reported unavailable', () => {
+      for (const err of [new LedgerUnavailableError('no sqlite'), new Error('disk full')]) {
+        const logged = [];
+        const r = life.startLedger({ ledger: { enabled: true, retentionDays: 90 } },
+          { open: () => { throw err; }, error: (m) => logged.push(m) });
+        assert.deepStrictEqual(r, { ledger: null, unavailable: true });
+        assert.strictEqual(logged.length, 1);
+        assert.ok(logged[0].includes(err.message));
+      }
+    });
+
+    await atest('collector.setLedger: /ledger/summary flips at runtime without a restart', async () => {
+      const { openLedger } = require('../src/ledger.js');
+      const PORT = 8799;
+      const get = () => new Promise((resolve) => {
+        http.get({ host: '127.0.0.1', port: PORT, path: '/ledger/summary', agent: false }, (res) => {
+          let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => resolve(JSON.parse(d)));
+        });
+      });
+      const c = createCollector(new Store(), PORT);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const l = openLedger({ file: ':memory:' });
+      try {
+        assert.deepStrictEqual(await get(), { enabled: false });
+        c.setLedger(l);
+        assert.strictEqual((await get()).enabled, true);
+        c.setLedger(null);
+        assert.deepStrictEqual(await get(), { enabled: false });
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

@@ -74,7 +74,8 @@ function readRaw(req, cap, cb) {
 }
 
 function createCollector(store, port, opts) {
-  const ledger = (opts && opts.ledger) || null;
+  // Swappable at runtime (setLedger): the tray toggles it without a restart.
+  let ledger = (opts && opts.ledger) || null;
   const clients = new Set();
   let timer = null;
 
@@ -302,6 +303,7 @@ function createCollector(store, port, opts) {
   return {
     server,
     broadcast,
+    setLedger(l) { ledger = l || null; },
     clientCount: () => clients.size,
     listen(cb) {
       server.on('error', (err) => cb && cb(err));
