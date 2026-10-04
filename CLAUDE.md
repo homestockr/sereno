@@ -85,9 +85,11 @@ Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
   both as Node and in the main process, with WAL and checkpoint-then-close. No native dep.
   `npm run serve` needs Node >= 22.13 (sqlite unflagged there); it logs an
   ExperimentalWarning, which is fine outside the shim. Still confirm once in a Windows build.
-- Re-probe with `tools/dump.js` on the current Claude Code: `SubagentStart` and
-  `StopFailure` (not seen in 2.1.270), and whether hook `agent_id` equals the trace
-  span `agent_id`.
+- ~~Re-probe~~ Done 2026-10-04 on 2.1.289, see `docs/payloads.md` §6. `SubagentStart`
+  exists; hook `agent_id` == span `agent_id`; spans join `api_request` on `request_id`;
+  telemetry carries `user.email` etc. (drop at ingest); statusline cost lags the ledger.
+- **Known v1.3.0 bug:** `Stop` clears all subagents, but background subagents outlive
+  `Stop`. Use `Stop.background_tasks` instead (§6).
 
 ## Key decisions (2026-10-04)
 

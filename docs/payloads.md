@@ -269,8 +269,43 @@ for an unknown id with an empty type; never list it as a subagent.
 **`SessionEnd.reason`** observed: `prompt_input_exit` (from `/exit`).
 **`SessionStart`** now carries `model`.
 
+### Telemetry (second run, OTLP/JSON logs + beta traces)
+
+**Hook `agent_id` equals span `agent_id`.** `SubagentStart` reported `a3eda4b7fa63e3565`;
+both of that subagent's `claude_code.llm_request` spans carry the same `agent_id`.
+Main-thread spans carry none.
+
+**Every span joins its `api_request` event on `request_id`**: 8 of 8. The event has
+the cost (`cost_usd`, `cost_usd_micros`); the span has the agent. Together they give
+explicit per-agent spend.
+
+**`query_source` values seen on `api_request`:** `repl_main_thread`,
+`agent:builtin:general-purpose`, `generate_session_title`, `prompt_suggestion`.
+The span's `query_source_safe` uses dots (`agent.builtin.general-purpose`).
+Normalize: `repl_main_thread` -> main; `agent:*` -> subagent; anything else -> auxiliary.
+`agent.name` is set on subagent requests (`general-purpose`; custom agents report `custom`).
+
+**Auxiliary requests cost real money.** Session titles and prompt suggestions were
+4 of 8 requests. They must be counted, and shown as auxiliary rather than folded into a role.
+
+⚠ **Every record carries personal identifiers**: `user.email`, `user.account_id`,
+`user.account_uuid`, `organization.id`. The ingest allowlist must drop them.
+
+**The statusline total lags the ledger.** Ledger: 110,863 micro-dollars. Last
+statusline: $0.103253. The gap is exactly one request (7,611 micros, a
+`prompt_suggestion`) issued after the final statusline repaint. Reconciliation must
+compare the statusline against ledger rows timestamped at or before the last
+statusline record, not against the session total.
+
+Other events seen: `managed_settings_resolved`, `hook_registered`,
+`hook_execution_start/complete`, `plugin_loaded`, `mcp_server_connection`,
+`permission_mode_changed`, `user_prompt`, `assistant_response`, `tool_decision`,
+`tool_result`, `subagent_completed`. Span types: `interaction`, `llm_request`, `tool`,
+`tool.execution`, `tool.blocked_on_user`.
+
+The first run captured no telemetry at all; the second, with the capture server
+confirmed up first, captured everything. Start the receiver before the session.
+
 ### Gaps
 
 - `StopFailure` was registered but not triggered (needs an API error).
-- No OTLP logs or trace spans arrived, so the hook-vs-span `agent_id` match and the
-  span → `api_request` join on `request_id` remain unverified.
