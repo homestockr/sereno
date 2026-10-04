@@ -227,3 +227,50 @@ WindowsTerminal  pid=28900  window=656696   <- focus this
 - `SessionStart.source` other than `startup`; `SessionEnd.reason` other than `other`.
 - `rate_limits` was present on every record of this plan; an API-key account may omit it.
   The header must degrade to the dollar figure when it is absent.
+
+---
+
+## 6. Re-probe — Claude Code 2.1.289 (2026-10-04)
+
+One interactive Haiku session that spawned one `general-purpose` subagent, captured
+with the extended `tools/mkprobe.js`. Hooks only: the OTLP capture received nothing
+(see Gaps below). Findings that change earlier sections:
+
+**`SubagentStart` now exists.** It carries `agent_id`, `agent_type` and `prompt_id`
+under the parent's `session_id`. Section 4's "there is no `SubagentStart`" holds for
+2.1.270 only. Liveness can now start from this event; keep the first-tagged-event
+fallback for older versions.
+
+**Subagents can outlive `Stop`.** The subagent ran in the background:
+
+```
+02.548  PreToolUse    tool=Agent  (parent)
+02.766  SubagentStart agent_id=a9ee… agent_type=general-purpose
+02.848  PostToolUse   tool=Agent  duration_ms=6     <- returns at launch, not at finish
+04.359  Stop          background_tasks=[{id:a9ee…, type:subagent, status:running}]
+04.937  PreToolUse    tool=Read   agent_id=a9ee…    <- subagent still working after Stop
+06.810  SubagentStop  agent_id=a9ee…
+07.108  UserPromptSubmit  prompt="<task-notification>…"  <- result reported back as a new turn
+```
+
+⚠ This breaks a current rule. `store.js` treats `Stop` as "no subagent can outlive
+the turn": it clears the agent map and sets the row idle. With a background subagent
+the row reads idle while work continues. `Stop.background_tasks` lists what is still
+running; that list, not `Stop` alone, should decide what to clear.
+
+**A `<task-notification>` `UserPromptSubmit` is not the user.** A background subagent
+reporting back fires `UserPromptSubmit` with a new `prompt_id`. Don't count it as a
+human prompt.
+
+**`SubagentStop` fires for agents that never started.** Two extra `SubagentStop`s
+arrived with unseen `agent_id`s and `agent_type: ""` (internal agents). Ignore a stop
+for an unknown id with an empty type; never list it as a subagent.
+
+**`SessionEnd.reason`** observed: `prompt_input_exit` (from `/exit`).
+**`SessionStart`** now carries `model`.
+
+### Gaps
+
+- `StopFailure` was registered but not triggered (needs an API error).
+- No OTLP logs or trace spans arrived, so the hook-vs-span `agent_id` match and the
+  span → `api_request` join on `request_id` remain unverified.
