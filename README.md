@@ -171,9 +171,11 @@ An optional local record of what each Claude Code request cost. Off by default.
 menu ("Keep spend history").
 
 **What is stored.** `%USERPROFILE%\.sereno\sereno.db` (or `$SERENO_HOME`), SQLite.
-Per request: `request_id`, session id, timestamp, model, token counts, cost estimate,
-duration, which agent. Per session: the working folder path (shown as the project name)
-and the model. Kept 90 days, then pruned. **Never stored**: prompts, responses, code,
+Per request: `request_id`, session and prompt ids, timestamp, model, query source
+(main thread, subagent, session title, ...), token counts, cost estimate, duration,
+which agent and how that was determined. Per session: the working folder path (shown as
+the project name), the model, and the last statusline cost. Per subagent: its id, type,
+and start/stop times. Rows older than 90 days are pruned each time Sereno starts. **Never stored**: prompts, responses, code,
 commands, tool inputs, your email, account ids, or organization ids. All dropped at
 ingest.
 
@@ -213,7 +215,8 @@ npm run unwire -- --telemetry
 the newest `settings.json` backup byte for byte; if you wired both hooks and telemetry,
 run it twice to undo both.
 
-Delete the `sereno.db` file to erase all history.
+To erase all history, quit Sereno, then delete `sereno.db`, `sereno.db-wal` and
+`sereno.db-shm`.
 
 Every dollar figure is an estimate, not a bill. The ledger records Claude Code's own
 cost estimate.

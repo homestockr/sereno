@@ -396,26 +396,33 @@ function createTray(store) {
   tray.on('click', () => showWindow());
   tray.on('double-click', () => showWindow());
 
+  rebuildTrayMenu();
+
+  updateTray(store.snapshot().counts);
+}
+
+/** Native menu labels are fixed at build time, so any state change rebuilds the whole menu. */
+function rebuildTrayMenu() {
+  if (!tray || tray.isDestroyed()) return;
+  const ledgerOn = config.read().ledger.enabled === true;
   trayMenu = Menu.buildFromTemplate([
     { label: 'Show Sereno', click: showWindow },
     { label: 'Hide to tray', click: hideWindow },
     { type: 'separator' },
     {
       id: 'ledger', label: 'Keep spend history', type: 'checkbox',
-      checked: config.read().ledger.enabled === true,
+      checked: ledgerOn,
       click: (item) => setLedgerEnabled(item.checked),
     },
     {
       id: 'telemetry', label: wiring.telemetryWired() ? 'Unwire telemetry' : 'Wire telemetry…',
-      enabled: config.read().ledger.enabled === true,
+      enabled: ledgerOn,
       click: () => (wiring.telemetryWired() ? offerTelemetryUnwiring() : offerTelemetryWiring()),
     },
     { type: 'separator' },
     { label: 'Quit Sereno', click: () => app.quit() },
   ]);
   tray.setContextMenu(trayMenu);
-
-  updateTray(store.snapshot().counts);
 }
 
 /* ---------- spend ledger ---------- */
@@ -431,10 +438,7 @@ function applyLedgerConfig() {
   ledger = r.ledger;
   ledgerUnavailable = r.unavailable;
   if (collector) collector.setLedger(ledger);
-  const item = trayMenu && trayMenu.getMenuItemById('ledger');
-  if (item) item.checked = config.read().ledger.enabled === true;
-  const tel = trayMenu && trayMenu.getMenuItemById('telemetry');
-  if (tel) tel.enabled = config.read().ledger.enabled === true;
+  rebuildTrayMenu();
   paintTray();
 }
 
@@ -513,10 +517,7 @@ function offerTelemetryUnwiring() {
 }
 
 function refreshTelemetryItem() {
-  const tel = trayMenu && trayMenu.getMenuItemById('telemetry');
-  if (!tel) return;
-  tel.label = wiring.telemetryWired() ? 'Unwire telemetry' : 'Wire telemetry…';
-  if (tray) tray.setContextMenu(trayMenu);
+  rebuildTrayMenu();
 }
 
 /* ---------- toast ---------- */
