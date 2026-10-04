@@ -4,7 +4,7 @@
 const fs = require('fs'), path = require('path');
 const probe = path.resolve(__dirname, 'dump.js').split(path.sep).join('/');
 const EVENTS = ['PreToolUse','PostToolUse','Notification','UserPromptSubmit','Stop',
-                'SubagentStop','PreCompact','SessionStart','SessionEnd'];
+                'SubagentStart','SubagentStop','StopFailure','PreCompact','SessionStart','SessionEnd'];
 const MATCHED = new Set(['PreToolUse','PostToolUse','PreCompact','SessionStart','SessionEnd']);
 const hooks = {};
 for (const ev of EVENTS) {
