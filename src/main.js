@@ -3,7 +3,7 @@
  * Sereno — Electron main process. Owns the collector, the window, and the toast.
  */
 
-const { app, BrowserWindow, ipcMain, Menu, Notification, Tray,
+const { app, BrowserWindow, dialog, ipcMain, Menu, Notification, Tray,
   nativeImage, nativeTheme, screen, powerMonitor, shell } = require('electron');
 const { execFile } = require('node:child_process');
 const fs = require('node:fs');
@@ -15,6 +15,7 @@ const { Store } = require('./store.js');
 const { createCollector, BROADCAST_COALESCE_MS } = require('./collector.js');
 const wiring = require('./wiring.js');
 const config = require('./config.js');
+const ledgerLife = require('./ledger-life.js');
 
 const PORT = Number(process.env.CLAUDE_HUD_PORT) || 8787;
 
@@ -58,6 +59,10 @@ let trayState = null;      // '<state>/<theme>', so a theme flip repaints too
 let trayTip = null;
 let trayCounts = { total: 0, blocked: 0, active: 0, quiet: 0 };
 let trayTimer = null;
+let ledger = null;               // open spend ledger, or null when off / unavailable
+let trayMenu = null;
+let optInAsked = false;         // the dialog is shown at most once per run
+let ledgerUnavailable = false;   // enabled in config but openLedger threw
 let lastCssHeight = MIN_HEIGHT;
 
 /* ---------- persistence ---------- */
@@ -361,7 +366,8 @@ function paintTray() {
   // repainted only when what it shows actually differs.
   const key = trayStateFor(trayCounts) + '/' + trayTheme();
   if (key !== trayState) { trayState = key; tray.setImage(trayIcon(trayStateFor(trayCounts))); }
-  const tip = trayTooltip(trayCounts);
+  // Composed here, not in trayTooltip: that one is a pure function of the counts.
+  const tip = trayTooltip(trayCounts) + (ledgerUnavailable ? ' · Spend history unavailable' : '');
   if (tip !== trayTip) { trayTip = tip; tray.setToolTip(tip); }
 }
 
@@ -390,14 +396,128 @@ function createTray(store) {
   tray.on('click', () => showWindow());
   tray.on('double-click', () => showWindow());
 
-  tray.setContextMenu(Menu.buildFromTemplate([
+  rebuildTrayMenu();
+
+  updateTray(store.snapshot().counts);
+}
+
+/** Native menu labels are fixed at build time, so any state change rebuilds the whole menu. */
+function rebuildTrayMenu() {
+  if (!tray || tray.isDestroyed()) return;
+  const ledgerOn = config.read().ledger.enabled === true;
+  trayMenu = Menu.buildFromTemplate([
     { label: 'Show Sereno', click: showWindow },
     { label: 'Hide to tray', click: hideWindow },
     { type: 'separator' },
+    {
+      id: 'ledger', label: 'Keep spend history', type: 'checkbox',
+      checked: ledgerOn,
+      click: (item) => setLedgerEnabled(item.checked),
+    },
+    {
+      id: 'telemetry', label: wiring.telemetryWired() ? 'Unwire telemetry' : 'Wire telemetry…',
+      enabled: ledgerOn,
+      click: () => (wiring.telemetryWired() ? offerTelemetryUnwiring() : offerTelemetryWiring()),
+    },
+    { type: 'separator' },
     { label: 'Quit Sereno', click: () => app.quit() },
-  ]));
+  ]);
+  tray.setContextMenu(trayMenu);
+}
 
-  updateTray(store.snapshot().counts);
+/* ---------- spend ledger ---------- */
+
+/** Closes whatever is open, then opens per config. Never throws. */
+function applyLedgerConfig() {
+  try { if (ledger) ledger.close(); } catch (_) {}
+  ledger = null;
+  const r = ledgerLife.startLedger(config.read(), {
+    log: (m) => console.log('[sereno] ' + m),
+    error: (m) => console.error('[sereno] ' + m),   // once per start attempt
+  });
+  ledger = r.ledger;
+  ledgerUnavailable = r.unavailable;
+  if (collector) collector.setLedger(ledger);
+  rebuildTrayMenu();
+  paintTray();
+}
+
+function setLedgerEnabled(on) {
+  try { config.write({ ledger: { enabled: !!on } }); }
+  catch (e) { console.error('[sereno] could not save spend history setting: ' + e.message); return; }
+  applyLedgerConfig();
+}
+
+/**
+ * One question, asked until it gets an answer: dismissing it leaves null.
+ * Async and parentless, and called only once the collector and window are up:
+ * a blocking dialog at boot would leave the hook that launched us with a dead
+ * port and lose its session and alerts.
+ */
+function askLedgerOptIn() {
+  if (optInAsked || config.read().ledger.enabled !== null) return;
+  optInAsked = true;
+  dialog.showMessageBox({
+    type: 'question',
+    message: ledgerLife.OPT_IN_MESSAGE,
+    detail: ledgerLife.OPT_IN_DETAIL,
+    buttons: ledgerLife.OPT_IN_BUTTONS,
+    defaultId: 0,
+    cancelId: ledgerLife.OPT_IN_BUTTONS.length,   // dismissal: not an answer
+    noLink: true,
+  }).then(({ response }) => {
+    const answer = ledgerLife.optInAnswer(response);
+    if (answer === null) return;
+    config.write({ ledger: { enabled: answer } });
+    applyLedgerConfig();
+    if (answer === true) offerTelemetryWiring();
+  }).catch((e) => console.error('[sereno] opt-in dialog failed: ' + e.message));
+}
+
+/**
+ * Separate confirmation (settings.json is Claude Code's, not ours): shown only
+ * after a Yes to the ledger, or from the tray item. Async and parentless.
+ */
+function offerTelemetryWiring() {
+  dialog.showMessageBox({
+    type: 'question',
+    message: "Also send Claude Code's usage telemetry to Sereno?",
+    detail: 'This edits ~/.claude/settings.json (a backup is made first). Only request costs and token counts are kept.',
+    buttons: ['Wire telemetry', 'Not now'],
+    defaultId: 1,   // Enter / Escape never edit settings.json
+    cancelId: 1,
+    noLink: true,
+  }).then(({ response }) => {
+    if (response !== 0) return null;
+    const r = wiring.wireTelemetry({ traces: true });
+    refreshTelemetryItem();
+    if (!r.conflict) return null;
+    return dialog.showMessageBox({
+      type: 'info', message: 'Telemetry not wired',
+      detail: wiring.conflictMessage(r.conflict), buttons: ['OK'], noLink: true,
+    });
+  }).catch((e) => console.error('[sereno] telemetry wiring failed: ' + e.message));
+}
+
+/** Tray toggle counterpart: removes only the env keys we added. Default is Cancel. */
+function offerTelemetryUnwiring() {
+  dialog.showMessageBox({
+    type: 'question',
+    message: 'Stop sending Claude Code telemetry to Sereno?',
+    detail: 'This removes the telemetry keys Sereno added to ~/.claude/settings.json.',
+    buttons: ['Unwire telemetry', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  }).then(({ response }) => {
+    if (response !== 0) return;
+    wiring.unwireTelemetry();
+    refreshTelemetryItem();
+  }).catch((e) => console.error('[sereno] telemetry unwiring failed: ' + e.message));
+}
+
+function refreshTelemetryItem() {
+  rebuildTrayMenu();
 }
 
 /* ---------- toast ---------- */
@@ -437,6 +557,7 @@ const CLI_UNWIRE = process.argv.includes('--unwire');
 if (CLI_UNWIRE) {
   app.whenReady().then(() => {
     try { wiring.removeEntries([shimCommands().shimPath]); } catch (_) {}
+    try { wiring.unwireTelemetry(); } catch (_) {}   // best-effort, never blocks hook removal
     app.exit(0);
   });
 } else if (!app.requestSingleInstanceLock()) {
@@ -496,6 +617,9 @@ if (CLI_UNWIRE) {
     // wrong about what a click should do.
     ui = loadUi();
 
+    // Ledger per current config (null = off); the opt-in is asked after startup.
+    applyLedgerConfig();
+
     // A tray is a nicety; the widget is not. An icon Windows refuses must not
     // take the rest of this callback - collector, window, everything - with it.
     try {
@@ -506,7 +630,7 @@ if (CLI_UNWIRE) {
       console.error('[sereno] running without a tray: ' + e.message);
     }
 
-    collector = createCollector(store, PORT);
+    collector = createCollector(store, PORT, { ledger });
 
     // createCollector takes store.onChange for its broadcast; chain the tray on
     // rather than replacing it, so both stay in step with every event.
@@ -520,6 +644,7 @@ if (CLI_UNWIRE) {
       }
       console.log('[sereno] collector on http://127.0.0.1:' + addr.port);
       createWindow();
+      askLedgerOptIn();
     });
 
     const sweep = setInterval(() => {
@@ -601,7 +726,11 @@ if (CLI_UNWIRE) {
   });
 
   ipcMain.handle('sereno:unwire', () => {
-    try { return Object.assign({ ok: true }, wiring.removeEntries([shimCommands().shimPath])); }
+    try {
+      const r = Object.assign({ ok: true }, wiring.removeEntries([shimCommands().shimPath]));
+      try { wiring.unwireTelemetry(); refreshTelemetryItem(); } catch (_) {}   // best-effort
+      return r;
+    }
     catch (e) { return { ok: false, error: e.message }; }
   });
 
@@ -627,5 +756,7 @@ if (CLI_UNWIRE) {
     flushUi();
     if (tray && !tray.isDestroyed()) { tray.destroy(); tray = null; }
     if (collector) collector.close();
+    try { if (ledger) ledger.close(); } catch (_) {}
+    ledger = null;
   });
 }

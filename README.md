@@ -164,6 +164,65 @@ While hidden, the widget announces nothing to a screen reader — the permission
 toast is the only accessible notification in that state, and it fires only when
 a session first blocks.
 
+## Spend history (alpha)
+
+An optional local record of what each Claude Code request cost. Off by default.
+**First launch offers to enable it.** You can turn it on or off later in the tray
+menu ("Keep spend history").
+
+**What is stored.** `%USERPROFILE%\.sereno\sereno.db` (or `$SERENO_HOME`), SQLite.
+Per request: `request_id`, session and prompt ids, timestamp, model, query source
+(main thread, subagent, session title, ...), token counts, cost estimate, duration,
+which agent and how that was determined. Per session: the working folder path (shown as
+the project name), the model, and the last statusline cost. Per subagent: its id, type,
+and start/stop times. Rows older than 90 days are pruned each time Sereno starts. **Never stored**: prompts, responses, code,
+commands, tool inputs, your email, account ids, or organization ids. All dropped at
+ingest.
+
+**Telemetry.** The ledger needs Claude Code's OpenTelemetry logs exported to Sereno
+at `http://127.0.0.1:8787`. Offered as a **separate confirmation** after you enable
+spend history, because it edits `~/.claude/settings.json`. Or run:
+
+```
+npm run wire -- --telemetry
+```
+
+This sets:
+
+```
+CLAUDE_CODE_ENABLE_TELEMETRY=1
+OTEL_LOGS_EXPORTER=otlp
+OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:8787
+OTEL_TRACES_EXPORTER=otlp
+CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+```
+
+Never sets any `OTEL_LOG_*` content flag (user prompts, tool details). **Conflict rule:**
+if any of these keys already holds a different value, or any other `OTEL_*` key is
+set (you send telemetry elsewhere), Sereno changes nothing and tells you which keys
+conflict. Merge them yourself or
+move your telemetry, then wire again.
+
+**Turning it off.** Tray toggle stops recording immediately. To remove the telemetry
+env keys, use "Unwire telemetry" in the tray, or:
+
+```
+npm run unwire -- --telemetry
+```
+
+(removes only keys Sereno set; ones you edited stay). Plain `npm run unwire` restores
+the newest `settings.json` backup byte for byte; if you wired both hooks and telemetry,
+run it twice to undo both.
+
+To erase all history, quit Sereno, then delete `sereno.db`, `sereno.db-wal` and
+`sereno.db-shm`.
+
+Every dollar figure is an estimate, not a bill. The ledger records Claude Code's own
+cost estimate.
+
+**Requires Node ≥ 22.13** for `npm run serve` (built-in `node:sqlite`).
+
 ## Sizing
 
 The widget scales for the display you actually have.

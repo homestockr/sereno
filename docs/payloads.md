@@ -313,6 +313,30 @@ Other events seen: `managed_settings_resolved`, `hook_registered`,
 The first run captured no telemetry at all; the second, with the capture server
 confirmed up first, captured everything. Start the receiver before the session.
 
+#### Ingest allowlist
+
+Sereno's `src/otlp.js` reads only allowlisted attributes from OpenTelemetry payloads.
+Everything else never reaches disk.
+
+**API request logs** (`event.name == "api_request"`): `event.name`, `event.timestamp`,
+`event.sequence`, `request_id`, `session.id`, `prompt.id`, `model`, `query_source`,
+`agent.name`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
+`cache_creation_tokens`, `cost_usd_micros`, `cost_usd`, `duration_ms`.
+
+**LLM request spans** (`span.type == "llm_request"`): `span.type`, `request_id`,
+`session.id`, `agent_id`.
+
+**Hook events** (via `src/ledger.js` `recordHook`): `session_id`, `cwd`, `model`,
+`agent_id`, `agent_type`. Only `SessionStart`, `SubagentStart` and `SubagentStop` are
+recorded; `recordHook` ignores every other event. The `prompt`, `tool_input`,
+`tool_response`, `transcript_path` and `last_assistant_message` fields are never read.
+
+**Statusline** (via `recordStatus`): `session_id` and `cost.total_cost_usd` only.
+
+**Dropped**: every other field, including `user.email`, `user.id`, `user.account_id`,
+`user.account_uuid`, `organization.id`, `terminal.type`, and all non-`api_request` log
+events such as `user_prompt`, `tool_result`, `assistant_response`.
+
 ### Gaps
 
 - `StopFailure` was registered but not triggered (needs an API error).

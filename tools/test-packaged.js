@@ -104,7 +104,7 @@ function runShim(args, payload, env) {
       /emit\.cmd/i.test(written.statusLine.command) && !/^node /.test(written.statusLine.command),
       written.statusLine.command);
     check('unrelated settings survive wiring', written.theme === 'dark-daltonized');
-    check('all nine hook events are wired', Object.keys(written.hooks).length === 9,
+    check('every hook event is wired', Object.keys(written.hooks).length === wiring.EVENTS.length,
       Object.keys(written.hooks).join(','));
 
     // Run the literal command Claude Code would run.

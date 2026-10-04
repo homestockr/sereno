@@ -17,7 +17,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 // Opt-in. Starting a GUI app from somebody's shell hook is not a default.
-const DEFAULTS = { autoLaunch: false, launch: null };
+const DEFAULTS = { autoLaunch: false, launch: null, ledger: { enabled: null, retentionDays: 90 } };
 
 // A replay only makes sense while the session it describes is still fresh, and
 // a crash loop must not be able to fill the queue with work for the next boot.
@@ -32,6 +32,20 @@ function home() {
 const configFile = () => path.join(home(), 'config.json');
 const pendingDir = () => path.join(home(), 'pending');
 const launchLock = () => path.join(home(), 'launching');
+
+/**
+ * enabled is tri-state on purpose: null means "not asked yet", which is what
+ * makes the first-launch dialog fire. Anything else that is not a real boolean
+ * is treated as not asked rather than guessed at.
+ */
+function normalizeLedger(l) {
+  const o = l && typeof l === 'object' ? l : {};
+  const rd = o.retentionDays;
+  return {
+    enabled: o.enabled === true || o.enabled === false ? o.enabled : null,
+    retentionDays: typeof rd === 'number' && Number.isFinite(rd) && rd > 0 ? rd : DEFAULTS.ledger.retentionDays,
+  };
+}
 
 /** Never throws: a missing or corrupt config just means defaults. */
 function read() {
@@ -49,12 +63,16 @@ function read() {
         o.launch.provisional === true ? { provisional: true } : null,
       )
       : DEFAULTS.launch,
+    ledger: normalizeLedger(o.ledger),
   };
 }
 
 /** Merges a patch in and returns the settings as they now stand on disk. */
 function write(patch) {
-  const next = Object.assign(read(), patch || {});
+  const cur = read();
+  const next = Object.assign({}, cur, patch || {});
+  // Merged, not replaced: { ledger: { enabled: true } } must keep retentionDays.
+  next.ledger = normalizeLedger(Object.assign({}, cur.ledger, patch && patch.ledger));
   fs.mkdirSync(home(), { recursive: true });
   // Written then renamed, for the same reason queuePending is: the shim reads
   // this file from another process on the hook path, and a bare truncating
@@ -161,5 +179,5 @@ function clearLaunchLock() {
 
 module.exports = {
   DEFAULTS, home, configFile, pendingDir, launchLock,
-  read, write, recordLaunch, drainPending, clearLaunchLock,
+  normalizeLedger, read, write, recordLaunch, drainPending, clearLaunchLock,
 };

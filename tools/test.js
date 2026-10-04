@@ -1230,6 +1230,8 @@ test('uninstall never removes another tool\'s hooks', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-ident-'));
   const prev = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_CONFIG_DIR = tmp;
+  const prevHome = process.env.SERENO_HOME;
+  process.env.SERENO_HOME = tmp;
   try {
     const foreign = {
       statusLine: { type: 'command', command: 'node "C:/other-tool/emit.js" statusline' },
@@ -1249,6 +1251,8 @@ test('uninstall never removes another tool\'s hooks', () => {
   } finally {
     if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = prev;
+    if (prevHome === undefined) delete process.env.SERENO_HOME;
+    else process.env.SERENO_HOME = prevHome;
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -1597,12 +1601,12 @@ test('missing rate_limits degrades instead of throwing', () => {
     const original = '{\n  "theme": "dark-daltonized",\n  "tui": "fullscreen"\n}\n';
     fs.writeFileSync(settings, original);
 
-    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp });
+    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, SERENO_HOME: tmp });
     execFileSync(process.execPath, [path.join(ROOT, 'tools', 'wire.js'), '--yes'], { env, encoding: 'utf8' });
 
     const wired = JSON.parse(fs.readFileSync(settings, 'utf8'));
     assert.ok(wired.statusLine.command.includes('emit.js'), 'statusLine not wired');
-    assert.strictEqual(Object.keys(wired.hooks).length, 9, 'expected 9 hook events');
+    assert.strictEqual(Object.keys(wired.hooks).length, 11, 'expected 11 hook events');
     assert.strictEqual(wired.theme, 'dark-daltonized', 'existing settings were lost');
 
     // Idempotent: a second wire must not duplicate anything.
@@ -1617,6 +1621,25 @@ test('missing rate_limits degrades instead of throwing', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
+  /* ---- Phase 1 step 0: SubagentStart + StopFailure wiring ---- */
+  await atest('wire registers SubagentStart (no matcher) and StopFailure, idempotently', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hud-wire3-'));
+    const settings = path.join(tmp, 'settings.json');
+    fs.writeFileSync(settings, '{}\n');
+    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, SERENO_HOME: tmp });
+    const run = () => execFileSync(process.execPath, [path.join(ROOT, 'tools', 'wire.js'), '--yes'], { env, encoding: 'utf8' });
+    run(); run();
+    const w = JSON.parse(fs.readFileSync(settings, 'utf8'));
+    for (const ev of ['SubagentStart', 'StopFailure']) {
+      assert.ok(wiring.EVENTS.includes(ev), ev + ' missing from EVENTS');
+      assert.strictEqual(w.hooks[ev].length, 1, ev + ' duplicated or missing');
+      assert.strictEqual(w.hooks[ev][0].matcher, undefined, ev + ' must have no matcher');
+      assert.ok(w.hooks[ev][0].hooks[0].command.endsWith(' hook ' + ev), ev + ' command wrong');
+    }
+    for (const ev of wiring.EVENTS) assert.strictEqual(w.hooks[ev].length, 1, ev + ' duplicated');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
   await atest('wire preserves a pre-existing foreign hook', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hud-wire2-'));
     const settings = path.join(tmp, 'settings.json');
@@ -1624,7 +1647,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo mine' }] }] },
     }, null, 2));
 
-    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp });
+    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, SERENO_HOME: tmp });
     execFileSync(process.execPath, [path.join(ROOT, 'tools', 'wire.js'), '--yes'], { env, encoding: 'utf8' });
 
     const w = JSON.parse(fs.readFileSync(settings, 'utf8'));
@@ -1978,6 +2001,1193 @@ test('missing rate_limits degrades instead of throwing', () => {
     }
     fs.rmSync(home, { recursive: true, force: true });
   });
+
+  /* ---- Phase 1 step 0b: StopFailure ---- */
+  {
+    const sf = (id, extra) => H('StopFailure', sid(id, extra));
+    const running = (st) => feed(st, [H('PreToolUse', sid('x', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't1' }))]);
+
+    test('StopFailure: running -> idle, pending cleared, unknown fields ignored', () => {
+      const s = new Store();
+      running(s);
+      assert.strictEqual(s.sessions.get('x').state, 'running');
+      feed(s, [sf('x', { error: 'rate_limit', unknown_field: { a: 1 } })]);
+      const r = s.sessions.get('x');
+      assert.strictEqual(r.state, 'idle');
+      assert.strictEqual(r._pending.size, 0);
+      assert.strictEqual(r.stateTool, '');
+    });
+
+    test('StopFailure: leaves subagents alone and ignores a background_tasks list', () => {
+      const s = new Store();
+      feed(s, [
+        H('PreToolUse', sid('x', { agent_id: 'a1', agent_type: 'Explore', tool_name: 'Read', tool_use_id: 'u1' })),
+        H('PreToolUse', sid('x', { agent_id: 'a2', agent_type: 'Plan', tool_name: 'Read', tool_use_id: 'u2' })),
+      ]);
+      running(s);
+      feed(s, [sf('x')]);
+      assert.strictEqual(s.sessions.get('x').subagents, 2);
+      feed(s, [sf('x', { background_tasks: [] })]);
+      assert.strictEqual(s.sessions.get('x').subagents, 2, 'an empty list must not prune');
+      feed(s, [sf('x', { background_tasks: [bgTask('a1'), bgTask('a3')] })]);
+      assert.deepStrictEqual([...s.sessions.get('x')._agents.keys()], ['a1', 'a2'], 'a list must not prune or add');
+    });
+
+    test('StopFailure: tagged is a no-op for top-level state and admits no ghost subagent', () => {
+      const s = new Store();
+      running(s);
+      feed(s, [H('PreToolUse', sid('x', { agent_id: 'a1', agent_type: 'Explore', tool_name: 'Read', tool_use_id: 'u1' }))]);
+      const r = s.sessions.get('x');
+      const before = { state: r.state, tool: r.stateTool, since: r.stateSince, pending: r._pending.size };
+      feed(s, [sf('x', { agent_id: 'a1' }), sf('x', { agent_id: 'never-seen' })]);
+      assert.strictEqual(r.state, before.state);
+      assert.strictEqual(r.stateTool, before.tool);
+      assert.strictEqual(r.stateSince, before.since);
+      assert.strictEqual(r._pending.size, before.pending);
+      assert.deepStrictEqual([...r._agents.keys()], ['a1'], 'unseen agent_id must not become a subagent');
+      assert.strictEqual(r.subagents, 1);
+      assert.strictEqual(r._agents.get('a1').tool, 'Read', 'existing entry untouched');
+    });
+
+    test('StopFailure: never calls onBlocked; blocked -> idle, and a later prompt alerts again', () => {
+      const s = new Store();
+      const fired = [];
+      s.onBlocked = (x) => fired.push(x);
+      running(s);
+      feed(s, [sf('x')]);
+      assert.strictEqual(fired.length, 0, 'StopFailure alone must not alert');
+      running(s);
+      feed(s, [H('Notification', sid('x', { notification_type: 'permission_prompt' }))]);
+      assert.strictEqual(fired.length, 1);
+      feed(s, [sf('x')]);
+      assert.strictEqual(s.sessions.get('x').state, 'idle');
+      assert.strictEqual(s.sessions.get('x')._blockedNotified, false);
+      assert.strictEqual(fired.length, 1, 'StopFailure must not alert');
+      running(s);
+      feed(s, [H('Notification', sid('x', { notification_type: 'permission_prompt' }))]);
+      assert.strictEqual(fired.length, 2, 'a new permission prompt after StopFailure alerts again');
+    });
+  }
+
+  /* ---- Phase 1 step 1: otlp.js ---- */
+  {
+    const otlp = require('../src/otlp.js');
+    const logsFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-logs.json'), 'utf8'));
+    const tracesFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-traces.json'), 'utf8'));
+    const S = (k, v) => ({ key: k, value: { stringValue: v } });
+    const I = (k, v) => ({ key: k, value: { intValue: v } });
+    const D = (k, v) => ({ key: k, value: { doubleValue: v } });
+    const wrapLog = (...recs) => ({ resourceLogs: [{ scopeLogs: [{ logRecords: recs }] }] });
+    const api = (extra) => ({ attributes: [S('event.name', 'api_request')].concat(extra) });
+    const LOG_FIELDS = ['requestKey', 'requestId', 'sessionId', 'promptId', 'ts', 'model', 'querySource', 'source',
+      'agentName', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'costMicros', 'durationMs'];
+
+    test('otlp: bad bodies and missing nested arrays give []', () => {
+      for (const b of [null, undefined, 'x', 42, [], [{}], {}, { resourceLogs: 5 }, { resourceLogs: [null, 1] },
+        { resourceLogs: [{}] }, { resourceLogs: [{ scopeLogs: [{}] }] }, { resourceLogs: [{ scopeLogs: [{ logRecords: 'no' }] }] }]) {
+        assert.deepStrictEqual(otlp.parseLogs(b), []);
+      }
+      for (const b of [null, 'x', [], {}, { resourceSpans: [{ scopeSpans: [{}] }] }, { resourceSpans: [{ scopeSpans: [{ spans: {} }] }] }]) {
+        assert.deepStrictEqual(otlp.parseTraces(b), []);
+      }
+    });
+
+    test('otlp: a garbled attribute list skips that record only', () => {
+      const out = otlp.parseLogs(wrapLog(
+        { attributes: 'garbage' }, { attributes: { key: 'x' } }, null, 7,
+        { attributes: [null, 5, { key: 3 }, { key: 'model' }, S('event.name', 'api_request'), S('request_id', 'ok1')] }));
+      assert.strictEqual(out.length, 1);
+      assert.strictEqual(out[0].requestKey, 'ok1');
+      assert.deepStrictEqual(otlp.parseTraces({ resourceSpans: [{ scopeSpans: [{ spans: [{ attributes: 'bad' }] }] }] }), []);
+    });
+
+    test('otlp: fixture yields the 5 api_requests, user_prompt dropped', () => {
+      const out = otlp.parseLogs(logsFx);
+      assert.deepStrictEqual(out.map(r => r.requestId),
+        ['req_main_1', 'req_sub_span', 'req_sub_nospan', 'req_aux_title', 'req_aux_suggest']);
+      assert.deepStrictEqual(out.map(r => r.source), ['main', 'subagent', 'subagent', 'auxiliary', 'auxiliary']);
+      const m = out[0];
+      assert.strictEqual(m.sessionId, 'sess-fake-0001');
+      assert.strictEqual(m.promptId, 'prompt-fake-01');
+      assert.strictEqual(m.ts, 1790000001000);
+      assert.strictEqual(m.cacheReadTokens, 900);
+      assert.strictEqual(m.cacheCreationTokens, 30);
+      assert.strictEqual(m.durationMs, 800);
+      assert.strictEqual(out[1].agentName, 'general-purpose');
+      assert.strictEqual(m.agentName, null);
+    });
+
+    test('otlp: string intValue parsed to a number', () => {
+      const out = otlp.parseLogs(logsFx);
+      assert.strictEqual(out[1].inputTokens, 2500);
+      assert.strictEqual(typeof out[1].inputTokens, 'number');
+    });
+
+    test('otlp: costMicros is an integer on both paths', () => {
+      const out = otlp.parseLogs(logsFx);
+      assert.strictEqual(out[0].costMicros, 12345);          // micros wins over cost_usd
+      assert.strictEqual(out[1].costMicros, 3100);           // 0.0031 * 1e6, rounded
+      for (const r of out) assert.ok(Number.isInteger(r.costMicros));
+      const f = otlp.parseLogs(wrapLog(api([S('request_id', 'a'), D('cost_usd', 0.1 + 0.2)])));
+      assert.strictEqual(f[0].costMicros, 300000);
+      const none = otlp.parseLogs(wrapLog(api([S('request_id', 'a')])));
+      assert.strictEqual(none[0].costMicros, 0);
+    });
+
+    test('otlp: source mapping covers main, subagent and auxiliary', () => {
+      const src = (qs) => otlp.parseLogs(wrapLog(api([S('request_id', 'r'), S('query_source', qs)])))[0].source;
+      assert.strictEqual(src('repl_main_thread'), 'main');
+      assert.strictEqual(src('agent:builtin:general-purpose'), 'subagent');
+      assert.strictEqual(src('agent:custom'), 'subagent');
+      assert.strictEqual(src('generate_session_title'), 'auxiliary');
+      assert.strictEqual(src('prompt_suggestion'), 'auxiliary');
+      assert.strictEqual(otlp.parseLogs(wrapLog(api([S('request_id', 'r')])))[0].source, 'auxiliary');
+    });
+
+    test('otlp: requestKey is request_id, else session.id:event.sequence', () => {
+      const a = otlp.parseLogs(wrapLog(api([S('request_id', 'rq1'), S('session.id', 's'), I('event.sequence', 9)])));
+      assert.strictEqual(a[0].requestKey, 'rq1');
+      const b = otlp.parseLogs(wrapLog(api([S('session.id', 's9'), I('event.sequence', '12')])));
+      assert.strictEqual(b[0].requestKey, 's9:12');
+      assert.strictEqual(b[0].requestId, null);
+      // no way to build a stable key: skipped rather than invented
+      assert.deepStrictEqual(otlp.parseLogs(wrapLog(api([S('session.id', 's9')]))), []);
+      assert.deepStrictEqual(otlp.parseLogs(wrapLog(api([I('event.sequence', 1)]))), []);
+    });
+
+    test('otlp: resource attributes are read, record wins; ts falls back to event.timestamp', () => {
+      const body = { resourceLogs: [{ resource: { attributes: [S('session.id', 'res-s'), S('model', 'res-m')] },
+        scopeLogs: [{ logRecords: [api([S('request_id', 'r'), S('model', 'rec-m'), S('event.timestamp', '2026-10-04T00:00:00.000Z')])] }] }] };
+      const r = otlp.parseLogs(body)[0];
+      assert.strictEqual(r.sessionId, 'res-s');
+      assert.strictEqual(r.model, 'rec-m');
+      assert.strictEqual(r.ts, Date.parse('2026-10-04T00:00:00.000Z'));
+    });
+
+    test('otlp: absent or unparseable numbers are 0, never NaN', () => {
+      const r = otlp.parseLogs(wrapLog(api([S('request_id', 'r'), S('input_tokens', 'abc'), I('duration_ms', 'zz')])))[0];
+      for (const k of ['ts', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens', 'costMicros', 'durationMs']) {
+        assert.strictEqual(r[k], 0, k);
+      }
+    });
+
+    test('otlp: other events are dropped', () => {
+      const names = ['user_prompt', 'tool_result', 'assistant_response', 'tool_decision', 'hook_registered', 'subagent_completed'];
+      const recs = names.map(n => ({ attributes: [S('event.name', n), S('request_id', 'x'), S('session.id', 's')] }));
+      assert.deepStrictEqual(otlp.parseLogs(wrapLog(...recs)), []);
+    });
+
+    test('otlp: traces keep only llm_request spans, main span has agentId null', () => {
+      const out = otlp.parseTraces(tracesFx);
+      assert.strictEqual(out.length, 2);
+      assert.deepStrictEqual(out[0], { requestId: 'req_main_1', sessionId: 'sess-fake-0001', agentId: null, ts: 1790000001000 });
+      assert.deepStrictEqual(out[1], { requestId: 'req_sub_span', sessionId: 'sess-fake-0001', agentId: 'agentfake0000000a1', ts: 1790000002000 });
+    });
+
+    test('otlp: output carries exactly the documented keys', () => {
+      for (const r of otlp.parseLogs(logsFx)) assert.deepStrictEqual(Object.keys(r), LOG_FIELDS);
+      for (const s of otlp.parseTraces(tracesFx)) assert.deepStrictEqual(Object.keys(s), ['requestId', 'sessionId', 'agentId', 'ts']);
+    });
+
+    test('otlp: no identifier or prompt content survives parsing', () => {
+      const raw = JSON.stringify(logsFx) + JSON.stringify(tracesFx);
+      const secrets = ['fake.person@example.invalid', 'fake-user-id-0001', 'fake-acct-id-0002',
+        '00000000-fake-0000-0000-account00001', 'fake-org-id-0003', 'fake-term', 'SERENO-CANARY-PROMPT'];
+      for (const s of secrets) assert.ok(raw.includes(s), 'fixture must contain ' + s);
+      const out = JSON.stringify(otlp.parseLogs(logsFx)) + JSON.stringify(otlp.parseTraces(tracesFx));
+      for (const s of secrets) assert.ok(!out.includes(s), 'leaked ' + s);
+      const spanOut = otlp.parseTraces({ resourceSpans: [{ scopeSpans: [{ spans: [{ attributes: [
+        S('span.type', 'llm_request'), S('request_id', 'r'), S('model', 'm'), S('user.email', 'e@x')] }] }] }] });
+      assert.deepStrictEqual(Object.keys(spanOut[0]), ['requestId', 'sessionId', 'agentId', 'ts']);
+    });
+
+    test('otlp: module does no I/O (requires nothing)', () => {
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'otlp.js'), 'utf8');
+      assert.ok(!/\brequire\(/.test(src), 'otlp.js should require nothing');
+      assert.ok(!/\bfetch\(|process\.std/.test(src));
+    });
+  }
+
+  /* ---- Phase 1 step 2: ledger.js ---- */
+  {
+    const { openLedger, LedgerUnavailableError } = require('../src/ledger.js');
+    const otlp = require('../src/otlp.js');
+    const logsFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-logs.json'), 'utf8'));
+    const tracesFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-traces.json'), 'utf8'));
+    // shift fixture timestamps to "now" so prune-on-open never eats them as the calendar moves
+    const BASE = Date.now() - 60000;
+    const shiftReqs = () => otlp.parseLogs(logsFx).map((r, i) => Object.assign({}, r, { ts: BASE + i * 1000 }));
+    const shiftSpans = () => otlp.parseTraces(tracesFx).map((s, i) => Object.assign({}, s, { ts: BASE + i * 1000 }));
+    const tmpFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-ledger-')), 'sereno.db');
+    const rmDir = f => fs.rmSync(path.dirname(f), { recursive: true, force: true });
+    const mem = () => openLedger({ file: ':memory:' });
+    const rq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's', promptId: null, ts: Date.now(),
+      model: 'm', querySource: null, source: 'main', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100, durationMs: 0 }, o);
+    const row = (l, id) => l._db.prepare('SELECT * FROM requests WHERE request_id=?').get(id);
+
+    test('ledger: LedgerUnavailableError is typed', () => {
+      const e = new LedgerUnavailableError('x');
+      assert.ok(e instanceof Error); assert.strictEqual(e.code, 'LEDGER_UNAVAILABLE');
+    });
+
+    test('ledger: WAL mode and user_version 1 on a file db', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        assert.strictEqual(l._db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
+        assert.strictEqual(l._db.prepare('PRAGMA user_version').get().user_version, 1);
+        l.close();
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: default file lives under SERENO_HOME', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-ledger-home-'));
+      const prev = process.env.SERENO_HOME;
+      process.env.SERENO_HOME = dir;
+      try {
+        const l = openLedger();
+        assert.strictEqual(l.file, path.join(dir, 'sereno.db'));
+        l.close();
+        assert.ok(fs.existsSync(path.join(dir, 'sereno.db')));
+      } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test('ledger: replaying the same fixtures twice leaves totals unchanged', () => {
+      const l = mem();
+      l.ingestRequests(shiftReqs()); l.ingestSpans(shiftSpans());
+      const a = JSON.stringify(l.totals());
+      l.ingestRequests(shiftReqs()); l.ingestSpans(shiftSpans());
+      assert.strictEqual(JSON.stringify(l.totals()), a);
+      const t = l.totals();
+      assert.strictEqual(t.requests, 5);
+      assert.strictEqual(t.costMicros, 12345 + 3100 + 777 + 500 + 7611);
+      assert.strictEqual(t.byAttribution.explicit, 12345 + 3100 + 500 + 7611);
+      assert.strictEqual(t.byAttribution.unknown, 777);
+      assert.strictEqual(t.bySource.subagent, 3100 + 777);
+      assert.ok(Number.isInteger(t.costMicros));
+      l.close();
+    });
+
+    test('ledger: close + reopen preserves totals', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        l.ingestRequests(shiftReqs()); l.ingestSpans(shiftSpans());
+        const a = JSON.stringify(l.totals());
+        l.close();
+        const l2 = openLedger({ file: f });
+        assert.strictEqual(JSON.stringify(l2.totals()), a);
+        l2.close();
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: methods throw a clear error after close', () => {
+      const l = mem(); l.close();
+      assert.throws(() => l.totals(), /closed/);
+    });
+
+    test('ledger: request-before-span and span-before-request both end explicit with agent_id', () => {
+      const l = mem();
+      l.ingestRequests([rq({ requestKey: 'a', requestId: 'ra', source: 'subagent' })]);
+      assert.strictEqual(row(l, 'ra').attribution, 'unknown');
+      l.ingestSpans([{ requestId: 'ra', sessionId: 's', agentId: 'ag1', ts: 1 }]);
+      assert.strictEqual(row(l, 'ra').attribution, 'explicit');
+      assert.strictEqual(row(l, 'ra').agent_id, 'ag1');
+      l.ingestSpans([{ requestId: 'rb', sessionId: 's', agentId: 'ag2', ts: 1 }]);
+      l.ingestRequests([rq({ requestKey: 'b', requestId: 'rb', source: 'subagent' })]);
+      assert.strictEqual(row(l, 'rb').attribution, 'explicit');
+      assert.strictEqual(row(l, 'rb').agent_id, 'ag2');
+      l.close();
+    });
+
+    test('ledger: subagent without span stays unknown; main-thread span does not change it', () => {
+      const l = mem();
+      l.ingestRequests([rq({ requestKey: 'a', requestId: 'ra', source: 'subagent' })]);
+      l.ingestSpans([{ requestId: 'ra', sessionId: 's', agentId: null, ts: 1 }]);
+      assert.strictEqual(row(l, 'ra').attribution, 'unknown');
+      assert.strictEqual(row(l, 'ra').agent_id, null);
+      l.ingestSpans([{ requestId: null, sessionId: 's', agentId: 'x', ts: 1 }]);
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM spans').get().n, 1);
+      l.close();
+    });
+
+    test('ledger: spans never reassign an already-explicit row', () => {
+      const l = mem();
+      l.ingestRequests([rq({ requestKey: 'a', requestId: 'ra', source: 'main' })]);
+      l.ingestSpans([{ requestId: 'ra', sessionId: 's', agentId: 'ag', ts: 1 }]);
+      assert.strictEqual(row(l, 'ra').agent_id, null);
+      assert.strictEqual(row(l, 'ra').attribution, 'explicit');
+      l.close();
+    });
+
+    test('ledger: telemetry without hooks creates a session row; null session creates none', () => {
+      const l = mem();
+      l.ingestRequests(shiftReqs());
+      const s = l._db.prepare('SELECT * FROM sessions').all();
+      assert.strictEqual(s.length, 1);
+      assert.strictEqual(s[0].session_id, 'sess-fake-0001');
+      assert.strictEqual(s[0].first_seen, BASE);
+      assert.strictEqual(s[0].last_seen, BASE + 4000);
+      l.ingestRequests([rq({ requestKey: 'n', requestId: 'rn', sessionId: null })]);
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM sessions').get().n, 1);
+      assert.strictEqual(l.totals().requests, 6);
+      l.close();
+    });
+
+    test('ledger: SessionStart sets cwd/project/model; telemetry does not clobber them', () => {
+      const l = mem();
+      l.recordHook('SessionStart', { session_id: 's', cwd: 'C:\\work\\proj-a', model: 'opus' });
+      l.ingestRequests([rq({ requestId: 'r1' })]);
+      const s = l._db.prepare('SELECT * FROM sessions WHERE session_id=?').get('s');
+      assert.strictEqual(s.cwd, 'C:\\work\\proj-a');
+      assert.strictEqual(s.project, 'proj-a');
+      assert.strictEqual(s.model, 'opus');
+      assert.strictEqual(l.totals().sessions[0].project, 'proj-a');
+      l.close();
+    });
+
+    test('ledger: recordHook ignores forbidden fields (canary absent from db and wal bytes)', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        const canary = 'SERENO-CANARY-LEDGER-9f3a';
+        const forbidden = { prompt: canary + 'p', tool_input: { command: canary + 'c' }, tool_response: canary + 'r',
+          transcript_path: canary + 't', last_assistant_message: canary + 'm', user_email: canary + 'e' };
+        l.recordHook('SessionStart', Object.assign({ session_id: 's', cwd: 'C:\\w\\p', model: 'm' }, forbidden));
+        l.recordHook('SubagentStart', Object.assign({ session_id: 's', agent_id: 'a1', agent_type: 'builder' }, forbidden));
+        l.recordHook('SubagentStop', Object.assign({ session_id: 's', agent_id: 'a1', agent_type: 'builder' }, forbidden));
+        l.recordHook('UserPromptSubmit', Object.assign({ session_id: 's' }, forbidden));
+        assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM agents').get().n, 1);
+        l.close();
+        for (const p of [f, f + '-wal']) {
+          if (fs.existsSync(p)) assert.ok(!fs.readFileSync(p).includes(canary), 'canary leaked into ' + p);
+        }
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: agents upsert; resume clears stopped; stop for unseen id with empty type ignored', () => {
+      const l = mem();
+      l.recordHook('SubagentStop', { session_id: 's', agent_id: 'ghost', agent_type: '' });
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM agents').get().n, 0);
+      l.recordHook('SubagentStart', { session_id: 's', agent_id: 'a1', agent_type: 'builder' });
+      let a = l._db.prepare('SELECT * FROM agents').get();
+      assert.strictEqual(a.agent_type, 'builder'); assert.strictEqual(a.stopped, null);
+      assert.ok(a.started > 0);
+      l.recordHook('SubagentStop', { session_id: 's', agent_id: 'a1', agent_type: '' });
+      a = l._db.prepare('SELECT * FROM agents').get();
+      assert.ok(a.stopped > 0); assert.strictEqual(a.agent_type, 'builder');
+      l.recordHook('SubagentStart', { session_id: 's', agent_id: 'a1', agent_type: 'builder' });
+      assert.strictEqual(l._db.prepare('SELECT stopped FROM agents').get().stopped, null);
+      l.close();
+    });
+
+    test('ledger: recordStatus stores micros and dedupes unchanged cost', () => {
+      const l = mem();
+      l.recordStatus('s', 1.234567, 1000);
+      l.recordStatus('s', 1.234567, 2000);
+      let st = l._db.prepare('SELECT * FROM status').get();
+      assert.strictEqual(st.cost_micros, 1234567); assert.strictEqual(st.ts, 1000);
+      l.recordStatus('s', 2, 3000);
+      st = l._db.prepare('SELECT * FROM status').get();
+      assert.strictEqual(st.cost_micros, 2000000); assert.strictEqual(st.ts, 3000);
+      l.recordStatus('s', NaN, 4000);
+      assert.strictEqual(l._db.prepare('SELECT ts FROM status').get().ts, 3000);
+      l.close();
+    });
+
+    test('ledger: reconcile ok, lag (later request excluded), drift, and no-status cases', () => {
+      const l = mem();
+      assert.deepStrictEqual(l.reconcile('s'), { ledgerMicros: 0, statusMicros: null, deltaPct: null, ok: false });
+      l.ingestRequests([rq({ requestKey: 'a', requestId: 'a', ts: 1000, costMicros: 600000 }),
+        rq({ requestKey: 'b', requestId: 'b', ts: 2000, costMicros: 400000 })]);
+      assert.strictEqual(l.reconcile('s').ledgerMicros, 1000000);
+      assert.strictEqual(l.reconcile('s').ok, false);
+      l.recordStatus('s', 1.0, 2000);
+      assert.deepStrictEqual(l.reconcile('s'), { ledgerMicros: 1000000, statusMicros: 1000000, deltaPct: 0, ok: true });
+      l.ingestRequests([rq({ requestKey: 'c', requestId: 'c', ts: 3000, costMicros: 900000 })]);
+      assert.strictEqual(l.reconcile('s').ledgerMicros, 1000000, 'request after status.ts excluded');
+      assert.strictEqual(l.reconcile('s').ok, true);
+      l.recordStatus('s', 0.9, 4000);
+      const d = l.reconcile('s');
+      assert.strictEqual(d.deltaPct, 111.1); assert.strictEqual(d.ok, false);
+      l.recordStatus('s', 1.019, 5000);
+      const e = l.reconcile('s');
+      assert.strictEqual(e.deltaPct, 86.5);
+      l.close();
+    });
+
+    test('ledger: reconcile rounds deltaPct to 1 decimal and allows 2 percent', () => {
+      const l = mem();
+      l.ingestRequests([rq({ ts: 1, costMicros: 1000000 })]);
+      l.recordStatus('s', 1.02, 10);
+      const r = l.reconcile('s');
+      assert.strictEqual(r.deltaPct, -2); assert.strictEqual(r.ok, true);
+      l.recordStatus('s', 1.03, 11);
+      const r2 = l.reconcile('s');
+      assert.strictEqual(r2.deltaPct, -2.9); assert.strictEqual(r2.ok, false);
+      l.close();
+    });
+
+    test('ledger: totals respects since (inclusive) and until (exclusive), sessions sorted desc', () => {
+      const l = mem();
+      l.ingestRequests([
+        rq({ requestKey: 'a', requestId: 'a', sessionId: 's1', ts: 1000, costMicros: 10 }),
+        rq({ requestKey: 'b', requestId: 'b', sessionId: 's2', ts: 2000, costMicros: 30 }),
+        rq({ requestKey: 'c', requestId: 'c', sessionId: 's1', ts: 3000, costMicros: 5 })]);
+      assert.strictEqual(l.totals({ since: 1000, until: 3000 }).costMicros, 40);
+      assert.strictEqual(l.totals({ since: 2000 }).costMicros, 35);
+      const t = l.totals();
+      assert.deepStrictEqual(t.sessions.map(s => s.sessionId), ['s2', 's1']);
+      assert.strictEqual(t.sessions[1].costMicros, 15);
+      l.close();
+    });
+
+    test('ledger: prune removes old requests and spans, keeps sessions and recent rows', () => {
+      const l = mem();
+      const old = Date.now() - 100 * 86400000;
+      l.ingestRequests([rq({ requestKey: 'o', requestId: 'o', ts: old }), rq({ requestKey: 'n', requestId: 'n', ts: Date.now() - 1000 })]);
+      l.ingestSpans([{ requestId: 'o', sessionId: 's', agentId: 'a', ts: old }, { requestId: 'n', sessionId: 's', agentId: 'a', ts: Date.now() }]);
+      l.prune();
+      assert.strictEqual(l.totals().requests, 1);
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM spans').get().n, 1);
+      assert.strictEqual(l._db.prepare('SELECT COUNT(*) n FROM sessions').get().n, 1);
+      l.prune(0);
+      assert.strictEqual(l.totals().requests, 0);
+      l.close();
+    });
+
+    test('ledger: ts 0 is stored as ingest time and survives close + reopen', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        l.ingestRequests([rq({ requestKey: 'z', requestId: 'z', ts: 0, costMicros: 42 })]);
+        l.ingestSpans([{ requestId: 'z', sessionId: 's', agentId: 'a', ts: 0 }]);
+        assert.ok(l._db.prepare('SELECT ts FROM spans').get().ts > 0);
+        l.close();
+        const l2 = openLedger({ file: f });
+        assert.strictEqual(l2.totals().costMicros, 42);
+        l2.close();
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: retentionDays option drives prune-on-open; bad values fall back to 90', () => {
+      const f = tmpFile();
+      try {
+        const l = openLedger({ file: f });
+        const d = n => Date.now() - n * 86400000;
+        l.ingestRequests([rq({ requestKey: 'a', requestId: 'a', ts: d(10) }), rq({ requestKey: 'b', requestId: 'b', ts: d(2) })]);
+        l.close();
+        for (const bad of [NaN, 0, -5, Infinity, undefined]) {
+          const x = openLedger({ file: f, retentionDays: bad }); assert.strictEqual(x.totals().requests, 2); x.close();
+        }
+        const l3 = openLedger({ file: f, retentionDays: 5 });
+        assert.strictEqual(l3.totals().requests, 1);
+        l3.close();
+      } finally { rmDir(f); }
+    });
+
+    test('ledger: schema has no prompt/response/command/tool_input/email columns', () => {
+      const l = mem();
+      const tables = l._db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+      assert.deepStrictEqual(tables.sort(), ['agents', 'requests', 'sessions', 'spans', 'status']);
+      for (const t of tables) {
+        for (const c of l._db.prepare('PRAGMA table_info(' + t + ')').all()) {
+          assert.ok(c.name === 'prompt_id' || !/prompt|response|command|tool_input|email/i.test(c.name), t + '.' + c.name);
+        }
+      }
+      const idx = l._db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='requests' AND name NOT LIKE 'sqlite_%'").all();
+      assert.strictEqual(idx.length, 3);
+      l.close();
+    });
+  }
+
+  /* ---- Phase 1 step 3: collector /v1 ---- */
+  {
+    const zlib = require('node:zlib');
+    const { openLedger } = require('../src/ledger.js');
+    const logsFx = fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-logs.json'), 'utf8');
+    const tracesFx = fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-traces.json'), 'utf8');
+    const PORT = 8798;
+    const rq = (opts, body) => new Promise((resolve) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port: PORT, agent: false }, opts), (res) => {
+        let d = '';
+        res.on('data', (c) => { d += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      });
+      r.on('error', () => resolve({ status: 0, body: '' }));
+      r.end(body);
+    });
+    const J = { 'content-type': 'application/json' };
+    const postJ = (p, body, headers) => rq({ method: 'POST', path: p, headers: Object.assign({}, J, headers) }, body);
+    const getJ = async (p) => JSON.parse((await rq({ method: 'GET', path: p })).body);
+    const start = async (ledger) => {
+      const st = new Store();
+      const c = createCollector(st, PORT, { ledger });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return { st, c };
+    };
+    const stop = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+
+    await atest('collector /v1: fixtures posted twice leave totals unchanged', async () => {
+      const ledger = openLedger({ file: ':memory:' });
+      const { c } = await start(ledger);
+      try {
+        for (let i = 0; i < 2; i++) {
+          const a = await postJ('/v1/logs', logsFx);
+          assert.strictEqual(a.status, 200); assert.strictEqual(a.body, '{}');
+          assert.strictEqual((await postJ('/v1/traces', tracesFx)).status, 200);
+          if (i === 0) {
+            const t1 = await getJ('/ledger/summary');
+            assert.strictEqual(t1.enabled, true);
+            assert.strictEqual(t1.requests, 5);
+            assert.ok(t1.costMicros > 0);
+          }
+        }
+        const t2 = await getJ('/ledger/summary');
+        assert.strictEqual(t2.requests, 5);
+        assert.strictEqual(t2.costMicros, ledger.totals().costMicros);
+        const none = await getJ('/ledger/summary?since=' + (Date.now() + 1e9) + '&until=bogus');
+        assert.strictEqual(none.requests, 0);
+      } finally { await stop(c); ledger.close(); }
+    });
+
+    await atest('collector /v1: Host 403, Origin 403, text/plain and protobuf 415', async () => {
+      const ledger = openLedger({ file: ':memory:' });
+      const { c } = await start(ledger);
+      try {
+        assert.strictEqual((await rq({ method: 'POST', path: '/v1/logs', headers: Object.assign({ host: 'evil.example' }, J) }, logsFx)).status, 403);
+        assert.strictEqual((await postJ('/v1/logs', logsFx, { origin: 'https://evil.example' })).status, 403);
+        assert.strictEqual((await rq({ method: 'GET', path: '/ledger/summary', headers: { host: 'evil.example' } })).status, 403);
+        const t = await rq({ method: 'POST', path: '/v1/logs', headers: { 'content-type': 'text/plain' } }, logsFx);
+        assert.strictEqual(t.status, 415);
+        const pb = await rq({ method: 'POST', path: '/v1/logs', headers: { 'content-type': 'application/x-protobuf' } }, Buffer.from([1, 2, 3]));
+        assert.strictEqual(pb.status, 415);
+        assert.ok(/protobuf/i.test(pb.body));
+        assert.strictEqual(ledger.totals().requests, 0, 'rejected requests must not write');
+      } finally { await stop(c); ledger.close(); }
+    });
+
+    await atest('collector /v1: gzip accepted, charset suffix allowed, bad gzip and bad json 400', async () => {
+      const ledger = openLedger({ file: ':memory:' });
+      const { c } = await start(ledger);
+      try {
+        const gz = await postJ('/v1/logs', zlib.gzipSync(logsFx), { 'content-type': 'application/json; charset=utf-8', 'content-encoding': 'gzip' });
+        assert.strictEqual(gz.status, 200);
+        assert.strictEqual(ledger.totals().requests, 5);
+        assert.strictEqual((await postJ('/v1/logs', 'not gzip', { 'content-encoding': 'gzip' })).status, 400);
+        assert.strictEqual((await postJ('/v1/logs', '{nope')).status, 400);
+        assert.strictEqual((await postJ('/v1/logs', '{"hello":1}')).status, 200, 'valid json without records is fine');
+        assert.strictEqual((await postJ('/v1/logs', '{}', { 'content-encoding': 'br' })).status, 415);
+        assert.strictEqual((await rq({ method: 'POST', path: '/v1/metrics', headers: J }, '{}')).status, 404);
+      } finally { await stop(c); ledger.close(); }
+    });
+
+    await atest('collector /v1: oversized raw body is 413', async () => {
+      const { c } = await start(openLedger({ file: ':memory:' }));
+      try {
+        const big = Buffer.alloc(8 * 1024 * 1024 + 1024, 32);
+        const r = await rq({ method: 'POST', path: '/v1/logs', headers: Object.assign({ 'content-length': big.length }, J) }, big);
+        assert.ok(r.status === 413 || r.status === 0, 'got ' + r.status);
+      } finally { await stop(c); }
+    });
+
+    await atest('collector /v1: a throwing ledger gives 503 so the exporter retries', async () => {
+      const boom = () => { throw new Error('disk full'); };
+      const { c } = await start({ ingestRequests: boom, ingestSpans: boom, totals: boom });
+      try {
+        assert.strictEqual((await postJ('/v1/logs', logsFx)).status, 503);
+        assert.strictEqual((await postJ('/v1/traces', tracesFx)).status, 503);
+        assert.strictEqual((await rq({ method: 'GET', path: '/ledger/summary' })).status, 503);
+      } finally { await stop(c); }
+    });
+
+    await atest('collector /v1: ledger off accepts and drops; summary says disabled', async () => {
+      const { c } = await start(null);
+      try {
+        const r = await postJ('/v1/logs', logsFx);
+        assert.strictEqual(r.status, 200); assert.strictEqual(r.body, '{}');
+        assert.strictEqual((await postJ('/v1/traces', tracesFx)).status, 200);
+        assert.deepStrictEqual(await getJ('/ledger/summary'), { enabled: false });
+      } finally { await stop(c); }
+    });
+
+    await atest('collector: /hook and /status feed the ledger; a throwing ledger never affects them', async () => {
+      const calls = [];
+      const stub = { recordHook: (e, p) => calls.push(['hook', e, p.session_id]), recordStatus: (s, usd) => calls.push(['status', s, usd]) };
+      const a = await start(stub);
+      try {
+        assert.strictEqual((await postJ('/hook', JSON.stringify({ event: 'SessionStart', payload: sid('lg1', {}) }))).status, 204);
+        assert.strictEqual((await postJ('/status', JSON.stringify({ payload: sid('lg1', { cost: { total_cost_usd: 1.25 } }) }))).status, 204);
+        await new Promise((r) => setTimeout(r, 30));
+        assert.deepStrictEqual(calls, [['hook', 'SessionStart', 'lg1'], ['status', 'lg1', 1.25]]);
+      } finally { await stop(a.c); }
+      const boom = () => { throw new Error('ledger down'); };
+      const b = await start({ recordHook: boom, recordStatus: boom });
+      try {
+        assert.strictEqual((await postJ('/hook', JSON.stringify({ event: 'PreToolUse', payload: sid('lg2', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't1' }) }))).status, 204);
+        assert.strictEqual((await postJ('/status', JSON.stringify({ payload: sid('lg2', { cost: { total_cost_usd: 2 } }) }))).status, 204);
+        await new Promise((r) => setTimeout(r, 30));
+        const s = b.st.snapshot().sessions.find((x) => x.id === 'lg2');
+        assert.ok(s, 'store must still update'); assert.strictEqual(s.costUsd, 2);
+      } finally { await stop(b.c); }
+    });
+  }
+
+  /* ---- Phase 1 step 4: config + ledger lifecycle ---- */
+  {
+    const cfgMod = require('../src/config.js');
+    const life = require('../src/ledger-life.js');
+    const { LedgerUnavailableError } = require('../src/ledger.js');
+    const withHome = (fn) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-life-'));
+      const prev = process.env.SERENO_HOME;
+      process.env.SERENO_HOME = dir;
+      try { return fn(dir); } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const rawCfg = (dir, o) => fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(o));
+
+    test('config: no ledger key reads as not-asked with 90 days', () => withHome(() => {
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: null, retentionDays: 90 });
+    }));
+
+    test('config: ledger is validated on read', () => withHome((dir) => {
+      rawCfg(dir, { ledger: { enabled: 'yes', retentionDays: -5 } });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: null, retentionDays: 90 });
+      rawCfg(dir, { ledger: { enabled: 1, retentionDays: 'x' } });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: null, retentionDays: 90 });
+      rawCfg(dir, { ledger: { enabled: false, retentionDays: 30 } });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: false, retentionDays: 30 });
+      rawCfg(dir, { ledger: 'garbage' });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: null, retentionDays: 90 });
+    }));
+
+    test('config: patching ledger.enabled keeps retentionDays and unrelated writes keep ledger', () => withHome((dir) => {
+      rawCfg(dir, { ledger: { enabled: null, retentionDays: 30 } });
+      assert.deepStrictEqual(cfgMod.write({ ledger: { enabled: true } }).ledger, { enabled: true, retentionDays: 30 });
+      cfgMod.write({ autoLaunch: true });
+      assert.deepStrictEqual(cfgMod.read().ledger, { enabled: true, retentionDays: 30 });
+      assert.strictEqual(cfgMod.read().autoLaunch, true);
+      cfgMod.write({ ledger: { enabled: 'bogus' } });
+      assert.strictEqual(cfgMod.read().ledger.enabled, null);
+    }));
+
+    test('opt-in: Yes/Not now map to true/false, dismissal stays null', () => {
+      assert.deepStrictEqual(life.OPT_IN_BUTTONS, ['Yes', 'Not now']);
+      assert.strictEqual(life.optInAnswer(0), true);
+      assert.strictEqual(life.optInAnswer(1), false);
+      assert.strictEqual(life.optInAnswer(2), null);
+      assert.strictEqual(life.optInAnswer(-1), null);
+      assert.strictEqual(life.optInAnswer(undefined), null);
+    });
+
+    test('startLedger: null or false opens nothing and creates no database file', () => withHome((dir) => {
+      for (const enabled of [null, false]) {
+        let opened = 0;
+        const r = life.startLedger({ ledger: { enabled, retentionDays: 90 } }, { open: () => { opened++; } });
+        assert.deepStrictEqual(r, { ledger: null, unavailable: false });
+        assert.strictEqual(opened, 0);
+      }
+      // The real opener too: still nothing on disk.
+      assert.strictEqual(life.startLedger({ ledger: { enabled: null, retentionDays: 90 } }).ledger, null);
+      for (const f of ['sereno.db', 'sereno.db-wal', 'sereno.db-shm']) {
+        assert.ok(!fs.existsSync(path.join(dir, f)), f + ' must not exist');
+      }
+    }));
+
+    test('startLedger: enabled opens the real ledger; close leaves an empty WAL', () => withHome((dir) => {
+      const r = life.startLedger({ ledger: { enabled: true, retentionDays: 30 } });
+      assert.strictEqual(r.unavailable, false);
+      assert.ok(r.ledger);
+      assert.ok(fs.existsSync(path.join(dir, 'sereno.db')));
+      r.ledger.close();
+      const wal = path.join(dir, 'sereno.db-wal');
+      assert.ok(!fs.existsSync(wal) || fs.statSync(wal).size === 0, 'wal checkpointed');
+    }));
+
+    test('startLedger: retentionDays is passed to open', () => {
+      let got = null;
+      life.startLedger({ ledger: { enabled: true, retentionDays: 7 } }, { open: (o) => { got = o; return {}; } });
+      assert.strictEqual(got.retentionDays, 7);
+    });
+
+    test('startLedger: open failure is logged once and reported unavailable', () => {
+      for (const err of [new LedgerUnavailableError('no sqlite'), new Error('disk full')]) {
+        const logged = [];
+        const r = life.startLedger({ ledger: { enabled: true, retentionDays: 90 } },
+          { open: () => { throw err; }, error: (m) => logged.push(m) });
+        assert.deepStrictEqual(r, { ledger: null, unavailable: true });
+        assert.strictEqual(logged.length, 1);
+        assert.ok(logged[0].includes(err.message));
+      }
+    });
+
+    await atest('collector.setLedger: /ledger/summary flips at runtime without a restart', async () => {
+      const { openLedger } = require('../src/ledger.js');
+      const PORT = 8799;
+      const get = () => new Promise((resolve) => {
+        http.get({ host: '127.0.0.1', port: PORT, path: '/ledger/summary', agent: false }, (res) => {
+          let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => resolve(JSON.parse(d)));
+        });
+      });
+      const c = createCollector(new Store(), PORT);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const l = openLedger({ file: ':memory:' });
+      try {
+        assert.deepStrictEqual(await get(), { enabled: false });
+        c.setLedger(l);
+        assert.strictEqual((await get()).enabled, true);
+        c.setLedger(null);
+        assert.deepStrictEqual(await get(), { enabled: false });
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+  }
+
+  /* ---- Phase 1 step 5: telemetry wiring ---- */
+  {
+    const withTmp = (initial, fn) => {
+      const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-tw-claude-'));
+      const hdir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-tw-home-'));
+      const prevC = process.env.CLAUDE_CONFIG_DIR; const prevH = process.env.SERENO_HOME;
+      process.env.CLAUDE_CONFIG_DIR = cdir; process.env.SERENO_HOME = hdir;
+      const file = path.join(cdir, 'settings.json');
+      if (initial !== null) fs.writeFileSync(file, initial);
+      try { return fn({ file, cdir, hdir }); } finally {
+        if (prevC === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevC;
+        if (prevH === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prevH;
+        fs.rmSync(cdir, { recursive: true, force: true }); fs.rmSync(hdir, { recursive: true, force: true });
+      }
+    };
+    const noLogKeys = (file) => {
+      const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.ok(!Object.keys(s.env || {}).some((k) => /^OTEL_LOG_/.test(k)), 'OTEL_LOG_* key written');
+    };
+    const nBackups = (cdir) => fs.readdirSync(cdir).filter((f) => f.includes('.bak.')).length;
+
+    test('wireTelemetry merges env, preserving unrelated env keys and settings, with a backup', () => withTmp(
+      JSON.stringify({ theme: 'dark', env: { FOO: 'bar' } }, null, 2) + '\n', ({ file, cdir }) => {
+        const r = wiring.wireTelemetry({ traces: true });
+        assert.strictEqual(r.conflict, null);
+        assert.ok(r.backup && fs.existsSync(r.backup));
+        const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.strictEqual(s.theme, 'dark');
+        assert.deepStrictEqual(s.env, Object.assign({ FOO: 'bar' }, {
+          CLAUDE_CODE_ENABLE_TELEMETRY: '1', OTEL_LOGS_EXPORTER: 'otlp',
+          OTEL_EXPORTER_OTLP_PROTOCOL: 'http/json', OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:8787',
+          OTEL_TRACES_EXPORTER: 'otlp', CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1',
+        }));
+        noLogKeys(file);
+        assert.strictEqual(nBackups(cdir), 1);
+      }));
+
+    test('wireTelemetry is idempotent: second call makes no backup and no change', () => withTmp('{}\n', ({ file, cdir }) => {
+      wiring.wireTelemetry();
+      const bytes = fs.readFileSync(file, 'utf8');
+      const r = wiring.wireTelemetry();
+      assert.deepStrictEqual(r.changes, []);
+      assert.strictEqual(r.backup, null);
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), bytes);
+      assert.strictEqual(nBackups(cdir), 1);
+      noLogKeys(file);
+    }));
+
+    test('wireTelemetry conflict: a different OTEL value changes nothing at all', () => {
+      const orig = JSON.stringify({ env: { OTEL_EXPORTER_OTLP_ENDPOINT: 'https://corp.example' } }) + '\n';
+      withTmp(orig, ({ file, cdir, hdir }) => {
+        const r = wiring.wireTelemetry();
+        assert.deepStrictEqual(r.conflict, ['OTEL_EXPORTER_OTLP_ENDPOINT']);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), orig);
+        assert.strictEqual(nBackups(cdir), 0);
+        assert.ok(!fs.existsSync(path.join(hdir, 'wired.json')));
+        assert.ok(/OTEL_EXPORTER_OTLP_ENDPOINT/.test(wiring.conflictMessage(r.conflict)));
+      });
+    });
+
+    test('wireTelemetry conflict: foreign OTEL_* keys we do not set (incl. OTEL_LOG_*) also block', () => {
+      for (const key of ['OTEL_METRICS_EXPORTER', 'OTEL_EXPORTER_OTLP_HEADERS', 'OTEL_LOG_USER_PROMPTS']) {
+        const orig = JSON.stringify({ env: { [key]: '1' } }) + '\n';
+        withTmp(orig, ({ file, cdir }) => {
+          assert.deepStrictEqual(wiring.wireTelemetry().conflict, [key]);
+          assert.strictEqual(fs.readFileSync(file, 'utf8'), orig);
+          assert.strictEqual(nBackups(cdir), 0);
+        });
+      }
+    });
+
+    test('wireTelemetry: traces:false omits the two trace keys', () => withTmp('{}\n', ({ file }) => {
+      wiring.wireTelemetry({ traces: false });
+      const env = JSON.parse(fs.readFileSync(file, 'utf8')).env;
+      assert.ok(!('OTEL_TRACES_EXPORTER' in env));
+      assert.ok(!('CLAUDE_CODE_ENHANCED_TELEMETRY_BETA' in env));
+      assert.strictEqual(env.OTEL_LOGS_EXPORTER, 'otlp');
+      noLogKeys(file);
+    }));
+
+    test('wireTelemetry: creates settings.json when absent; dryRun writes nothing', () => withTmp(null, ({ file, hdir }) => {
+      const d = wiring.wireTelemetry({ dryRun: true });
+      assert.ok(d.dryRun && d.changes.length);
+      assert.ok(!fs.existsSync(file) && !fs.existsSync(path.join(hdir, 'wired.json')));
+      wiring.wireTelemetry();
+      assert.ok(fs.existsSync(file));
+      noLogKeys(file);
+    }));
+
+    test('unwireTelemetry removes ours, keeps a user-changed key and unrelated keys, clears the record', () => withTmp(
+      JSON.stringify({ theme: 'dark', env: { FOO: 'bar' } }) + '\n', ({ file, hdir }) => {
+        wiring.wireTelemetry();
+        const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+        s.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'https://mine.example';
+        fs.writeFileSync(file, JSON.stringify(s));
+        const r = wiring.unwireTelemetry();
+        assert.deepStrictEqual(r.kept, ['OTEL_EXPORTER_OTLP_ENDPOINT']);
+        const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.deepStrictEqual(after.env, { FOO: 'bar', OTEL_EXPORTER_OTLP_ENDPOINT: 'https://mine.example' });
+        assert.strictEqual(after.theme, 'dark');
+        assert.ok(!('telemetry' in JSON.parse(fs.readFileSync(path.join(hdir, 'wired.json'), 'utf8'))));
+        noLogKeys(file);
+      }));
+
+    test('unwireTelemetry drops an emptied env; a pre-existing identical key is not ours to remove', () => {
+      withTmp('{}\n', ({ file }) => {
+        wiring.wireTelemetry();
+        wiring.unwireTelemetry();
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')), {});
+      });
+      withTmp(JSON.stringify({ env: { CLAUDE_CODE_ENABLE_TELEMETRY: '1' } }), ({ file }) => {
+        wiring.wireTelemetry();
+        wiring.unwireTelemetry();
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).env, { CLAUDE_CODE_ENABLE_TELEMETRY: '1' });
+      });
+    });
+
+    test('unwireTelemetry with no wired.json record removes nothing and says so', () => {
+      const orig = JSON.stringify({ env: { OTEL_LOGS_EXPORTER: 'otlp' } }) + '\n';
+      withTmp(orig, ({ file }) => {
+        const r = wiring.unwireTelemetry();
+        assert.strictEqual(r.recorded, false);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), orig);
+      });
+    });
+
+    test('wired.json keeps the shim ledger keys when telemetry is recorded and cleared', () => withTmp('{}\n', ({ hdir }) => {
+      const rec = path.join(hdir, 'wired.json');
+      fs.writeFileSync(rec, JSON.stringify({ shims: ['c:/x/emit.js'] }));
+      wiring.wireTelemetry();
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(rec, 'utf8')).shims, ['c:/x/emit.js']);
+      wiring.unwireTelemetry();
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(rec, 'utf8')), { shims: ['c:/x/emit.js'] });
+    }));
+
+    test('wire() after wireTelemetry keeps the telemetry record; unwireTelemetry still removes our keys', () => withTmp('{}\n', ({ file, hdir }) => {
+      wiring.wireTelemetry();
+      wiring.wire(wiring.buildCommands({ packaged: false, emitJsPath: 'C:/x/bin/emit.js' }));
+      const rec = JSON.parse(fs.readFileSync(path.join(hdir, 'wired.json'), 'utf8'));
+      assert.ok(rec.telemetry && rec.shims.length === 1, 'record or shims lost');
+      const r = wiring.unwireTelemetry();
+      assert.ok(r.recorded && r.removed.length === 6);
+      assert.ok(!('env' in JSON.parse(fs.readFileSync(file, 'utf8'))));
+    }));
+
+    test('wireTelemetry after wire() keeps the shims', () => withTmp('{}\n', ({ hdir }) => {
+      wiring.wire(wiring.buildCommands({ packaged: false, emitJsPath: 'C:/x/bin/emit.js' }));
+      wiring.wireTelemetry();
+      const rec = JSON.parse(fs.readFileSync(path.join(hdir, 'wired.json'), 'utf8'));
+      assert.deepStrictEqual(rec.shims, ['c:/x/bin/emit.js']);
+      assert.ok(rec.telemetry);
+    }));
+
+    test('CLI: wire --telemetry wires env only; unwire --telemetry reverses; plain unwire still restores bytes', () => withTmp(
+      '{\n  "theme": "dark"\n}\n', ({ file, cdir, hdir }) => {
+        const orig = fs.readFileSync(file, 'utf8');
+        const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: cdir, SERENO_HOME: hdir });
+        const run = (script, args) => execFileSync(process.execPath, [path.join(ROOT, 'tools', script)].concat(args), { env, encoding: 'utf8' });
+        run('wire.js', ['--telemetry', '--dry-run', '--yes']);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), orig, 'dry-run wrote');
+        run('wire.js', ['--telemetry', '--yes']);
+        const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+        assert.ok(s.env.OTEL_LOGS_EXPORTER && !s.hooks && !s.statusLine, 'telemetry flag must not wire hooks');
+        noLogKeys(file);
+        run('unwire.js', ['--telemetry']);
+        assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { theme: 'dark' });
+        run('wire.js', ['--telemetry', '--yes']);
+        run('unwire.js', ['--yes']);
+        assert.strictEqual(fs.readFileSync(file, 'utf8'), orig, 'plain unwire must restore the newest backup byte for byte');
+      }));
+  }
+
+  /* ---- [ledger exit] ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const life = require('../src/ledger-life.js');
+    const otlp = require('../src/otlp.js');
+    const fxDir = path.join(__dirname, 'fixtures');
+    const logsRaw = fs.readFileSync(path.join(fxDir, 'otlp-logs.json'), 'utf8');
+    const tracesRaw = fs.readFileSync(path.join(fxDir, 'otlp-traces.json'), 'utf8');
+    const PORT = 8800;
+    const rq = (opts, body) => new Promise((resolve) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port: PORT, agent: false }, opts), (res) => {
+        let d = '';
+        res.on('data', (c) => { d += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      });
+      r.on('error', () => resolve({ status: 0, body: '' }));
+      r.end(body);
+    });
+    const post = (p, body) => rq({ method: 'POST', path: p, headers: { 'content-type': 'application/json' } }, typeof body === 'string' ? body : JSON.stringify(body));
+    const start = async (ledger) => {
+      const c = createCollector(new Store(), PORT, { ledger });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return c;
+    };
+    const stop = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-exit-'));
+    const rmDir = (d) => fs.rmSync(d, { recursive: true, force: true });
+    const open = (file) => openLedger({ file, retentionDays: 36500 });   // fixtures are dated; never prune them
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const withHome = async (fn) => {
+      const dir = tmpDir(); const prev = process.env.SERENO_HOME;
+      process.env.SERENO_HOME = dir;
+      try { return await fn(dir); } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        rmDir(dir);
+      }
+    };
+    // every identifier value in a fixture, collected from its JSON rather than hard-coded
+    const ID_KEYS = new Set(['user.email', 'user.account_id', 'user.account_uuid', 'user.id', 'organization.id']);
+    const idValues = (...raws) => {
+      const out = new Set();
+      const walk = (v) => {
+        if (Array.isArray(v)) return v.forEach(walk);
+        if (!v || typeof v !== 'object') return;
+        if (ID_KEYS.has(v.key) && v.value && typeof v.value.stringValue === 'string') out.add(v.value.stringValue);
+        Object.values(v).forEach(walk);
+      };
+      raws.forEach((r) => walk(JSON.parse(r)));
+      return [...out];
+    };
+    const reqs = () => otlp.parseLogs(JSON.parse(logsRaw));
+    const spans = () => otlp.parseTraces(JSON.parse(tracesRaw));
+    const sessionIds = () => {
+      const ids = new Set();
+      for (const r of reqs()) if (r.sessionId) ids.add(r.sessionId);
+      for (const s of spans()) { if (s.sessionId) ids.add(s.sessionId); if (s.agentId) ids.add(s.agentId); }
+      return [...ids];
+    };
+
+    test('ledger exit 1: replaying the same OTLP input twice leaves every total unchanged', () => {
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      l.ingestRequests(reqs()); l.ingestSpans(spans());
+      const first = l.totals();
+      assert.strictEqual(first.requests, 5);
+      assert.ok(first.costMicros > 0);
+      l.ingestRequests(reqs()); l.ingestSpans(spans());
+      assert.deepStrictEqual(l.totals(), first);
+      l.close();
+    });
+
+    test('ledger exit 2: closing and reopening the ledger preserves spend', () => {
+      const d = tmpDir(); const file = path.join(d, 'sereno.db');
+      try {
+        const a = open(file);
+        a.ingestRequests(reqs()); a.ingestSpans(spans());
+        const before = a.totals();
+        assert.ok(before.costMicros > 0);
+        a.close();
+        const b = open(file);
+        assert.deepStrictEqual(b.totals(), before);
+        b.close();
+      } finally { rmDir(d); }
+    });
+
+    test('ledger exit 3: telemetry with no hooks still creates a session row', () => {
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      l.ingestRequests(reqs());
+      const sid = reqs()[0].sessionId;
+      assert.ok(l._db.prepare('SELECT session_id FROM sessions WHERE session_id=?').get(sid), 'session row missing');
+      assert.strictEqual(l.totals().sessions.length, 1);
+      l.close();
+    });
+
+    await atest('ledger exit 4: an unmatched subagent request stays unknown across re-posts, a main-thread span and reopen', async () => {
+      const d = tmpDir(); const file = path.join(d, 'sereno.db');
+      let l = open(file);
+      const c = await start(l);
+      const want = { attribution: 'unknown', agent_id: null };
+      const get = (lg) => Object.assign({}, lg._db.prepare("SELECT attribution, agent_id FROM requests WHERE request_id='req_sub_nospan'").get());
+      try {
+        assert.strictEqual((await post('/v1/logs', logsRaw)).status, 200);
+        assert.strictEqual((await post('/v1/traces', tracesRaw)).status, 200);
+        assert.deepStrictEqual(get(l), want);
+        assert.strictEqual((await post('/v1/traces', tracesRaw)).status, 200);
+        l.ingestSpans([{ requestId: 'req_sub_nospan', sessionId: reqs()[0].sessionId, agentId: null, ts: 1790000003000 }]);
+        assert.deepStrictEqual(get(l), want);
+        await stop(c); l.close();
+        l = open(file);
+        assert.deepStrictEqual(get(l), want);
+        assert.strictEqual(l.totals().byAttribution.unknown, 777);
+      } finally { try { l.close(); } catch (_) { /* already closed */ } rmDir(d); }
+    });
+
+    await atest('ledger exit 5: raw sereno.db, -wal and -shm never contain identifiers, prompts or tool inputs', async () => {
+      const d = tmpDir(); const file = path.join(d, 'sereno.db');
+      const ids = idValues(logsRaw, tracesRaw);
+      assert.ok(ids.length >= 5, 'expected the fixtures to carry >= 5 identifier values, got ' + ids.length);
+      const needles = ids.concat(['SERENO-CANARY-PROMPT', 'SERENO-CANARY-TOOLINPUT']);
+      const scan = (when) => {
+        for (const suffix of ['', '-wal', '-shm']) {
+          const f = file + suffix;
+          if (!fs.existsSync(f)) continue;
+          const bytes = fs.readFileSync(f);
+          for (const n of needles) {
+            assert.ok(!bytes.includes(Buffer.from(n, 'utf8')), when + ': ' + path.basename(f) + ' contains a forbidden value (' + n.slice(0, 6) + '...)');
+            assert.ok(!bytes.includes(Buffer.from(n, 'utf16le')), when + ': ' + path.basename(f) + ' contains a utf16 forbidden value');
+          }
+        }
+      };
+      const l = open(file);
+      const c = await start(l);
+      try {
+        const sid = reqs()[0].sessionId;
+        assert.strictEqual((await post('/v1/logs', logsRaw)).status, 200);
+        assert.strictEqual((await post('/v1/traces', tracesRaw)).status, 200);
+        assert.strictEqual((await post('/hook', { event: 'SessionStart', payload: { session_id: sid, cwd: 'C:\\work\\proj', model: 'm' } })).status, 204);
+        assert.strictEqual((await post('/hook', { event: 'UserPromptSubmit', payload: { session_id: sid, prompt: 'SERENO-CANARY-PROMPT' } })).status, 204);
+        assert.strictEqual((await post('/hook', { event: 'PreToolUse', payload: { session_id: sid, tool_name: 'Bash', tool_use_id: 't1', tool_input: { command: 'echo SERENO-CANARY-TOOLINPUT' } } })).status, 204);
+        assert.strictEqual((await post('/status', { payload: { session_id: sid, cost: { total_cost_usd: 0.0243 } } })).status, 204);
+        await wait(80);
+        assert.ok(l._db.prepare('SELECT COUNT(*) n FROM sessions').get().n >= 1);
+        scan('while open');
+        await stop(c); l.close();
+        scan('after close');
+      } finally { try { l.close(); } catch (_) { /* closed */ } rmDir(d); }
+    });
+
+    await atest('ledger exit 6: ledger disabled (null and false) never creates a database file', async () => {
+      for (const enabled of [null, false]) {
+        await withHome(async (dir) => {
+          const r = life.startLedger({ ledger: { enabled, retentionDays: 90 } });
+          assert.strictEqual(r.ledger, null);
+          const c = await start(r.ledger);
+          try {
+            assert.strictEqual((await post('/v1/logs', logsRaw)).status, 200);
+            assert.strictEqual((await post('/v1/traces', tracesRaw)).status, 200);
+            assert.strictEqual((await post('/hook', { event: 'SessionStart', payload: { session_id: 'x', cwd: 'C:\\w' } })).status, 204);
+            assert.strictEqual((await post('/status', { payload: { session_id: 'x', cost: { total_cost_usd: 1 } } })).status, 204);
+            await wait(50);
+          } finally { await stop(c); }
+          const found = fs.readdirSync(dir).filter((f) => /^sereno\.db/.test(f));
+          assert.deepStrictEqual(found, [], 'enabled=' + enabled + ' created ' + found.join(','));
+        });
+      }
+    });
+
+    test('replay --otlp --fixtures exits 0, is idempotent and prints no identifiers', () => {
+      const home = tmpDir();
+      try {
+        const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'replay.js'), '--otlp', '--fixtures'],
+          { env: Object.assign({}, process.env, { SERENO_HOME: home }), encoding: 'utf8' });
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.ok(r.stdout.includes('replay idempotent: yes'));
+        assert.ok(/est\. \$/.test(r.stdout), 'dollar figure must be labelled est.');
+        const forbidden = idValues(logsRaw, tracesRaw).concat(sessionIds());
+        assert.ok(forbidden.length >= 7);
+        for (const v of forbidden) assert.ok(!r.stdout.includes(v), 'stdout leaked ' + v.slice(0, 6) + '...');
+        assert.deepStrictEqual(fs.readdirSync(home), [], 'replay must not touch SERENO_HOME');
+      } finally { rmDir(home); }
+    });
+  }
+  /* ---- Phase 1: red-team fixes ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const tmpF = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-rt-')), 'sereno.db');
+    const rmF = f => fs.rmSync(path.dirname(f), { recursive: true, force: true });
+    const mkReq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's', promptId: null, ts: Date.now(),
+      model: 'm', querySource: null, source: 'main', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100, durationMs: 0 }, o);
+
+    test('ledger: two handles on one file both open and ingest, totals agree', () => {
+      const f = tmpF();
+      try {
+        const a = openLedger({ file: f });
+        const b = openLedger({ file: f });
+        a.ingestRequests([mkReq({ requestKey: 'k1', requestId: 'r1', costMicros: 100 })]);
+        b.ingestRequests([mkReq({ requestKey: 'k2', requestId: 'r2', costMicros: 250 })]);
+        for (const h of [a, b]) assert.strictEqual(Number(h._db.prepare('PRAGMA busy_timeout').get().timeout), 2000);
+        assert.strictEqual(a.totals().costMicros, 350);
+        assert.strictEqual(b.totals().costMicros, 350);
+        a.close(); b.close();
+      } finally { rmF(f); }
+    });
+
+    test('ledger prune: old session with status and agents is fully removed, recent kept', () => {
+      const f = tmpF();
+      try {
+        const l = openLedger({ file: f });
+        const old = Date.now() - 200 * 86400000, now = Date.now();
+        const ins = (sql, ...a) => l._db.prepare(sql).run(...a);
+        for (const [id, t] of [['old', old], ['new', now]]) {
+          ins('INSERT INTO sessions (session_id, first_seen, last_seen) VALUES (?,?,?)', id, t, t);
+          ins('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,NULL)', id, 'a1', 't', t);
+          ins('INSERT INTO status (session_id, ts, cost_micros) VALUES (?,?,?)', id, t, 5);
+        }
+        ins('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,?)', 'new', 'a2', 't', old, old);
+        l.prune(90);
+        const n = (t, id) => l._db.prepare(`SELECT COUNT(*) AS c FROM ${t} WHERE session_id=?`).get(id).c;
+        for (const t of ['sessions', 'agents', 'status']) { assert.strictEqual(n(t, 'old'), 0, t); assert.strictEqual(n(t, 'new'), t === 'agents' ? 1 : 1, t); }
+        assert.deepStrictEqual(l.reconcile('old'), { ledgerMicros: 0, statusMicros: null, deltaPct: null, ok: false });
+        assert.strictEqual(l.reconcile('new').statusMicros, 5);
+        l.close();
+      } finally { rmF(f); }
+    });
+
+    const twTmp = (initial, fn) => {
+      const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-rt-claude-'));
+      const hdir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-rt-home-'));
+      const prevC = process.env.CLAUDE_CONFIG_DIR; const prevH = process.env.SERENO_HOME;
+      process.env.CLAUDE_CONFIG_DIR = cdir; process.env.SERENO_HOME = hdir;
+      const file = path.join(cdir, 'settings.json');
+      if (initial !== null) fs.writeFileSync(file, initial);
+      try { return fn({ file, cdir, hdir }); } finally {
+        if (prevC === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevC;
+        if (prevH === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prevH;
+        fs.rmSync(cdir, { recursive: true, force: true }); fs.rmSync(hdir, { recursive: true, force: true });
+      }
+    };
+
+    test('wireTelemetry: a non-object env (array, string, number, null) is a conflict; file untouched, no backup', () => {
+      for (const bad of [[1, 2], 'x', 7, null]) {
+        const raw = JSON.stringify({ theme: 'dark', env: bad }, null, 2) + '\n';
+        twTmp(raw, ({ file, cdir }) => {
+          const r = wiring.wireTelemetry();
+          assert.deepStrictEqual(r.conflict, ['env']);
+          assert.strictEqual(fs.readFileSync(file, 'utf8'), raw);
+          assert.deepStrictEqual(fs.readdirSync(cdir).filter((x) => x.includes('.bak.')), []);
+        });
+      }
+    });
+
+    test('telemetryWired reflects the wired.json record', () => twTmp('{}\n', () => {
+      assert.strictEqual(wiring.telemetryWired(), false);
+      wiring.wireTelemetry();
+      assert.strictEqual(wiring.telemetryWired(), true);
+      wiring.unwireTelemetry();
+      assert.strictEqual(wiring.telemetryWired(), false);
+    }));
+
+    test('collector server sets requestTimeout 30s and headersTimeout 15s', () => {
+      const c = createCollector(new Store(), 0);
+      assert.strictEqual(c.server.requestTimeout, 30000);
+      assert.strictEqual(c.server.headersTimeout, 15000);
+      c.close();
+    });
+  }
+
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
