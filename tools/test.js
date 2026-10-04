@@ -2921,6 +2921,188 @@ test('missing rate_limits degrades instead of throwing', () => {
       }));
   }
 
+  /* ---- [ledger exit] ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const life = require('../src/ledger-life.js');
+    const otlp = require('../src/otlp.js');
+    const fxDir = path.join(__dirname, 'fixtures');
+    const logsRaw = fs.readFileSync(path.join(fxDir, 'otlp-logs.json'), 'utf8');
+    const tracesRaw = fs.readFileSync(path.join(fxDir, 'otlp-traces.json'), 'utf8');
+    const PORT = 8800;
+    const rq = (opts, body) => new Promise((resolve) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port: PORT, agent: false }, opts), (res) => {
+        let d = '';
+        res.on('data', (c) => { d += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      });
+      r.on('error', () => resolve({ status: 0, body: '' }));
+      r.end(body);
+    });
+    const post = (p, body) => rq({ method: 'POST', path: p, headers: { 'content-type': 'application/json' } }, typeof body === 'string' ? body : JSON.stringify(body));
+    const start = async (ledger) => {
+      const c = createCollector(new Store(), PORT, { ledger });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return c;
+    };
+    const stop = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-exit-'));
+    const rmDir = (d) => fs.rmSync(d, { recursive: true, force: true });
+    const open = (file) => openLedger({ file, retentionDays: 36500 });   // fixtures are dated; never prune them
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const withHome = async (fn) => {
+      const dir = tmpDir(); const prev = process.env.SERENO_HOME;
+      process.env.SERENO_HOME = dir;
+      try { return await fn(dir); } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        rmDir(dir);
+      }
+    };
+    // every identifier value in a fixture, collected from its JSON rather than hard-coded
+    const ID_KEYS = new Set(['user.email', 'user.account_id', 'user.account_uuid', 'user.id', 'organization.id']);
+    const idValues = (...raws) => {
+      const out = new Set();
+      const walk = (v) => {
+        if (Array.isArray(v)) return v.forEach(walk);
+        if (!v || typeof v !== 'object') return;
+        if (ID_KEYS.has(v.key) && v.value && typeof v.value.stringValue === 'string') out.add(v.value.stringValue);
+        Object.values(v).forEach(walk);
+      };
+      raws.forEach((r) => walk(JSON.parse(r)));
+      return [...out];
+    };
+    const reqs = () => otlp.parseLogs(JSON.parse(logsRaw));
+    const spans = () => otlp.parseTraces(JSON.parse(tracesRaw));
+    const sessionIds = () => {
+      const ids = new Set();
+      for (const r of reqs()) if (r.sessionId) ids.add(r.sessionId);
+      for (const s of spans()) { if (s.sessionId) ids.add(s.sessionId); if (s.agentId) ids.add(s.agentId); }
+      return [...ids];
+    };
+
+    test('ledger exit 1: replaying the same OTLP input twice leaves every total unchanged', () => {
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      l.ingestRequests(reqs()); l.ingestSpans(spans());
+      const first = l.totals();
+      assert.strictEqual(first.requests, 5);
+      assert.ok(first.costMicros > 0);
+      l.ingestRequests(reqs()); l.ingestSpans(spans());
+      assert.deepStrictEqual(l.totals(), first);
+      l.close();
+    });
+
+    test('ledger exit 2: closing and reopening the ledger preserves spend', () => {
+      const d = tmpDir(); const file = path.join(d, 'sereno.db');
+      try {
+        const a = open(file);
+        a.ingestRequests(reqs()); a.ingestSpans(spans());
+        const before = a.totals();
+        assert.ok(before.costMicros > 0);
+        a.close();
+        const b = open(file);
+        assert.deepStrictEqual(b.totals(), before);
+        b.close();
+      } finally { rmDir(d); }
+    });
+
+    test('ledger exit 3: telemetry with no hooks still creates a session row', () => {
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      l.ingestRequests(reqs());
+      const sid = reqs()[0].sessionId;
+      assert.ok(l._db.prepare('SELECT session_id FROM sessions WHERE session_id=?').get(sid), 'session row missing');
+      assert.strictEqual(l.totals().sessions.length, 1);
+      l.close();
+    });
+
+    await atest('ledger exit 4: an unmatched subagent request stays unknown across re-posts, a main-thread span and reopen', async () => {
+      const d = tmpDir(); const file = path.join(d, 'sereno.db');
+      let l = open(file);
+      const c = await start(l);
+      const want = { attribution: 'unknown', agent_id: null };
+      const get = (lg) => Object.assign({}, lg._db.prepare("SELECT attribution, agent_id FROM requests WHERE request_id='req_sub_nospan'").get());
+      try {
+        assert.strictEqual((await post('/v1/logs', logsRaw)).status, 200);
+        assert.strictEqual((await post('/v1/traces', tracesRaw)).status, 200);
+        assert.deepStrictEqual(get(l), want);
+        assert.strictEqual((await post('/v1/traces', tracesRaw)).status, 200);
+        l.ingestSpans([{ requestId: 'req_sub_nospan', sessionId: reqs()[0].sessionId, agentId: null, ts: 1790000003000 }]);
+        assert.deepStrictEqual(get(l), want);
+        await stop(c); l.close();
+        l = open(file);
+        assert.deepStrictEqual(get(l), want);
+        assert.strictEqual(l.totals().byAttribution.unknown, 777);
+      } finally { try { l.close(); } catch (_) { /* already closed */ } rmDir(d); }
+    });
+
+    await atest('ledger exit 5: raw sereno.db, -wal and -shm never contain identifiers, prompts or tool inputs', async () => {
+      const d = tmpDir(); const file = path.join(d, 'sereno.db');
+      const ids = idValues(logsRaw, tracesRaw);
+      assert.ok(ids.length >= 5, 'expected the fixtures to carry >= 5 identifier values, got ' + ids.length);
+      const needles = ids.concat(['SERENO-CANARY-PROMPT', 'SERENO-CANARY-TOOLINPUT']);
+      const scan = (when) => {
+        for (const suffix of ['', '-wal', '-shm']) {
+          const f = file + suffix;
+          if (!fs.existsSync(f)) continue;
+          const bytes = fs.readFileSync(f);
+          for (const n of needles) {
+            assert.ok(!bytes.includes(Buffer.from(n, 'utf8')), when + ': ' + path.basename(f) + ' contains a forbidden value (' + n.slice(0, 6) + '...)');
+            assert.ok(!bytes.includes(Buffer.from(n, 'utf16le')), when + ': ' + path.basename(f) + ' contains a utf16 forbidden value');
+          }
+        }
+      };
+      const l = open(file);
+      const c = await start(l);
+      try {
+        const sid = reqs()[0].sessionId;
+        assert.strictEqual((await post('/v1/logs', logsRaw)).status, 200);
+        assert.strictEqual((await post('/v1/traces', tracesRaw)).status, 200);
+        assert.strictEqual((await post('/hook', { event: 'SessionStart', payload: { session_id: sid, cwd: 'C:\\work\\proj', model: 'm' } })).status, 204);
+        assert.strictEqual((await post('/hook', { event: 'UserPromptSubmit', payload: { session_id: sid, prompt: 'SERENO-CANARY-PROMPT' } })).status, 204);
+        assert.strictEqual((await post('/hook', { event: 'PreToolUse', payload: { session_id: sid, tool_name: 'Bash', tool_use_id: 't1', tool_input: { command: 'echo SERENO-CANARY-TOOLINPUT' } } })).status, 204);
+        assert.strictEqual((await post('/status', { payload: { session_id: sid, cost: { total_cost_usd: 0.0243 } } })).status, 204);
+        await wait(80);
+        assert.ok(l._db.prepare('SELECT COUNT(*) n FROM sessions').get().n >= 1);
+        scan('while open');
+        await stop(c); l.close();
+        scan('after close');
+      } finally { try { l.close(); } catch (_) { /* closed */ } rmDir(d); }
+    });
+
+    await atest('ledger exit 6: ledger disabled (null and false) never creates a database file', async () => {
+      for (const enabled of [null, false]) {
+        await withHome(async (dir) => {
+          const r = life.startLedger({ ledger: { enabled, retentionDays: 90 } });
+          assert.strictEqual(r.ledger, null);
+          const c = await start(r.ledger);
+          try {
+            assert.strictEqual((await post('/v1/logs', logsRaw)).status, 200);
+            assert.strictEqual((await post('/v1/traces', tracesRaw)).status, 200);
+            assert.strictEqual((await post('/hook', { event: 'SessionStart', payload: { session_id: 'x', cwd: 'C:\\w' } })).status, 204);
+            assert.strictEqual((await post('/status', { payload: { session_id: 'x', cost: { total_cost_usd: 1 } } })).status, 204);
+            await wait(50);
+          } finally { await stop(c); }
+          const found = fs.readdirSync(dir).filter((f) => /^sereno\.db/.test(f));
+          assert.deepStrictEqual(found, [], 'enabled=' + enabled + ' created ' + found.join(','));
+        });
+      }
+    });
+
+    test('replay --otlp --fixtures exits 0, is idempotent and prints no identifiers', () => {
+      const home = tmpDir();
+      try {
+        const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'replay.js'), '--otlp', '--fixtures'],
+          { env: Object.assign({}, process.env, { SERENO_HOME: home }), encoding: 'utf8' });
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.ok(r.stdout.includes('replay idempotent: yes'));
+        assert.ok(/est\. \$/.test(r.stdout), 'dollar figure must be labelled est.');
+        const forbidden = idValues(logsRaw, tracesRaw).concat(sessionIds());
+        assert.ok(forbidden.length >= 7);
+        for (const v of forbidden) assert.ok(!r.stdout.includes(v), 'stdout leaked ' + v.slice(0, 6) + '...');
+        assert.deepStrictEqual(fs.readdirSync(home), [], 'replay must not touch SERENO_HOME');
+      } finally { rmDir(home); }
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
