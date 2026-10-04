@@ -51,11 +51,13 @@ function openLedger(opts = {}) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const rd = Number(opts.retentionDays);
   const retentionDays = Number.isFinite(rd) && rd > 0 ? rd : 90;
-  const db = new sqlite.DatabaseSync(file);
+  const db = new sqlite.DatabaseSync(file, { timeout: 2000 });   // busy timeout: a second process waits instead of SQLITE_BUSY
   try {
   let closed = false;
   const live = () => { if (closed) throw new Error('ledger is closed'); };
 
+  // The constructor `timeout` option is ignored on Node 22.13-22.15; set it explicitly.
+  db.exec('PRAGMA busy_timeout=2000');
   db.exec('PRAGMA journal_mode=WAL');
   db.exec('PRAGMA synchronous=NORMAL');
   let ver = Number(db.prepare('PRAGMA user_version').get().user_version);
@@ -98,6 +100,10 @@ function openLedger(opts = {}) {
     sumAll: db.prepare('SELECT COALESCE(SUM(cost_micros),0) AS s FROM requests WHERE session_id=?'),
     pruneReq: db.prepare('DELETE FROM requests WHERE ts < ?'),
     pruneSpan: db.prepare('DELETE FROM spans WHERE ts < ?'),
+    pruneSess: db.prepare('DELETE FROM sessions WHERE last_seen < ?'),
+    pruneAgents: db.prepare(`DELETE FROM agents WHERE COALESCE(stopped, started) < ?
+      OR session_id NOT IN (SELECT session_id FROM sessions)`),
+    pruneStatus: db.prepare('DELETE FROM status WHERE ts < ?'),
   };
 
   /** @template T @param {() => T} fn @returns {T} */
@@ -226,7 +232,10 @@ function openLedger(opts = {}) {
   function prune(days = retentionDays) {
     live();
     const cutoff = Date.now() - days * DAY_MS;
-    tx(() => { q.pruneReq.run(cutoff); q.pruneSpan.run(cutoff); });
+    tx(() => {
+      q.pruneReq.run(cutoff); q.pruneSpan.run(cutoff); q.pruneSess.run(cutoff);
+      q.pruneAgents.run(cutoff); q.pruneStatus.run(cutoff);
+    });
   }
 
   function close() {

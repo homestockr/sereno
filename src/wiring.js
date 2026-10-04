@@ -319,7 +319,12 @@ function wireTelemetry(options) {
   const want = telemetryEnv(opt.traces !== false);
   const s = readSettings();
   const settings = s.settings;
-  const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env) ? settings.env : null;
+  // A present-but-not-an-object env (array, string, number, null) is somebody's
+  // malformed config: a conflict, never silently replaced.
+  if ('env' in settings && !(settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env))) {
+    return { conflict: ['env'], changes: [], backup: null };
+  }
+  const env = settings.env || null;
 
   const conflict = [];
   if (env) {
@@ -388,6 +393,12 @@ function unwireTelemetry() {
   return { removed, kept, recorded: true };
 }
 
+/** Is there a telemetry record in wired.json (did we wire it)? */
+function telemetryWired() {
+  const t = readWiredRecord().telemetry;
+  return !!(t && t.env && typeof t.env === 'object');
+}
+
 /** Human text for a wireTelemetry conflict, shared by the app and the CLI. */
 function conflictMessage(keys) {
   return 'settings.json already configures telemetry (' + keys.join(', ') + '). '
@@ -421,6 +432,6 @@ function unwire() {
 
 module.exports = {
   EVENTS, ledgerPath, configDir, settingsPath, buildCommands,
-  wireTelemetry, unwireTelemetry, conflictMessage, telemetryEnv,
+  wireTelemetry, unwireTelemetry, telemetryWired, conflictMessage, telemetryEnv,
   status, wire, unwire, removeEntries, backups, isOurs, shimPathOf, ownShims,
 };

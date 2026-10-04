@@ -3102,6 +3102,92 @@ test('missing rate_limits degrades instead of throwing', () => {
       } finally { rmDir(home); }
     });
   }
+  /* ---- Phase 1: red-team fixes ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const tmpF = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-rt-')), 'sereno.db');
+    const rmF = f => fs.rmSync(path.dirname(f), { recursive: true, force: true });
+    const mkReq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's', promptId: null, ts: Date.now(),
+      model: 'm', querySource: null, source: 'main', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100, durationMs: 0 }, o);
+
+    test('ledger: two handles on one file both open and ingest, totals agree', () => {
+      const f = tmpF();
+      try {
+        const a = openLedger({ file: f });
+        const b = openLedger({ file: f });
+        a.ingestRequests([mkReq({ requestKey: 'k1', requestId: 'r1', costMicros: 100 })]);
+        b.ingestRequests([mkReq({ requestKey: 'k2', requestId: 'r2', costMicros: 250 })]);
+        for (const h of [a, b]) assert.strictEqual(Number(h._db.prepare('PRAGMA busy_timeout').get().timeout), 2000);
+        assert.strictEqual(a.totals().costMicros, 350);
+        assert.strictEqual(b.totals().costMicros, 350);
+        a.close(); b.close();
+      } finally { rmF(f); }
+    });
+
+    test('ledger prune: old session with status and agents is fully removed, recent kept', () => {
+      const f = tmpF();
+      try {
+        const l = openLedger({ file: f });
+        const old = Date.now() - 200 * 86400000, now = Date.now();
+        const ins = (sql, ...a) => l._db.prepare(sql).run(...a);
+        for (const [id, t] of [['old', old], ['new', now]]) {
+          ins('INSERT INTO sessions (session_id, first_seen, last_seen) VALUES (?,?,?)', id, t, t);
+          ins('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,NULL)', id, 'a1', 't', t);
+          ins('INSERT INTO status (session_id, ts, cost_micros) VALUES (?,?,?)', id, t, 5);
+        }
+        ins('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,?)', 'new', 'a2', 't', old, old);
+        l.prune(90);
+        const n = (t, id) => l._db.prepare(`SELECT COUNT(*) AS c FROM ${t} WHERE session_id=?`).get(id).c;
+        for (const t of ['sessions', 'agents', 'status']) { assert.strictEqual(n(t, 'old'), 0, t); assert.strictEqual(n(t, 'new'), t === 'agents' ? 1 : 1, t); }
+        assert.deepStrictEqual(l.reconcile('old'), { ledgerMicros: 0, statusMicros: null, deltaPct: null, ok: false });
+        assert.strictEqual(l.reconcile('new').statusMicros, 5);
+        l.close();
+      } finally { rmF(f); }
+    });
+
+    const twTmp = (initial, fn) => {
+      const cdir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-rt-claude-'));
+      const hdir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-rt-home-'));
+      const prevC = process.env.CLAUDE_CONFIG_DIR; const prevH = process.env.SERENO_HOME;
+      process.env.CLAUDE_CONFIG_DIR = cdir; process.env.SERENO_HOME = hdir;
+      const file = path.join(cdir, 'settings.json');
+      if (initial !== null) fs.writeFileSync(file, initial);
+      try { return fn({ file, cdir, hdir }); } finally {
+        if (prevC === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevC;
+        if (prevH === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prevH;
+        fs.rmSync(cdir, { recursive: true, force: true }); fs.rmSync(hdir, { recursive: true, force: true });
+      }
+    };
+
+    test('wireTelemetry: a non-object env (array, string, number, null) is a conflict; file untouched, no backup', () => {
+      for (const bad of [[1, 2], 'x', 7, null]) {
+        const raw = JSON.stringify({ theme: 'dark', env: bad }, null, 2) + '\n';
+        twTmp(raw, ({ file, cdir }) => {
+          const r = wiring.wireTelemetry();
+          assert.deepStrictEqual(r.conflict, ['env']);
+          assert.strictEqual(fs.readFileSync(file, 'utf8'), raw);
+          assert.deepStrictEqual(fs.readdirSync(cdir).filter((x) => x.includes('.bak.')), []);
+        });
+      }
+    });
+
+    test('telemetryWired reflects the wired.json record', () => twTmp('{}\n', () => {
+      assert.strictEqual(wiring.telemetryWired(), false);
+      wiring.wireTelemetry();
+      assert.strictEqual(wiring.telemetryWired(), true);
+      wiring.unwireTelemetry();
+      assert.strictEqual(wiring.telemetryWired(), false);
+    }));
+
+    test('collector server sets requestTimeout 30s and headersTimeout 15s', () => {
+      const c = createCollector(new Store(), 0);
+      assert.strictEqual(c.server.requestTimeout, 30000);
+      assert.strictEqual(c.server.headersTimeout, 15000);
+      c.close();
+    });
+  }
+
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

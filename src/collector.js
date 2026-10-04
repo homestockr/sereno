@@ -297,6 +297,9 @@ function createCollector(store, port, opts) {
       res.end(buf);
     });
   });
+  // Slow-client guards: these bound receiving the request, not long-lived SSE responses.
+  server.requestTimeout = 30000;
+  server.headersTimeout = 15000;
 
   store.onChange = broadcast;
 

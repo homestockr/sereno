@@ -406,9 +406,9 @@ function createTray(store) {
       click: (item) => setLedgerEnabled(item.checked),
     },
     {
-      id: 'telemetry', label: 'Wire telemetry…',
+      id: 'telemetry', label: wiring.telemetryWired() ? 'Unwire telemetry' : 'Wire telemetry…',
       enabled: config.read().ledger.enabled === true,
-      click: () => offerTelemetryWiring(),
+      click: () => (wiring.telemetryWired() ? offerTelemetryUnwiring() : offerTelemetryWiring()),
     },
     { type: 'separator' },
     { label: 'Quit Sereno', click: () => app.quit() },
@@ -480,18 +480,43 @@ function offerTelemetryWiring() {
     message: "Also send Claude Code's usage telemetry to Sereno?",
     detail: 'This edits ~/.claude/settings.json (a backup is made first). Only request costs and token counts are kept.',
     buttons: ['Wire telemetry', 'Not now'],
-    defaultId: 0,
+    defaultId: 1,   // Enter / Escape never edit settings.json
     cancelId: 1,
     noLink: true,
   }).then(({ response }) => {
     if (response !== 0) return null;
     const r = wiring.wireTelemetry({ traces: true });
+    refreshTelemetryItem();
     if (!r.conflict) return null;
     return dialog.showMessageBox({
       type: 'info', message: 'Telemetry not wired',
       detail: wiring.conflictMessage(r.conflict), buttons: ['OK'], noLink: true,
     });
   }).catch((e) => console.error('[sereno] telemetry wiring failed: ' + e.message));
+}
+
+/** Tray toggle counterpart: removes only the env keys we added. Default is Cancel. */
+function offerTelemetryUnwiring() {
+  dialog.showMessageBox({
+    type: 'question',
+    message: 'Stop sending Claude Code telemetry to Sereno?',
+    detail: 'This removes the telemetry keys Sereno added to ~/.claude/settings.json.',
+    buttons: ['Unwire telemetry', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  }).then(({ response }) => {
+    if (response !== 0) return;
+    wiring.unwireTelemetry();
+    refreshTelemetryItem();
+  }).catch((e) => console.error('[sereno] telemetry unwiring failed: ' + e.message));
+}
+
+function refreshTelemetryItem() {
+  const tel = trayMenu && trayMenu.getMenuItemById('telemetry');
+  if (!tel) return;
+  tel.label = wiring.telemetryWired() ? 'Unwire telemetry' : 'Wire telemetry…';
+  if (tray) tray.setContextMenu(trayMenu);
 }
 
 /* ---------- toast ---------- */
@@ -531,6 +556,7 @@ const CLI_UNWIRE = process.argv.includes('--unwire');
 if (CLI_UNWIRE) {
   app.whenReady().then(() => {
     try { wiring.removeEntries([shimCommands().shimPath]); } catch (_) {}
+    try { wiring.unwireTelemetry(); } catch (_) {}   // best-effort, never blocks hook removal
     app.exit(0);
   });
 } else if (!app.requestSingleInstanceLock()) {
@@ -699,7 +725,11 @@ if (CLI_UNWIRE) {
   });
 
   ipcMain.handle('sereno:unwire', () => {
-    try { return Object.assign({ ok: true }, wiring.removeEntries([shimCommands().shimPath])); }
+    try {
+      const r = Object.assign({ ok: true }, wiring.removeEntries([shimCommands().shimPath]));
+      try { wiring.unwireTelemetry(); refreshTelemetryItem(); } catch (_) {}   // best-effort
+      return r;
+    }
     catch (e) { return { ok: false, error: e.message }; }
   });
 
