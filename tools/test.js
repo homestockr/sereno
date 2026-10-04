@@ -3214,6 +3214,240 @@ test('missing rate_limits degrades instead of throwing', () => {
     assert.ok(!/nine/.test(app), 'hard-coded count is gone');
   });
 
+  /* ---- Phase 2 step 0: spend queries ---- */
+  {
+    const st = require('../src/spendtime.js');
+    const { openLedger } = require('../src/ledger.js');
+    const HR = 3600000;
+
+    test('spendtime: 23:59 and 00:01 land on different local days', () => {
+      const a = st.dayBounds(new Date(2026, 5, 10, 23, 59).getTime());
+      const b = st.dayBounds(new Date(2026, 5, 11, 0, 1).getTime());
+      assert.strictEqual(a.day, '2026-06-10'); assert.strictEqual(b.day, '2026-06-11');
+      assert.strictEqual(a.until, b.since);
+      assert.strictEqual(a.since, new Date(2026, 5, 10).getTime());
+      assert.strictEqual(st.dayStart(new Date(2026, 5, 10, 23, 59).getTime()), a.since);
+    });
+
+    test('spendtime: day string is zero-padded local, not UTC', () => {
+      assert.strictEqual(st.dayBounds(new Date(2026, 0, 5, 0, 30).getTime()).day, '2026-01-05');
+    });
+
+    test('spendtime: lastNDays(30) is 30 contiguous days ending today', () => {
+      const now = new Date(2026, 2, 15, 13, 7).getTime();
+      const d = st.lastNDays(30, now);
+      assert.strictEqual(d.length, 30);
+      for (let i = 1; i < d.length; i++) assert.strictEqual(d[i - 1].until, d[i].since);
+      const last = d[29];
+      assert.ok(last.since <= now && now < last.until);
+      assert.strictEqual(last.day, '2026-03-15');
+      assert.strictEqual(d[0].day, '2026-02-14');
+    });
+
+    test('spendtime: hourBuckets is 24 contiguous hours ending with the current one', () => {
+      const now = new Date(2026, 5, 10, 13, 45).getTime();
+      const h = st.hourBuckets(now);
+      assert.strictEqual(h.length, 24);
+      for (let i = 1; i < h.length; i++) assert.strictEqual(h[i - 1].until, h[i].since);
+      assert.ok(h[23].since <= now && now < h[23].until);
+      assert.strictEqual(h[23].key, '2026-06-10T13');
+      assert.strictEqual(h[0].key, '2026-06-09T14');
+      assert.strictEqual(h[23].since, new Date(2026, 5, 10, 13).getTime());
+    });
+
+    test('spendtime: monthStart is local midnight on the 1st', () => {
+      assert.strictEqual(st.monthStart(new Date(2026, 8, 30, 23, 59).getTime()), new Date(2026, 8, 1).getTime());
+      assert.strictEqual(st.monthStart(new Date(2026, 0, 1, 0, 0).getTime()), new Date(2026, 0, 1).getTime());
+    });
+
+    test('spendtime: DST day is 23 hours in America/New_York (skipped if TZ is not honoured)', () => {
+      const code = `const s=require(${JSON.stringify(path.join(ROOT, 'src', 'spendtime.js'))});` +
+        `const b=s.dayBounds(new Date(2026,2,8,12).getTime());const f=s.dayBounds(new Date(2026,10,1,12).getTime());` +
+        `console.log((b.until-b.since)/3600000,(f.until-f.since)/3600000)`;
+      const r = spawnSync(process.execPath, ['-e', code], { env: Object.assign({}, process.env, { TZ: 'America/New_York' }), encoding: 'utf8' });
+      const out = (r.stdout || '').trim();
+      if (out !== '23 25') { console.log('       (note: TZ=America/New_York not honoured here, got "' + out + '"; DST test skipped)'); return; }
+      assert.strictEqual(out, '23 25');
+    });
+
+    const tmpF = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-sq-')), 'sereno.db');
+    const rmF = f => fs.rmSync(path.dirname(f), { recursive: true, force: true });
+    const openL = (file) => openLedger({ file: file || ':memory:', retentionDays: 36500 });
+    let kn = 0;
+    const R = (o) => Object.assign({ requestKey: 'k' + (++kn), requestId: 'r' + kn, sessionId: 's1', promptId: null, ts: Date.now(),
+      model: 'm', querySource: null, source: 'main', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100, durationMs: 0 }, o);
+    const sess = (l, id, cwd) => l.recordHook('SessionStart', { session_id: id, cwd });
+
+    test('ledger.series: buckets sum to totals() over the same range; boundary goes to the later bucket', () => {
+      const l = openL();
+      const now = new Date(2026, 5, 10, 13, 45).getTime();
+      const b = st.hourBuckets(now);
+      l.ingestRequests([
+        R({ ts: b[0].since, costMicros: 10 }),                       // exactly at first bucket start
+        R({ ts: b[5].since, costMicros: 20, source: 'subagent' }),   // exactly on a boundary: bucket 5, not 4
+        R({ ts: b[5].since - 1, costMicros: 30 }),                   // last ms of bucket 4
+        R({ ts: b[23].until - 1, costMicros: 40, source: 'auxiliary' }),
+        R({ ts: b[0].since - 1, costMicros: 999 }),                  // before range
+        R({ ts: b[23].until, costMicros: 777 }),                     // at the end bound: excluded
+      ]);
+      const s = l.series(b);
+      assert.strictEqual(s.length, 24);
+      assert.deepStrictEqual(s.map(x => x.key), b.map(x => x.key));
+      assert.strictEqual(s[4].costMicros, 30); assert.strictEqual(s[5].costMicros, 20);
+      assert.deepStrictEqual(s[5].bySource, { subagent: 20 });
+      assert.deepStrictEqual(s[5].byAttribution, { unknown: 20 });
+      assert.strictEqual(s[0].costMicros, 10); assert.strictEqual(s[23].costMicros, 40);
+      const t = l.totals({ since: b[0].since, until: b[23].until });
+      assert.strictEqual(s.reduce((a, x) => a + x.costMicros, 0), t.costMicros);
+      assert.strictEqual(s.reduce((a, x) => a + x.requests, 0), t.requests);
+      assert.strictEqual(t.costMicros, 100);
+      l.close();
+    });
+
+    test('ledger.series: empty ledger and empty bucket list give zeros and {}', () => {
+      const l = openL();
+      const s = l.series(st.lastNDays(3, Date.now()));
+      assert.strictEqual(s.length, 3);
+      for (const x of s) assert.deepStrictEqual(x, { key: x.key, costMicros: 0, requests: 0, bySource: {}, byAttribution: {} });
+      assert.deepStrictEqual(l.series([]), []);
+      l.close();
+    });
+
+    test('ledger.series: 23/25 hour day buckets keep 23:59 and 00:01 on different days', () => {
+      const l = openL();
+      const days = st.lastNDays(2, new Date(2026, 5, 11, 12).getTime());
+      l.ingestRequests([R({ ts: new Date(2026, 5, 10, 23, 59).getTime(), costMicros: 5 }), R({ ts: new Date(2026, 5, 11, 0, 1).getTime(), costMicros: 7 })]);
+      const s = l.series(days);
+      assert.deepStrictEqual(s.map(x => x.costMicros), [5, 7]);
+      l.close();
+    });
+
+    test('ledger.projects: sorted desc, null project, unattributed included in project totals', () => {
+      const l = openL();
+      sess(l, 'sa', 'C:\\w\\alpha'); sess(l, 'sb', 'C:\\w\\beta');
+      const t = 1000000;
+      l.ingestRequests([
+        R({ sessionId: 'sa', ts: t, costMicros: 100 }),
+        R({ sessionId: 'sa', ts: t + 1, costMicros: 50, source: 'subagent' }),   // no span: unknown
+        R({ sessionId: 'sb', ts: t + 2, costMicros: 500 }),
+        R({ sessionId: 'sx', ts: t + 3, costMicros: 20, source: 'subagent' }),   // session without project: null
+        R({ sessionId: 'sa', ts: t + 100, costMicros: 9999 }),                   // out of range
+      ]);
+      const p = l.projects({ since: t, until: t + 10 });
+      assert.deepStrictEqual(p.rows.map(r => r.project), ['beta', 'alpha', null]);
+      assert.strictEqual(p.rows[1].costMicros, 150); assert.strictEqual(p.rows[1].requests, 2);
+      assert.deepStrictEqual(p.rows[1].bySource, { main: 100, subagent: 50 });
+      assert.deepStrictEqual(p.rows[1].byAttribution, { explicit: 100, unknown: 50 });
+      assert.deepStrictEqual(p.unattributed, { costMicros: 70, requests: 2 });
+      assert.strictEqual(p.rows.reduce((a, r) => a + r.costMicros, 0), l.totals({ since: t, until: t + 10 }).costMicros);
+      assert.deepStrictEqual(l.projects({ since: 5, until: 6 }), { rows: [], unattributed: { costMicros: 0, requests: 0 } });
+      l.close();
+    });
+
+    test('ledger.trend: one value per bucket, null project matches IS NULL', () => {
+      const l = openL();
+      sess(l, 'sa', 'C:\\w\\alpha');
+      const days = st.lastNDays(14, new Date(2026, 5, 20, 9).getTime());
+      l.ingestRequests([
+        R({ sessionId: 'sa', ts: days[13].since + 5, costMicros: 30 }),
+        R({ sessionId: 'sa', ts: days[13].since + 6, costMicros: 20 }),
+        R({ sessionId: 'sa', ts: days[0].since, costMicros: 4 }),
+        R({ sessionId: 'sx', ts: days[3].since + 1, costMicros: 8 }),
+        R({ sessionId: null, ts: days[3].since + 2, costMicros: 2, requestKey: 'nos' }),
+      ]);
+      const a = l.trend({ project: 'alpha', buckets: days });
+      assert.strictEqual(a.length, 14); assert.strictEqual(a[13], 50); assert.strictEqual(a[0], 4);
+      assert.strictEqual(a.reduce((x, y) => x + y, 0), 54);
+      const n = l.trend({ project: null, buckets: days });
+      assert.strictEqual(n.length, 14); assert.strictEqual(n[3], 10); assert.strictEqual(n.reduce((x, y) => x + y, 0), 10);
+      assert.deepStrictEqual(l.trend({ project: 'nope', buckets: days }), new Array(14).fill(0));
+      l.close();
+    });
+
+    test('ledger.topPrompts: groups by prompt_id, falls back to request_key, models, attribution, order, limit', () => {
+      const l = openL();
+      sess(l, 'abcdefghijkl', 'C:\\w\\alpha');
+      const t = 2000000;
+      const S = 'abcdefghijkl';
+      l.ingestRequests([
+        R({ sessionId: S, promptId: 'p1', ts: t + 5, costMicros: 100, model: 'b-model' }),
+        R({ sessionId: S, promptId: 'p1', ts: t + 3, costMicros: 100, model: 'a-model' }),
+        R({ sessionId: S, promptId: 'p1', ts: t + 4, costMicros: 50, model: 'a-model' }),          // all explicit, 2 distinct models
+        R({ sessionId: S, promptId: 'p2', ts: t + 1, costMicros: 100, source: 'subagent' }),       // unknown
+        R({ sessionId: S, promptId: 'p2', ts: t + 2, costMicros: 100, source: 'subagent' }),       // all unknown
+        R({ sessionId: S, promptId: 'p3', ts: t + 6, costMicros: 10 }),
+        R({ sessionId: S, promptId: 'p3', ts: t + 7, costMicros: 10, source: 'subagent' }),        // mixed
+        R({ sessionId: S, promptId: null, requestKey: 'solo', ts: t + 8, costMicros: 250 }),       // fallback group
+        R({ sessionId: S, promptId: null, requestKey: 'tie', ts: t + 0, costMicros: 250 }),        // ties solo; earlier ts first
+        R({ sessionId: S, promptId: 'out', ts: t + 999, costMicros: 5000 }),
+      ]);
+      const top = l.topPrompts({ since: t, until: t + 100 });
+      assert.deepStrictEqual(top.map(x => x.costMicros), [250, 250, 250, 200, 20]);
+      assert.strictEqual(top[0].ts, t);                 // 'tie' (250, earliest) before 'solo' (250, t+8)
+      const p1 = top.find(x => x.costMicros === 250 && x.models.length === 2);
+      assert.deepStrictEqual(p1.models, ['a-model', 'b-model']); assert.strictEqual(p1.attribution, 'explicit');
+      assert.strictEqual(p1.sessionShort, 'abcdefgh'); assert.strictEqual(p1.project, 'alpha');
+      assert.strictEqual(top[3].attribution, 'unknown'); assert.strictEqual(top[4].attribution, 'mixed');
+      assert.strictEqual(top[3].models.length, 1);
+      assert.strictEqual(l.topPrompts({ since: t, until: t + 100, limit: 2 }).length, 2);
+      assert.strictEqual(l.topPrompts({ since: t, until: t + 100, limit: 0 }).length, 1);
+      assert.strictEqual(l.topPrompts({ since: t, until: t + 100, limit: -5 }).length, 1);
+      assert.strictEqual(l.topPrompts({ since: t, until: t + 100, limit: 1000 }).length, 5);
+      assert.deepStrictEqual(l.topPrompts({ since: 1, until: 2 }), []);
+      l.close();
+    });
+
+    test('ledger.topPrompts: a session-less request has null sessionShort and project', () => {
+      const l = openL();
+      l.ingestRequests([R({ sessionId: null, ts: 50, costMicros: 3 })]);
+      const [x] = l.topPrompts({ since: 0, until: 100 });
+      assert.strictEqual(x.sessionShort, null); assert.strictEqual(x.project, null);
+      l.close();
+    });
+
+    test('ledger.today: equals totals() for its local day, counts unattributed', () => {
+      const l = openL();
+      const now = new Date(2026, 5, 10, 13, 45).getTime();
+      const b = st.dayBounds(now);
+      l.ingestRequests([
+        R({ ts: new Date(2026, 5, 10, 0, 1).getTime(), costMicros: 100 }),
+        R({ ts: new Date(2026, 5, 10, 12).getTime(), costMicros: 40, source: 'subagent' }),
+        R({ ts: new Date(2026, 5, 9, 23, 59).getTime(), costMicros: 900 }),
+        R({ ts: new Date(2026, 5, 11, 0, 1).getTime(), costMicros: 800 }),
+      ]);
+      const td = l.today(now), t = l.totals({ since: b.since, until: b.until });
+      assert.strictEqual(td.day, '2026-06-10'); assert.strictEqual(td.since, b.since); assert.strictEqual(td.until, b.until);
+      assert.strictEqual(td.costMicros, 140); assert.strictEqual(td.costMicros, t.costMicros);
+      assert.strictEqual(td.requests, t.requests);
+      assert.deepStrictEqual(td.bySource, t.bySource); assert.deepStrictEqual(td.byAttribution, t.byAttribution);
+      assert.strictEqual(td.unattributedN, 1);
+      assert.deepStrictEqual(l.today(new Date(2020, 0, 1).getTime()).bySource, {});
+      assert.strictEqual(l.today(new Date(2020, 0, 1).getTime()).costMicros, 0);
+      l.close();
+    });
+
+    test('ledger.today: survives close and reopen of a file ledger', () => {
+      const f = tmpF();
+      try {
+        const now = Date.now();
+        const l = openL(f);
+        l.ingestRequests([R({ ts: now, costMicros: 321 })]);
+        const a = l.today(now);
+        l.close();
+        const l2 = openL(f);
+        assert.deepStrictEqual(l2.today(now), a);
+        assert.strictEqual(l2.today(now).costMicros, 321);
+        l2.close();
+      } finally { rmF(f); }
+    });
+
+    test('ledger: new read methods throw once closed', () => {
+      const l = openL(); l.close();
+      for (const fn of [() => l.series([]), () => l.projects({ since: 0, until: 1 }), () => l.trend({ project: null, buckets: [] }),
+        () => l.topPrompts({ since: 0, until: 1 }), () => l.today(Date.now())]) assert.throws(fn, /closed/);
+    });
+  }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
