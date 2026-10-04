@@ -3846,6 +3846,154 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 2 step 3: console Spend tab ---- */
+  {
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const names = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry',
+      'summaryLine', 'attributionSplit', 'formatTime', 'projectLabel', 'syncLabel', 'sparkPoints', 'pageState'];
+    const lifted = (src) => names.filter((n) => new RegExp('function ' + n + '\\(').test(src))
+      .map((n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
+    const C = new Function(lifted(cjs).join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+    const W = new Function(lifted(app).join('\n') + '\nreturn { estMoney };')();
+
+    test('console estMoney matches the widget and always ends in est.', () => {
+      for (const v of [0, 1, 4000, 12340000, 1250000000, 999999, NaN, Infinity, undefined, null, 'x', -5, '7500000']) {
+        assert.strictEqual(C.estMoney(v), W.estMoney(v));
+        assert.match(C.estMoney(v), /^\$\d+\.\d\d est\.$/);
+      }
+    });
+
+    test('esc neutralises markup and quotes', () => {
+      assert.strictEqual(C.esc('<script>alert("x")</script>'), '&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;');
+      assert.strictEqual(C.esc("a'b&c"), 'a&#39;b&amp;c');
+      assert.strictEqual(C.esc(null), '');
+      assert.strictEqual(C.esc(5), '5');
+    });
+
+    test('niceTicks: 3-4 increasing dollar ticks covering the max', () => {
+      for (const m of [0, 1, 40000, 1230000, 9990000, 27400000, 31000000, 412000000, 1e9, 2500000, 3e6]) {
+        const t = C.niceTicks(m);
+        assert.ok(t.length >= 3 && t.length <= 4, JSON.stringify([m, t]));
+        for (let i = 1; i < t.length; i++) assert.ok(t[i] > t[i - 1]);
+        assert.strictEqual(t[0], 0);
+        assert.ok(t[t.length - 1] * 1e6 >= m, JSON.stringify([m, t]));
+      }
+      assert.deepStrictEqual(C.niceTicks(27400000), [0, 10, 20, 30]);
+      assert.deepStrictEqual(C.niceTicks(NaN), [0, 1, 2, 3]);
+      assert.strictEqual(C.tickLabel(10), '$10');
+      assert.strictEqual(C.tickLabel(2.5), '$2.50');
+    });
+
+    test('barGeometry: stacked, unattributed on top, heights sum to scaled total, no NaN', () => {
+      const bs = [
+        { key: 'a', costMicros: 10e6, bySource: { main: 6e6, subagent: 3e6, auxiliary: 1e6 }, byAttribution: { explicit: 8e6, unknown: 2e6 } },
+        { key: 'b', costMicros: 0, bySource: {}, byAttribution: {} },
+        { key: 'c', costMicros: 5e6, bySource: { main: 5e6 }, byAttribution: { unknown: 5e6 } },
+      ];
+      const g = C.barGeometry(bs, 300, 100, 20e6);
+      assert.strictEqual(g.length, 3);
+      const a = g[0];
+      assert.deepStrictEqual(a.segs.map((s) => s.key), ['main', 'subagent', 'auxiliary', 'unattributed']);
+      assert.ok(Math.abs(a.segs.reduce((x, s) => x + s.h, 0) - 50) < 1e-9);
+      assert.strictEqual(a.total, 10e6);
+      assert.strictEqual(a.segs[3].micros, 2e6);
+      assert.ok(a.segs[3].y <= a.segs[0].y);   // unattributed is the topmost (smallest y)
+      assert.ok(Math.abs(a.segs[0].y + a.segs[0].h - 100) < 1e-9);   // stack starts at the baseline
+      assert.strictEqual(g[1].total, 0);
+      assert.strictEqual(g[2].segs[3].micros, 5e6);   // all unattributed
+      for (const b of g) for (const s of b.segs) for (const k of ['x', 'y', 'w', 'h']) assert.ok(Number.isFinite(s[k]), k);
+      for (const bad of [[], null, undefined]) assert.deepStrictEqual(C.barGeometry(bad, 300, 100, 0), []);
+      const z = C.barGeometry([{ costMicros: 0 }], 0, 0, 0);
+      for (const s of z[0].segs) for (const k of ['x', 'y', 'w', 'h']) assert.ok(Number.isFinite(s[k]), k);
+    });
+
+    test('summaryLine: exact string with est. and n', () => {
+      const today = { costMicros: 27400000 };
+      const projects = { rows: [{ costMicros: 300e6 }, { costMicros: 112e6 }], unattributed: { costMicros: 24720000, requests: 742 } };
+      assert.strictEqual(C.summaryLine(today, projects),
+        '$27.40 est. today · $412.00 est. this month · 6% unattributed (n=742)');
+      assert.strictEqual(C.summaryLine({ costMicros: 0 }, { rows: [], unattributed: { costMicros: 0, requests: 0 } }),
+        '$0.00 est. today · $0.00 est. this month · 0% unattributed (n=0)');
+      assert.match(C.summaryLine(null, null), /est\. today · .* est\. this month/);
+    });
+
+    test('attributionSplit sums to 100 and carries n', () => {
+      const s = C.attributionSplit({ explicit: 1, unknown: 1 }, 3);
+      assert.strictEqual(s.explicitPct + s.unattributedPct, 100);
+      assert.strictEqual(s.n, 3);
+      const t = C.attributionSplit({ explicit: 90e6, unknown: 3.9e6 }, 386);
+      assert.strictEqual(t.explicitPct + t.unattributedPct, 100);
+      assert.deepStrictEqual(C.attributionSplit({ explicit: 5 }, 2), { explicitPct: 100, unattributedPct: 0, n: 2 });
+      assert.deepStrictEqual(C.attributionSplit({}, 0), { explicitPct: 0, unattributedPct: 0, n: 0 });
+    });
+
+    test('formatTime, projectLabel, syncLabel, sparkPoints, pageState', () => {
+      assert.strictEqual(C.formatTime(new Date(2026, 8, 28, 9, 4).getTime()), 'Sep 28 09:04');
+      assert.strictEqual(C.formatTime(new Date(2026, 0, 5, 23, 59).getTime()), 'Jan 05 23:59');
+      assert.strictEqual(C.formatTime(NaN), '');
+      assert.strictEqual(C.projectLabel(null), 'Unknown project');
+      assert.strictEqual(C.projectLabel(undefined), 'Unknown project');
+      assert.strictEqual(C.projectLabel('sereno'), 'sereno');
+      assert.strictEqual(C.syncLabel(1000, 2000), 'Synced just now');
+      assert.strictEqual(C.syncLabel(0, 40000), 'Synced 40s ago');
+      assert.strictEqual(C.syncLabel(0, 190000), 'Synced 3m ago');
+      assert.strictEqual(C.syncLabel(null, 5), 'Not synced yet');
+      assert.ok(!/NaN/.test(C.sparkPoints([0, 0, 0], 100, 20)));
+      assert.ok(!/NaN/.test(C.sparkPoints([1, 5, 2], 100, 20)));
+      assert.strictEqual(C.sparkPoints([], 100, 20), '');
+      assert.strictEqual(C.pageState([{ status: 200, body: { enabled: false } }]), 'off');
+      assert.strictEqual(C.pageState([{ status: 503, body: null }, { status: 200, body: { enabled: false } }]), 'unavailable');
+      assert.strictEqual(C.pageState([{ status: 200, body: { enabled: true } }]), null);
+    });
+
+    test('console.js: no prompt text, one innerHTML write, est. labels, empty-state copy', () => {
+      assert.ok(!/\.prompt\b|\['prompt|prompt_text|promptText|\.text\b|\.body\.text/.test(cjs));
+      assert.strictEqual((cjs.match(/\.innerHTML\s*=/g) || []).length, 1);
+      assert.match(cjs, /function setHtml\(el, html\) \{ el\.innerHTML = html; \}/);
+      assert.match(cjs, /Prompt text is never stored/);
+      assert.match(cjs, /Spend history is off/);
+      assert.match(cjs, /Turn it on from the Sereno tray: Keep spend history\./);
+      assert.match(cjs, /No spend recorded yet/);
+      assert.match(cjs, /Wire telemetry/);
+      assert.match(cjs, /No spend in this range/);
+      assert.match(cjs, /Spend history is unavailable right now/);
+      assert.match(cjs, /No subagent could be confirmed for these requests\./);
+      assert.ok(!/first tool/i.test(cjs));
+      assert.match(cjs, /location\.host \+ '\/console'/);
+      // API strings that reach markup are escaped
+      for (const f of ['esc(projectLabel(r.project))', 'esc(r.sessionShort)', "esc((r.models || []).join(', '))", 'esc(formatTime(r.ts))']) {
+        assert.ok(cjs.includes(f), f);
+      }
+    });
+
+    test('console: strict CSP, no inline style attributes in generated markup', () => {
+      const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
+      assert.match(html, /Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"/);
+      assert.ok(!/style=/.test(cjs.replace(/el.style./g, '')), 'style= found in console.js');
+      assert.ok(!/style=/.test(html));
+      assert.match(cjs, /el.style.width/);
+    });
+
+    test('console page: absolute /console/ assets, nav is Spend only, source colours match the widget', () => {
+      const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
+      const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+      const appcss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+      assert.match(html, /href="\/console\/console\.css"/);
+      assert.match(html, /src="\/console\/console\.js"/);
+      assert.match(html, /LOCAL WORKSPACE/);
+      assert.match(html, /Local only/);
+      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 1);
+      for (const v of ['--src-main', '--src-subagent', '--src-auxiliary', '--src-unattributed', '--src-hatch']) {
+        const re = new RegExp(v + ':\\s*(#[0-9a-f]{6})', 'i');
+        assert.strictEqual(css.match(re)[1].toLowerCase(), appcss.match(re)[1].toLowerCase(), v);
+      }
+      assert.match(css, /prefers-color-scheme: light/);
+      for (const m of css.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

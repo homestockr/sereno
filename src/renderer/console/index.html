@@ -1,3 +1,50 @@
 <!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sereno console</title>
-Console coming in Step 3
+<link rel="stylesheet" href="/console/console.css">
+</head>
+<body>
+<!-- Shared hatch for unattributed spend in SVG charts (HTML uses a CSS gradient). -->
+<svg class="defs" width="0" height="0" aria-hidden="true" focusable="false">
+  <defs>
+    <pattern id="unattr-hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect class="hatch-base" width="4" height="4"></rect>
+      <rect class="hatch-line" width="4" height="1.3"></rect>
+    </pattern>
+  </defs>
+</svg>
+<div class="app">
+  <nav class="side" aria-label="Console">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17V11a8 8 0 0 1 16 0v6M3 19h18M8 12a4 4 0 0 1 8 0" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></svg>
+      <span class="wordmark">sereno</span>
+    </div>
+    <div class="nav-label">LOCAL WORKSPACE</div>
+    <a class="nav-item active" href="/console/" aria-current="page">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 5v6M6 6.6c0-1.2 4-1.2 4 0s-4 1.2-4 2.8 4 1.6 4 0" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+      Spend
+    </a>
+    <div class="side-foot">
+      <div class="local"><i class="ring" aria-hidden="true"></i>Local only</div>
+      <div class="side-today" id="side-today"></div>
+    </div>
+  </nav>
+  <div class="col">
+    <header class="top">
+      <div class="crumb">Workspace / <span>Spend</span></div>
+      <div class="sync" id="sync" aria-live="off">Synced just now</div>
+    </header>
+    <main class="main" id="view" aria-busy="true"></main>
+    <footer class="foot">
+      <span>Totals include unattributed usage · every figure is an estimate</span>
+      <span id="foot-host">127.0.0.1:8787/console</span>
+    </footer>
+  </div>
+</div>
+<script src="/console/console.js"></script>
+</body>
+</html>
