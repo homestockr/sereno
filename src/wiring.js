@@ -24,6 +24,7 @@ const path = require('node:path');
 const EVENTS = [
   'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
   'Notification', 'Stop', 'SubagentStop', 'PreCompact', 'SessionEnd',
+  'SubagentStart', 'StopFailure',
 ];
 // Events whose config entries carry a matcher field.
 const MATCHED = new Set(['PreToolUse', 'PostToolUse', 'PreCompact', 'SessionStart', 'SessionEnd']);

@@ -1602,7 +1602,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     const wired = JSON.parse(fs.readFileSync(settings, 'utf8'));
     assert.ok(wired.statusLine.command.includes('emit.js'), 'statusLine not wired');
-    assert.strictEqual(Object.keys(wired.hooks).length, 9, 'expected 9 hook events');
+    assert.strictEqual(Object.keys(wired.hooks).length, 11, 'expected 11 hook events');
     assert.strictEqual(wired.theme, 'dark-daltonized', 'existing settings were lost');
 
     // Idempotent: a second wire must not duplicate anything.
@@ -1614,6 +1614,25 @@ test('missing rate_limits degrades instead of throwing', () => {
     const restored = fs.readFileSync(settings, 'utf8');
     assert.strictEqual(restored, original, 'settings.json is not byte-identical after unwire');
 
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  /* ---- Phase 1 step 0: SubagentStart + StopFailure wiring ---- */
+  await atest('wire registers SubagentStart (no matcher) and StopFailure, idempotently', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hud-wire3-'));
+    const settings = path.join(tmp, 'settings.json');
+    fs.writeFileSync(settings, '{}\n');
+    const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp });
+    const run = () => execFileSync(process.execPath, [path.join(ROOT, 'tools', 'wire.js'), '--yes'], { env, encoding: 'utf8' });
+    run(); run();
+    const w = JSON.parse(fs.readFileSync(settings, 'utf8'));
+    for (const ev of ['SubagentStart', 'StopFailure']) {
+      assert.ok(wiring.EVENTS.includes(ev), ev + ' missing from EVENTS');
+      assert.strictEqual(w.hooks[ev].length, 1, ev + ' duplicated or missing');
+      assert.strictEqual(w.hooks[ev][0].matcher, undefined, ev + ' must have no matcher');
+      assert.ok(w.hooks[ev][0].hooks[0].command.endsWith(' hook ' + ev), ev + ' command wrong');
+    }
+    for (const ev of wiring.EVENTS) assert.strictEqual(w.hooks[ev].length, 1, ev + ' duplicated');
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
