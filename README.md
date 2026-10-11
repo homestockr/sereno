@@ -236,6 +236,45 @@ cost estimate.
 
 **Requires Node ≥ 22.13** for `npm run serve` (built-in `node:sqlite`).
 
+## Projects and briefs (alpha)
+
+The console opens on **Projects**, at `http://127.0.0.1:8787/console`. Every git repo a
+Claude Code session runs in appears there by itself. A worktree counts as its repo, not as
+a second project. Hide a project from its **⋯** menu. Hidden projects are not polled.
+
+**Briefs.** A brief is `.sereno/briefs/<branch>.md` in a repo: front matter, then three
+lines, `Now:`, `Next:` and `Blocked:`. The `/` in a branch name becomes `%2F`, so `feat/x`
+is `feat%2Fx.md`. The `/brief` command in Claude Code writes it. Sereno never writes to your
+repos; it only reads briefs.
+
+Install `/brief` from the widget's settings panel (after a confirmation), or run
+`npm run wire -- --commands`. Install never overwrites a different `brief.md` already in
+`~/.claude/commands/`; it reports the conflict instead. Remove it with
+`npm run unwire -- --commands`, which deletes it only if it is unchanged.
+
+**Freshness** compares a brief with its branch:
+
+- **fresh**: no commit on the branch since the brief's `source_commit` touches anything
+  outside `.sereno/` and `STATUS.md`.
+- **behind**: such a commit exists. Commits that touch only `.sereno/` or `STATUS.md` never
+  make a brief behind.
+- **stale**: the oldest such commit is more than a day old.
+- **No brief**: the branch has no brief file.
+- **Brief source not found**: the brief's `source_commit` is not in this repo.
+
+**What Sereno reads from your repos.** Branch names, commit times and hashes (the hashes
+stay inside the app), ahead and behind against the default branch's upstream, an
+uncommitted-changes flag, the worktree list, and the brief files. Never commit messages,
+diffs or other file contents.
+The list of projects, with each repo's path, is kept in `~/.sereno/projects.json`.
+
+Git runs with repo-supplied programs disabled (fsmonitor, hooks, filters, submodules). It
+never prompts and never touches the network. Open PR counts come from `gh`, when it is
+installed and signed in, using only the GitHub owner and name from `origin`.
+
+**Review in terminal** is in the console's attention panel. It raises the waiting session's
+terminal, as the widget's button does. It is not available under `npm run serve`.
+
 ## Sizing
 
 The widget scales for the display you actually have.
