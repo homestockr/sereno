@@ -7069,14 +7069,14 @@ test('missing rate_limits degrades instead of throwing', () => {
       await p.pollNow();
       const settle = async () => { clock += 1000; c.n = 0; await p.pollNow(); const n = c.n; return n; };
       assert.ok(await settle() <= 2);
-      // index touched
-      const later = new Date(Date.now() + 5000);
-      fs.utimesSync(path.join(d, '.git', 'index'), later, later);
+      // index touched: stage a real new file so the index changes now (never a future mtime)
+      fs.writeFileSync(path.join(d, 'staged.txt'), 'staged file one');
+      git(d, 'add', 'staged.txt');
       assert.ok(await settle() > 2, 'index mtime change re-reads');
       assert.ok(await settle() <= 2, 'and then it is quiet again');
       // a commit
       const before = p.snapshot().p0.lastCommitAt;
-      fs.writeFileSync(path.join(d, 'a.txt'), 'two');
+      fs.writeFileSync(path.join(d, 'a.txt'), 'second version, longer');
       git(d, 'commit', '-q', '-a', '-m', 'second');
       assert.ok(await settle() > 2, 'commit re-reads');
       assert.ok(p.snapshot().p0.lastCommitAt >= before);
@@ -7087,7 +7087,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(await settle() > 2, 'new brief re-reads');
       assert.ok(await settle() <= 2);
       // dirty tracked file: invisible until the forced full re-check
-      fs.writeFileSync(path.join(d, 'a.txt'), 'three');
+      fs.writeFileSync(path.join(d, 'a.txt'), 'third version, longer still');
       assert.ok(await settle() <= 2);
       clock += 5 * 60 * 1000;
       c.n = 0; await p.pollNow();
@@ -7204,9 +7204,30 @@ test('missing rate_limits degrades instead of throwing', () => {
       const v = briefsLib.validBranchName;
       assert.strictEqual(v('main'), true);
       assert.strictEqual(v('feat/x-1'), true);
-      for (const bad of ['main\u202e', 'ma\u200bin', 'ma\u200fin', '\u202ablah', 'a\u2066b', 'a\u2069b', '\ufeffmain', 'ma\u0085in', 'ma\u009fin', 'ma\u0007in', 'ma\u007fin']) {
+      for (const bad of ['main\u{e0061}', 'ma\u2060in', 'main\u061c', 'main\u202e', 'ma\u200bin', 'ma\u200fin', '\u202ablah', 'a\u2066b', 'a\u2069b', '\ufeffmain', 'ma\u0085in', 'ma\u009fin', 'ma\u0007in', 'ma\u007fin']) {
         assert.strictEqual(v(bad), false, JSON.stringify(bad));
       }
+    });
+
+    test('final: ZWNJ/ZWJ joiners and non-Latin names stay valid', () => {
+      const v = briefsLib.validBranchName;
+      for (const ok of ['ویژگی\u200cجدید', 'a\u200db', 'функция', '機能', 'feat-\u{1F680}']) assert.strictEqual(v(ok), true, ok);
+    });
+
+    test('final: hotProjectIds ignores empty and non-local cwds, matches repo and worktree roots', () => {
+      const projects = [{ id: 'a', repoPath: 'C:\\hot\\repo' }, { id: 'b', repoPath: 'D:\\other' }];
+      const snap = { b: { worktrees: [{ path: 'D:\\wt\\b' }] } };
+      assert.deepStrictEqual(repos.hotProjectIds(['', '\\\\srv\\share\\x', null, 'relative'], projects, snap), []);
+      assert.deepStrictEqual(repos.hotProjectIds(['C:\\hot\\repo\\sub', 'D:\\wt\\b'], projects, snap).sort(), ['a', 'b']);
+    });
+
+    await atest('final: runPoll asks for hot ids once per run, not per project', async () => {
+      const a = mkRepo(); const b = mkRepo();
+      let calls = 0;
+      const p = repos.createPoller({ registry: fake([a, b]), hotIds: () => { calls++; return []; } });
+      await p.tick(); calls = 0;
+      await p.tick();
+      assert.ok(calls <= 1, 'hotIds calls: ' + calls);
     });
 
     await atest('ff6: a worktree on a disguised branch name is shown without a branch', async () => {

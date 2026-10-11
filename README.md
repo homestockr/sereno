@@ -265,7 +265,8 @@ Install `/brief` from the widget's settings panel (after a confirmation), or run
 **What Sereno reads from your repos.** Branch names, commit times and hashes (the hashes
 stay inside the app), ahead and behind against the default branch's upstream, an
 uncommitted-changes flag, the worktree list, and the brief files. Never commit messages,
-diffs or other file contents.
+diffs or other file contents. Between full checks (at most 5 minutes) Sereno may not notice
+uncommitted edits, a fetch, or a new branch in a subfolder.
 The list of projects, with each repo's path, is kept in `~/.sereno/projects.json`.
 
 Sereno uses read-only git commands, mostly plumbing (rev-parse, for-each-ref, rev-list,

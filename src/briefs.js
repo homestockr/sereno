@@ -105,8 +105,8 @@ function validBranchName(b) {
   if (typeof b !== 'string' || !b || b.length > 255) return false;
   if (b.startsWith('-') || b.startsWith('/') || b.endsWith('/') || b.endsWith('.') || b.endsWith('.lock')) return false;
   if (/[\s\u0000-\u001f\u007f~^:?*[\\]/.test(b)) return false;
-  // Zero-width, bidi and C1 control characters can disguise a name: treat it as absent.
-  if (/[\u0080-\u009f​-‏‪-‮⁦-⁩﻿]/.test(b)) return false;
+  // Characters that disguise a name (invisible, bidi, tag, C1): treat it as absent. ZWNJ/ZWJ stay valid.
+  if (/[-​‎‏؜᠎⁠-⁤﻿￹-￻‪-‮⁦-⁩󠀀-󠁿]/u.test(b)) return false;
   if (b.includes('..') || b.includes('//') || b.includes('@{') || b === '@') return false;
   if (b.split('/').some((c) => c.startsWith('.') || c.endsWith('.lock'))) return false;
   return true;

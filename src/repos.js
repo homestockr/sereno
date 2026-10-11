@@ -7,6 +7,9 @@
  * ahead/behind against the existing upstream ref, and a dirty flag. No commit
  * messages, no diffs, no network commands. All git goes through gitexec.js
  * (hardened for untrusted repos). Nothing here throws.
+ *
+ * Known lag: an unchanged fingerprint (HEAD, index, refs and brief mtimes) skips the full read.
+ * Between full checks (at most 5 minutes) Sereno may not notice uncommitted edits, a fetch, or a new branch in a subfolder.
  */
 
 const os = require('node:os');
@@ -15,6 +18,7 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const nodeFs = require('node:fs');
 const { gitExec, isLocalPath } = require('./gitexec.js');
 const briefsLib = require('./briefs.js');
+const { normalizePath } = require('./projects.js');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECENT_MS = 14 * DAY_MS;
@@ -294,7 +298,7 @@ function createPoller(opts) {
       return Object.assign({}, prevGood.result, { polledAt: now() });
     }
     const fullAt = now();
-    if (prevGood && now() - prevGood.at >= FULL_RECHECK_MS) gitDirs.clear();
+    if (prevGood && now() - prevGood.at >= FULL_RECHECK_MS) for (const w of wts) gitDirs.delete(w.path);
     const branches = parseBranches(await git(['for-each-ref', '--count=2000', '--sort=-committerdate', 'refs/heads',
       '--format=%(refname)%09%(committerdate:unix)%09%(objectname)'], cwd))
       .filter((b) => briefsLib.validBranchName(b.name));
@@ -377,9 +381,9 @@ function createPoller(opts) {
   /** Set by pollOne, committed by runPoll only when the poll was not killed. @type {Map<string, { fp: string, at: number, result: RepoState }>} */
   const pendingGood = new Map();
 
-  /** @param {{ id: string }} p */
-  function isHot(p) {
-    try { for (const id of hotIds()) if (id === p.id) return true; } catch (_) { /* host callback failed: not hot */ }
+  /** @param {{ id: string }} p @param {Set<string>} [hot] */
+  function isHot(p, hot) {
+    if (hot && hot.has(p.id)) return true;
     const st = state.get(p.id);
     return !!(st && typeof st.lastCommitAt === 'number' && now() - st.lastCommitAt < DAY_MS);
   }
@@ -394,10 +398,13 @@ function createPoller(opts) {
     state = next;
     if (onlyDue) {
       const t0 = now();
+      /** @type {Set<string>} */
+      let hot = new Set();
+      try { hot = new Set(hotIds()); } catch (_) { /* host callback failed: nothing is hot */ }
       list = list.filter((p) => {
         const last = lastTry.get(p.id);
         if (last === undefined) return true;
-        return t0 - last >= (isHot(p) ? intervalMs * 0.9 : quietMs);
+        return t0 - last >= (isHot(p, hot) ? intervalMs * 0.9 : quietMs);
       });
     }
     await pool(list, concurrency, async (p) => {
@@ -527,4 +534,23 @@ function createPoller(opts) {
   };
 }
 
-module.exports = { createPoller, aggregateDirty, QUIET_MS, FULL_RECHECK_MS, parseGithubRemote, GH_INTERVAL_MS, GH_ARGS, parseWorktrees, parseBranches, RECENT_MS, MAX_BRANCHES };
+/**
+ * Ids of projects with a live session under the repo or one of its worktrees.
+ * Sessions with an empty or non-local cwd are ignored.
+ * @param {unknown[]} sessionCwds
+ * @param {{ id: string, repoPath: string }[]} projects
+ * @param {Record<string, any>} snap
+ * @returns {string[]}
+ */
+function hotProjectIds(sessionCwds, projects, snap) {
+  const cwds = (sessionCwds || []).filter((c) => typeof c === 'string' && c && isLocalPath(c)).map((c) => normalizePath(/** @type {string} */ (c)));
+  const hot = [];
+  if (!cwds.length) return hot;
+  for (const pr of projects) {
+    const roots = [pr.repoPath].concat(((snap && snap[pr.id] && snap[pr.id].worktrees) || []).map((w) => w.path)).map(normalizePath);
+    if (cwds.some((c) => roots.some((r) => c === r || c.startsWith(r.endsWith('/') ? r : r + '/')))) hot.push(pr.id);
+  }
+  return hot;
+}
+
+module.exports = { hotProjectIds, createPoller, aggregateDirty, QUIET_MS, FULL_RECHECK_MS, parseGithubRemote, GH_INTERVAL_MS, GH_ARGS, parseWorktrees, parseBranches, RECENT_MS, MAX_BRANCHES };
