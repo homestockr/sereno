@@ -5029,6 +5029,225 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 3 step 2: briefs ---- */
+  {
+    const briefs = require('../src/briefs.js');
+    const repos = require('../src/repos.js');
+    const { gitExec } = require('../src/gitexec.js');
+    const baseEnv = Object.assign({}, process.env, {
+      GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+      GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+    });
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: baseEnv, stdio: 'pipe', windowsHide: true }).toString();
+    const gitAt = (cwd, unix, ...args) => execFileSync('git', args, {
+      cwd, windowsHide: true, stdio: 'pipe',
+      env: Object.assign({}, baseEnv, { GIT_AUTHOR_DATE: unix + ' +0000', GIT_COMMITTER_DATE: unix + ' +0000' }),
+    }).toString();
+    const mk = () => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-brief-')));
+    const T0 = 1700000000;
+    const mkRepo = () => {
+      const d = mk();
+      git(d, 'init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(d, 'a.js'), '1');
+      git(d, 'add', 'a.js');
+      gitAt(d, T0, 'commit', '-q', '-m', 'init');
+      return d;
+    };
+    const head = (d, ref) => git(d, 'rev-parse', ref || 'HEAD').trim();
+    const briefText = (o) => [
+      '---',
+      'branch: ' + (o.branch === undefined ? 'main' : o.branch),
+      'worktree: ' + (o.worktree || 'C:/x/repo'),
+      'version: ' + (o.version === undefined ? 1 : o.version),
+      'source_commit: ' + (o.sc || 'abcd1234'),
+      'task: ' + (o.task || 'Ship it'),
+      'generated_at: ' + (o.at || '2026-10-01T10:00:00Z'),
+      '---',
+      'Now: ' + (o.now || 'Writing the parser'),
+      'Next: ' + (o.next || 'Tests'),
+      'Blocked: ' + (o.blocked || 'none'),
+      '',
+    ].join('\n');
+    const putBrief = (wt, branch, o) => {
+      const dir = path.join(wt, '.sereno', 'briefs'); fs.mkdirSync(dir, { recursive: true });
+      const f = path.join(dir, encodeURIComponent(branch) + '.md');
+      fs.writeFileSync(f, briefText(Object.assign({ branch }, o || {}))); return f;
+    };
+    const fake = (dirs) => ({ list: () => dirs.map((d, i) => ({ id: 'p' + i, name: path.basename(d), repoPath: d, hidden: false })) });
+
+    test('briefs: parseBrief round trip of the spec example', () => {
+      const b = briefs.parseBrief(briefText({ branch: 'feat/barcode-scan', version: 3, sc: 'AbCd1234' }));
+      assert.deepStrictEqual(b, {
+        branch: 'feat/barcode-scan', worktree: 'C:/x/repo', version: 3, sourceCommit: 'AbCd1234',
+        task: 'Ship it', generatedAt: '2026-10-01T10:00:00Z', now: 'Writing the parser', next: 'Tests', blocked: 'none',
+      });
+      const k = briefs.parseBrief('---\nbranch: m\nmystery: 1\n---\nnow: lower\nNOW: second ignored\n');
+      assert.strictEqual(k.now, 'lower'); assert.strictEqual(k.next, null); assert.strictEqual(k.version, null);
+    });
+
+    test('briefs: malformed input returns null or null fields, never throws', () => {
+      assert.strictEqual(briefs.parseBrief('Now: x\nNext: y\n'), null, 'no front matter');
+      assert.strictEqual(briefs.parseBrief('---\nbranch: m\nNow: x\n'), null, 'unterminated front matter');
+      assert.strictEqual(briefs.parseBrief('---\ntask: t\n---\nNow: x\n'), null, 'missing branch');
+      assert.strictEqual(briefs.parseBrief('---\nbranch: m\n---\njust prose\n'), null, 'no body lines');
+      assert.strictEqual(briefs.parseBrief('---\nbranch: m\nversion: -1\nsource_commit: zz\n---\nNow: x\n').version, null);
+      assert.strictEqual(briefs.parseBrief('---\nbranch: m\nversion: 1.5\n---\nNow: x\n').version, null);
+      assert.strictEqual(briefs.parseBrief('---\nbranch: m\nversion: 2\nsource_commit: xyz\n---\nNow: x\n').sourceCommit, null);
+      assert.strictEqual(briefs.parseBrief('---\nbranch: m\nsource_commit: abc\n---\nNow: x\n').sourceCommit, null, 'too short');
+      assert.strictEqual(briefs.parseBrief('---\nbranch: m\n---\nNow: ' + 'x'.repeat(17000)), null, '>16 KB');
+      for (const bad of [null, undefined, 5, {}, '']) assert.strictEqual(briefs.parseBrief(bad), null);
+    });
+
+    test('briefs: control characters and bidi overrides are stripped; lines cap at 200 with an ellipsis', () => {
+      const b = briefs.parseBrief('---\nbranch: m\ntask: a\u0007b\n---\nNow: he\u0000l\u001blo \u202eevil\u2066x\u2069 \u007f\u0085end\nNext: ' + 'y'.repeat(300) + '\n');
+      assert.strictEqual(b.now, 'hello evilx end');
+      assert.strictEqual(b.task, 'ab');
+      assert.strictEqual(b.next.length, 200);
+      assert.ok(b.next.endsWith('\u2026'));
+      assert.strictEqual(briefs.parseBrief('---\nbranch: m\n---\nNow: ' + 'z'.repeat(200)).now.length, 200, 'exactly 200 is kept whole');
+    });
+
+    test('briefs: decodeBriefName', () => {
+      assert.strictEqual(briefs.decodeBriefName('feat%2Fbarcode-scan.md'), 'feat/barcode-scan');
+      assert.strictEqual(briefs.decodeBriefName('main.md'), 'main');
+      assert.strictEqual(briefs.decodeBriefName('bad%E0%A4%A.md'), null);
+      assert.strictEqual(briefs.decodeBriefName('noext'), null);
+      assert.strictEqual(briefs.decodeBriefName('.md'), null);
+    });
+
+    test('briefs: readBriefs skips symlinks, counts a filename that disagrees with its branch, ignores non-md', () => {
+      const wt = mk(); const dir = path.join(wt, '.sereno', 'briefs'); fs.mkdirSync(dir, { recursive: true });
+      const outside = path.join(mk(), 'secret.md');
+      fs.writeFileSync(outside, briefText({ branch: 'linked' }));
+      let linked = true;
+      try { fs.symlinkSync(outside, path.join(dir, 'linked.md')); } catch (_) { linked = false; }
+      putBrief(wt, 'good');
+      fs.writeFileSync(path.join(dir, 'other.md'), briefText({ branch: 'not-other' }));   // name/branch mismatch
+      fs.writeFileSync(path.join(dir, 'junk.md'), 'nothing here');
+      fs.writeFileSync(path.join(dir, 'notes.txt'), briefText({ branch: 'txt' }));
+      fs.mkdirSync(path.join(dir, 'sub.md'));
+      const r = briefs.readBriefs([wt, path.join(wt, 'does-not-exist')]);
+      assert.deepStrictEqual(Array.from(r.byBranch.keys()), ['good']);
+      assert.strictEqual(r.malformed, 2, 'mismatch + junk');
+      assert.strictEqual(r.byBranch.get('good').file, 'good.md');
+      if (!linked) console.log('    (symlink not permitted here; link case not exercised)');
+      assert.strictEqual(briefs.readBriefs([wt], { maxFiles: 1 }).byBranch.size + briefs.readBriefs([wt], { maxFiles: 1 }).malformed <= 1, true);
+    });
+
+    test('briefs: a junctioned or symlinked .sereno or briefs dir is never read', () => {
+      const target = mk(); putBrief(target, 'evil');
+      const realBriefs = path.join(target, '.sereno', 'briefs');
+      const w1 = mk(); fs.mkdirSync(path.join(w1, '.sereno'));
+      fs.symlinkSync(realBriefs, path.join(w1, '.sereno', 'briefs'), 'junction');
+      assert.strictEqual(briefs.readBriefs([w1]).byBranch.size, 0, 'briefs dir junction');
+      const w2 = mk();
+      fs.symlinkSync(path.join(target, '.sereno'), path.join(w2, '.sereno'), 'junction');
+      assert.strictEqual(briefs.readBriefs([w2]).byBranch.size, 0, '.sereno junction');
+      assert.strictEqual(briefs.readBriefs([target]).byBranch.size, 1, 'control: the real dir reads');
+    });
+
+    test('briefs: the highest version wins across two worktrees; ties go to the later generated_at', () => {
+      const a = mk(); const b = mk();
+      putBrief(a, 'feat/x', { version: 2, now: 'from a' });
+      putBrief(b, 'feat/x', { version: 5, now: 'from b' });
+      assert.strictEqual(briefs.readBriefs([a, b]).byBranch.get('feat/x').now, 'from b');
+      assert.strictEqual(briefs.readBriefs([b, a]).byBranch.get('feat/x').now, 'from b');
+      putBrief(a, 'feat/x', { version: 5, now: 'later', at: '2026-10-02T10:00:00Z' });
+      assert.strictEqual(briefs.readBriefs([b, a]).byBranch.get('feat/x').now, 'later');
+      assert.strictEqual(briefs.readBriefs([a, b]).byBranch.get('feat/x').now, 'later');
+    });
+
+    await atest('briefs: freshness from real commits, and .sereno / STATUS.md commits never make a brief behind', async () => {
+      const d = mkRepo(); const src = head(d);
+      const fr = (o) => briefs.freshness(Object.assign({ brief: { branch: 'main', sourceCommit: src }, exec: gitExec, cwd: d, now: (T0 + 100) * 1000 }, o || {}));
+      assert.strictEqual(await fr(), 'fresh', 'at source_commit');
+      putBrief(d, 'main'); git(d, 'add', '-f', '.sereno/briefs/main.md'); gitAt(d, T0 + 10, 'commit', '-q', '-m', 'brief');
+      assert.strictEqual(await fr(), 'fresh', 'a brief-only commit');
+      fs.writeFileSync(path.join(d, 'STATUS.md'), 's'); git(d, 'add', 'STATUS.md'); gitAt(d, T0 + 20, 'commit', '-q', '-m', 'status');
+      assert.strictEqual(await fr(), 'fresh', 'a STATUS.md-only commit');
+      fs.writeFileSync(path.join(d, 'a.js'), '2'); git(d, 'add', 'a.js'); gitAt(d, T0 + 30, 'commit', '-q', '-m', 'code');
+      assert.strictEqual(await fr(), 'behind', 'a code commit');
+      assert.strictEqual(await fr({ now: (T0 + 30 + 24 * 3600) * 1000 }), 'behind', 'exactly 24 h is not over 24 h');
+      assert.strictEqual(await fr({ now: (T0 + 30 + 25 * 3600) * 1000 }), 'stale', '25 h after');
+      assert.strictEqual(await fr({ brief: { branch: 'main', sourceCommit: 'deadbeefdeadbeef' } }), 'unknown', 'source not in repo');
+      assert.strictEqual(await fr({ brief: { branch: 'main', sourceCommit: null } }), 'unknown');
+      assert.strictEqual(await fr({ brief: { branch: 'nope', sourceCommit: src } }), 'unknown', 'branch not in repo');
+    });
+
+    await atest('briefs: a hostile branch name never reaches git as an option', async () => {
+      const d = mkRepo(); const calls = [];
+      const exec = (f, a, o) => { calls.push(a); return gitExec(f, a, o); };
+      for (const name of ['--output=x', '-x', 'a b', 'a..b', 'a~1', 'a^', 'a:b', 'a?', 'a*', 'a[', 'a\\b', '', 'a.lock']) {
+        const r = await briefs.freshness({ brief: { branch: name, sourceCommit: head(d) }, exec, cwd: d, now: 0 });
+        assert.strictEqual(r, 'unknown', JSON.stringify(name));
+      }
+      assert.strictEqual(calls.length, 0, 'git was never run for an invalid name');
+      await briefs.freshness({ brief: { branch: 'main', sourceCommit: head(d) }, exec, cwd: d, now: 0 });
+      for (const a of calls) assert.ok(!a.some((x) => x.startsWith('--output')));
+      assert.strictEqual(fs.existsSync(path.join(d, 'x')), false);
+    });
+
+    await atest('briefs: poller adds brief, freshness, briefsMalformed; no brief is none; headline mirrors the default branch', async () => {
+      const d = mkRepo(); const src = head(d);
+      git(d, 'branch', 'feat/y');
+      let p = repos.createPoller({ registry: fake([d]), now: () => (T0 + 3600) * 1000 });
+      await p.pollNow();
+      let s = p.snapshot().p0;
+      assert.strictEqual(s.freshness, 'none'); assert.strictEqual(s.brief, null); assert.strictEqual(s.briefsMalformed, 0);
+      assert.ok(s.branches.every((b) => b.freshness === 'none' && b.brief === null));
+      putBrief(d, 'main', { sc: src }); putBrief(d, 'feat/y', { sc: 'deadbeefdeadbeef' });
+      fs.writeFileSync(path.join(d, '.sereno', 'briefs', 'junk.md'), 'x');
+      fs.writeFileSync(path.join(d, 'a.js'), '2'); git(d, 'add', 'a.js'); gitAt(d, T0 + 60, 'commit', '-q', '-m', 'code');
+      p = repos.createPoller({ registry: fake([d]), now: () => (T0 + 3600) * 1000 });
+      await p.pollNow(); s = p.snapshot().p0;
+      assert.strictEqual(s.freshness, 'behind');
+      assert.strictEqual(s.brief.now, 'Writing the parser');
+      assert.strictEqual(s.briefsMalformed, 1);
+      assert.strictEqual(s.branches.find((b) => b.name === 'main').freshness, 'behind');
+      assert.strictEqual(s.branches.find((b) => b.name === 'feat/y').freshness, 'unknown');
+      p = repos.createPoller({ registry: fake([d]), now: () => (T0 + 60 + 25 * 3600) * 1000 });
+      await p.pollNow();
+      assert.strictEqual(p.snapshot().p0.freshness, 'stale');
+    });
+
+    await atest('briefs: branches with a brief are always shown, within the 8 cap, ahead of plain recent ones', async () => {
+      const day = 86400;
+      const d = mk(); git(d, 'init', '-q', '-b', 'main');
+      gitAt(d, T0, 'commit', '-q', '--allow-empty', '-m', 'base');
+      for (let i = 0; i < 10; i++) {
+        git(d, 'checkout', '-q', '-b', 'b' + i, 'main');
+        gitAt(d, T0 + (10 + i) * day, 'commit', '-q', '--allow-empty', '-m', 'c' + i);
+      }
+      git(d, 'checkout', '-q', 'main'); git(d, 'branch', 'old', 'main');
+      putBrief(d, 'old', { sc: head(d) }); putBrief(d, 'b0', { sc: head(d) });
+      const p = repos.createPoller({ registry: fake([d]), now: () => (T0 + 20 * day) * 1000 });
+      await p.pollNow();
+      const names = p.snapshot().p0.branches.map((b) => b.name);
+      assert.strictEqual(names.length, 8);
+      assert.ok(names.includes('main') && names.includes('old') && names.includes('b0'), names.join());
+      assert.ok(names.includes('b9') && names.includes('b8') && !names.includes('b1'));
+    });
+
+    await atest('briefs: freshness is cached per branch head and brief; an unchanged head runs no git log', async () => {
+      const d = mkRepo(); putBrief(d, 'main', { sc: head(d) });
+      let logs = 0;
+      const exec = (f, a, o) => { if (a.includes('log')) logs++; return gitExec(f, a, o); };
+      const p = repos.createPoller({ registry: fake([d]), exec });
+      await p.pollNow();
+      assert.strictEqual(logs, 1); assert.strictEqual(p.snapshot().p0.freshness, 'fresh');
+      await p.pollNow();
+      assert.strictEqual(logs, 1, 'second poll, same head: no git log');
+      fs.writeFileSync(path.join(d, 'a.js'), '2'); git(d, 'add', 'a.js'); git(d, 'commit', '-q', '-m', 'more');
+      await p.pollNow();
+      assert.strictEqual(logs, 2, 'head moved: recomputed');
+      assert.strictEqual(p.snapshot().p0.freshness, 'behind');
+      putBrief(d, 'main', { sc: head(d), version: 2 });
+      await p.pollNow();
+      assert.strictEqual(logs, 3, 'new source commit: recomputed');
+      assert.strictEqual(p.snapshot().p0.freshness, 'fresh');
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

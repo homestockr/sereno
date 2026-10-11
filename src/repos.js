@@ -10,6 +10,7 @@
  */
 
 const { gitExec } = require('./gitexec.js');
+const briefsLib = require('./briefs.js');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECENT_MS = 14 * DAY_MS;
@@ -18,11 +19,11 @@ const MAX_BRANCHES = 8;
 /**
  * @typedef {import('./gitexec.js').Exec} Exec
  * @typedef {{ path: string, branch: string | null, head: string, dirty: boolean | null }} Worktree
- * @typedef {{ name: string, lastCommitAt: number, head: string }} Branch
+ * @typedef {{ name: string, lastCommitAt: number, head: string, brief?: any, freshness?: string }} Branch
  * @typedef {{
  *   id: string, name: string, defaultBranch: string | null, ahead: number | null, behind: number | null,
  *   dirty: boolean | null, lastCommitAt: number | null, worktrees: Worktree[], branches: Branch[],
- *   polledAt: number | null, error: boolean
+ *   polledAt: number | null, error: boolean, brief: any, freshness: string, briefsMalformed: number
  * }} RepoState
  */
 
@@ -86,6 +87,9 @@ function createPoller(opts) {
   let running = null;
   /** @type {NodeJS.Timeout | null} */
   let timer = null;
+  /** Git half of freshness, keyed by project + branch + head + source commit. Pruned each poll.
+   * @type {Map<string, 'fresh' | { oldest: number }>} */
+  const freshCache = new Map();
 
   /** @param {string[]} args @param {string} cwd */
   const git = async (args, cwd) => (await exec('git', args, { cwd })).stdout;
@@ -150,12 +154,39 @@ function createPoller(opts) {
     }
 
     const t = now();
+    const { byBranch, malformed } = briefsLib.readBriefs(wts.map((w) => w.path));
     const byRecent = branches.slice().sort((a, b) => b.lastCommitAt - a.lastCommitAt);
-    const picked = byRecent.filter((b) => b.name === def || t - b.lastCommitAt <= RECENT_MS);
-    const keep = new Set(picked.filter((b) => b.name !== def).slice(0, def && names.has(def) ? MAX_BRANCHES - 1 : MAX_BRANCHES)
-      .map((b) => b.name));
+    const hasDef = !!(def && names.has(def));
+    const picked = byRecent.filter((b) => b.name !== def && (byBranch.has(b.name) || t - b.lastCommitAt <= RECENT_MS));
+    // Branches with a brief come first, so the cap never drops one for a plain recent branch.
+    const chosen = picked.filter((b) => byBranch.has(b.name)).concat(picked.filter((b) => !byBranch.has(b.name)))
+      .slice(0, hasDef ? MAX_BRANCHES - 1 : MAX_BRANCHES);
+    const keep = new Set(chosen.map((b) => b.name));
     if (def) keep.add(def);
-    const shown = byRecent.filter((b) => keep.has(b.name));
+
+    /** @type {Set<string>} */
+    const used = new Set();
+    /** @type {Branch[]} */
+    const shown = [];
+    for (const b of byRecent) {
+      if (!keep.has(b.name)) continue;
+      const brief = byBranch.get(b.name) || null;
+      let fr = 'none';
+      if (brief) {
+        const key = [p.id, b.name, b.head, brief.sourceCommit || ''].join('\u0000');
+        used.add(key);
+        let r = freshCache.get(key);
+        if (r === undefined) {
+          const got = await briefsLib.inspectFreshness({ brief, branchHead: b.head, exec, cwd });
+          if (got === 'unknown') fr = 'unknown';   // not cached: the commit may arrive on a later fetch
+          else { freshCache.set(key, got); r = got; }
+        }
+        if (r !== undefined) fr = r === 'fresh' ? 'fresh' : briefsLib.classify(r.oldest, t);
+      }
+      shown.push(Object.assign({}, b, { brief, freshness: fr }));
+    }
+    for (const k of Array.from(freshCache.keys())) if (k.startsWith(p.id + '\u0000') && !used.has(k)) freshCache.delete(k);
+    const headline = shown.find((b) => b.name === def);
 
     return {
       id: p.id, name: p.name, defaultBranch: def, ahead, behind,
@@ -163,6 +194,7 @@ function createPoller(opts) {
       lastCommitAt: branches.length ? Math.max(...branches.map((b) => b.lastCommitAt)) : null,
       worktrees: worktrees.map((w) => ({ path: w.path, branch: w.branch, dirty: w.dirty })),
       branches: shown, polledAt: t, error: false,
+      brief: headline ? headline.brief : null, freshness: headline ? headline.freshness : 'none', briefsMalformed: malformed,
     };
   }
 
@@ -182,6 +214,7 @@ function createPoller(opts) {
         else state.set(p.id, {
           id: p.id, name: p.name, defaultBranch: null, ahead: null, behind: null, dirty: null,
           lastCommitAt: null, worktrees: [], branches: [], polledAt: null, error: true,
+          brief: null, freshness: 'none', briefsMalformed: 0,
         });
       }
     });
