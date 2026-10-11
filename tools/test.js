@@ -6990,6 +6990,26 @@ test('missing rate_limits degrades instead of throwing', () => {
       return c;
     };
 
+    await atest('ff-gh: a project registered after start gets its gh lookup on the next git poll, then keeps the 5 minute cadence', async () => {
+      const clock = { t: 1000 }; let calls = 0;
+      const list = [];
+      const p = repos.createPoller({
+        registry: { list: () => list }, now: () => clock.t,
+        exec: (f, a) => (a[0] === 'config' ? Promise.resolve({ stdout: 'https://github.com/o/n.git' }) : Promise.reject(new Error('no git'))),
+        ghExec: () => { calls++; return Promise.resolve({ stdout: '[{"number":1}]' }); },
+      });
+      await p.pollNow(); await p.pollGh();
+      assert.strictEqual(calls, 0, 'empty registry: nothing to look up');
+      list.push({ id: 'late', name: 'late', repoPath: 'C://x//late', hidden: false });
+      clock.t += 30 * 1000;
+      await p.pollNow(); await p.pollGh();
+      assert.strictEqual(calls, 1, 'first gh lookup on the next git poll');
+      assert.strictEqual(p.snapshot().late.prs, 1);
+      clock.t += 30 * 1000;
+      await p.pollNow(); await p.pollGh();
+      assert.strictEqual(calls, 1, 'inside 5 minutes: no second gh call');
+    });
+
     await atest('ff1: noteCwd runs at most 2 resolves at once and holds at most 50 distinct cwds', async () => {
       let live = 0; let maxLive = 0; let started = 0; let maxPending = 0;
       const gate = [];

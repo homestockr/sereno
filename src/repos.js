@@ -437,17 +437,20 @@ function createPoller(opts) {
     });
   }
 
+  /** After every git poll: a gh pass. Its due filter keeps the 5 minute cadence, and a newly registered project gets its first lookup now. */
+  function afterGit() { try { pollGh(); } catch (_) { /* fire and forget */ } }
+
   /** Overlapping calls share the in-flight poll; nothing is queued. @returns {Promise<void>} */
   function pollNow() {
     if (running) return running;
-    running = runPoll(false).catch(() => {}).finally(() => { running = null; });
+    running = runPoll(false).catch(() => {}).then(afterGit).finally(() => { running = null; });
     return running;
   }
 
   /** Timer tick: polls only the projects that are due (hot every interval, the rest every few minutes). @returns {Promise<void>} */
   function tick() {
     if (running) return running;
-    running = runPoll(true).catch(() => {}).finally(() => { running = null; });
+    running = runPoll(true).catch(() => {}).then(afterGit).finally(() => { running = null; });
     return running;
   }
 
@@ -468,7 +471,7 @@ function createPoller(opts) {
     let list = [];
     try { list = registry.list().filter((p) => !p.hidden); } catch (_) { return; }
     const t = now();
-    const due = list.filter((p) => !ghAt.has(p.id) || t - /** @type {number} */ (ghAt.get(p.id)) >= ghIntervalMs);
+    const due = list.filter((p) => isLocalPath(p.repoPath) && !(backoff.get(p.id) && t < /** @type {{ until: number }} */ (backoff.get(p.id)).until) && (!ghAt.has(p.id) || t - /** @type {number} */ (ghAt.get(p.id)) >= ghIntervalMs));
     await pool(due, 1, async (p) => {
       if (ghOff) return;
       ghAt.set(p.id, now());
