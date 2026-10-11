@@ -53,11 +53,11 @@ function ghExecDefault(args, o) {
 /**
  * @typedef {import('./gitexec.js').Exec} Exec
  * @typedef {{ path: string, branch: string | null, head: string, dirty: boolean | null }} Worktree
- * @typedef {{ name: string, lastCommitAt: number, head: string, brief?: any, freshness?: string }} Branch
+ * @typedef {{ name: string, lastCommitAt: number, head: string, brief?: any, freshness?: string, behindSince?: number | null }} Branch
  * @typedef {{
  *   id: string, name: string, defaultBranch: string | null, ahead: number | null, behind: number | null,
  *   dirty: boolean | null, lastCommitAt: number | null, worktrees: Worktree[], branches: Branch[],
- *   polledAt: number | null, error: boolean, brief: any, freshness: string, briefsMalformed: number,
+ *   polledAt: number | null, error: boolean, brief: any, freshness: string, behindSince?: number | null, briefsMalformed: number,
  *   prs?: number | null
  * }} RepoState
  */
@@ -219,6 +219,7 @@ function createPoller(opts) {
       if (!keep.has(b.name)) continue;
       const brief = byBranch.get(b.name) || null;
       let fr = 'none';
+      let behindSince = null;
       if (brief) {
         const key = [p.id, b.name, b.head, brief.sourceCommit || ''].join('\u0000');
         used.add(key);
@@ -228,9 +229,12 @@ function createPoller(opts) {
           if (got === 'unknown') fr = 'unknown';   // not cached: the commit may arrive on a later fetch
           else { freshCache.set(key, got); r = got; }
         }
-        if (r !== undefined) fr = r === 'fresh' ? 'fresh' : briefsLib.classify(r.oldest, t);
+        if (r !== undefined) {
+          fr = r === 'fresh' ? 'fresh' : briefsLib.classify(r.oldest, t);
+          if (r !== 'fresh') behindSince = r.oldest;
+        }
       }
-      shown.push(Object.assign({}, b, { brief, freshness: fr }));
+      shown.push(Object.assign({}, b, { brief, freshness: fr, behindSince }));
     }
     for (const k of Array.from(freshCache.keys())) if (k.startsWith(p.id + '\u0000') && !used.has(k)) freshCache.delete(k);
     const headline = shown.find((b) => b.name === def);
@@ -241,7 +245,8 @@ function createPoller(opts) {
       lastCommitAt: branches.length ? Math.max(...branches.map((b) => b.lastCommitAt)) : null,
       worktrees: worktrees.map((w) => ({ path: w.path, branch: w.branch, dirty: w.dirty })),
       branches: shown, polledAt: t, error: false,
-      brief: headline ? headline.brief : null, freshness: headline ? headline.freshness : 'none', briefsMalformed: malformed,
+      brief: headline ? headline.brief : null, freshness: headline ? headline.freshness : 'none',
+      behindSince: headline ? headline.behindSince : null, briefsMalformed: malformed,
     };
   }
 

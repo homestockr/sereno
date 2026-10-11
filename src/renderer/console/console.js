@@ -204,6 +204,7 @@ function attentionState(snapshot) {
       tool: typeof s.stateTool === 'string' ? s.stateTool : '',
       arg: typeof s.stateArgShort === 'string' ? s.stateArgShort : '',
       since: Number.isFinite(Number(s.stateSince)) && Number(s.stateSince) > 0 ? Number(s.stateSince) : null,
+      ...(typeof s.id === 'string' && s.id ? { sessionId: s.id } : {}),
     }));
   return { amber: items.length > 0, count: items.length, items };
 }
@@ -234,10 +235,25 @@ function waitWhat(it) {
 }
 
 /**
+ * "Review in terminal" control for one waiting session. opts: { review, na, msgs }.
+ * No control without opts.review or a session id. After a 501 (serve mode) every
+ * control becomes plain text. The only thing a click ever sends is the session id.
+ */
+function reviewControl(it, opts) {
+  if (!opts || opts.review !== true || !it || !it.sessionId) return '';
+  const m = opts.msgs && opts.msgs[it.sessionId];
+  if (opts.na === true || m === 'na') return '<div class="review-msg">Open the widget to review</div>';
+  if (m === 'ok') return '<div class="review-msg">Raised the terminal</div>';
+  return '<div class="review"><button type="button" class="btn-review" data-act="review" data-sid="' + esc(it.sessionId)
+    + '">Review in terminal ↗</button>' + (m === 'err' ? '<span class="review-msg">Could not raise the terminal</span>' : '') + '</div>';
+}
+
+/**
  * Attention panel markup. Input is attentionState() output, or { unavailable: true } when
  * /state could not be read (neutral grey, never amber). Every API string goes through esc().
+ * opts (optional) adds the review controls, see reviewControl().
  */
-function attentionHtml(st, nowMs) {
+function attentionHtml(st, nowMs, opts) {
   if (!st || st.unavailable) {
     return '<div class="attn attn-off"><div class="attn-head"><span>LIVE STATUS</span></div>'
       + '<h2 class="attn-title">Live status unavailable</h2></div>';
@@ -256,17 +272,267 @@ function attentionHtml(st, nowMs) {
       const what = waitWhat(it);
       const w = waitLabel(it.since, nowMs);
       return '<li><strong>' + esc(it.project) + '</strong>' + (what ? '<span class="mono">' + what + '</span>' : '')
-        + (w ? '<span class="wait">' + esc(w) + '</span>' : '') + '</li>';
+        + (w ? '<span class="wait">' + esc(w) + '</span>' : '') + reviewControl(it, opts) + '</li>';
     }).join('') + '</ul>';
   } else if (items.length === 1) {
     const what = waitWhat(items[0]);
     const w = waitLabel(items[0].since, nowMs);
     if (what) list += '<div class="attn-what mono">' + what + '</div>';
     if (w) list += '<div class="wait">' + esc(w) + '</div>';
+    list += reviewControl(items[0], opts);
   }
   return '<div class="attn attn-amber"><div class="attn-head">' + ringIcon() + '<span>NEEDS YOUR ATTENTION</span></div>'
     + '<h2 class="attn-title">' + title + '</h2>' + list
     + '<p class="attn-body">Answer it in the terminal. Sereno only points you there.</p></div>';
+}
+
+/* ---------- Projects tab: pure helpers (Phase 3 step 5) ---------- */
+
+/** '#spend' -> 'spend'; '#projects', '', and anything else -> 'projects'. */
+function parseRoute(hash) {
+  const h = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim().toLowerCase();
+  return h === 'spend' ? 'spend' : 'projects';
+}
+
+/** No hash -> the remembered tab (default projects); a hash always wins. */
+function initialRoute(hash, saved) {
+  const h = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim();
+  if (h === '') return saved === 'spend' ? 'spend' : 'projects';
+  return parseRoute(hash);
+}
+
+/** '8 min ago' / '3 hours ago' / '2 days ago'; '' for a missing or non-finite time. */
+function relTime(ts, nowMs) {
+  const t = Number(ts);
+  if (ts == null || !Number.isFinite(t) || !Number.isFinite(Number(nowMs))) return '';
+  const s = Math.max(0, Math.floor((Number(nowMs) - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' min ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + (h === 1 ? ' hour ago' : ' hours ago');
+  const d = Math.floor(h / 24);
+  return d + (d === 1 ? ' day ago' : ' days ago');
+}
+
+/** Whole days since the brief went behind (behindSince, ms), at least 1; null when unknown. */
+function staleDaysOf(behindSince, nowMs) {
+  const ts = typeof behindSince === 'number' ? behindSince : NaN;
+  if (!Number.isFinite(ts) || !Number.isFinite(Number(nowMs))) return null;
+  return Math.max(1, Math.floor((Number(nowMs) - ts) / 86400000));
+}
+
+/** Chip text and class for a freshness state. Stale uses the dashed rule; behind is outlined. */
+function freshnessChip(freshness, staleDays) {
+  switch (freshness) {
+    case 'fresh': return { label: 'fresh', cls: 'chip-fresh' };
+    case 'behind': return { label: 'behind', cls: 'chip-behind' };
+    case 'stale': {
+      const n = Math.floor(Number(staleDays));
+      const label = Number.isFinite(n) && n > 0 ? 'Brief is ' + n + (n === 1 ? ' day behind' : ' days behind') : 'stale';
+      return { label, cls: 'chip-stale' };
+    }
+    case 'unknown': return { label: 'Brief source not found', cls: 'chip-unknown' };
+    default: return { label: 'No brief', cls: 'chip-none' };
+  }
+}
+
+/** A headline brief with a Blocked line that is neither empty nor "None". */
+function hasBlocker(p) {
+  const b = p && p.brief && typeof p.brief.blocked === 'string' ? p.brief.blocked.trim() : '';
+  return b !== '' && !/^none\.?$/i.test(b);
+}
+
+/** Top-level live sessions of /state (tagged subagent rows never count). */
+function topSessions(snapshot) {
+  const list = snapshot && Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
+  return list.filter((s) => s && typeof s === 'object' && !s.agent_id && !s.agentId);
+}
+
+/** Is this session worth showing live: top-level, not stale, running / thinking / blocked. */
+function isLiveSession(s) {
+  return !!s && typeof s === 'object' && !s.stale && !s.agent_id && !s.agentId
+    && (s.state === 'running' || s.state === 'thinking' || s.state === 'blocked');
+}
+
+/** Best matching non-stale top-level session state for a project: blocked, running, thinking, idle, or null. */
+function liveState(p, sessions) {
+  const list = (Array.isArray(sessions) ? sessions : []).filter((s) => s && !s.stale && !s.agent_id && !s.agentId && s.projectName === p.name);
+  for (const st of ['blocked', 'running', 'thinking', 'idle']) if (list.some((s) => s.state === st)) return st;
+  return null;
+}
+
+/** Active = a running / thinking / blocked session for the project (idle alone does not count) or a commit in the last 24 h. */
+function isActive(p, sessions, nowMs) {
+  const st = liveState(p, sessions);
+  if (st === 'blocked' || st === 'running' || st === 'thinking') return true;
+  const c = p && p.git && p.git.lastCommitAt !== null ? Number(p.git.lastCommitAt) : NaN;
+  return Number.isFinite(c) && Number(nowMs) - c < 86400000;
+}
+
+function visibleProjects(projects) {
+  return (Array.isArray(projects) ? projects : []).filter((p) => p && p.hidden !== true);
+}
+
+function filterCounts(projects, sessions, nowMs) {
+  const v = visibleProjects(projects);
+  const active = v.filter((p) => isActive(p, sessions, nowMs)).length;
+  return { all: v.length, active, quiet: v.length - active };
+}
+
+/** Visible projects for a filter ('all' | 'active' | 'quiet'), newest activity first. */
+function selectProjects(projects, filter, sessions, nowMs) {
+  const la = (p) => (p.lastActivity !== null && Number.isFinite(Number(p.lastActivity)) ? Number(p.lastActivity) : -1);
+  return visibleProjects(projects)
+    .filter((p) => (filter === 'active' ? isActive(p, sessions, nowMs) : filter === 'quiet' ? !isActive(p, sessions, nowMs) : true))
+    .sort((a, b) => (la(b) - la(a)) || String(a.name).localeCompare(String(b.name)));
+}
+
+/** `N projects · N with blockers · N stale · <decision clause>` */
+function projectsSummary(projects, blockedCount) {
+  const v = visibleProjects(projects);
+  const n = v.length;
+  const blockers = v.filter(hasBlocker).length;
+  const stale = v.filter((p) => p.freshness === 'stale').length;
+  const b = Number(blockedCount) > 0 ? Math.floor(Number(blockedCount)) : 0;
+  const clause = b === 0 ? 'nothing needs a decision' : b === 1 ? '1 session needs you' : b + ' sessions need you';
+  return n + (n === 1 ? ' project' : ' projects') + ' · ' + blockers + ' with blockers · ' + stale + ' stale · ' + clause;
+}
+
+/** `main ↑2 ↓0 · 2 open PRs · Last commit 8 min ago`; absent parts are left out. */
+function gitLine(git, prs, nowMs) {
+  const g = git || {};
+  const parts = [];
+  const head = [];
+  if (typeof g.defaultBranch === 'string' && g.defaultBranch) head.push(g.defaultBranch);
+  if (Number.isFinite(g.ahead) && Number.isFinite(g.behind)) head.push('↑' + g.ahead + ' ↓' + g.behind);
+  if (head.length) parts.push(head.join(' '));
+  if (Number.isFinite(prs)) parts.push(prs + (prs === 1 ? ' open PR' : ' open PRs'));
+  const rel = relTime(g.lastCommitAt, nowMs);
+  if (rel) parts.push('Last commit ' + rel);
+  return parts.join(' · ');
+}
+
+function sparkSvg(trend) {
+  return '<svg class="spark" viewBox="0 0 110 25" aria-hidden="true"><polyline points="' + sparkPoints(trend, 110, 25) + '"></polyline></svg>';
+}
+
+/** State shape: needs-you ring (blocked), bars (running), spinner (thinking), quiet ring (idle or none). */
+function liveShape(st) {
+  if (st === 'blocked') return '<svg class="pshape pshape-need" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/>'
+    + '<path d="M6.2 6.3c0-1.9 3.6-1.9 3.6 0 0 1.3-1.8 1.4-1.8 2.6M8 11.1v.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+  if (st === 'running') return '<svg class="pshape pshape-live" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6v4M6 3v10M9 5v6M12 4v8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+  if (st === 'thinking') return '<svg class="pshape pshape-live" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2.2 2.2"/></svg>';
+  return '<svg class="pshape" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+}
+
+/** Non-default branches: `↳ name  <chip>  <brief now or "No brief">`. */
+function branchRows(branches, defaultBranch, nowMs) {
+  const list = (Array.isArray(branches) ? branches : []).filter((b) => b && b.name !== defaultBranch);
+  return list.map((b) => {
+    const f = b && b.freshness ? b.freshness : 'none';
+    const chip = freshnessChip(f, staleDaysOf(b && b.behindSince, nowMs));
+    const none = f === 'none';
+    return '<div class="brow"><span class="bname mono">\u21b3 ' + esc(b && b.name) + '</span>'
+      + (none ? '' : '<span class="chip ' + chip.cls + '">' + esc(chip.label) + '</span>')
+      + '<span class="bnow' + (b && b.now ? '' : ' quiet-text') + '">' + esc(b && b.now ? b.now : 'No brief') + '</span></div>';
+  }).join('');
+}
+
+/** One project card. ctx: { now, state } (state = liveState()). Every API string goes through esc(); no style attributes. */
+function cardHtml(p, ctx) {
+  const c = ctx || {};
+  const now = c.now;
+  const chip = freshnessChip(p.freshness, staleDaysOf(p.brief ? p.brief.behindSince : null, now));
+  const b = p.brief;
+  const kv = (k, v) => '<div class="kv"><span class="k">' + k + '</span><span class="v">' + esc(v == null || v === '' ? '—' : v) + '</span></div>';
+  let body = '';
+  if (b) body = kv('Now', b.now) + kv('Next', b.next) + kv('Blocked', b.blocked);
+  else if (p.freshness === 'none' || p.freshness == null) body = '<div class="nobrief">No brief yet — run /brief in a session</div>';
+  let git = '';
+  if (p.error === true) {
+    git = '<div class="git git-off">Git status unavailable</div>';
+  } else {
+    const line = gitLine(p.git, p.prs, now);
+    const dirty = p.git && p.git.dirty === true
+      ? '<span class="dirty"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1l4 4-4 4-4-4z" fill="currentColor"/></svg>dirty</span>' : '';
+    if (line || dirty) git = '<div class="git">' + (line ? '<span>' + esc(line) + '</span>' : '') + dirty + '</div>';
+  }
+  const spend = p.spend14
+    ? '<div class="spend14"><div class="spend-label">14-day spend</div>' + sparkSvg(p.spend14.trend)
+      + '<div class="spend-num num">' + esc(estMoney(p.spend14.costMicros)) + '</div></div>' : '';
+  const menu = '<details class="menu"><summary aria-label="Project actions">⋯</summary>'
+    + '<button type="button" class="menu-item" data-act="hide" data-id="' + esc(p.id) + '">Hide project</button></details>';
+  return '<article class="pcard">' + liveShape(c.state)
+    + '<div class="pmain"><div class="phead"><h3>' + esc(p.name) + '</h3><span class="chip ' + chip.cls + '">' + esc(chip.label) + '</span></div>'
+    + body + git + branchRows(p.branches, p.git ? p.git.defaultBranch : null, now) + '</div>'
+    + '<div class="pside">' + menu + spend + '</div></article>';
+}
+
+/**
+ * LIVE SESSIONS strip: only non-stale running / thinking / blocked sessions, newest first,
+ * at most 6 and then "+N more". '' when none.
+ */
+function liveStrip(sessions, nowMs) {
+  const list = (Array.isArray(sessions) ? sessions : []).filter(isLiveSession)
+    .sort((a, b) => (Number(b.stateSince) || 0) - (Number(a.stateSince) || 0));
+  if (!list.length) return '';
+  const more = list.length > 6 ? '<div class="live-more">+' + (list.length - 6) + ' more</div>' : '';
+  return '<div class="live-strip"><div class="live-title">LIVE SESSIONS</div><div class="live-list">'
+    + list.slice(0, 6).map((s) => {
+      const rel = relTime(s.stateSince, nowMs);
+      return '<div class="live-item"><strong>' + esc(s.projectName == null || s.projectName === '' ? 'Unknown project' : s.projectName)
+        + ' / ' + esc(s.state) + '</strong>' + (rel ? '<span>' + esc(rel) + '</span>' : '') + '</div>';
+    }).join('') + more + '</div></div>';
+}
+
+/** The hidden-projects toggle and, when open, the list with Unhide. '' when none are hidden. */
+function hiddenSection(projects, open) {
+  const h = (Array.isArray(projects) ? projects : []).filter((p) => p && p.hidden === true);
+  if (!h.length) return '';
+  const list = open ? '<ul class="hidden-list">' + h.map((p) => '<li><span>' + esc(p.name) + '</span>'
+    + '<button type="button" class="link-btn" data-act="unhide" data-id="' + esc(p.id) + '">Unhide</button></li>').join('') + '</ul>' : '';
+  return '<div class="hidden-box"><button type="button" class="link-btn" data-act="toggle-hidden" aria-expanded="' + (open === true) + '">'
+    + h.length + ' hidden · ' + (open ? 'hide' : 'show') + '</button>' + list + '</div>';
+}
+
+/** Filter tabs with counts. */
+function filterBar(counts, filter) {
+  return '<div class="filters" role="group" aria-label="Filter">'
+    + [['all', 'All', counts.all], ['active', 'Active', counts.active], ['quiet', 'Quiet', counts.quiet]].map((f) =>
+      '<button type="button" data-filter="' + f[0] + '" class="' + (filter === f[0] ? 'on' : '') + '" aria-pressed="' + (filter === f[0]) + '">'
+      + f[1] + ' ' + f[2] + '</button>').join('') + '<span class="sortnote">Last activity ↓</span></div>';
+}
+
+/** The whole Projects view body (below the title row). `sessions` is the /state session list. */
+function projectsBody(projects, sessions, filter, showHidden, nowMs) {
+  const all = Array.isArray(projects) ? projects : [];
+  const live = topSessions({ sessions });
+  const blocked = live.filter((s) => s.state === 'blocked' && !s.stale).length;
+  if (!all.length) {
+    return '<div class="state-panel"><h2>No projects yet</h2><p>Projects appear when a Claude Code session runs in a git repo.</p></div>';
+  }
+  const counts = filterCounts(all, live, nowMs);
+  const shown = selectProjects(all, filter, live, nowMs);
+  const cards = shown.length
+    ? shown.map((p) => cardHtml(p, { now: nowMs, state: liveState(p, live) })).join('')
+    : '<p class="empty-note">No projects match this filter.</p>';
+  return '<p class="summary">' + esc(projectsSummary(all, blocked)) + '</p>' + filterBar(counts, filter)
+    + '<div class="plist">' + cards + '</div>' + hiddenSection(all, showHidden) + liveStrip(live, nowMs);
+}
+
+/** Request for a console POST: { method, headers, body } ready for fetch(). */
+function actionRequest(bodyObj, token) {
+  return {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-sereno-token': String(token == null ? '' : token) },
+    body: JSON.stringify(bodyObj),
+  };
+}
+
+/** The review body carries nothing but the session id. */
+function reviewRequest(sessionId, token) {
+  return actionRequest({ sessionId: String(sessionId) }, token);
 }
 
 /* ---------- state ---------- */
@@ -279,7 +545,20 @@ const state = {
   range: '30d', today: null, series: null, projects: null, top: null,
   mode: 'loading', lastOk: null, token: 0,
   attn: null, attnToken: 0,   // attn: attentionState() output, { unavailable: true }, or null before the first read
+  route: 'projects',
+  proj: { mode: 'loading', list: [], filter: 'all', showHidden: false, token: 0, lastOk: null },
+  sessions: [],               // /state sessions, for the Projects summary, filters and live strip
+  apiToken: null, reviewNA: false, reviewMsgs: {},
 };
+
+const TABS = { projects: 'Projects', spend: 'Spend' };
+
+function loadTab() {
+  try { return localStorage.getItem('sereno.console.tab'); } catch (_) { return null; }
+}
+function saveTab(r) {
+  try { localStorage.setItem('sereno.console.tab', r); } catch (_) { /* ignore */ }
+}
 
 function loadRange() {
   try {
@@ -427,7 +706,10 @@ function titleRow() {
 
 function renderAttention() {
   const box = document.getElementById('attn');
-  if (box) setHtml(box, attentionHtml(state.attn || { amber: false, count: 0, items: [] }, Date.now()));
+  if (box) {
+    setHtml(box, attentionHtml(state.attn || { amber: false, count: 0, items: [] }, Date.now(),
+      { review: true, na: state.reviewNA, msgs: state.reviewMsgs }));
+  }
   const slot = document.getElementById('pill-slot');
   if (slot) setHtml(slot, pillHtml(state.attn && state.attn.amber ? state.attn.count : 0));
 }
@@ -437,6 +719,7 @@ function panel(title, text) {
 }
 
 function render() {
+  if (state.route !== 'spend') return;
   const view = document.getElementById('view');
   const side = document.getElementById('side-today');
   view.setAttribute('aria-busy', state.mode === 'loading' ? 'true' : 'false');
@@ -462,6 +745,25 @@ function render() {
   drawChart();
 }
 
+/* ---------- Projects tab: rendering ---------- */
+
+function projectsTitle() {
+  return '<div class="title-row"><h1>Projects</h1><span id="pill-slot">' + pillHtml(state.attn && state.attn.amber ? state.attn.count : 0) + '</span></div>';
+}
+
+function renderProjects() {
+  if (state.route !== 'projects') return;
+  const view = document.getElementById('view');
+  const p = state.proj;
+  view.setAttribute('aria-busy', p.mode === 'loading' ? 'true' : 'false');
+  if (p.mode === 'loading') { setHtml(view, ''); return; }
+  if (p.mode === 'unavailable') {
+    setHtml(view, projectsTitle() + '<div class="state-panel"><h2>Projects are unavailable right now</h2><p>Sereno will try again on the next refresh.</p></div>');
+    return;
+  }
+  setHtml(view, projectsTitle() + projectsBody(p.list, state.sessions, p.filter, p.showHidden, Date.now()));
+}
+
 /* ---------- data ---------- */
 
 async function getJson(url) {
@@ -480,7 +782,56 @@ async function refreshAttention() {
   const r = await getJson('/state');
   if (token !== state.attnToken) return;
   state.attn = r.body && Array.isArray(r.body.sessions) ? attentionState(r.body) : { unavailable: true };
+  state.sessions = r.body && Array.isArray(r.body.sessions) ? r.body.sessions : [];
   renderAttention();
+  if (state.route === 'projects') renderProjects();
+}
+
+async function refreshProjects() {
+  const p = state.proj;
+  const token = ++p.token;
+  const r = await getJson('/api/projects');
+  if (token !== p.token) return;
+  if (!r.body || !Array.isArray(r.body.projects)) {
+    if (p.mode !== 'data') p.mode = 'unavailable';   // keep showing the last good list on a blip
+  } else {
+    p.list = r.body.projects; p.mode = 'data'; p.lastOk = Date.now();
+  }
+  renderProjects();
+  tickSync();
+}
+
+/* Console POSTs: the token comes from GET /api/token, cached, refetched once on a 403. */
+async function getApiToken(force) {
+  if (state.apiToken && !force) return state.apiToken;
+  const r = await getJson('/api/token');
+  state.apiToken = r.body && typeof r.body.token === 'string' ? r.body.token : null;
+  return state.apiToken;
+}
+
+async function postAction(url, bodyObj) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const tok = await getApiToken(attempt > 0);
+    if (!tok) return 0;
+    const req = actionRequest(bodyObj, tok);
+    let status = 0;
+    try { status = (await fetch(url, { method: req.method, headers: req.headers, body: req.body, cache: 'no-store' })).status; } catch (_) { return 0; }
+    if (status !== 403) return status;
+  }
+  return 403;
+}
+
+async function reviewSession(sid) {
+  const status = await postAction('/api/review', { sessionId: String(sid) });
+  if (status === 204) state.reviewMsgs[sid] = 'ok';
+  else if (status === 501) { state.reviewMsgs[sid] = 'na'; state.reviewNA = true; }
+  else state.reviewMsgs[sid] = 'err';
+  renderAttention();
+}
+
+async function setHidden(id, hidden) {
+  const status = await postAction('/api/projects/' + encodeURIComponent(id) + '/hide', { hidden });
+  if (status === 204) refreshProjects();
 }
 
 async function refresh() {
@@ -502,6 +853,32 @@ async function refresh() {
   tickSync();
 }
 
+/** Refresh whatever the current tab shows. */
+function refreshActive() {
+  if (state.route === 'spend') refresh();
+  else { refreshAttention(); refreshProjects(); }
+}
+
+function applyRoute(route, first) {
+  state.route = route;
+  document.querySelectorAll('.nav-item').forEach((a) => {
+    const on = a.getAttribute('data-route') === route;
+    a.classList.toggle('active', on);
+    if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  });
+  const crumb = document.getElementById('crumb-tab');
+  if (crumb) crumb.textContent = TABS[route];
+  const foot = document.getElementById('foot-note');
+  if (foot) foot.textContent = route === 'spend'
+    ? 'Totals include unattributed usage \u00b7 every figure is an estimate'
+    : 'Dollar figures are estimates \u00b7 nothing leaves this machine';
+  if (!first) saveTab(route);
+  const side = document.getElementById('side-today');
+  if (side) setHtml(side, '');
+  if (route === 'spend') { render(); refresh(); }
+  else { renderProjects(); refreshActive(); }
+}
+
 async function refreshSeries() {
   const token = ++state.token;
   const r = await getJson('/api/spend/series?range=' + state.range);
@@ -516,7 +893,7 @@ async function refreshSeries() {
 
 function tickSync() {
   const el = document.getElementById('sync');
-  if (el) el.textContent = syncLabel(state.lastOk, Date.now());
+  if (el) el.textContent = syncLabel(state.route === 'spend' ? state.lastOk : state.proj.lastOk, Date.now());
 }
 
 /* ---------- boot ---------- */
@@ -526,7 +903,16 @@ function boot() {
   const host = document.getElementById('foot-host');
   if (host) host.textContent = location.host + '/console';
   document.getElementById('view').addEventListener('click', (e) => {
-    const b = e.target && e.target.closest ? e.target.closest('button[data-range]') : null;
+    const tgt = e.target && e.target.closest ? e.target : null;
+    const act = tgt ? tgt.closest('button[data-act], button[data-filter]') : null;
+    if (act) {
+      const f = act.getAttribute('data-filter');
+      const a = act.getAttribute('data-act');
+      if (f) { state.proj.filter = f; renderProjects(); return; }
+      if (a === 'toggle-hidden') { state.proj.showHidden = !state.proj.showHidden; renderProjects(); return; }
+      if (a === 'hide' || a === 'unhide') { setHidden(act.getAttribute('data-id'), a === 'hide'); return; }
+    }
+    const b = tgt ? tgt.closest('button[data-range]') : null;
     if (!b) return;
     const r = b.getAttribute('data-range');
     if (RANGES.indexOf(r) < 0 || r === state.range) return;
@@ -541,8 +927,18 @@ function boot() {
     if (su) su.textContent = t.sub;
     refreshSeries();
   });
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
-  setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 60000);
+  document.getElementById('attn').addEventListener('click', (e) => {
+    const b = e.target && e.target.closest ? e.target.closest('button[data-act="review"]') : null;
+    if (b) reviewSession(b.getAttribute('data-sid'));
+  });
+  window.addEventListener('hashchange', () => {
+    const r = parseRoute(location.hash);
+    if (r !== state.route) applyRoute(r, false);
+  });
+  window.addEventListener('focus', () => { if (state.route === 'projects') refreshProjects(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshActive(); });
+  setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'spend') refresh(); }, 60000);
+  setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'projects') refreshProjects(); }, 30000);
   // While amber, poll faster so a resolved wait clears promptly.
   setInterval(() => { if (document.visibilityState === 'visible' && state.attn && state.attn.amber) refreshAttention(); }, 10000);
   setInterval(tickSync, 10000);
@@ -551,8 +947,7 @@ function boot() {
     if (raf) return;
     raf = requestAnimationFrame(() => { raf = 0; drawChart(); });
   });
-  render();
-  refresh();   // also reads /state; the panel stays empty until it answers
+  applyRoute(initialRoute(location.hash, loadTab()), true);   // also reads /state; the panel stays empty until it answers
 }
 
 if (typeof document !== 'undefined') boot();

@@ -351,7 +351,7 @@ function createCollector(store, port, opts) {
         name: p.name,
         hidden: p.hidden === true,
         freshness: st && typeof st.freshness === 'string' ? st.freshness : 'none',
-        brief: b ? { now: b.now ?? null, next: b.next ?? null, blocked: b.blocked ?? null, generatedAt: b.generatedAt ?? null } : null,
+        brief: b ? { now: b.now ?? null, next: b.next ?? null, blocked: b.blocked ?? null, generatedAt: b.generatedAt ?? null, behindSince: st ? num(st.behindSince) : null } : null,
         git: {
           defaultBranch: st && typeof st.defaultBranch === 'string' ? st.defaultBranch : null,
           ahead: st ? num(st.ahead) : null,
@@ -361,7 +361,7 @@ function createCollector(store, port, opts) {
         },
         prs: st ? num(st.prs) : null,
         branches: st && Array.isArray(st.branches)
-          ? st.branches.map((x) => ({ name: x.name, freshness: x.freshness || 'none', now: x.brief ? (x.brief.now ?? null) : null }))
+          ? st.branches.map((x) => ({ name: x.name, freshness: x.freshness || 'none', now: x.brief ? (x.brief.now ?? null) : null, behindSince: num(x.behindSince) }))
           : [],
         spend14: sp ? { costMicros: sp.costMicros, trend: sp.trend.slice() } : null,
         lastActivity: last,
