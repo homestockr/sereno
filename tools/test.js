@@ -4651,6 +4651,165 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 3 step 0: project registry ---- */
+  {
+    const projects = require('../src/projects.js');
+    const gitEnv = Object.assign({}, process.env, {
+      GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+      GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+    });
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: gitEnv, stdio: 'pipe', windowsHide: true });
+    const mk = () => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-proj-')));
+    const mkRepo = () => {
+      const d = mk();
+      git(d, 'init', '-q');
+      git(d, 'commit', '-q', '--allow-empty', '-m', 'init');
+      return d;
+    };
+    const same = (a, b) => projects.normalizePath(a) === projects.normalizePath(b);
+    const withHome = async (fn) => {
+      const home = mk(); const prev = process.env.SERENO_HOME;
+      process.env.SERENO_HOME = home;
+      try { await fn(home); }
+      finally { if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev; }
+    };
+
+    await atest('projects: plain repo resolves to its root', async () => {
+      const d = mkRepo();
+      const r = await projects.resolveRepo(d);
+      assert.ok(r && same(r.root, d) && same(r.worktree, d));
+    });
+
+    await atest('projects: a nested folder resolves to the same root', async () => {
+      const d = mkRepo();
+      fs.mkdirSync(path.join(d, 'a', 'b'), { recursive: true });
+      const r = await projects.resolveRepo(path.join(d, 'a', 'b'));
+      assert.ok(r && same(r.root, d) && same(r.worktree, d));
+    });
+
+    await atest('projects: a worktree is the same project with a different worktree', async () => {
+      await withHome(async () => {
+        const d = mkRepo();
+        const wt = path.join(mk(), 'wt');
+        git(d, 'worktree', 'add', '-q', '-b', 'side', wt);
+        const reg = projects.createRegistry();
+        await reg.noteCwd(d);
+        await reg.noteCwd(wt);
+        assert.strictEqual(reg.list().length, 1, 'one project, not two');
+        const a = await projects.resolveRepo(d); const b = await projects.resolveRepo(wt);
+        assert.ok(a && b && same(a.root, b.root));
+        assert.ok(!same(b.worktree, b.root), 'worktree path differs from the root');
+        assert.ok(same(b.worktree, wt));
+        assert.strictEqual(projects.projectId(a.root), projects.projectId(b.root));
+      });
+    });
+
+    await atest('projects: not a repo and a missing dir resolve to null', async () => {
+      assert.strictEqual(await projects.resolveRepo(mk()), null);
+      assert.strictEqual(await projects.resolveRepo(path.join(mk(), 'nope')), null);
+      assert.strictEqual(await projects.resolveRepo(''), null);
+    });
+
+    await atest('projects: git missing (ENOENT) resolves to null and never throws', async () => {
+      const exec = () => Promise.reject(Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' }));
+      assert.strictEqual(await projects.resolveRepo(mk(), { exec }), null);
+      await withHome(async () => {
+        const reg = projects.createRegistry({ exec });
+        await reg.noteCwd(mk());
+        assert.deepStrictEqual(reg.list(), []);
+      });
+    });
+
+    await atest('projects: results are cached per cwd for 10 minutes (injected clock)', async () => {
+      const d = mkRepo(); let calls = 0; let t = 1000;
+      const exec = (f, a, o) => { calls++; return Promise.resolve({ stdout: execFileSync(f, a, { cwd: o.cwd, encoding: 'utf8', windowsHide: true }) }); };
+      const cache = new Map();
+      await projects.resolveRepo(d, { exec, cache, now: () => t });
+      const first = calls;
+      await projects.resolveRepo(d, { exec, cache, now: () => t + 9 * 60 * 1000 });
+      assert.strictEqual(calls, first, 'served from cache');
+      await projects.resolveRepo(d, { exec, cache, now: () => t + 11 * 60 * 1000 });
+      assert.ok(calls > first, 'expired after 10 minutes');
+    });
+
+    await atest('projects: case and separators do not change identity', async () => {
+      assert.strictEqual(projects.projectId('C:\\X\\Repo'), projects.projectId('c:/x/repo'));
+      assert.notStrictEqual(projects.projectId('C:\\X\\Repo'), projects.projectId('c:/x/other'));
+      assert.strictEqual(projects.projectId('C:\\X\\Repo').length, 12);
+      await withHome(async () => {
+        const reg = projects.createRegistry();
+        const a = reg.register('C:\\X\\Repo'); const b = reg.register('c:/x/repo');
+        assert.strictEqual(a.id, b.id);
+        assert.strictEqual(reg.list().length, 1);
+        assert.strictEqual(reg.list()[0].name, 'Repo', 'display keeps the original casing');
+      });
+    });
+
+    await atest('projects: a corrupt projects.json reads as empty and is untouched until a change', async () => {
+      await withHome(async (home) => {
+        const f = path.join(home, 'projects.json');
+        fs.writeFileSync(f, '{ not json');
+        const reg = projects.createRegistry();
+        assert.deepStrictEqual(reg.list(), []);
+        assert.strictEqual(fs.readFileSync(f, 'utf8'), '{ not json', 'reading must not overwrite');
+        reg.register(mk());
+        const saved = JSON.parse(fs.readFileSync(f, 'utf8'));
+        assert.strictEqual(saved.projects.length, 1);
+        assert.deepStrictEqual(Object.keys(saved.projects[0]).sort(), ['firstSeen', 'hidden', 'id', 'name', 'repoPath']);
+        assert.ok(!fs.existsSync(f + '.tmp'));
+      });
+    });
+
+    await atest('projects: hide and unhide persist across a reload', async () => {
+      await withHome(async () => {
+        const reg = projects.createRegistry();
+        const p = reg.register(mk());
+        assert.strictEqual(reg.hide(p.id), true);
+        assert.strictEqual(projects.createRegistry().list()[0].hidden, true);
+        assert.strictEqual(reg.unhide(p.id), true);
+        assert.strictEqual(projects.createRegistry().list()[0].hidden, false);
+        assert.strictEqual(reg.hide('nope'), false);
+      });
+    });
+
+    await atest('projects: concurrent noteCwd for one cwd resolves once', async () => {
+      await withHome(async () => {
+        const d = mkRepo(); let calls = 0;
+        const exec = (f, a, o) => { calls++; return Promise.resolve({ stdout: execFileSync(f, a, { cwd: o.cwd, encoding: 'utf8', windowsHide: true }) }); };
+        const reg = projects.createRegistry({ exec });
+        await Promise.all([reg.noteCwd(d), reg.noteCwd(d), reg.noteCwd(d)]);
+        assert.strictEqual(calls, 2, 'one resolve = toplevel + common-dir, not three');
+        assert.strictEqual(reg.list().length, 1);
+      });
+    });
+
+    await atest('projects: /hook answers 204 promptly while noteCwd never resolves; /status never notes', async () => {
+      const PORT = 8921;
+      const noted = [];
+      const stub = { noteCwd: (c) => { noted.push(c); return new Promise(() => {}); } };
+      const c = createCollector(new Store(), PORT, { projects: stub });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const send = (p, body) => new Promise((resolve, reject) => {
+        const b = JSON.stringify(body);
+        const req = http.request({
+          host: '127.0.0.1', port: PORT, path: p, method: 'POST',
+          headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(b) },
+        }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode)); });
+        req.on('error', reject); req.end(b);
+      });
+      try {
+        const t0 = Date.now();
+        assert.strictEqual(await send('/hook', { event: 'SessionStart', payload: { hook_event_name: 'SessionStart', session_id: 'p0', cwd: 'C:\\x\\repo' } }), 204);
+        assert.ok(Date.now() - t0 < 1000);
+        assert.strictEqual(await send('/hook', { event: 'Stop', payload: { hook_event_name: 'Stop', session_id: 'p0' } }), 204);
+        assert.strictEqual(await send('/hook', { event: 'Stop', payload: { hook_event_name: 'Stop', session_id: 'p0', cwd: '' } }), 204);
+        assert.strictEqual(await send('/status', { payload: { session_id: 'p0', cwd: 'C:\\x\\status' } }), 204);
+        await new Promise((r) => setTimeout(r, 50));
+        assert.deepStrictEqual(noted, ['C:\\x\\repo'], 'only a non-empty cwd on /hook is noted');
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

@@ -117,6 +117,7 @@ function createCollector(store, port, opts) {
   // Swappable at runtime (setLedger): the tray toggles it without a restart.
   let ledger = (opts && opts.ledger) || null;
   const now = (opts && typeof opts.now === 'function') ? opts.now : Date.now;
+  const projects = (opts && opts.projects) || null;   // project registry (src/projects.js)
   const clients = new Set();
   let timer = null;
 
@@ -315,6 +316,13 @@ function createCollector(store, port, opts) {
           if (url === '/hook') store.applyHook(event, msg.payload, meta);
           else store.applyStatus(msg.payload, meta);
         } catch (_) { /* a bad payload must never take the HUD down */ }
+        // Project registration runs git, so it is fire-and-forget after the 204.
+        if (url === '/hook' && projects) {
+          try {
+            const cwd = msg.payload.cwd;
+            if (typeof cwd === 'string' && cwd) Promise.resolve(projects.noteCwd(cwd)).catch(() => {});
+          } catch (_) { /* never affects the store or the response */ }
+        }
         // The ledger is a record, not the live view: its failures stay here.
         if (ledger) {
           try {
