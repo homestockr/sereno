@@ -7,6 +7,7 @@
  *
  *   node tools/wire.js [--yes] [--dry-run]
  *   node tools/wire.js --telemetry [--yes] [--dry-run]   (OTLP env only, no hooks)
+ *   node tools/wire.js --commands [--yes] [--dry-run]    (installs the /brief command only)
  *
  * Undo telemetry only with: npm run unwire -- --telemetry
  */
@@ -20,6 +21,7 @@ const argv = process.argv.slice(2);
 const YES = argv.includes('--yes') || argv.includes('-y');
 const DRY = argv.includes('--dry-run');
 const TELEMETRY = argv.includes('--telemetry');
+const COMMANDS = argv.includes('--commands');
 
 const emitJs = path.resolve(__dirname, '..', 'bin', 'emit.js');
 
@@ -53,7 +55,34 @@ async function wireTelemetryOnly() {
   console.log('Undo with: npm run unwire -- --telemetry');
 }
 
+function installBrief() {
+  let r;
+  try { r = wiring.installCommands({ dryRun: DRY }); }
+  catch (e) { console.error(e.message); process.exit(1); }
+  if (r.conflict) {
+    console.log('\nA different commands/brief.md already exists in ' + wiring.configDir() + '. Nothing was changed.');
+    console.log('Move or rename it to let Sereno install /brief.');
+    return;
+  }
+  if (!r.changes.length) { console.log('\nNothing to do - /brief is already installed.'); return; }
+  if (DRY) {
+    console.log('\n--dry-run, nothing written. Would change:');
+    for (const c of r.changes) console.log('  - ' + c);
+    return;
+  }
+  console.log(r.changes[0].endsWith('updated') ? '\nUpdated /brief.' : '\nInstalled /brief.');
+  for (const c of r.changes) console.log('  - ' + c);
+  console.log('Undo with: npm run unwire -- --commands');
+}
+
 async function main() {
+  if (COMMANDS) {
+    if (!DRY && !(await ask('Write commands/brief.md into ' + wiring.configDir() + ' (one file, nothing else changes)?'))) {
+      console.log('Aborted.');
+      return;
+    }
+    return installBrief();
+  }
   if (!fs.existsSync(wiring.configDir())) {
     console.error('Claude Code config dir not found: ' + wiring.configDir());
     console.error('Set CLAUDE_CONFIG_DIR, or run Claude Code once to create it.');

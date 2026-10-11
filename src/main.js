@@ -744,6 +744,36 @@ if (CLI_UNWIRE) {
     catch (e) { return { ok: false, error: e.message }; }
   });
 
+  ipcMain.handle('sereno:commands-status', () => {
+    try { return { ok: true, status: wiring.commandsStatus() }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  // The renderer only asks; the confirmation and the write both happen here.
+  ipcMain.handle('sereno:commands-toggle', async () => {
+    try {
+      const cur = wiring.commandsStatus();
+      if (cur === 'conflict') return { ok: true, status: cur, changed: false };
+      const removing = cur === 'installed';
+      const updating = cur === 'update-available';
+      const { response } = await dialog.showMessageBox({
+        type: 'question',
+        message: removing ? 'Remove the /brief command from ~/.claude/commands?'
+          : updating ? 'Update the /brief command in ~/.claude/commands?'
+            : 'Install the /brief command into ~/.claude/commands?',
+        detail: removing ? 'Sereno removes that one file if you have not changed it, and changes nothing else.'
+          : 'Sereno writes one file and changes nothing else.',
+        buttons: [removing ? 'Remove /brief' : updating ? 'Update /brief' : 'Install /brief', 'Cancel'],
+        defaultId: 1,   // Enter / Escape never write
+        cancelId: 1,
+        noLink: true,
+      });
+      if (response !== 0) return { ok: true, status: cur, changed: false };
+      if (removing) wiring.uninstallCommands(); else wiring.installCommands();
+      return { ok: true, status: wiring.commandsStatus(), changed: true };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+
   ipcMain.handle('sereno:focus', async (_e, pid) => {
     const target = Number(pid);
     if (!Number.isInteger(target) || target <= 0) return false;

@@ -58,6 +58,7 @@
     "files": [
       "src/**/*",
       "bin/**/*",
+      "templates/**/*",
       "package.json"
     ],
     "asarUnpack": [

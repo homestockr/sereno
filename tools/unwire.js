@@ -15,6 +15,7 @@ const argv = process.argv.slice(2);
 const YES = argv.includes('--yes') || argv.includes('-y');
 const LIST = argv.includes('--list');
 const TELEMETRY = argv.includes('--telemetry');
+const COMMANDS = argv.includes('--commands');
 
 function ask(q) {
   if (YES) return Promise.resolve(true);
@@ -25,6 +26,13 @@ function ask(q) {
 }
 
 async function main() {
+  if (COMMANDS) {
+    const r = wiring.uninstallCommands();
+    if (!r.recorded) { console.log('No commands record in wired.json - removed nothing.'); return; }
+    console.log(r.removed.length ? 'Removed: ' + r.removed.join(', ') : 'No command files left to remove.');
+    if (r.kept.length) console.log('Kept (you changed it): ' + r.kept.join(', '));
+    return;
+  }
   if (TELEMETRY) {
     const r = wiring.unwireTelemetry();
     if (!r.recorded) { console.log('No telemetry record in wired.json - removed nothing.'); return; }

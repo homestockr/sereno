@@ -20,6 +20,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const config = require('./config.js');
 
 const EVENTS = [
@@ -406,6 +407,86 @@ function conflictMessage(keys) {
     + 'Nothing was changed. Remove or align those keys to let Sereno wire telemetry.';
 }
 
+/* ---------- /brief slash command (templates/commands/brief.md) ---------- */
+
+const COMMAND_KEY = 'commands/brief.md';
+
+/** The bundled template. Same relative path in dev and inside app.asar. */
+function commandTemplatePath() {
+  return path.join(__dirname, '..', 'templates', 'commands', 'brief.md');
+}
+function commandTargetPath() { return path.join(configDir(), 'commands', 'brief.md'); }
+const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+
+function readIfExists(file) {
+  try { return fs.readFileSync(file); } catch (e) { if (e && e.code === 'ENOENT') return null; throw e; }
+}
+
+/** 'installed' (same bytes), 'not-installed', 'update-available' (our unedited copy, older than the bundle) or 'conflict'. */
+function commandsStatus(options) {
+  const tpl = fs.readFileSync((options && options.templatePath) || commandTemplatePath());
+  const cur = readIfExists(commandTargetPath());
+  if (cur === null) return 'not-installed';
+  if (cur.equals(tpl)) return 'installed';
+  // Ours and unedited (matches the recorded sha) but behind the bundled template: an upgrade, not a conflict.
+  const rec = readWiredRecord().commands;
+  return rec && rec[COMMAND_KEY] === sha256(cur) ? 'update-available' : 'conflict';
+}
+function commandsInstalled(options) {
+  try { return commandsStatus(options) === 'installed'; } catch (_) { return false; }
+}
+
+/**
+ * Copies the /brief command into <configDir>/commands. Never overwrites a
+ * different file: that returns { conflict: ['commands/brief.md'] } and writes nothing.
+ * @param {{dryRun?: boolean, templatePath?: string}} [options]
+ */
+function installCommands(options) {
+  const opt = options || {};
+  const tpl = fs.readFileSync(opt.templatePath || commandTemplatePath());
+  const target = commandTargetPath();
+  const cur = readIfExists(target);
+  if (cur !== null) {
+    if (cur.equals(tpl)) return { conflict: null, changes: [], installed: true };
+    const recd = readWiredRecord().commands;
+    if (!(recd && recd[COMMAND_KEY] === sha256(cur))) return { conflict: [COMMAND_KEY], changes: [] };
+  }
+  const changes = [COMMAND_KEY + (cur !== null ? ': updated' : ': added')];
+  if (opt.dryRun) return { conflict: null, changes, dryRun: true };
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const tmp = target + '.tmp-' + process.pid;
+  try {
+    fs.writeFileSync(tmp, tpl);
+    fs.renameSync(tmp, target);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (_) { /* nothing to clean */ }
+    throw e;
+  }
+  const rec = readWiredRecord();
+  rec.commands = Object.assign({}, rec.commands, { [COMMAND_KEY]: sha256(tpl) });
+  writeWiredRecord(rec);
+  return { conflict: null, changes, installed: true };
+}
+
+/** Removes brief.md only if it still matches the sha256 we recorded; otherwise keeps it. */
+function uninstallCommands() {
+  const rec = readWiredRecord();
+  const want = rec.commands && rec.commands[COMMAND_KEY];
+  if (typeof want !== 'string') return { removed: [], kept: [], recorded: false };
+  const target = commandTargetPath();
+  const cur = readIfExists(target);
+  const removed = [];
+  const kept = [];
+  if (cur !== null) {
+    if (sha256(cur) === want) { fs.unlinkSync(target); removed.push(COMMAND_KEY); }
+    else kept.push(COMMAND_KEY);
+  }
+  delete rec.commands[COMMAND_KEY];
+  if (!Object.keys(rec.commands).length) delete rec.commands;
+  writeWiredRecord(rec);
+  return { removed, kept, recorded: true };
+}
+
 function backups() {
   const file = settingsPath();
   const dir = path.dirname(file);
@@ -434,5 +515,6 @@ function unwire() {
 module.exports = {
   EVENTS, ledgerPath, configDir, settingsPath, buildCommands,
   wireTelemetry, unwireTelemetry, telemetryWired, conflictMessage, telemetryEnv,
+  installCommands, uninstallCommands, commandsInstalled, commandsStatus, commandTemplatePath,
   status, wire, unwire, removeEntries, backups, isOurs, shimPathOf, ownShims,
 };

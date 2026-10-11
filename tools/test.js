@@ -5248,6 +5248,263 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 3 step 3: /brief command ---- */
+  {
+    const briefs = require('../src/briefs.js');
+    const TPL = path.join(ROOT, 'templates', 'commands', 'brief.md');
+    const tplText = fs.readFileSync(TPL, 'utf8');
+    const sha = (b) => require('node:crypto').createHash('sha256').update(b).digest('hex');
+    const mkEnv = () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-cmd-'));
+      const prev = { c: process.env.CLAUDE_CONFIG_DIR, h: process.env.SERENO_HOME };
+      process.env.CLAUDE_CONFIG_DIR = tmp;
+      process.env.SERENO_HOME = tmp;
+      return {
+        tmp,
+        target: path.join(tmp, 'commands', 'brief.md'),
+        done() {
+          if (prev.c === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev.c;
+          if (prev.h === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev.h;
+          fs.rmSync(tmp, { recursive: true, force: true });
+        },
+      };
+    };
+    const rec = (e) => JSON.parse(fs.readFileSync(path.join(e.tmp, 'wired.json'), 'utf8'));
+
+    test('commands: install writes the template, creates the dir, records the sha256', () => {
+      const e = mkEnv();
+      try {
+        assert.strictEqual(wiring.commandsStatus(), 'not-installed');
+        const dry = wiring.installCommands({ dryRun: true });
+        assert.ok(dry.dryRun && dry.changes.length === 1);
+        assert.ok(!fs.existsSync(path.join(e.tmp, 'commands')), 'dry run wrote something');
+        const r = wiring.installCommands();
+        assert.strictEqual(r.conflict, null);
+        assert.strictEqual(fs.readFileSync(e.target, 'utf8'), tplText);
+        assert.strictEqual(rec(e).commands['commands/brief.md'], sha(fs.readFileSync(TPL)));
+        assert.strictEqual(wiring.commandsStatus(), 'installed');
+        assert.ok(wiring.commandsInstalled());
+        assert.deepStrictEqual(fs.readdirSync(path.dirname(e.target)), ['brief.md'], 'tmp file left behind');
+      } finally { e.done(); }
+    });
+
+    test('commands: installing again is a no-op (same bytes, same mtime)', () => {
+      const e = mkEnv();
+      try {
+        wiring.installCommands();
+        const old = new Date(Date.now() - 3600 * 1000);
+        fs.utimesSync(e.target, old, old);
+        const before = fs.statSync(e.target).mtimeMs;
+        const r = wiring.installCommands();
+        assert.deepStrictEqual(r.changes, []);
+        assert.strictEqual(r.conflict, null);
+        assert.strictEqual(fs.statSync(e.target).mtimeMs, before, 'file was rewritten');
+      } finally { e.done(); }
+    });
+
+    test('commands: a different existing brief.md is a conflict and stays byte-identical', () => {
+      const e = mkEnv();
+      try {
+        fs.mkdirSync(path.dirname(e.target), { recursive: true });
+        const mine = Buffer.from('# my own /brief\r\nkeep me\n');
+        fs.writeFileSync(e.target, mine);
+        const r = wiring.installCommands();
+        assert.deepStrictEqual(r.conflict, ['commands/brief.md']);
+        assert.ok(fs.readFileSync(e.target).equals(mine));
+        assert.strictEqual(wiring.commandsStatus(), 'conflict');
+        assert.strictEqual(wiring.commandsInstalled(), false);
+        assert.ok(!fs.existsSync(path.join(e.tmp, 'wired.json')), 'a conflict must not record anything');
+        assert.deepStrictEqual(wiring.uninstallCommands().removed, [], 'must not remove a file we never wrote');
+        assert.ok(fs.readFileSync(e.target).equals(mine));
+      } finally { e.done(); }
+    });
+
+    test('commands: uninstall removes an unchanged file and the record; keeps an edited one', () => {
+      const e = mkEnv();
+      try {
+        wiring.installCommands();
+        const r = wiring.uninstallCommands();
+        assert.deepStrictEqual(r.removed, ['commands/brief.md']);
+        assert.ok(!fs.existsSync(e.target));
+        assert.strictEqual(rec(e).commands, undefined);
+
+        wiring.installCommands();
+        fs.appendFileSync(e.target, '\nmy edit\n');
+        const edited = fs.readFileSync(e.target);
+        const k = wiring.uninstallCommands();
+        assert.deepStrictEqual(k.kept, ['commands/brief.md']);
+        assert.deepStrictEqual(k.removed, []);
+        assert.ok(fs.readFileSync(e.target).equals(edited), 'edited file was touched');
+        assert.strictEqual(rec(e).commands, undefined, 'record should be dropped either way');
+        assert.strictEqual(wiring.uninstallCommands().recorded, false);
+      } finally { e.done(); }
+    });
+
+    test('commands: an unedited older copy is update-available and is replaced; an edited one stays a conflict', () => {
+      const e = mkEnv();
+      try {
+        const oldTpl = path.join(e.tmp, 'old-template.md');
+        fs.writeFileSync(oldTpl, 'old version of the command\n');
+        wiring.installCommands({ templatePath: oldTpl });
+        assert.strictEqual(wiring.commandsStatus({ templatePath: oldTpl }), 'installed');
+        // The bundled template moves on.
+        assert.strictEqual(wiring.commandsStatus(), 'update-available');
+        assert.strictEqual(wiring.commandsInstalled(), false);
+        const dry = wiring.installCommands({ dryRun: true });
+        assert.deepStrictEqual(dry.changes, ['commands/brief.md: updated']);
+        assert.strictEqual(fs.readFileSync(e.target, 'utf8'), 'old version of the command\n');
+        const r = wiring.installCommands();
+        assert.strictEqual(r.conflict, null);
+        assert.strictEqual(fs.readFileSync(e.target, 'utf8'), tplText);
+        assert.strictEqual(rec(e).commands['commands/brief.md'], sha(fs.readFileSync(TPL)));
+        assert.strictEqual(wiring.commandsStatus(), 'installed');
+        assert.deepStrictEqual(fs.readdirSync(path.dirname(e.target)), ['brief.md']);
+
+        // User-edited older copy: matches neither the record nor the bundle.
+        wiring.uninstallCommands();
+        wiring.installCommands({ templatePath: oldTpl });
+        fs.appendFileSync(e.target, 'my edit\n');
+        const edited = fs.readFileSync(e.target);
+        assert.strictEqual(wiring.commandsStatus(), 'conflict');
+        assert.deepStrictEqual(wiring.installCommands().conflict, ['commands/brief.md']);
+        assert.ok(fs.readFileSync(e.target).equals(edited));
+      } finally { e.done(); }
+    });
+
+    test('commands: wired.json keeps shim and telemetry records intact', () => {
+      const e = mkEnv();
+      try {
+        fs.writeFileSync(path.join(e.tmp, 'settings.json'), '{}\n');
+        wiring.wire(wiring.buildCommands({ packaged: false, emitJsPath: path.join(ROOT, 'bin', 'emit.js') }));
+        wiring.wireTelemetry({ traces: true });
+        const before = rec(e);
+        assert.ok(before.shims.length && before.telemetry);
+        wiring.installCommands();
+        const mid = rec(e);
+        assert.deepStrictEqual(mid.shims, before.shims);
+        assert.deepStrictEqual(mid.telemetry, before.telemetry);
+        wiring.uninstallCommands();
+        const after = rec(e);
+        assert.deepStrictEqual(after, before);
+        // And the other direction: telemetry/shim writes keep the commands record.
+        wiring.installCommands();
+        wiring.unwireTelemetry();
+        assert.ok(rec(e).commands['commands/brief.md']);
+      } finally { e.done(); }
+    });
+
+    await atest('commands: CLI --commands honours --dry-run, installs, prints conflict and exits 0, unwires', async () => {
+      const e = mkEnv();
+      try {
+        const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: e.tmp, SERENO_HOME: e.tmp });
+        const run = (script, ...a) => spawnSync(process.execPath, [path.join(ROOT, 'tools', script), ...a], { env, encoding: 'utf8' });
+        let r = run('wire.js', '--commands', '--dry-run');
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.ok(/dry-run/.test(r.stdout) && !fs.existsSync(e.target));
+        r = run('wire.js', '--commands', '--yes');
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.strictEqual(fs.readFileSync(e.target, 'utf8'), tplText);
+        assert.ok(!fs.existsSync(path.join(e.tmp, 'settings.json')), 'the commands flag must not touch settings.json');
+        r = run('wire.js', '--commands', '--yes');
+        assert.ok(/already installed/.test(r.stdout), r.stdout);
+        r = run('unwire.js', '--commands');
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.ok(!fs.existsSync(e.target));
+        fs.mkdirSync(path.dirname(e.target), { recursive: true });
+        fs.writeFileSync(e.target, 'someone else\n');
+        r = run('wire.js', '--commands', '--yes');
+        assert.strictEqual(r.status, 0, r.stderr);
+        assert.ok(/different commands\/brief\.md/.test(r.stdout), r.stdout);
+        assert.strictEqual(fs.readFileSync(e.target, 'utf8'), 'someone else\n');
+      } finally { e.done(); }
+    });
+
+    test('commands: the template ships in the build and is reachable from wiring', () => {
+      const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+      assert.ok(pkg.build.files.includes('templates/**/*'), 'templates/ missing from build.files');
+      assert.strictEqual(path.resolve(wiring.commandTemplatePath()), path.resolve(TPL));
+    });
+
+    test('commands: the template names every front-matter key and line key the parser reads', () => {
+      for (const k of ['branch', 'worktree', 'version', 'source_commit', 'task', 'generated_at']) {
+        assert.ok(new RegExp('^' + k + ':', 'm').test(tplText), 'template lacks front-matter key ' + k);
+      }
+      for (const k of ['Now', 'Next', 'Blocked']) {
+        assert.ok(new RegExp('^' + k + ':', 'm').test(tplText), 'template lacks line ' + k);
+      }
+      assert.ok(tplText.includes('feat%2Fx.md'), 'the encoding example is missing');
+      assert.ok(/^description: .+/m.test(tplText.split('\n---')[0]));
+      assert.ok(tplText.includes('$ARGUMENTS'));
+      for (const c of ['git branch --show-current', 'git rev-parse --show-toplevel', 'git rev-parse HEAD']) {
+        assert.ok(tplText.includes(c), 'missing ' + c);
+      }
+    });
+
+    test('commands: the format the template shows parses, and so does a brief rendered by its rules', () => {
+      const m = /```\n(---\n[\s\S]*?\n---\n[\s\S]*?)\n```/.exec(tplText);
+      assert.ok(m, 'no format example in the template');
+      const b = briefs.parseBrief(m[1]);
+      assert.ok(b, 'the template example does not parse');
+      assert.strictEqual(b.branch, 'feat/x');
+      assert.strictEqual(b.version, 3);
+      assert.ok(b.sourceCommit && b.sourceCommit.length === 40);
+      assert.ok(b.now && b.next && b.blocked === 'None');
+
+      // Rendered by hand following the template: CRLF-free, forward-slash worktree, kebab task, UTC time.
+      const branch = 'feat/projects-briefs';
+      const sample = [
+        '---', 'branch: ' + branch, 'worktree: C:/Users/me/code/sereno', 'version: 1',
+        'source_commit: ' + 'a1b2c3d4'.repeat(5), 'task: brief-command', 'generated_at: 2026-10-11T14:05:00Z', '---',
+        'Now: Adding the /brief command template and its installer.',
+        'Next: Wire the install button into the settings panel.',
+        'Blocked: None', '',
+      ].join('\n');
+      const p = briefs.parseBrief(sample);
+      assert.ok(p, 'rendered brief rejected');
+      assert.deepStrictEqual([p.branch, p.worktree, p.version, p.task, p.generatedAt, p.blocked],
+        [branch, 'C:/Users/me/code/sereno', 1, 'brief-command', '2026-10-11T14:05:00Z', 'None']);
+      // The file name rule: encodeURIComponent, which the reader decodes back.
+      const name = encodeURIComponent(branch) + '.md';
+      assert.strictEqual(name, 'feat%2Fprojects-briefs.md');
+      assert.strictEqual(briefs.decodeBriefName(name), branch);
+    });
+
+    test('commands: neither template tells Claude to commit or stage', () => {
+      const scribe = fs.readFileSync(path.join(ROOT, 'templates', 'agents', 'sereno-scribe.md'), 'utf8');
+      for (const [n, t] of [['brief.md', tplText], ['sereno-scribe.md', scribe]]) {
+        assert.ok(!/git\s+(commit|add|stage|push|reset|checkout)\b/i.test(t), n + ' mentions a git write command');
+        assert.ok(/do not commit|not commit/i.test(t), n + ' should forbid committing');
+      }
+    });
+
+    test('commands: sereno-scribe is a haiku agent that points at the same brief rules', () => {
+      const scribe = fs.readFileSync(path.join(ROOT, 'templates', 'agents', 'sereno-scribe.md'), 'utf8');
+      assert.ok(/^name: sereno-scribe$/m.test(scribe) && /^model: haiku$/m.test(scribe));
+      for (const k of ['branch', 'worktree', 'version', 'source_commit', 'task', 'generated_at', 'Now:', 'Next:', 'Blocked:']) {
+        assert.ok(scribe.includes(k), 'sereno-scribe lacks ' + k);
+      }
+      assert.ok(scribe.includes('.sereno/briefs/'));
+      // The Phase 1 scribe is untouched.
+      assert.ok(fs.existsSync(path.join(ROOT, 'templates', 'agents', 'scribe.md')));
+    });
+
+    test('commands: the settings row is wired through preload and main, hidden without preload', () => {
+      const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const pre = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+      const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+      assert.ok(html.includes('id="brief-row"') && /id="brief-row"[^>]*hidden/.test(html));
+      assert.ok(/if \(!api \|\| !api\.commandsStatus\) \{ ui\.briefRow\.hidden = true/.test(app));
+      assert.ok(pre.includes('sereno:commands-status') && pre.includes('sereno:commands-toggle'));
+      // The confirmation lives in main, defaults to Cancel, and precedes the write.
+      const i = main.indexOf("'sereno:commands-toggle'");
+      const seg = main.slice(i, i + 1800);
+      assert.ok(/defaultId: 1/.test(seg) && /Cancel/.test(seg));
+      assert.ok(seg.indexOf('showMessageBox') < seg.indexOf('installCommands'));
+      assert.ok(seg.includes('Sereno writes one file and changes nothing else.'));
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

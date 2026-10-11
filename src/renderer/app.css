@@ -535,3 +535,7 @@ html, body { height: 100%; }
 .console-line a { color: #c2c6cc; text-decoration: none; }
 .console-line a:hover { color: #fff; text-decoration: underline; }
 .console-line a:focus-visible { outline: 2px solid #f3cc91; outline-offset: 3px; }
+
+/* The /brief row: a status on the left, its button on the right. */
+#brief-row { align-items: center; }
+#brief-row .review { flex: none; width: auto; margin: 0 0 0 auto; padding: 6px 10px; }
