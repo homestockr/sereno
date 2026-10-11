@@ -12,10 +12,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFile } = require('node:child_process');
 const config = require('./config.js');
+const { gitExec } = require('./gitexec.js');
 
-const GIT_TIMEOUT_MS = 5000;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
 /**
@@ -25,14 +24,8 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
  * @typedef {{ id: string, name: string, repoPath: string, hidden: boolean, firstSeen: number }} Project
  */
 
-/** @type {Exec} */
-function defaultExec(file, args, opts) {
-  return new Promise((resolve, reject) => {
-    execFile(file, args, {
-      cwd: opts && opts.cwd, windowsHide: true, timeout: GIT_TIMEOUT_MS, encoding: 'utf8', maxBuffer: 1024 * 1024,
-    }, (err, stdout) => (err ? reject(err) : resolve({ stdout: String(stdout) })));
-  });
-}
+/** Shared hardened git runner (src/gitexec.js). @type {Exec} */
+const defaultExec = gitExec;
 
 /**
  * Identity form of a path: absolute, forward slashes, no trailing slash, and

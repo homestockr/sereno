@@ -4810,6 +4810,225 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 3 step 1: repo poller ---- */
+  {
+    const repos = require('../src/repos.js');
+    const { gitExec } = require('../src/gitexec.js');
+    const baseEnv = Object.assign({}, process.env, {
+      GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+      GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+    });
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: baseEnv, stdio: 'pipe', windowsHide: true }).toString();
+    const gitAt = (cwd, unix, ...args) => execFileSync('git', args, {
+      cwd, windowsHide: true, stdio: 'pipe',
+      env: Object.assign({}, baseEnv, { GIT_AUTHOR_DATE: unix + ' +0000', GIT_COMMITTER_DATE: unix + ' +0000' }),
+    });
+    const mk = () => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-poll-')));
+    const mkRepo = (branch) => {
+      const d = mk();
+      git(d, 'init', '-q', '-b', branch || 'main');
+      git(d, 'commit', '-q', '--allow-empty', '-m', 'init');
+      return d;
+    };
+    const fake = (dirs) => ({ list: () => dirs.map((d, i) => ({ id: 'p' + i, name: path.basename(d), repoPath: d, hidden: false })) });
+    const pollOnce = async (d, o) => {
+      const p = repos.createPoller(Object.assign({ registry: fake([d]) }, o || {}));
+      await p.pollNow();
+      return p.snapshot().p0;
+    };
+    const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+    await atest('repos: ahead/behind against a local bare origin; no upstream is null', async () => {
+      const origin = mk(); git(origin, 'init', '-q', '--bare', '-b', 'main');
+      const a = mk(); git(a, 'clone', '-q', origin, a);
+      git(a, 'checkout', '-q', '-b', 'main');
+      git(a, 'commit', '-q', '--allow-empty', '-m', 'one');
+      git(a, 'push', '-q', '-u', 'origin', 'main');
+      let s = await pollOnce(a);
+      assert.strictEqual(s.defaultBranch, 'main');
+      assert.strictEqual(s.ahead, 0); assert.strictEqual(s.behind, 0);
+      git(a, 'commit', '-q', '--allow-empty', '-m', 'local');
+      s = await pollOnce(a);
+      assert.strictEqual(s.ahead, 1); assert.strictEqual(s.behind, 0);
+      const b = mk(); git(b, 'clone', '-q', origin, b);
+      git(b, 'commit', '-q', '--allow-empty', '-m', 'remote'); git(b, 'push', '-q', 'origin', 'main');
+      git(a, 'fetch', '-q', 'origin');
+      s = await pollOnce(a);
+      assert.strictEqual(s.ahead, 1); assert.strictEqual(s.behind, 1);
+      s = await pollOnce(mkRepo());
+      assert.strictEqual(s.ahead, null); assert.strictEqual(s.behind, null);
+      assert.strictEqual(s.error, false);
+    });
+
+    await atest('repos: default branch from origin/HEAD, then main, master, then the current branch', async () => {
+      const origin = mk(); git(origin, 'init', '-q', '--bare', '-b', 'trunk');
+      const seed = mkRepo('trunk');
+      git(seed, 'push', '-q', origin, 'trunk');
+      const c = mk(); git(c, 'clone', '-q', origin, c);
+      git(c, 'checkout', '-q', '-b', 'main');          // a local "main" exists too: origin/HEAD still wins
+      assert.strictEqual((await pollOnce(c)).defaultBranch, 'trunk');
+      const m = mkRepo('main'); git(m, 'checkout', '-q', '-b', 'work');
+      assert.strictEqual((await pollOnce(m)).defaultBranch, 'main');
+      assert.strictEqual((await pollOnce(mkRepo('master'))).defaultBranch, 'master');
+      assert.strictEqual((await pollOnce(mkRepo('dev'))).defaultBranch, 'dev');
+    });
+
+    await atest('repos: dirty is a tracked change only; untracked files do not count', async () => {
+      const d = mkRepo();
+      fs.writeFileSync(path.join(d, 'a.txt'), '1'); git(d, 'add', 'a.txt'); git(d, 'commit', '-q', '-m', 'a');
+      assert.strictEqual((await pollOnce(d)).dirty, false);
+      fs.writeFileSync(path.join(d, 'new.txt'), 'x');
+      assert.strictEqual((await pollOnce(d)).dirty, false, 'untracked only');
+      fs.writeFileSync(path.join(d, 'a.txt'), '2');
+      const s = await pollOnce(d);
+      assert.strictEqual(s.dirty, true);
+      assert.strictEqual(s.worktrees[0].dirty, true);
+    });
+
+    await atest('repos: a worktree on another branch reports its branch and dirty separately; detached has null', async () => {
+      const d = mkRepo();
+      fs.writeFileSync(path.join(d, 'a.txt'), '1'); git(d, 'add', 'a.txt'); git(d, 'commit', '-q', '-m', 'a');
+      const wt = path.join(mk(), 'wt'); git(d, 'worktree', 'add', '-q', '-b', 'side', wt);
+      const det = path.join(mk(), 'det'); git(d, 'worktree', 'add', '-q', '--detach', det);
+      fs.writeFileSync(path.join(wt, 'a.txt'), 'changed');
+      const s = await pollOnce(d);
+      assert.strictEqual(s.worktrees.length, 3);
+      const find = (p) => s.worktrees.find((w) => samePath(w.path, p));
+      assert.strictEqual(find(d).branch, 'main'); assert.strictEqual(find(d).dirty, false);
+      assert.strictEqual(find(wt).branch, 'side'); assert.strictEqual(find(wt).dirty, true);
+      assert.strictEqual(find(det).branch, null); assert.strictEqual(find(det).dirty, false);
+      assert.strictEqual(s.dirty, true);
+      assert.deepStrictEqual(Object.keys(s.worktrees[0]).sort(), ['branch', 'dirty', 'path']);
+    });
+
+    await atest('repos: shown branches are the default plus the last 14 days, at most 8, newest first', async () => {
+      const day = 86400; const T0 = 1700000000;
+      const d = mk(); git(d, 'init', '-q', '-b', 'main');
+      gitAt(d, T0, 'commit', '-q', '--allow-empty', '-m', 'base');
+      for (let i = 0; i < 10; i++) {
+        git(d, 'checkout', '-q', '-b', 'b' + i, 'main');
+        gitAt(d, T0 + (10 + i) * day, 'commit', '-q', '--allow-empty', '-m', 'c' + i);
+      }
+      git(d, 'checkout', '-q', 'main');
+      git(d, 'branch', 'old', 'main');
+      const now = () => (T0 + 20 * day) * 1000;
+      const s = await pollOnce(d, { now });
+      const names = s.branches.map((b) => b.name);
+      assert.strictEqual(names.length, 8);
+      assert.ok(names.includes('main'), 'default always shown');
+      assert.ok(!names.includes('old'));
+      assert.deepStrictEqual(names.slice(0, 3), ['b9', 'b8', 'b7']);
+      for (let i = 1; i < s.branches.length; i++) assert.ok(s.branches[i - 1].lastCommitAt >= s.branches[i].lastCommitAt);
+      assert.strictEqual(s.lastCommitAt, (T0 + 19 * day) * 1000);
+      assert.ok(/^[0-9a-f]{40}/.test(s.branches[0].head));
+      const s2 = await pollOnce(d, { now: () => (T0 + 60 * day) * 1000 });
+      assert.deepStrictEqual(s2.branches.map((b) => b.name), ['main']);
+    });
+
+    await atest('repos: a git failure keeps the last good state and sets error; no good data yet is error with nulls', async () => {
+      const d = mkRepo(); let fail = false;
+      const exec = (f, a, o) => (fail ? Promise.reject(new Error('boom')) : gitExec(f, a, o));
+      const p = repos.createPoller({ registry: fake([d]), exec });
+      await p.pollNow();
+      const good = p.snapshot().p0;
+      assert.strictEqual(good.error, false); assert.strictEqual(good.defaultBranch, 'main');
+      fail = true; await p.pollNow();
+      const bad = p.snapshot().p0;
+      assert.strictEqual(bad.error, true);
+      assert.strictEqual(bad.defaultBranch, 'main'); assert.deepStrictEqual(bad.branches, good.branches);
+      fail = false; await p.pollNow();
+      assert.strictEqual(p.snapshot().p0.error, false);
+      const q = repos.createPoller({ registry: fake([d]), exec: () => Promise.reject(Object.assign(new Error('x'), { code: 'ENOENT' })) });
+      await q.pollNow();
+      const n = q.snapshot().p0;
+      assert.strictEqual(n.error, true); assert.strictEqual(n.defaultBranch, null);
+      assert.strictEqual(n.dirty, null); assert.strictEqual(n.polledAt, null); assert.deepStrictEqual(n.branches, []);
+    });
+
+    await atest('repos: hidden projects are skipped and overlapping pollNow calls share one run', async () => {
+      const d = mkRepo(); let calls = 0;
+      const exec = (f, a, o) => { calls++; return gitExec(f, a, o); };
+      const reg = { list: () => [
+        { id: 'p0', name: 'x', repoPath: d, hidden: false },
+        { id: 'h', name: 'hid', repoPath: d, hidden: true }] };
+      const p = repos.createPoller({ registry: reg, exec });
+      await p.pollNow(); const single = calls;
+      assert.ok(single > 0);
+      assert.deepStrictEqual(Object.keys(p.snapshot()), ['p0']);
+      calls = 0;
+      const rs = [p.pollNow(), p.pollNow(), p.pollNow()];
+      await Promise.all(rs);
+      assert.strictEqual(calls, single, 'three overlapping calls ran git once');
+      await p.pollNow();
+      assert.strictEqual(calls, single * 2, 'a later call runs again');
+    });
+
+    await atest('repos: stop() leaves no timer, and a started poller never keeps the process alive', async () => {
+      const code = 'const r=require(' + JSON.stringify(path.join(ROOT, 'src', 'repos.js')) + ');' +
+        'const p=r.createPoller({registry:{list:()=>[]},intervalMs:50});p.start();p.stop();p.stop();' +
+        'const q=r.createPoller({registry:{list:()=>[]},intervalMs:50});q.start();';
+      const out = spawnSync(process.execPath, ['-e', code], { timeout: 10000, windowsHide: true });
+      assert.strictEqual(out.status, 0, 'child exited by itself');
+    });
+
+    await atest('repos: a clean filter in repo config never runs during the dirty check', async () => {
+      const d = mkRepo();
+      fs.writeFileSync(path.join(d, 'a.txt'), '1'); git(d, 'add', 'a.txt'); git(d, 'commit', '-q', '-m', 'a');
+      fs.writeFileSync(path.join(d, '.gitattributes'), '* filter=evil\n');
+      const marker = path.join(mk(), 'filtered').replace(/\\/g, '/');
+      git(d, 'config', 'filter.evil.clean', 'sh -c "touch \'' + marker + '\'; cat"');
+      git(d, 'config', 'filter.evil.required', 'true');
+      const later = new Date(Date.now() + 5000);
+      fs.utimesSync(path.join(d, 'a.txt'), later, later);   // stat-dirty: git must compare content
+      git(d, 'status', '--porcelain', '--untracked-files=no');
+      assert.ok(fs.existsSync(marker), 'control: unprotected git should have run the clean filter');
+      fs.rmSync(marker, { force: true });
+      const later2 = new Date(Date.now() + 9000);
+      fs.utimesSync(path.join(d, 'a.txt'), later2, later2);
+      const s = await pollOnce(d);
+      assert.strictEqual(s.error, false);
+      assert.strictEqual(fs.existsSync(marker), false, 'dirty check must not run filter.clean');
+    });
+
+    await atest('repos: a submodule with its own clean filter is never entered by the dirty check', async () => {
+      const subSrc = mkRepo();
+      fs.writeFileSync(path.join(subSrc, 'f.txt'), '1'); git(subSrc, 'add', 'f.txt'); git(subSrc, 'commit', '-q', '-m', 'f');
+      const d = mkRepo();
+      git(d, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', subSrc, 'sub');
+      git(d, 'commit', '-q', '-m', 'sub');
+      const sub = path.join(d, 'sub');
+      fs.writeFileSync(path.join(sub, '.gitattributes'), '* filter=evil\n');
+      const marker = path.join(mk(), 'subfiltered').replace(/\\/g, '/');
+      git(sub, 'config', 'filter.evil.clean', 'sh -c "touch \'' + marker + '\'; cat"');
+      const later = new Date(Date.now() + 5000);
+      fs.utimesSync(path.join(sub, 'f.txt'), later, later);
+      git(d, 'status', '--porcelain', '--untracked-files=no');
+      assert.ok(fs.existsSync(marker), 'control: unprotected git should have entered the submodule');
+      fs.rmSync(marker, { force: true });
+      const later2 = new Date(Date.now() + 9000);
+      fs.utimesSync(path.join(sub, 'f.txt'), later2, later2);
+      const s = await pollOnce(d);
+      assert.strictEqual(s.error, false);
+      assert.strictEqual(fs.existsSync(marker), false, 'dirty check must not enter the submodule');
+    });
+
+    await atest('repos: a repo whose config sets core.fsmonitor never runs it (nor does project resolve)', async () => {
+      const d = mkRepo();
+      fs.writeFileSync(path.join(d, 'a.txt'), '1'); git(d, 'add', 'a.txt'); git(d, 'commit', '-q', '-m', 'a');
+      const marker = path.join(mk(), 'pwned').replace(/\\/g, '/');
+      git(d, 'config', 'core.fsmonitor', 'touch "' + marker + '"');
+      // control: an unprotected git runs it, so the assertions below are not vacuous
+      git(d, 'status', '--porcelain');
+      assert.ok(fs.existsSync(marker), 'control: unprotected git should have fired fsmonitor');
+      fs.rmSync(marker, { force: true });
+      const s = await pollOnce(d);
+      assert.strictEqual(s.error, false);
+      assert.strictEqual(fs.existsSync(marker), false, 'poller must not trigger core.fsmonitor');
+      await require('../src/projects.js').resolveRepo(d);
+      assert.strictEqual(fs.existsSync(marker), false, 'resolveRepo must not trigger core.fsmonitor');
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
