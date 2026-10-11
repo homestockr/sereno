@@ -369,6 +369,55 @@ function liveState(p, sessions) {
   return null;
 }
 
+const LIVE_RANK = ['idle', 'thinking', 'running', 'blocked'];
+
+/**
+ * projectId -> best live state, derived from a pushed snapshot by matching its top-level,
+ * non-stale session ids against p.live.sessionIds (the server's cwd join, last /api/projects).
+ * Projects without p.live are left out: they keep the server value / name fallback.
+ */
+function deriveLiveStates(projects, sessions) {
+  const top = (Array.isArray(sessions) ? sessions : []).filter((s) => s && typeof s === 'object' && !s.stale && !s.agent_id && !s.agentId);
+  const out = {};
+  for (const p of Array.isArray(projects) ? projects : []) {
+    if (!p || !p.live || !Array.isArray(p.live.sessionIds)) continue;
+    const ids = new Set(p.live.sessionIds);
+    let rank = -1;
+    for (const s of top) if (ids.has(s.id)) rank = Math.max(rank, LIVE_RANK.indexOf(s.state));
+    out[p.id] = rank >= 0 ? LIVE_RANK[rank] : null;
+  }
+  return out;
+}
+
+/** Project ids whose derived live state differs between two derivations. */
+function liveDiff(prev, next) {
+  const a = prev && typeof prev === 'object' ? prev : {};
+  const b = next && typeof next === 'object' ? next : {};
+  const changed = [];
+  for (const id of new Set(Object.keys(a).concat(Object.keys(b)))) {
+    if ((a[id] === undefined ? null : a[id]) !== (b[id] === undefined ? null : b[id])) changed.push(id);
+  }
+  return changed;
+}
+
+/** Projects with their live.state replaced by the derived map (sessionIds untouched). */
+function withLive(projects, map) {
+  return (Array.isArray(projects) ? projects : []).map((p) => (p && p.live && map && Object.prototype.hasOwnProperty.call(map, p.id)
+    ? Object.assign({}, p, { live: Object.assign({}, p.live, { state: map[p.id] }) }) : p));
+}
+
+/** Snapshot session ids no project's live.sessionIds knows and `seen` has not asked about yet: a new session. */
+function unknownSessionIds(projects, sessions, seen) {
+  const list = Array.isArray(projects) ? projects : [];
+  if (!list.some((p) => p && p.live && Array.isArray(p.live.sessionIds))) return [];
+  const known = new Set();
+  for (const p of list) if (p && p.live && Array.isArray(p.live.sessionIds)) for (const id of p.live.sessionIds) known.add(id);
+  return (Array.isArray(sessions) ? sessions : [])
+    .filter((s) => s && typeof s === 'object' && typeof s.id === 'string' && s.id && !s.stale && !s.agent_id && !s.agentId
+      && !known.has(s.id) && !(seen && seen.has(s.id)))
+    .map((s) => s.id);
+}
+
 /** Active = a running / thinking / blocked session for the project (idle alone does not count) or a commit in the last 24 h. */
 function isActive(p, sessions, nowMs) {
   const st = liveState(p, sessions);
@@ -561,6 +610,7 @@ const state = {
   route: 'projects',
   proj: { mode: 'loading', list: [], filter: 'all', showHidden: false, token: 0, lastOk: null },
   sessions: [],               // /state sessions, for the Projects summary, filters and live strip
+  liveMap: {}, liveSig: '', seenIds: new Set(),   // client-side live states from the SSE stream
   apiToken: null, reviewNA: false, reviewMsgs: {},
 };
 
@@ -774,7 +824,7 @@ function renderProjects() {
     setHtml(view, projectsTitle() + '<div class="state-panel"><h2>Projects are unavailable right now</h2><p>Sereno will try again on the next refresh.</p></div>');
     return;
   }
-  setHtml(view, projectsTitle() + projectsBody(p.list, state.sessions, p.filter, p.showHidden, Date.now()));
+  setHtml(view, projectsTitle() + projectsBody(withLive(p.list, state.liveMap), state.sessions, p.filter, p.showHidden, Date.now()));
 }
 
 /* ---------- data ---------- */
@@ -790,12 +840,48 @@ async function getJson(url) {
   }
 }
 
+/* ---------- live stream: /events pushes a full snapshot (same shape as /state) ---------- */
+
+let stream = null;
+function streamOpen() { return !!stream && stream.readyState === 1; }
+
+/** Apply one snapshot: attention panel every time, cards only when a project's live state changed. */
+function applySnapshot(snap) {
+  state.attnToken++;   // an in-flight /state fetch is now older than this push
+  const sessions = Array.isArray(snap.sessions) ? snap.sessions : [];
+  state.attn = attentionState(snap);
+  state.sessions = sessions;
+  renderAttention();
+  const map = deriveLiveStates(state.proj.list, sessions);
+  const strip = sessions.filter(isLiveSession).map((s) => s.id + ':' + s.state).sort().join(',');
+  const sig = strip + '|' + state.attn.count;
+  const changed = liveDiff(state.liveMap, map).length > 0 || sig !== state.liveSig;
+  state.liveMap = map; state.liveSig = sig;
+  if (state.route === 'projects' && changed) renderProjects();
+  if (state.proj.mode === 'data') {
+    const fresh = unknownSessionIds(state.proj.list, sessions, state.seenIds);
+    if (fresh.length) { fresh.forEach((id) => state.seenIds.add(id)); refreshProjects(); }
+  }
+}
+
+function openStream() {
+  if (stream || typeof EventSource === 'undefined') return;
+  stream = new EventSource('/events');
+  stream.onmessage = (e) => {
+    let snap = null;
+    try { snap = JSON.parse(e.data); } catch (_) { return; }
+    if (snap && Array.isArray(snap.sessions)) applySnapshot(snap);
+  };
+}
+
 async function refreshAttention() {
+  if (streamOpen() && state.attn && !state.attn.unavailable) return;   // the stream is the source while it is open
   const token = ++state.attnToken;
   const r = await getJson('/state');
   if (token !== state.attnToken) return;
   state.attn = r.body && Array.isArray(r.body.sessions) ? attentionState(r.body) : { unavailable: true };
   state.sessions = r.body && Array.isArray(r.body.sessions) ? r.body.sessions : [];
+  state.liveMap = deriveLiveStates(state.proj.list, state.sessions);
   renderAttention();
   if (state.route === 'projects') renderProjects();
 }
@@ -809,6 +895,8 @@ async function refreshProjects() {
     if (p.mode !== 'data') p.mode = 'unavailable';   // keep showing the last good list on a blip
   } else {
     p.list = r.body.projects; p.mode = 'data'; p.lastOk = Date.now();
+    // server cwd join + the current snapshot; before any snapshot, the server's p.live stands
+    state.liveMap = state.attn && !state.attn.unavailable ? deriveLiveStates(p.list, state.sessions) : {};
   }
   renderProjects();
   tickSync();
@@ -952,8 +1040,14 @@ function boot() {
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshActive(); });
   setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'spend') refresh(); }, 60000);
   setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'projects') refreshProjects(); }, 30000);
-  // While amber, poll faster so a resolved wait clears promptly.
-  setInterval(() => { if (document.visibilityState === 'visible' && state.attn && state.attn.amber) refreshAttention(); }, 10000);
+  // The /events stream drives the attention panel; poll /state only while it is not open.
+  setInterval(() => {
+    if (stream && stream.readyState === 2) { stream = null; openStream(); }   // the server refused or dropped it: try again
+    if (document.visibilityState === 'visible' && !streamOpen()) refreshAttention();
+  }, 10000);
+  window.addEventListener('pagehide', () => { if (stream) { stream.close(); stream = null; } });
+  window.addEventListener('pageshow', (e) => { if (e.persisted) openStream(); });
+  openStream();
   setInterval(tickSync, 10000);
   let raf = 0;
   window.addEventListener('resize', () => {

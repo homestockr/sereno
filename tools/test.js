@@ -4073,11 +4073,11 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(A.waitLabel(9000, 1000), 'waiting 0s');
     });
 
-    test('console: /state fetched on refresh and every 10s while amber; page has the aside, no action', () => {
+    test('console: /state fetched on refresh and every 10s while the stream is not open; page has the aside, no action', () => {
       const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
       const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
       assert.match(cjs, /getJson\('\/state'\)/);
-      assert.match(cjs, /state\.attn && state\.attn\.amber\) refreshAttention\(\); \}, 10000\)/);
+      assert.match(cjs, /!streamOpen\(\)\) refreshAttention\(\);\n  \}, 10000\)/);
       assert.match(cjs, /refreshAttention\(\);\n  const token = \+\+state\.token/);
       assert.match(html, /<aside class="attn-col" id="attn"/);
       assert.match(css, /@media \(max-width: 1359px\)/);
@@ -7269,6 +7269,59 @@ test('missing rate_limits degrades instead of throwing', () => {
       const src = fs.readFileSync(__filename, 'utf8');
       assert.ok(!/createCollector\([^;]*?,\s*(PORT|port|\d{4,5})\b/.test(src.replace(/test\('ff7[\s\S]*$/, '')), 'every collector in the suite listens on port 0');
     });
+
+    {
+      const cj = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+      const names = ['esc', 'projectLabel', 'pillText', 'ringIcon', 'pillHtml', 'attentionState', 'topSessions', 'isLiveSession', 'deriveLiveStates', 'liveDiff', 'withLive',
+        'unknownSessionIds', 'hasBlocker', 'visibleProjects', 'projectsSummary'];
+      const lifted = names.map((n) => cj.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
+      const S = new Function("const LIVE_RANK = ['idle', 'thinking', 'running', 'blocked'];\n" + lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+      const proj = [{ id: 'pa', name: 'alpha', live: { state: 'idle', sessionIds: ['s1'] } }, { id: 'pb', name: 'beta', live: { state: null, sessionIds: [] } }];
+      const blockedSnap = { sessions: [{ id: 's1', state: 'blocked', projectName: 'alpha', stateTool: 'Bash', stateSince: 5 }, { id: 'sub', state: 'blocked', agent_id: 'a1' }] };
+      const calmSnap = { sessions: [{ id: 's1', state: 'running', projectName: 'alpha' }] };
+
+      test('final: a pushed blocked snapshot turns the attention state amber, with pill and summary clause, no /api/projects refetch', () => {
+        const a = S.attentionState(blockedSnap);
+        assert.strictEqual(a.amber, true);
+        assert.strictEqual(a.count, 1);
+        assert.ok(S.pillHtml(a.count).includes('1 decision needs you'));
+        const map = S.deriveLiveStates(proj, blockedSnap.sessions);
+        assert.strictEqual(map.pa, 'blocked');
+        const live = S.withLive(proj, map);
+        assert.strictEqual(live[0].live.state, 'blocked');
+        const blocked = S.topSessions(blockedSnap).filter((s) => s.state === 'blocked' && !s.stale).length;
+        assert.ok(S.projectsSummary(live, blocked).endsWith('1 session needs you'));
+        assert.deepStrictEqual(S.unknownSessionIds(proj, blockedSnap.sessions, new Set()), [], 'no new session, so no refetch');
+      });
+
+      test('final: a resolved snapshot returns to calm', () => {
+        const a = S.attentionState(calmSnap);
+        assert.strictEqual(a.amber, false);
+        assert.strictEqual(a.count, 0);
+        assert.ok(S.projectsSummary(proj, 0).endsWith('nothing needs a decision'));
+        assert.strictEqual(S.deriveLiveStates(proj, calmSnap.sessions).pa, 'running');
+      });
+
+      test('final: the live-state diff reports only changed projects; a new session id is reported once', () => {
+        const a = S.deriveLiveStates(proj, calmSnap.sessions);
+        assert.deepStrictEqual(S.liveDiff(a, S.deriveLiveStates(proj, calmSnap.sessions)), []);
+        assert.deepStrictEqual(S.liveDiff(a, S.deriveLiveStates(proj, blockedSnap.sessions)), ['pa']);
+        assert.deepStrictEqual(S.deriveLiveStates(proj, [{ id: 's1', state: 'blocked', stale: true }]).pa, null);
+        const seen = new Set();
+        const withNew = calmSnap.sessions.concat([{ id: 's9', state: 'running' }]);
+        assert.deepStrictEqual(S.unknownSessionIds(proj, withNew, seen), ['s9']);
+        seen.add('s9');
+        assert.deepStrictEqual(S.unknownSessionIds(proj, withNew, seen), []);
+      });
+
+      test('final: console.js opens exactly one EventSource(/events) and closes it on pagehide', () => {
+        assert.strictEqual((cj.match(/new EventSource\(/g) || []).length, 1);
+        assert.match(cj, /new EventSource\('\/events'\)/);
+        assert.match(cj, /addEventListener\('pagehide', \(\) => \{ if \(stream\) \{ stream\.close\(\)/);
+        const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'index.html'), 'utf8');
+        assert.match(html, /connect-src 'self'/);
+      });
+    }
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
