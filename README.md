@@ -172,6 +172,9 @@ menu ("Keep spend history").
 
 Spend is split by source (main thread, subagent, auxiliary) until roles arrive in a later release.
 
+Spend is recorded only while Sereno is running. Telemetry sent while it is closed is
+not kept, so leave "Start Sereno automatically" on.
+
 **What is stored.** `%USERPROFILE%\.sereno\sereno.db` (or `$SERENO_HOME`), SQLite.
 Per request: `request_id`, session and prompt ids, timestamp, model, query source
 (main thread, subagent, session title, ...), token counts, cost estimate, duration,
