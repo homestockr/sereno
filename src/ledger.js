@@ -182,14 +182,19 @@ function openLedger(opts = {}) {
     q.statusSet.run(sessionId, Number.isFinite(ts) ? Math.round(ts) : Date.now(), micros);
   }
 
-  /** @param {{since?: number, until?: number}} [range] */
-  function totals(range = {}) {
-    live();
+  /** @param {{since?: number, until?: number}} range */
+  function whereFor(range) {
     /** @type {string[]} */ const where = [];
     /** @type {number[]} */ const args = [];
     if (range.since != null) { where.push('requests.ts >= ?'); args.push(range.since); }
     if (range.until != null) { where.push('requests.ts < ?'); args.push(range.until); }
-    const w = where.length ? ' WHERE ' + where.join(' AND ') : '';
+    return { w: where.length ? ' WHERE ' + where.join(' AND ') : '', args };
+  }
+
+  // The one aggregation behind totals() and today(): head totals plus per-column groups.
+  /** @param {{since?: number, until?: number}} range */
+  function aggregate(range) {
+    const { w, args } = whereFor(range);
     const head = db.prepare('SELECT COALESCE(SUM(cost_micros),0) AS c, COUNT(*) AS n FROM requests' + w).get(...args);
     /** @param {string} col */
     const group = col => {
@@ -200,15 +205,179 @@ function openLedger(opts = {}) {
       }
       return o;
     };
+    return {
+      costMicros: Number(head.c), requests: Number(head.n),
+      bySource: group('source'), byModel: group('model'), byAttribution: group('attribution'),
+    };
+  }
+
+  /** @param {{since?: number, until?: number}} [range] */
+  function totals(range = {}) {
+    live();
+    const { w, args } = whereFor(range);
+    const agg = aggregate(range);
     const sw = w ? w + ' AND requests.session_id IS NOT NULL' : ' WHERE requests.session_id IS NOT NULL';
     const sessions = db.prepare(`SELECT requests.session_id AS sid, sessions.project AS project,
       SUM(requests.cost_micros) AS c FROM requests LEFT JOIN sessions ON sessions.session_id = requests.session_id
       ${sw} GROUP BY requests.session_id ORDER BY c DESC`).all(...args)
       .map(r => ({ sessionId: r.sid, project: r.project ?? null, costMicros: Number(r.c) }));
     return {
-      costMicros: Number(head.c), requests: Number(head.n),
-      bySource: group('source'), byModel: group('model'), byAttribution: group('attribution'), sessions,
+      costMicros: agg.costMicros, requests: agg.requests,
+      bySource: agg.bySource, byModel: agg.byModel, byAttribution: agg.byAttribution, sessions,
     };
+  }
+
+  /** @param {Record<string, number>} o @param {any} k @param {number} c */
+  const addTo = (o, k, c) => { const key = String(k); o[key] = (o[key] || 0) + c; };
+
+  // Rows are pre-aggregated into 15-minute slots (ts - ts % 900000), not per request: the
+  // aggregation is then O(slots), not O(requests). 15 minutes (not a whole hour) is on purpose:
+  // every real UTC offset is a multiple of 15 min (+05:30, +05:45...), so local day AND local
+  // hour boundaries always fall on a slot boundary and bucketing slots is exact. Whole-hour
+  // slots would split buckets in those zones. If a caller passes boundaries that are not
+  // slot-aligned, we fall back to per-request grouping (SLOT = 1) so results stay exact.
+  const SLOT_MS = 900000;
+  /** @param {{ since: number, until: number }[]} buckets */
+  const slotFor = buckets => (buckets.every(b => b.since % SLOT_MS === 0 && b.until % SLOT_MS === 0) ? SLOT_MS : 1);
+  /** @param {{ since: number, until: number }[]} buckets @param {number} ts @returns {number} index or -1 */
+  function bucketIndex(buckets, ts) {
+    let a = 0, b = buckets.length - 1;
+    while (a < b) { const mid = (a + b + 1) >> 1; if (buckets[mid].since <= ts) a = mid; else b = mid - 1; }
+    return ts < buckets[a].since || ts >= buckets[a].until ? -1 : a;
+  }
+
+  // series: ONE query for the whole span; slots are bucketed in JS by binary search over
+  // the (contiguous, sorted) bucket list. A boundary ts belongs to the later bucket.
+  /** @param {{ key: string, since: number, until: number }[]} buckets */
+  function series(buckets) {
+    live();
+    const out = (buckets || []).map(b => ({
+      key: b.key, costMicros: 0, requests: 0,
+      /** @type {Record<string, number>} */ bySource: {},
+      /** @type {Record<string, number>} */ byAttribution: {},
+    }));
+    if (!out.length) return out;
+    const lo = buckets[0].since, hi = buckets[buckets.length - 1].until;
+    const slot = slotFor(buckets);
+    const rows = db.prepare(`SELECT ts - (ts % ${slot}) AS slot, source, attribution, SUM(cost_micros) AS c, COUNT(*) AS n
+      FROM requests WHERE ts >= ? AND ts < ? GROUP BY slot, source, attribution`).all(lo, hi);
+    for (const r of rows) {
+      const i = bucketIndex(buckets, Number(r.slot));
+      if (i < 0) continue;
+      const o = out[i], c = Number(r.c);
+      o.costMicros += c; o.requests += Number(r.n);
+      addTo(o.bySource, r.source, c); addTo(o.byAttribution, r.attribution, c);
+    }
+    return out;
+  }
+
+  /** @param {{ since: number, until: number }} range */
+  function projects(range) {
+    live();
+    const rows = db.prepare(`SELECT sessions.project AS p, requests.source AS s, requests.attribution AS a,
+      SUM(requests.cost_micros) AS c, COUNT(*) AS n FROM requests
+      LEFT JOIN sessions ON sessions.session_id = requests.session_id
+      WHERE requests.ts >= ? AND requests.ts < ? GROUP BY p, s, a`).all(range.since, range.until);
+    /** @type {Map<string|null, any>} */
+    const m = new Map();
+    const un = { costMicros: 0, requests: 0 };
+    for (const r of rows) {
+      const p = r.p ?? null, c = Number(r.c), n = Number(r.n);
+      let e = m.get(p);
+      if (!e) { e = { project: p, costMicros: 0, requests: 0, bySource: {}, byAttribution: {} }; m.set(p, e); }
+      e.costMicros += c; e.requests += n;
+      addTo(e.bySource, r.s, c); addTo(e.byAttribution, r.a, c);
+      if (r.a === 'unknown') { un.costMicros += c; un.requests += n; }
+    }
+    const list = [...m.values()].sort((x, y) => y.costMicros - x.costMicros);
+    return { rows: list, unattributed: un };
+  }
+
+  // Per-project trend for ALL projects in one query. Map: project (null = no project) -> number[].
+  /** @param {{ buckets: { since: number, until: number }[] }} o */
+  function trends(o) {
+    live();
+    const buckets = o.buckets || [];
+    /** @type {Map<string|null, number[]>} */
+    const m = new Map();
+    if (!buckets.length) return m;
+    const slot = slotFor(buckets);
+    const rows = db.prepare(`SELECT sessions.project AS p, requests.ts - (requests.ts % ${slot}) AS slot,
+      SUM(requests.cost_micros) AS c FROM requests
+      LEFT JOIN sessions ON sessions.session_id = requests.session_id
+      WHERE requests.ts >= ? AND requests.ts < ? GROUP BY p, slot`).all(buckets[0].since, buckets[buckets.length - 1].until);
+    for (const r of rows) {
+      const i = bucketIndex(buckets, Number(r.slot));
+      if (i < 0) continue;
+      const p = r.p ?? null;
+      let arr = m.get(p);
+      if (!arr) { arr = buckets.map(() => 0); m.set(p, arr); }
+      arr[i] += Number(r.c);
+    }
+    return m;
+  }
+
+  /** @param {{ project: string|null, buckets: { since: number, until: number }[] }} o */
+  function trend(o) {
+    live();
+    const buckets = o.buckets || [];
+    return trends({ buckets }).get(o.project ?? null) || buckets.map(() => 0);
+  }
+
+  /** @param {{ since: number, until: number, limit?: number }} o */
+  function topPrompts(o) {
+    live();
+    const rawLim = Math.floor(Number(o.limit ?? 10));
+    const lim = Math.min(100, Math.max(1, Number.isFinite(rawLim) ? rawLim : 10));
+    // 1) rank prompt groups by cost in SQL and keep only the top N group keys
+    const top = db.prepare(`SELECT COALESCE(prompt_id, request_key) AS g FROM requests
+      WHERE ts >= ? AND ts < ? GROUP BY g ORDER BY SUM(cost_micros) DESC, MIN(ts) ASC LIMIT ${lim}`).all(o.since, o.until);
+    if (!top.length) return [];
+    // 2) details only for those N keys; grouped per (prompt, model), merged per prompt in JS
+    //    so models stay a clean distinct list
+    const keys = top.map(r => r.g);
+    const rows = db.prepare(`SELECT COALESCE(requests.prompt_id, requests.request_key) AS g, requests.model AS model,
+      MIN(requests.ts) AS ts, SUM(requests.cost_micros) AS c, COUNT(*) AS n,
+      SUM(requests.attribution='explicit') AS ne, SUM(requests.attribution='unknown') AS nu,
+      MIN(sessions.project) AS project, MIN(requests.session_id) AS sid
+      FROM requests LEFT JOIN sessions ON sessions.session_id = requests.session_id
+      WHERE requests.ts >= ? AND requests.ts < ?
+      AND COALESCE(requests.prompt_id, requests.request_key) IN (${keys.map(() => '?').join(',')})
+      GROUP BY g, requests.model`).all(o.since, o.until, ...keys);
+    /** @type {Map<string, any>} */
+    const m = new Map();
+    for (const r of rows) {
+      let e = m.get(r.g);
+      if (!e) { e = { ts: Number(r.ts), project: r.project ?? null, sid: r.sid ?? null, costMicros: 0, n: 0, ne: 0, nu: 0, models: new Set() }; m.set(r.g, e); }
+      e.ts = Math.min(e.ts, Number(r.ts));
+      if (e.project === null && r.project != null) e.project = r.project;
+      if (e.sid === null && r.sid != null) e.sid = r.sid;
+      e.costMicros += Number(r.c); e.n += Number(r.n); e.ne += Number(r.ne); e.nu += Number(r.nu);
+      if (r.model != null) e.models.add(String(r.model));
+    }
+    return [...m.values()].map(e => ({
+      ts: e.ts, project: e.project, sessionShort: e.sid ? String(e.sid).slice(0, 8) : null,
+      costMicros: e.costMicros, models: [...e.models].sort(),
+      attribution: e.ne === e.n ? 'explicit' : e.nu === e.n ? 'unknown' : 'mixed',
+    })).sort((x, y) => y.costMicros - x.costMicros || x.ts - y.ts).slice(0, lim);
+  }
+
+  /** @param {number} nowMs */
+  function today(nowMs) {
+    live();
+    const b = require('./spendtime.js').dayBounds(nowMs);
+    const agg = aggregate({ since: b.since, until: b.until });
+    const un = db.prepare(`SELECT COUNT(*) AS n FROM requests WHERE ts >= ? AND ts < ? AND attribution='unknown'`).get(b.since, b.until);
+    return {
+      day: b.day, since: b.since, until: b.until, costMicros: agg.costMicros, requests: agg.requests,
+      bySource: agg.bySource, byAttribution: agg.byAttribution, unattributedN: Number(un.n),
+    };
+  }
+
+  /** True once any request has ever been recorded (not just today). */
+  function hasAny() {
+    live();
+    return db.prepare('SELECT 1 FROM requests LIMIT 1').get() !== undefined;
   }
 
   /** @param {string} sessionId */
@@ -244,7 +413,7 @@ function openLedger(opts = {}) {
   }
 
   prune(retentionDays);
-  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, reconcile, prune, close, _db: db };
+  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, topPrompts, today, hasAny, reconcile, prune, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }

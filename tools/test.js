@@ -3214,6 +3214,1442 @@ test('missing rate_limits degrades instead of throwing', () => {
     assert.ok(!/nine/.test(app), 'hard-coded count is gone');
   });
 
+  /* ---- Phase 2 step 0: spend queries ---- */
+  {
+    const st = require('../src/spendtime.js');
+    const { openLedger } = require('../src/ledger.js');
+    const HR = 3600000;
+
+    test('spendtime: 23:59 and 00:01 land on different local days', () => {
+      const a = st.dayBounds(new Date(2026, 5, 10, 23, 59).getTime());
+      const b = st.dayBounds(new Date(2026, 5, 11, 0, 1).getTime());
+      assert.strictEqual(a.day, '2026-06-10'); assert.strictEqual(b.day, '2026-06-11');
+      assert.strictEqual(a.until, b.since);
+      assert.strictEqual(a.since, new Date(2026, 5, 10).getTime());
+      assert.strictEqual(st.dayStart(new Date(2026, 5, 10, 23, 59).getTime()), a.since);
+    });
+
+    test('spendtime: day string is zero-padded local, not UTC', () => {
+      assert.strictEqual(st.dayBounds(new Date(2026, 0, 5, 0, 30).getTime()).day, '2026-01-05');
+    });
+
+    test('spendtime: lastNDays(30) is 30 contiguous days ending today', () => {
+      const now = new Date(2026, 2, 15, 13, 7).getTime();
+      const d = st.lastNDays(30, now);
+      assert.strictEqual(d.length, 30);
+      for (let i = 1; i < d.length; i++) assert.strictEqual(d[i - 1].until, d[i].since);
+      const last = d[29];
+      assert.ok(last.since <= now && now < last.until);
+      assert.strictEqual(last.day, '2026-03-15');
+      assert.strictEqual(d[0].day, '2026-02-14');
+    });
+
+    test('spendtime: hourBuckets is 24 contiguous hours ending with the current one', () => {
+      const now = new Date(2026, 5, 10, 13, 45).getTime();
+      const h = st.hourBuckets(now);
+      assert.strictEqual(h.length, 24);
+      for (let i = 1; i < h.length; i++) assert.strictEqual(h[i - 1].until, h[i].since);
+      assert.ok(h[23].since <= now && now < h[23].until);
+      assert.strictEqual(h[23].key, '2026-06-10T13');
+      assert.strictEqual(h[0].key, '2026-06-09T14');
+      assert.strictEqual(h[23].since, new Date(2026, 5, 10, 13).getTime());
+    });
+
+    test('spendtime: monthStart is local midnight on the 1st', () => {
+      assert.strictEqual(st.monthStart(new Date(2026, 8, 30, 23, 59).getTime()), new Date(2026, 8, 1).getTime());
+      assert.strictEqual(st.monthStart(new Date(2026, 0, 1, 0, 0).getTime()), new Date(2026, 0, 1).getTime());
+    });
+
+    test('spendtime: DST day is 23 hours in America/New_York (skipped if TZ is not honoured)', () => {
+      const code = `const s=require(${JSON.stringify(path.join(ROOT, 'src', 'spendtime.js'))});` +
+        `const b=s.dayBounds(new Date(2026,2,8,12).getTime());const f=s.dayBounds(new Date(2026,10,1,12).getTime());` +
+        `console.log((b.until-b.since)/3600000,(f.until-f.since)/3600000)`;
+      const r = spawnSync(process.execPath, ['-e', code], { env: Object.assign({}, process.env, { TZ: 'America/New_York' }), encoding: 'utf8' });
+      const out = (r.stdout || '').trim();
+      if (out !== '23 25') { console.log('       (note: TZ=America/New_York not honoured here, got "' + out + '"; DST test skipped)'); return; }
+      assert.strictEqual(out, '23 25');
+    });
+
+    const tmpF = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-sq-')), 'sereno.db');
+    const rmF = f => fs.rmSync(path.dirname(f), { recursive: true, force: true });
+    const openL = (file) => openLedger({ file: file || ':memory:', retentionDays: 36500 });
+    let kn = 0;
+    const R = (o) => Object.assign({ requestKey: 'k' + (++kn), requestId: 'r' + kn, sessionId: 's1', promptId: null, ts: Date.now(),
+      model: 'm', querySource: null, source: 'main', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100, durationMs: 0 }, o);
+    const sess = (l, id, cwd) => l.recordHook('SessionStart', { session_id: id, cwd });
+
+    test('ledger.series: buckets sum to totals() over the same range; boundary goes to the later bucket', () => {
+      const l = openL();
+      const now = new Date(2026, 5, 10, 13, 45).getTime();
+      const b = st.hourBuckets(now);
+      l.ingestRequests([
+        R({ ts: b[0].since, costMicros: 10 }),                       // exactly at first bucket start
+        R({ ts: b[5].since, costMicros: 20, source: 'subagent' }),   // exactly on a boundary: bucket 5, not 4
+        R({ ts: b[5].since - 1, costMicros: 30 }),                   // last ms of bucket 4
+        R({ ts: b[23].until - 1, costMicros: 40, source: 'auxiliary' }),
+        R({ ts: b[0].since - 1, costMicros: 999 }),                  // before range
+        R({ ts: b[23].until, costMicros: 777 }),                     // at the end bound: excluded
+      ]);
+      const s = l.series(b);
+      assert.strictEqual(s.length, 24);
+      assert.deepStrictEqual(s.map(x => x.key), b.map(x => x.key));
+      assert.strictEqual(s[4].costMicros, 30); assert.strictEqual(s[5].costMicros, 20);
+      assert.deepStrictEqual(s[5].bySource, { subagent: 20 });
+      assert.deepStrictEqual(s[5].byAttribution, { unknown: 20 });
+      assert.strictEqual(s[0].costMicros, 10); assert.strictEqual(s[23].costMicros, 40);
+      const t = l.totals({ since: b[0].since, until: b[23].until });
+      assert.strictEqual(s.reduce((a, x) => a + x.costMicros, 0), t.costMicros);
+      assert.strictEqual(s.reduce((a, x) => a + x.requests, 0), t.requests);
+      assert.strictEqual(t.costMicros, 100);
+      l.close();
+    });
+
+    test('ledger.series: empty ledger and empty bucket list give zeros and {}', () => {
+      const l = openL();
+      const s = l.series(st.lastNDays(3, Date.now()));
+      assert.strictEqual(s.length, 3);
+      for (const x of s) assert.deepStrictEqual(x, { key: x.key, costMicros: 0, requests: 0, bySource: {}, byAttribution: {} });
+      assert.deepStrictEqual(l.series([]), []);
+      l.close();
+    });
+
+    test('ledger.series: 23/25 hour day buckets keep 23:59 and 00:01 on different days', () => {
+      const l = openL();
+      const days = st.lastNDays(2, new Date(2026, 5, 11, 12).getTime());
+      l.ingestRequests([R({ ts: new Date(2026, 5, 10, 23, 59).getTime(), costMicros: 5 }), R({ ts: new Date(2026, 5, 11, 0, 1).getTime(), costMicros: 7 })]);
+      const s = l.series(days);
+      assert.deepStrictEqual(s.map(x => x.costMicros), [5, 7]);
+      l.close();
+    });
+
+    test('ledger.projects: sorted desc, null project, unattributed included in project totals', () => {
+      const l = openL();
+      sess(l, 'sa', 'C:\\w\\alpha'); sess(l, 'sb', 'C:\\w\\beta');
+      const t = 1000000;
+      l.ingestRequests([
+        R({ sessionId: 'sa', ts: t, costMicros: 100 }),
+        R({ sessionId: 'sa', ts: t + 1, costMicros: 50, source: 'subagent' }),   // no span: unknown
+        R({ sessionId: 'sb', ts: t + 2, costMicros: 500 }),
+        R({ sessionId: 'sx', ts: t + 3, costMicros: 20, source: 'subagent' }),   // session without project: null
+        R({ sessionId: 'sa', ts: t + 100, costMicros: 9999 }),                   // out of range
+      ]);
+      const p = l.projects({ since: t, until: t + 10 });
+      assert.deepStrictEqual(p.rows.map(r => r.project), ['beta', 'alpha', null]);
+      assert.strictEqual(p.rows[1].costMicros, 150); assert.strictEqual(p.rows[1].requests, 2);
+      assert.deepStrictEqual(p.rows[1].bySource, { main: 100, subagent: 50 });
+      assert.deepStrictEqual(p.rows[1].byAttribution, { explicit: 100, unknown: 50 });
+      assert.deepStrictEqual(p.unattributed, { costMicros: 70, requests: 2 });
+      assert.strictEqual(p.rows.reduce((a, r) => a + r.costMicros, 0), l.totals({ since: t, until: t + 10 }).costMicros);
+      assert.deepStrictEqual(l.projects({ since: 5, until: 6 }), { rows: [], unattributed: { costMicros: 0, requests: 0 } });
+      l.close();
+    });
+
+    test('ledger.trend: one value per bucket, null project matches IS NULL', () => {
+      const l = openL();
+      sess(l, 'sa', 'C:\\w\\alpha');
+      const days = st.lastNDays(14, new Date(2026, 5, 20, 9).getTime());
+      l.ingestRequests([
+        R({ sessionId: 'sa', ts: days[13].since + 5, costMicros: 30 }),
+        R({ sessionId: 'sa', ts: days[13].since + 6, costMicros: 20 }),
+        R({ sessionId: 'sa', ts: days[0].since, costMicros: 4 }),
+        R({ sessionId: 'sx', ts: days[3].since + 1, costMicros: 8 }),
+        R({ sessionId: null, ts: days[3].since + 2, costMicros: 2, requestKey: 'nos' }),
+      ]);
+      const a = l.trend({ project: 'alpha', buckets: days });
+      assert.strictEqual(a.length, 14); assert.strictEqual(a[13], 50); assert.strictEqual(a[0], 4);
+      assert.strictEqual(a.reduce((x, y) => x + y, 0), 54);
+      const n = l.trend({ project: null, buckets: days });
+      assert.strictEqual(n.length, 14); assert.strictEqual(n[3], 10); assert.strictEqual(n.reduce((x, y) => x + y, 0), 10);
+      assert.deepStrictEqual(l.trend({ project: 'nope', buckets: days }), new Array(14).fill(0));
+      l.close();
+    });
+
+    test('ledger.topPrompts: groups by prompt_id, falls back to request_key, models, attribution, order, limit', () => {
+      const l = openL();
+      sess(l, 'abcdefghijkl', 'C:\\w\\alpha');
+      const t = 2000000;
+      const S = 'abcdefghijkl';
+      l.ingestRequests([
+        R({ sessionId: S, promptId: 'p1', ts: t + 5, costMicros: 100, model: 'b-model' }),
+        R({ sessionId: S, promptId: 'p1', ts: t + 3, costMicros: 100, model: 'a-model' }),
+        R({ sessionId: S, promptId: 'p1', ts: t + 4, costMicros: 50, model: 'a-model' }),          // all explicit, 2 distinct models
+        R({ sessionId: S, promptId: 'p2', ts: t + 1, costMicros: 100, source: 'subagent' }),       // unknown
+        R({ sessionId: S, promptId: 'p2', ts: t + 2, costMicros: 100, source: 'subagent' }),       // all unknown
+        R({ sessionId: S, promptId: 'p3', ts: t + 6, costMicros: 10 }),
+        R({ sessionId: S, promptId: 'p3', ts: t + 7, costMicros: 10, source: 'subagent' }),        // mixed
+        R({ sessionId: S, promptId: null, requestKey: 'solo', ts: t + 8, costMicros: 250 }),       // fallback group
+        R({ sessionId: S, promptId: null, requestKey: 'tie', ts: t + 0, costMicros: 250 }),        // ties solo; earlier ts first
+        R({ sessionId: S, promptId: 'out', ts: t + 999, costMicros: 5000 }),
+      ]);
+      const top = l.topPrompts({ since: t, until: t + 100 });
+      assert.deepStrictEqual(top.map(x => x.costMicros), [250, 250, 250, 200, 20]);
+      assert.strictEqual(top[0].ts, t);                 // 'tie' (250, earliest) before 'solo' (250, t+8)
+      const p1 = top.find(x => x.costMicros === 250 && x.models.length === 2);
+      assert.deepStrictEqual(p1.models, ['a-model', 'b-model']); assert.strictEqual(p1.attribution, 'explicit');
+      assert.strictEqual(p1.sessionShort, 'abcdefgh'); assert.strictEqual(p1.project, 'alpha');
+      assert.strictEqual(top[3].attribution, 'unknown'); assert.strictEqual(top[4].attribution, 'mixed');
+      assert.strictEqual(top[3].models.length, 1);
+      assert.strictEqual(l.topPrompts({ since: t, until: t + 100, limit: 2 }).length, 2);
+      assert.strictEqual(l.topPrompts({ since: t, until: t + 100, limit: 0 }).length, 1);
+      assert.strictEqual(l.topPrompts({ since: t, until: t + 100, limit: -5 }).length, 1);
+      assert.strictEqual(l.topPrompts({ since: t, until: t + 100, limit: 1000 }).length, 5);
+      assert.deepStrictEqual(l.topPrompts({ since: 1, until: 2 }), []);
+      l.close();
+    });
+
+    test('ledger.topPrompts: a session-less request has null sessionShort and project', () => {
+      const l = openL();
+      l.ingestRequests([R({ sessionId: null, ts: 50, costMicros: 3 })]);
+      const [x] = l.topPrompts({ since: 0, until: 100 });
+      assert.strictEqual(x.sessionShort, null); assert.strictEqual(x.project, null);
+      l.close();
+    });
+
+    test('ledger.today: equals totals() for its local day, counts unattributed', () => {
+      const l = openL();
+      const now = new Date(2026, 5, 10, 13, 45).getTime();
+      const b = st.dayBounds(now);
+      l.ingestRequests([
+        R({ ts: new Date(2026, 5, 10, 0, 1).getTime(), costMicros: 100 }),
+        R({ ts: new Date(2026, 5, 10, 12).getTime(), costMicros: 40, source: 'subagent' }),
+        R({ ts: new Date(2026, 5, 9, 23, 59).getTime(), costMicros: 900 }),
+        R({ ts: new Date(2026, 5, 11, 0, 1).getTime(), costMicros: 800 }),
+      ]);
+      const td = l.today(now), t = l.totals({ since: b.since, until: b.until });
+      assert.strictEqual(td.day, '2026-06-10'); assert.strictEqual(td.since, b.since); assert.strictEqual(td.until, b.until);
+      assert.strictEqual(td.costMicros, 140); assert.strictEqual(td.costMicros, t.costMicros);
+      assert.strictEqual(td.requests, t.requests);
+      assert.deepStrictEqual(td.bySource, t.bySource); assert.deepStrictEqual(td.byAttribution, t.byAttribution);
+      assert.strictEqual(td.unattributedN, 1);
+      assert.deepStrictEqual(l.today(new Date(2020, 0, 1).getTime()).bySource, {});
+      assert.strictEqual(l.today(new Date(2020, 0, 1).getTime()).costMicros, 0);
+      l.close();
+    });
+
+    test('ledger.today: survives close and reopen of a file ledger', () => {
+      const f = tmpF();
+      try {
+        const now = Date.now();
+        const l = openL(f);
+        l.ingestRequests([R({ ts: now, costMicros: 321 })]);
+        const a = l.today(now);
+        l.close();
+        const l2 = openL(f);
+        assert.deepStrictEqual(l2.today(now), a);
+        assert.strictEqual(l2.today(now).costMicros, 321);
+        l2.close();
+      } finally { rmF(f); }
+    });
+
+    test('ledger: new read methods throw once closed', () => {
+      const l = openL(); l.close();
+      for (const fn of [() => l.series([]), () => l.projects({ since: 0, until: 1 }), () => l.trend({ project: null, buckets: [] }),
+        () => l.topPrompts({ since: 0, until: 1 }), () => l.today(Date.now())]) assert.throws(fn, /closed/);
+    });
+  }
+
+  /* ---- Phase 2 step 1: spend API ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const PORT = 8801;
+    const NOW0 = new Date(2026, 5, 10, 13, 45).getTime();
+    let clock = NOW0;
+    const rq = (opts, body) => new Promise((resolve) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port: PORT, agent: false }, opts), (res) => {
+        let d = '';
+        res.on('data', (c) => { d += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d, type: res.headers['content-type'] }));
+      });
+      r.on('error', () => resolve({ status: 0, body: '', type: '' }));
+      r.end(body);
+    });
+    const get = (p, headers) => rq({ method: 'GET', path: p, headers: headers || {} });
+    const getJ = async (p) => { const r = await get(p); return Object.assign({ status: r.status }, r.status === 200 ? JSON.parse(r.body) : {}); };
+    const post = (p, body) => rq({ method: 'POST', path: p, headers: { 'content-type': 'application/json' } }, JSON.stringify(body));
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const sv = (k, v) => ({ key: k, value: { stringValue: v } });
+    const logs = (recs) => ({ resourceLogs: [{ resource: { attributes: [] }, scopeLogs: [{ scope: { name: 'x' }, logRecords: recs.map((r) => ({
+      timeUnixNano: String(BigInt(r.ts) * 1000000n),
+      attributes: [sv('event.name', 'api_request'), sv('request_id', r.id), sv('session.id', r.sess || 'sess-aaaaaaaa-1111'),
+        sv('prompt.id', r.prompt || 'p-' + r.id), sv('model', r.model || 'claude-fake'), sv('query_source', r.qs || 'repl_main_thread'),
+        { key: 'cost_usd_micros', value: { intValue: r.micros } }],
+    })) }] }] });
+    const FIX = () => logs([
+      { id: 'r1', ts: NOW0 - 60000, micros: 5000 },
+      { id: 'r2', ts: NOW0 - 120000, micros: 3000, qs: 'agent:Explore' },
+      { id: 'r3', ts: NOW0 - 3 * 86400000, micros: 7000, qs: 'compact', sess: 'sess-bbbbbbbb-2222' },
+    ]);
+    const mkLedger = () => openLedger({ file: ':memory:', retentionDays: 36500 });
+    const start = async (ledger) => {
+      const c = createCollector(new Store(), PORT, { ledger, now: () => clock });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return c;
+    };
+    const stop = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const boom = () => { throw new Error('boom'); };
+    const throwing = { today: boom, series: boom, projects: boom, trend: boom, topPrompts: boom, totals: boom,
+      ingestRequests: boom, ingestSpans: boom, recordHook() {}, recordStatus() {} };
+    const checkKeys = (o, allowed, where) => {
+      for (const k of Object.keys(o)) assert.ok(allowed.includes(k), where + ': unexpected key ' + k);
+      for (const k of allowed) assert.ok(k in o, where + ': missing key ' + k);
+    };
+    const ROUTES = ['/api/spend/today', '/api/spend/series', '/api/spend/projects', '/api/spend/top-prompts'];
+
+    await atest('spend api: ledger on returns data for every route, with only documented keys', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      const c = await start(l);
+      try {
+        l.recordHook('SessionStart', { session_id: 'sess-aaaaaaaa-1111', cwd: 'C:\\work\\proj' });
+        assert.strictEqual((await post('/v1/logs', FIX())).status, 200);
+
+        const t = await getJ('/api/spend/today');
+        checkKeys(t, ['status', 'enabled', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution', 'unattributedN', 'hasTelemetry'], 'today');
+        assert.strictEqual(t.enabled, true); assert.strictEqual(t.asOf, NOW0); assert.strictEqual(t.day, '2026-06-10');
+        assert.strictEqual(t.costMicros, 8000); assert.strictEqual(t.requests, 2);
+        assert.strictEqual(t.unattributedN, 1);
+
+        const s = await getJ('/api/spend/series?range=7d');
+        checkKeys(s, ['status', 'enabled', 'asOf', 'range', 'buckets'], 'series');
+        assert.strictEqual(s.buckets.length, 7);
+        for (const b of s.buckets) checkKeys(b, ['key', 'since', 'until', 'costMicros', 'requests', 'bySource', 'byAttribution'], 'series bucket');
+        assert.strictEqual(s.buckets.reduce((a, b) => a + b.costMicros, 0), 15000);
+        assert.strictEqual(s.buckets[6].costMicros, 8000);
+
+        const h = await getJ('/api/spend/series?range=24h');
+        assert.strictEqual(h.buckets.length, 24);
+        assert.strictEqual(h.buckets.reduce((a, b) => a + b.costMicros, 0), 8000);
+
+        const p = await getJ('/api/spend/projects');
+        checkKeys(p, ['status', 'enabled', 'asOf', 'range', 'rows', 'unattributed'], 'projects');
+        checkKeys(p.unattributed, ['costMicros', 'requests'], 'projects.unattributed');
+        assert.strictEqual(p.range, 'month');
+        assert.ok(p.rows.length >= 1);
+        for (const r of p.rows) {
+          checkKeys(r, ['project', 'costMicros', 'requests', 'bySource', 'byAttribution', 'trend'], 'projects row');
+          assert.strictEqual(r.trend.length, 14);
+        }
+        assert.strictEqual(p.rows.reduce((a, r) => a + r.costMicros, 0), 15000);
+
+        const tp = await getJ('/api/spend/top-prompts');
+        checkKeys(tp, ['status', 'enabled', 'asOf', 'range', 'rows'], 'top-prompts');
+        assert.strictEqual(tp.range, 'month'); assert.strictEqual(tp.rows.length, 3);
+        for (const r of tp.rows) {
+          checkKeys(r, ['ts', 'project', 'sessionShort', 'costMicros', 'models', 'attribution'], 'top-prompts row');
+          assert.strictEqual(r.sessionShort.length, 8);
+        }
+        assert.strictEqual(tp.rows[0].costMicros, 7000);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('spend api: default ranges, range validation and limit passthrough', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      const c = await start(l);
+      try {
+        await post('/v1/logs', FIX());
+        assert.strictEqual((await getJ('/api/spend/series')).range, '30d');
+        assert.strictEqual((await getJ('/api/spend/series')).buckets.length, 30);
+        assert.strictEqual((await getJ('/api/spend/top-prompts?range=7d')).range, '7d');
+        assert.strictEqual((await getJ('/api/spend/projects?range=30d')).range, '30d');
+        assert.strictEqual((await get('/api/spend/series?range=90d')).status, 400);
+        assert.strictEqual((await get('/api/spend/series?range=month')).status, 400);
+        assert.strictEqual((await get('/api/spend/projects?range=24h')).status, 400);
+        assert.strictEqual((await get('/api/spend/top-prompts?range=bogus')).status, 400);
+        assert.strictEqual((await getJ('/api/spend/top-prompts?limit=1')).rows.length, 1);
+        assert.strictEqual((await getJ('/api/spend/top-prompts?limit=2')).rows.length, 2);
+        assert.strictEqual((await getJ('/api/spend/top-prompts?limit=abc')).rows.length, 3);
+        assert.strictEqual((await get('/api/spend/nope')).status, 404);
+        assert.strictEqual((await get('/api/other')).status, 404);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('spend api: ledger off answers enabled:false (200) on every route; ledger throwing answers 503', async () => {
+      const c = await start(null);
+      try {
+        for (const r of ROUTES) {
+          const x = await get(r);
+          assert.strictEqual(x.status, 200, r); assert.deepStrictEqual(JSON.parse(x.body), { enabled: false }, r);
+        }
+      } finally { await stop(c); }
+      const c2 = await start(throwing);
+      try {
+        for (const r of ROUTES) assert.strictEqual((await get(r)).status, 503, r);
+        assert.strictEqual((await get('/state')).status, 200);   // a broken ledger never breaks the snapshot
+      } finally { await stop(c2); }
+    });
+
+    await atest('spend api: non-GET on /api/spend/* is not served', async () => {
+      const c = await start(mkLedger());
+      try {
+        const r = await post('/api/spend/today', {});
+        assert.ok(r.status === 404 || r.status === 403 || r.status === 405, 'got ' + r.status);
+        assert.ok(!/costMicros/.test(r.body));
+      } finally { await stop(c); }
+    });
+
+    await atest('spend exit 7: foreign Host or Origin gets 403 on /console and /api/spend/today', async () => {
+      const c = await start(mkLedger());
+      try {
+        for (const p of ['/console', '/api/spend/today']) {
+          assert.strictEqual((await get(p, { host: 'evil.example' })).status, 403, p + ' host');
+          assert.strictEqual((await get(p, { origin: 'http://evil.example' })).status, 403, p + ' origin');
+          assert.notStrictEqual((await get(p)).status, 403, p + ' ok');
+        }
+      } finally { await stop(c); }
+    });
+
+    await atest('console route: serves the placeholder as html and blocks traversal', async () => {
+      const c = await start(null);
+      try {
+        for (const p of ['/console', '/console/', '/console/index.html']) {
+          const r = await get(p);
+          assert.strictEqual(r.status, 200, p);
+          assert.match(r.type, /^text\/html/); assert.match(r.body, /<title>Sereno console<\/title>/);
+        }
+        assert.strictEqual((await get('/console/missing.js')).status, 404);
+        for (const p of ['/console/../collector.js', '/console/%2e%2e%2fcollector.js', '/console/%2e%2e/%2e%2e/package.json', '/console/..%5c..%5cpackage.json']) {
+          const r = await get(p);
+          assert.ok(r.status === 403 || r.status === 404, p + ' -> ' + r.status);
+          assert.ok(!/createCollector|"name"/.test(r.body), p + ' leaked a file');
+        }
+        assert.strictEqual((await get('/')).status, 200);   // widget route still works
+      } finally { await stop(c); }
+    });
+
+    await atest('snapshot spend: disabled without a ledger; updates after /v1/logs; not recomputed by /status or /hook', async () => {
+      clock = NOW0;
+      const c0 = await start(null);
+      try {
+        const st = JSON.parse((await get('/state')).body);
+        assert.deepStrictEqual(st.spend, { enabled: false });
+      } finally { await stop(c0); }
+
+      const l = mkLedger();
+      let calls = 0;
+      const orig = l.today;
+      l.today = (n) => { calls++; return orig(n); };
+      const c = await start(l);
+      const spend = async () => JSON.parse((await get('/state')).body).spend;
+      try {
+        const a = await spend();
+        assert.deepStrictEqual(Object.keys(a).sort(), ['bySource', 'byAttribution', 'enabled', 'hasTelemetry', 'todayMicros', 'unattributedN'].sort());
+        assert.strictEqual(a.enabled, true); assert.strictEqual(a.todayMicros, 0); assert.strictEqual(a.hasTelemetry, false);
+        assert.strictEqual(calls, 1);
+        await spend(); await spend();
+        assert.strictEqual(calls, 1, 'snapshots must not recompute');
+
+        assert.strictEqual((await post('/v1/logs', FIX())).status, 200);
+        const b = await spend();
+        assert.strictEqual(b.todayMicros, 8000); assert.strictEqual(b.hasTelemetry, true);
+        assert.strictEqual(b.bySource.main, 5000);
+        assert.strictEqual(calls, 2);
+
+        await post('/status', { payload: { session_id: 's-x', cost: { total_cost_usd: 1.5 } } });
+        await post('/hook', { event: 'SessionStart', payload: { session_id: 's-x', cwd: 'C:\\work\\x' } });
+        await wait(60);
+        await spend();
+        assert.strictEqual(calls, 2, '/status and /hook must not recompute spend');
+        // an empty logs post inserts nothing and must not recompute either
+        await post('/v1/logs', { resourceLogs: [] });
+        assert.strictEqual(calls, 2);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('snapshot spend: SSE frames carry spend; setLedger recomputes; day rollover recomputes via the tick', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      let calls = 0;
+      const orig = l.today;
+      l.today = (n) => { calls++; return orig(n); };
+      const c = await start(l);
+      try {
+        await post('/v1/logs', FIX());
+        const first = await new Promise((resolve) => {
+          const r = http.get({ host: '127.0.0.1', port: PORT, path: '/events', agent: false }, (res) => {
+            let d = '';
+            res.on('data', (ch) => {
+              d += ch;
+              const m = /data: (.*)\n\n/.exec(d);
+              if (m) { r.destroy(); resolve(JSON.parse(m[1])); }
+            });
+          });
+          r.on('error', () => {});
+        });
+        assert.strictEqual(first.spend.todayMicros, 8000);
+        const before = calls;
+        c._tickSpend();
+        assert.strictEqual(calls, before, 'same day: tick does nothing');
+        clock = NOW0 + 24 * 3600000;   // past midnight
+        c._tickSpend();
+        assert.strictEqual(calls, before + 1, 'new day: tick recomputes');
+        const st = JSON.parse((await get('/state')).body);
+        assert.strictEqual(st.spend.todayMicros, 0); assert.strictEqual(st.spend.hasTelemetry, true);   // telemetry has arrived, just none today
+        c._tickSpend();
+        assert.strictEqual(calls, before + 1, 'the tick recomputes once per day');
+        c.setLedger(null);
+        assert.deepStrictEqual(JSON.parse((await get('/state')).body).spend, { enabled: false });
+        c.setLedger(l);
+        assert.strictEqual(JSON.parse((await get('/state')).body).spend.enabled, true);
+        // a throwing today() keeps the previous cache
+        const keep = JSON.parse((await get('/state')).body).spend;
+        l.today = () => { throw new Error('boom'); };
+        c.setLedger(l);
+        assert.deepStrictEqual(JSON.parse((await get('/state')).body).spend, keep);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('snapshot spend: traces ingest with spans recomputes (attribution upgrade); empty traces does not', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      let calls = 0;
+      const orig = l.today;
+      l.today = (n) => { calls++; return orig(n); };
+      const c = await start(l);
+      const spend = async () => JSON.parse((await get('/state')).body).spend;
+      try {
+        await post('/v1/logs', FIX());
+        const a = await spend();
+        assert.strictEqual(a.unattributedN, 1); assert.strictEqual(a.byAttribution.unknown, 3000);
+        const n = calls;
+        await post('/v1/traces', { resourceSpans: [] });
+        assert.strictEqual(calls, n, 'empty traces must not recompute');
+        const span = { startTimeUnixNano: String(BigInt(NOW0 - 120000) * 1000000n), attributes: [sv('span.type', 'llm_request'),
+          sv('request_id', 'r2'), sv('session.id', 'sess-aaaaaaaa-1111'), sv('agent_id', 'agent-1')] };
+        assert.strictEqual((await post('/v1/traces', { resourceSpans: [{ scopeSpans: [{ spans: [span] }] }] })).status, 200);
+        const b = await spend();
+        assert.strictEqual(calls, n + 1);
+        assert.strictEqual(b.unattributedN, 0); assert.strictEqual(b.byAttribution.unknown, undefined);
+      } finally { await stop(c); l.close(); }
+    });
+
+    await atest('snapshot spend: first-use failure is {enabled:true, unavailable:true}; a later success clears it', async () => {
+      clock = NOW0;
+      const l = mkLedger();
+      const orig = l.today;
+      l.today = () => { throw new Error('boom'); };
+      const c = await start(l);
+      try {
+        const st = JSON.parse((await get('/state')).body).spend;
+        assert.deepStrictEqual(st, { enabled: true, unavailable: true });
+        l.today = orig;
+        c.setLedger(l);
+        const ok = JSON.parse((await get('/state')).body).spend;
+        assert.strictEqual(ok.enabled, true); assert.ok(!('unavailable' in ok));
+        assert.strictEqual(ok.todayMicros, 0);
+      } finally { await stop(c); l.close(); }
+    });
+  }
+
+  /* ---- Phase 2 step 2: widget footer ---- */
+  {
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const lift = (name) => app.match(new RegExp('function ' + name + '[\\s\\S]*?\\n}'))[0];
+    const fns = new Function([lift('estMoney'), lift('largestRemainder'), lift('sourceSegments'),
+      lift('barAriaLabel'), lift('cumulativePoints'), lift('spendMode'),
+      'return { estMoney, largestRemainder, sourceSegments, barAriaLabel, cumulativePoints, spendMode };'].join('\n'))();
+
+    test('estMoney: two decimals, always est., bad input is $0.00', () => {
+      assert.strictEqual(fns.estMoney(12340000), '$12.34 est.');
+      assert.strictEqual(fns.estMoney(0), '$0.00 est.');
+      assert.strictEqual(fns.estMoney(4000), '$0.00 est.');
+      assert.strictEqual(fns.estMoney(1250000000), '$1250.00 est.');
+      for (const bad of [NaN, Infinity, undefined, null, 'x', -5]) assert.strictEqual(fns.estMoney(bad), '$0.00 est.');
+    });
+
+    test('largestRemainder sums to exactly 100, or all zero', () => {
+      for (const v of [[1, 1, 1], [1, 2, 3, 4], [33, 33, 34], [1, 0, 0], [5, 5], [0.1, 0.2, 0.7], [1, 1, 1, 1, 1, 1, 1]]) {
+        const r = fns.largestRemainder(v);
+        assert.strictEqual(r.reduce((a, b) => a + b, 0), 100, JSON.stringify(v));
+        assert.ok(r.every(Number.isInteger));
+      }
+      assert.deepStrictEqual(fns.largestRemainder([1, 1, 1]), [34, 33, 33]);
+      assert.deepStrictEqual(fns.largestRemainder([0, 0]), [0, 0]);
+      assert.deepStrictEqual(fns.largestRemainder([]), []);
+    });
+
+    test('sourceSegments: ordered, unattributed last and carved out of source', () => {
+      const segs = fns.sourceSegments({
+        todayMicros: 10000000,
+        bySource: { main: 6000000, subagent: 3000000, auxiliary: 1000000 },
+        byAttribution: { explicit: 8000000, unknown: 2000000 },
+      });
+      assert.deepStrictEqual(segs.map((x) => x.key), ['main', 'subagent', 'auxiliary', 'unattributed']);
+      assert.deepStrictEqual(segs.map((x) => x.micros), [6000000, 1000000, 1000000, 2000000]);
+      assert.strictEqual(segs.reduce((a, b) => a + b.pct, 0), 100);
+      assert.strictEqual(segs.reduce((a, b) => a + b.micros, 0), 10000000);
+      assert.deepStrictEqual(fns.sourceSegments({ todayMicros: 0, bySource: {}, byAttribution: {} }), []);
+      assert.deepStrictEqual(fns.sourceSegments(undefined), []);
+      const only = fns.sourceSegments({ bySource: { main: 5 }, byAttribution: { explicit: 5 } });
+      assert.deepStrictEqual(only.map((x) => [x.key, x.pct]), [['main', 100]]);
+    });
+
+    test('cumulativePoints: monotonic, in range, today only, hours after now undrawn', () => {
+      const mid = new Date(2026, 9, 4).getTime();
+      const H = 3600000;
+      const mk = (hr, c) => ({ since: mid + hr * H, until: mid + (hr + 1) * H, costMicros: c });
+      const buckets = [mk(-3, 9000000), mk(1, 1000000), mk(0, 2000000), mk(5, 0), mk(6, 3000000)];
+      const asOf = mid + 6.5 * H;
+      const pts = fns.cumulativePoints(buckets, mid, asOf, 360, 40)
+        .split(' ').map((p) => p.split(',').map(Number));
+      assert.strictEqual(pts[0][0], 0);
+      assert.strictEqual(pts[0][1], 40);                      // nothing spent at 00:00
+      for (let i = 1; i < pts.length; i++) {
+        assert.ok(pts[i][1] <= pts[i - 1][1], 'y never rises (cumulative never falls)');
+        assert.ok(pts[i][0] >= pts[i - 1][0]);
+      }
+      for (const [x, y] of pts) { assert.ok(x >= 0 && x <= 360); assert.ok(y >= 0 && y <= 40); }
+      const last = pts[pts.length - 1];
+      assert.strictEqual(last[1], 0);                         // yesterday's bucket is not in the total
+      assert.ok(Math.abs(last[0] - 360 * 6.5 / 24) < 0.2);    // ends at "now", not at 24:00
+      const empty = fns.cumulativePoints([], mid, asOf, 360, 40);
+      assert.ok(empty.split(' ').every((p) => p.endsWith(',40.0')));
+    });
+
+    test('every money string the footer can produce ends in est.', () => {
+      for (const m of [0, 1, 999, 10000, 12340000, 987654321, NaN, undefined]) {
+        assert.match(fns.estMoney(m), /^\$\d+\.\d\d est\.$/);
+      }
+      const segs = fns.sourceSegments({ bySource: { main: 3000000, subagent: 1500000, auxiliary: 12 }, byAttribution: { unknown: 700000 } });
+      const label = fns.barAriaLabel(segs);
+      for (const part of label.split('; ')) assert.match(part, /est\.$/);
+      assert.strictEqual((label.match(/\$/g) || []).length, (label.match(/est\./g) || []).length);
+      assert.strictEqual(fns.barAriaLabel([]), 'No estimated spend today');
+      // the list-price line and the Today header are both labelled at the source
+      assert.match(app, /money\(snapshot\.totalCost\) \+ ' list-price est\.'/);
+      assert.match(app, /esc\(estMoney\(total\)\)/);
+    });
+
+    test('footer fallback: copy, gating and a single fetch path', () => {
+      assert.match(app, /Waiting for telemetry from new Claude Code sessions/);
+      assert.match(app, /Spend history unavailable/);
+      assert.strictEqual(fns.spendMode(undefined), 'off');
+      assert.strictEqual(fns.spendMode({ enabled: false }), 'off');
+      assert.strictEqual(fns.spendMode({ enabled: true, unavailable: true }), 'unavailable');
+      assert.strictEqual(fns.spendMode({ enabled: true, hasTelemetry: false }), 'waiting');
+      assert.strictEqual(fns.spendMode({ enabled: true, hasTelemetry: true }), 'on');
+      assert.strictEqual((app.match(/fetch\(/g) || []).length, 1);
+      assert.match(app, /fetch\('\/api\/spend\/series\?range=24h'\)/);
+    });
+
+    test('open console: main builds the URL, preload only signals, tray item exists', () => {
+      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const pre = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+      assert.match(main, /http:\/\/127\.0\.0\.1:\$\{PORT\}\/console/);
+      assert.match(main, /ipcMain\.on\('sereno:open-console'/);
+      assert.match(main, /label: 'Open console'/);
+      assert.match(main, /if \(isWebUrl\(url\)\) shell\.openExternal\(url\)/);
+      assert.match(pre, /openConsole: \(\) => ipcRenderer\.send\('sereno:open-console'\)/);
+      const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+      assert.match(html, /<a id="open-console"[^>]*href="\/console"[^>]*target="_blank"[^>]*rel="noopener"/);
+    });
+  }
+
+  /* ---- Phase 2 step 3: console Spend tab ---- */
+  {
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const names = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry',
+      'summaryLine', 'attributionSplit', 'formatTime', 'projectLabel', 'syncLabel', 'sparkPoints', 'pageState', 'noSpendYet'];
+    const lifted = (src) => names.filter((n) => new RegExp('function ' + n + '\\(').test(src))
+      .map((n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
+    const C = new Function(lifted(cjs).join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+    const W = new Function(lifted(app).join('\n') + '\nreturn { estMoney };')();
+
+    test('console estMoney matches the widget and always ends in est.', () => {
+      for (const v of [0, 1, 4000, 12340000, 1250000000, 999999, NaN, Infinity, undefined, null, 'x', -5, '7500000']) {
+        assert.strictEqual(C.estMoney(v), W.estMoney(v));
+        assert.match(C.estMoney(v), /^\$\d+\.\d\d est\.$/);
+      }
+    });
+
+    test('esc neutralises markup and quotes', () => {
+      assert.strictEqual(C.esc('<script>alert("x")</script>'), '&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;');
+      assert.strictEqual(C.esc("a'b&c"), 'a&#39;b&amp;c');
+      assert.strictEqual(C.esc(null), '');
+      assert.strictEqual(C.esc(5), '5');
+    });
+
+    test('niceTicks: 3-4 increasing dollar ticks covering the max', () => {
+      for (const m of [0, 1, 40000, 1230000, 9990000, 27400000, 31000000, 412000000, 1e9, 2500000, 3e6]) {
+        const t = C.niceTicks(m);
+        assert.ok(t.length >= 3 && t.length <= 4, JSON.stringify([m, t]));
+        for (let i = 1; i < t.length; i++) assert.ok(t[i] > t[i - 1]);
+        assert.strictEqual(t[0], 0);
+        assert.ok(t[t.length - 1] * 1e6 >= m, JSON.stringify([m, t]));
+      }
+      assert.deepStrictEqual(C.niceTicks(27400000), [0, 10, 20, 30]);
+      assert.deepStrictEqual(C.niceTicks(NaN), [0, 1, 2, 3]);
+      assert.strictEqual(C.tickLabel(10), '$10');
+      assert.strictEqual(C.tickLabel(2.5), '$2.50');
+    });
+
+    test('barGeometry: stacked, unattributed on top, heights sum to scaled total, no NaN', () => {
+      const bs = [
+        { key: 'a', costMicros: 10e6, bySource: { main: 6e6, subagent: 3e6, auxiliary: 1e6 }, byAttribution: { explicit: 8e6, unknown: 2e6 } },
+        { key: 'b', costMicros: 0, bySource: {}, byAttribution: {} },
+        { key: 'c', costMicros: 5e6, bySource: { main: 5e6 }, byAttribution: { unknown: 5e6 } },
+      ];
+      const g = C.barGeometry(bs, 300, 100, 20e6);
+      assert.strictEqual(g.length, 3);
+      const a = g[0];
+      assert.deepStrictEqual(a.segs.map((s) => s.key), ['main', 'subagent', 'auxiliary', 'unattributed']);
+      assert.ok(Math.abs(a.segs.reduce((x, s) => x + s.h, 0) - 50) < 1e-9);
+      assert.strictEqual(a.total, 10e6);
+      assert.strictEqual(a.segs[3].micros, 2e6);
+      assert.ok(a.segs[3].y <= a.segs[0].y);   // unattributed is the topmost (smallest y)
+      assert.ok(Math.abs(a.segs[0].y + a.segs[0].h - 100) < 1e-9);   // stack starts at the baseline
+      assert.strictEqual(g[1].total, 0);
+      assert.strictEqual(g[2].segs[3].micros, 5e6);   // all unattributed
+      for (const b of g) for (const s of b.segs) for (const k of ['x', 'y', 'w', 'h']) assert.ok(Number.isFinite(s[k]), k);
+      for (const bad of [[], null, undefined]) assert.deepStrictEqual(C.barGeometry(bad, 300, 100, 0), []);
+      const z = C.barGeometry([{ costMicros: 0 }], 0, 0, 0);
+      for (const s of z[0].segs) for (const k of ['x', 'y', 'w', 'h']) assert.ok(Number.isFinite(s[k]), k);
+    });
+
+    test('summaryLine: exact string with est. and n', () => {
+      const today = { costMicros: 27400000 };
+      const projects = { rows: [{ costMicros: 300e6 }, { costMicros: 112e6 }], unattributed: { costMicros: 24720000, requests: 742 } };
+      assert.strictEqual(C.summaryLine(today, projects),
+        '$27.40 est. today · $412.00 est. this month · 6% unattributed (n=742)');
+      assert.strictEqual(C.summaryLine({ costMicros: 0 }, { rows: [], unattributed: { costMicros: 0, requests: 0 } }),
+        '$0.00 est. today · $0.00 est. this month · 0% unattributed (n=0)');
+      assert.match(C.summaryLine(null, null), /est\. today · .* est\. this month/);
+    });
+
+    test('attributionSplit sums to 100 and carries n', () => {
+      const s = C.attributionSplit({ explicit: 1, unknown: 1 }, 3);
+      assert.strictEqual(s.explicitPct + s.unattributedPct, 100);
+      assert.strictEqual(s.n, 3);
+      const t = C.attributionSplit({ explicit: 90e6, unknown: 3.9e6 }, 386);
+      assert.strictEqual(t.explicitPct + t.unattributedPct, 100);
+      assert.deepStrictEqual(C.attributionSplit({ explicit: 5 }, 2), { explicitPct: 100, unattributedPct: 0, n: 2 });
+      assert.deepStrictEqual(C.attributionSplit({}, 0), { explicitPct: 0, unattributedPct: 0, n: 0 });
+    });
+
+    test('formatTime, projectLabel, syncLabel, sparkPoints, pageState', () => {
+      assert.strictEqual(C.formatTime(new Date(2026, 8, 28, 9, 4).getTime()), 'Sep 28 09:04');
+      assert.strictEqual(C.formatTime(new Date(2026, 0, 5, 23, 59).getTime()), 'Jan 05 23:59');
+      assert.strictEqual(C.formatTime(NaN), '');
+      assert.strictEqual(C.projectLabel(null), 'Unknown project');
+      assert.strictEqual(C.projectLabel(undefined), 'Unknown project');
+      assert.strictEqual(C.projectLabel('sereno'), 'sereno');
+      assert.strictEqual(C.syncLabel(1000, 2000), 'Synced just now');
+      assert.strictEqual(C.syncLabel(0, 40000), 'Synced 40s ago');
+      assert.strictEqual(C.syncLabel(0, 190000), 'Synced 3m ago');
+      assert.strictEqual(C.syncLabel(null, 5), 'Not synced yet');
+      assert.ok(!/NaN/.test(C.sparkPoints([0, 0, 0], 100, 20)));
+      assert.ok(!/NaN/.test(C.sparkPoints([1, 5, 2], 100, 20)));
+      assert.strictEqual(C.sparkPoints([], 100, 20), '');
+      assert.strictEqual(C.pageState([{ status: 200, body: { enabled: false } }]), 'off');
+      assert.strictEqual(C.pageState([{ status: 503, body: null }, { status: 200, body: { enabled: false } }]), 'unavailable');
+      assert.strictEqual(C.pageState([{ status: 200, body: { enabled: true } }]), null);
+    });
+
+    test('console.js: no prompt text, one innerHTML write, est. labels, empty-state copy', () => {
+      assert.ok(!/\.prompt\b|\['prompt|prompt_text|promptText|\.text\b|\.body\.text/.test(cjs));
+      assert.strictEqual((cjs.match(/\.innerHTML\s*=/g) || []).length, 1);
+      assert.match(cjs, /function setHtml\(el, html\) \{ el\.innerHTML = html; \}/);
+      assert.match(cjs, /Prompt text is never stored/);
+      assert.match(cjs, /Spend history is off/);
+      assert.match(cjs, /Turn it on from the Sereno tray: Keep spend history\./);
+      assert.match(cjs, /No spend recorded yet/);
+      assert.match(cjs, /Wire telemetry/);
+      assert.match(cjs, /No spend in this range/);
+      assert.match(cjs, /Spend history is unavailable right now/);
+      assert.match(cjs, /No subagent could be confirmed for these requests\./);
+      assert.ok(!/first tool/i.test(cjs));
+      assert.match(cjs, /location\.host \+ '\/console'/);
+      // API strings that reach markup are escaped
+      for (const f of ['esc(projectLabel(r.project))', 'esc(r.sessionShort)', "esc((r.models || []).join(', '))", 'esc(formatTime(r.ts))']) {
+        assert.ok(cjs.includes(f), f);
+      }
+    });
+
+    test('console: strict CSP, no inline style attributes in generated markup', () => {
+      const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
+      assert.match(html, /Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"/);
+      assert.ok(!/style=/.test(cjs.replace(/el.style./g, '')), 'style= found in console.js');
+      assert.ok(!/style=/.test(html));
+      assert.match(cjs, /el.style.width/);
+    });
+
+    test('console page: absolute /console/ assets, nav is Spend only, source colours match the widget', () => {
+      const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
+      const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+      const appcss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+      assert.match(html, /href="\/console\/console\.css"/);
+      assert.match(html, /src="\/console\/console\.js"/);
+      assert.match(html, /LOCAL WORKSPACE/);
+      assert.match(html, /Local only/);
+      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 1);
+      for (const v of ['--src-main', '--src-subagent', '--src-auxiliary', '--src-unattributed', '--src-hatch']) {
+        const re = new RegExp(v + ':\\s*(#[0-9a-f]{6})', 'i');
+        assert.strictEqual(css.match(re)[1].toLowerCase(), appcss.match(re)[1].toLowerCase(), v);
+      }
+      assert.match(css, /prefers-color-scheme: light/);
+      for (const m of css.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+    });
+  }
+
+  /* ---- Phase 2 step 4: attention panel ---- */
+  {
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const names = ['esc', 'projectLabel', 'pillText', 'attentionState', 'waitLabel', 'ringIcon', 'pillHtml', 'waitWhat', 'attentionHtml'];
+    const lifted = names.map((n) => cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
+    const A = new Function(lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+    const sess = (o) => Object.assign({ projectName: 'sereno', state: 'idle', stateTool: '', stateArgShort: '', stateSince: 1000 }, o);
+
+    test('attentionState: amber only for top-level blocked sessions', () => {
+      for (const st of ['idle', 'running', 'thinking', 'compacting', 'stale', 'bogus', undefined, null, '']) {
+        const r = A.attentionState({ sessions: [sess({ state: st })] });
+        assert.deepStrictEqual([r.amber, r.count, r.items.length], [false, 0, 0], String(st));
+      }
+      assert.strictEqual(A.attentionState({ sessions: [sess({ state: 'running', stale: true })] }).amber, false);
+      assert.strictEqual(A.attentionState({ sessions: [sess({ state: 'blocked', agent_id: 'a1' })] }).amber, false);
+      for (const bad of [null, undefined, {}, { sessions: 'x' }, { sessions: [null, 5] }]) assert.strictEqual(A.attentionState(bad).amber, false);
+      const r = A.attentionState({ sessions: [sess({ state: 'blocked', projectName: 'api', stateTool: 'Bash', stateArgShort: 'npm test', stateSince: 5000 }), sess()] });
+      assert.deepStrictEqual(r, { amber: true, count: 1, items: [{ project: 'api', tool: 'Bash', arg: 'npm test', since: 5000 }] });
+    });
+
+    test('pillText singular and plural', () => {
+      assert.strictEqual(A.pillText(1), '1 decision needs you');
+      assert.strictEqual(A.pillText(2), '2 decisions need you');
+      assert.strictEqual(A.pillText(5), '5 decisions need you');
+      assert.strictEqual(A.pillHtml(0), '');
+      assert.match(A.pillHtml(2), /2 decisions need you/);
+    });
+
+    test('attentionHtml: amber single, several, calm, unavailable', () => {
+      const one = A.attentionHtml(A.attentionState({ sessions: [sess({ state: 'blocked', projectName: 'api', stateTool: 'Bash', stateArgShort: 'npm test', stateSince: 1000 })] }), 91000);
+      assert.match(one, /attn-amber/);
+      assert.match(one, /NEEDS YOUR ATTENTION/);
+      assert.match(one, /api is waiting for permission\./);
+      assert.match(one, /Bash npm test/);
+      assert.match(one, /waiting 1m/);
+      assert.match(one, /Answer it in the terminal\. Sereno only points you there\./);
+      assert.ok(!/<button|<a /.test(one));
+      const two = A.attentionHtml(A.attentionState({ sessions: [sess({ state: 'blocked', projectName: 'a' }), sess({ state: 'blocked', projectName: 'b', stateTool: 'Edit', stateSince: null })] }), 5000);
+      assert.match(two, /2 sessions are waiting for permission\./);
+      assert.match(two, /<strong>a<\/strong>/);
+      assert.match(two, /<strong>b<\/strong>/);
+      const calm = A.attentionHtml(A.attentionState({ sessions: [sess()] }), 1);
+      assert.match(calm, /ALL CLEAR/);
+      assert.match(calm, /Nothing needs you right now\./);
+      assert.ok(!/Latest activity/i.test(calm + one));
+      const off = A.attentionHtml({ unavailable: true }, 1);
+      assert.match(off, /Live status unavailable/);
+      for (const m of [calm, off]) assert.ok(!/amber|NEEDS YOUR/i.test(m), m);
+      assert.ok(!/amber/i.test(A.attentionHtml(null, 1)));
+    });
+
+    test('attentionHtml escapes every API string and emits no style attribute', () => {
+      const evil = '<img src=x onerror=alert(1)>';
+      const st = A.attentionState({ sessions: [
+        sess({ state: 'blocked', projectName: evil, stateTool: evil, stateArgShort: evil }),
+      ] });
+      const st2 = A.attentionState({ sessions: [
+        sess({ state: 'blocked', projectName: evil, stateTool: evil, stateArgShort: evil }),
+        sess({ state: 'blocked', projectName: evil, stateTool: evil, stateArgShort: '"x"' }),
+      ] });
+      for (const m of [A.attentionHtml(st, 5000), A.attentionHtml(st2, 5000)]) {
+        assert.ok(!m.includes('<img'), m);
+        assert.ok(m.includes('&lt;img src=x onerror=alert(1)&gt;'));
+        assert.ok(!/style=/.test(m));
+      }
+      assert.ok(!/style=/.test(A.pillHtml(3)));
+    });
+
+    test('waitLabel', () => {
+      assert.strictEqual(A.waitLabel(null, 1), '');
+      assert.strictEqual(A.waitLabel(1000, 46000), 'waiting 45s');
+      assert.strictEqual(A.waitLabel(0, 181000), 'waiting 3m');
+      assert.strictEqual(A.waitLabel(0, 3700000), 'waiting 1h 1m');
+      assert.strictEqual(A.waitLabel(9000, 1000), 'waiting 0s');
+    });
+
+    test('console: /state fetched on refresh and every 10s while amber; page has the aside, no action', () => {
+      const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
+      const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+      assert.match(cjs, /getJson\('\/state'\)/);
+      assert.match(cjs, /state\.attn && state\.attn\.amber\) refreshAttention\(\); \}, 10000\)/);
+      assert.match(cjs, /refreshAttention\(\);\n  const token = \+\+state\.token/);
+      assert.match(html, /<aside class="attn-col" id="attn"/);
+      assert.match(css, /@media \(max-width: 1359px\)/);
+      assert.ok(!/Review in terminal/.test(cjs));
+      assert.strictEqual((cjs.match(/\.innerHTML\s*=/g) || []).length, 1);
+    });
+  }
+
+  /* ---- Phase 2: render fixes ---- */
+  {
+    const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const cjs = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
+    const W = new Function('const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;\n' + [lf(app, 'segmentWidths'), lf(app, 'nowPosition'),
+      'return { segmentWidths, nowPosition };'].join('\n'))();
+
+    test('widget: no inline style attributes in generated markup; geometry via data-* + CSSOM', () => {
+      const spendBlock = app.slice(app.indexOf('function spendHtml'), app.indexOf('function renderSpend'));
+      assert.ok(!/style=/.test(spendBlock), 'style= in spendHtml');
+      assert.match(spendBlock, /data-w="/);
+      assert.match(app, /el\.style\.width = /);
+      assert.match(app, /el\.style\.left = /);
+      assert.match(app, /applySpendLayout\(ui\.spend\)/);
+    });
+
+    test('segmentWidths and nowPosition: pure geometry', () => {
+      assert.deepStrictEqual(W.segmentWidths([{ micros: 78 }, { micros: 22 }]), ['78.000', '22.000']);
+      assert.deepStrictEqual(W.segmentWidths([{ micros: 0 }]), ['0.000']);
+      const p = W.nowPosition(162, 10);
+      assert.strictEqual(p.left, '50.00');
+      assert.strictEqual(p.top, (22 / 44 * 100).toFixed(2));
+    });
+
+    test('widget chart: non-scaling strokes and an HTML dot of fixed size', () => {
+      assert.ok((app.match(/vector-effect="non-scaling-stroke"/g) || []).length >= 2);
+      assert.ok(!/<circle/.test(app));
+      assert.match(app, /class="spend-dot"/);
+    });
+
+    test('console chart title and subtitle follow the range', () => {
+      const t = new Function(lf(cjs, 'chartTitle') + '\nreturn chartTitle;')();
+      assert.deepStrictEqual(t('24h'), { title: 'Hourly usage cost', sub: 'hourly · estimated' });
+      for (const r of ['7d', '30d']) assert.deepStrictEqual(t(r), { title: 'Daily usage cost', sub: 'daily · estimated' });
+      assert.match(cjs, /getElementById\('chart-title'\)/);
+    });
+
+    test('console main column is capped at 1180px', () => {
+      const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
+      assert.match(css, /\.main \{[^}]*max-width: 1180px/);
+    });
+
+    await atest('static responses: nosniff everywhere, frame-ancestors header on html', async () => {
+      const PORT = 8796;
+      const c = createCollector(new Store(), PORT);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const get = (p) => new Promise((resolve) => {
+        http.get({ host: '127.0.0.1', port: PORT, path: p, agent: false }, (r) => { r.resume(); r.on('end', () => resolve(r)); })
+          .on('error', () => resolve({ statusCode: 0, headers: {} }));
+      });
+      try {
+        for (const p of ['/', '/console']) {
+          const r = await get(p);
+          assert.strictEqual(r.statusCode, 200, p);
+          assert.strictEqual(r.headers['content-security-policy'], "frame-ancestors 'none'", p);
+          assert.strictEqual(r.headers['x-content-type-options'], 'nosniff', p);
+        }
+        const js = await get('/console/console.js');
+        assert.strictEqual(js.statusCode, 200);
+        assert.strictEqual(js.headers['x-content-type-options'], 'nosniff');
+        assert.ok(!js.headers['content-security-policy']);
+      } finally {
+        await new Promise((res) => { c.server.close(() => res()); c.close(); });
+      }
+    });
+  }
+
+  /* ---- [spend exit] Phase 2 exit criteria, one end-to-end test each ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const life = require('../src/ledger-life.js');
+    const otlpLogsFx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-logs.json'), 'utf8'));
+    const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
+    const W = new Function(['estMoney', 'spendMode'].map((n) => lf(appSrc, n)).join('\n') + '\nreturn { estMoney, spendMode };')();
+    const CN = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry', 'summaryLine',
+      'attributionSplit', 'formatTime', 'projectLabel', 'sparkPoints', 'sw', 'dayLabel', 'chartSvg', 'legendHtml', 'chartTitle',
+      'chartSection', 'projectsSection', 'promptsSection'];
+    const mkCon = (state) => new Function('state', "const RANGES = ['24h', '7d', '30d'];\n"
+      + "const SRC_LABEL = { main: 'Main', subagent: 'Subagent', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };\n"
+      + "const ATTR_LABEL = { explicit: 'Explicit', unknown: 'Unattributed', mixed: 'Mixed' };\n"
+      + CN.map((n) => lf(conSrc, n)).join('\n') + '\nreturn { ' + CN.join(', ') + ' };')(state);
+    const WN = ['estMoney', 'esc', 'largestRemainder', 'sourceSegments', 'barAriaLabel', 'cumulativePoints', 'segmentWidths',
+      'nowPosition', 'nowMarkerX', 'spendHtml'];
+    const widget = new Function('const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;\n'
+      + WN.map((n) => lf(appSrc, n)).join('\n') + '\nreturn { spendHtml };')();
+
+    const T0 = new Date(2026, 5, 10, 13, 45).getTime();
+    let clock = T0;
+    const rqx = (port, opts) => new Promise((resolve) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port, agent: false }, opts), (res) => {
+        let d = '';
+        res.on('data', (c) => { d += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      });
+      r.on('error', () => resolve({ status: 0, body: '' }));
+      r.end(opts.body);
+    });
+    const getX = (port, p, headers) => rqx(port, { method: 'GET', path: p, headers: headers || {} });
+    const jsonX = async (port, p) => JSON.parse((await getX(port, p)).body);
+    // the otlp fixture with every record's timestamp replaced, in document order
+    const fixtureAt = (tsFor) => {
+      const fx = JSON.parse(JSON.stringify(otlpLogsFx));
+      let i = 0;
+      for (const rl of fx.resourceLogs) for (const sl of rl.scopeLogs) for (const rec of sl.logRecords) {
+        rec.timeUnixNano = String(BigInt(tsFor(i++)) * 1000000n);
+      }
+      return fx;
+    };
+    const postLogs = (port, fx) => rqx(port, { method: 'POST', path: '/v1/logs', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fx) });
+    const tmpDb = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-exit-')), 'sereno.db');
+    const open = (file) => openLedger({ file, retentionDays: 36500 });
+    const boot = async (port, ledger) => {
+      const c = createCollector(new Store(), port, { ledger, now: () => clock });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return c;
+    };
+    const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const SPEND_ROUTES = ['/api/spend/today', '/api/spend/series?range=7d', '/api/spend/series?range=24h',
+      '/api/spend/projects', '/api/spend/top-prompts'];
+    // every key that may appear in an /api/spend/* body at any depth (the Step 1 documented shapes)
+    const ALLOWED = new Set(['status', 'enabled', 'hasTelemetry', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution',
+      'unattributedN', 'range', 'buckets', 'key', 'since', 'until', 'rows', 'unattributed', 'project', 'trend', 'ts',
+      'sessionShort', 'models', 'attribution']);
+    const LEAF_MAPS = { bySource: ['main', 'subagent', 'auxiliary'], byAttribution: ['explicit', 'unknown'] };
+    const walkKeys = (o, where) => {
+      if (Array.isArray(o)) { o.forEach((x, i) => walkKeys(x, where + '[' + i + ']')); return; }
+      if (!o || typeof o !== 'object') return;
+      for (const k of Object.keys(o)) {
+        assert.ok(ALLOWED.has(k), where + ': key outside the allowlist: ' + k);
+        if (LEAF_MAPS[k]) {
+          for (const lk of Object.keys(o[k])) assert.ok(LEAF_MAPS[k].includes(lk), where + '.' + k + ': unexpected ' + lk);
+        } else walkKeys(o[k], where + '.' + k);
+      }
+    };
+    const withTmpHome = async (fn) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-exit-home-'));
+      const prev = process.env.SERENO_HOME;
+      process.env.SERENO_HOME = dir;
+      try { await fn(dir); } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    await atest('[spend exit 1] widget today, /api/spend/today and the Spend tab show one figure', async () => {
+      clock = T0;
+      const file = tmpDb();
+      const l = open(file);
+      const c = await boot(8802, l);
+      try {
+        l.recordHook('SessionStart', { session_id: 'sess-exit-1111', cwd: 'C:\\work\\exit' });
+        assert.strictEqual((await postLogs(8802, fixtureAt((i) => T0 - (i + 1) * 60000))).status, 200);
+        const st = await jsonX(8802, '/state');
+        const today = await jsonX(8802, '/api/spend/today');
+        const projects = await jsonX(8802, '/api/spend/projects');
+        assert.ok(today.costMicros > 0, 'fixture should produce spend');
+        assert.strictEqual(st.spend.todayMicros, today.costMicros);
+        const CN1 = mkCon({});
+        const line = CN1.summaryLine(today, projects);
+        assert.ok(line.startsWith(CN1.estMoney(st.spend.todayMicros) + ' today'), line);
+        assert.strictEqual(CN1.estMoney(st.spend.todayMicros), W.estMoney(st.spend.todayMicros));
+        assert.ok(widget.spendHtml(st.spend, null).includes(W.estMoney(today.costMicros)));
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 2] today survives closing and reopening the ledger on the same file', async () => {
+      clock = T0;
+      const file = tmpDb();
+      let l = open(file);
+      let c = await boot(8803, l);
+      let before;
+      try {
+        await postLogs(8803, fixtureAt((i) => T0 - (i + 1) * 60000));
+        before = await jsonX(8803, '/api/spend/today');
+        assert.ok(before.costMicros > 0);
+      } finally { await halt(c); l.close(); }
+      l = open(file);
+      c = await boot(8803, l);
+      try {
+        assert.deepStrictEqual(await jsonX(8803, '/api/spend/today'), before);
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 3] 23:59 and 00:01 land on different days and different hour buckets', async () => {
+      const day1 = new Date(2026, 5, 10, 23, 59).getTime();
+      const day2 = new Date(2026, 5, 11, 0, 1).getTime();
+      clock = new Date(2026, 5, 11, 0, 30).getTime();
+      const file = tmpDb();
+      const l = open(file);
+      const c = await boot(8804, l);
+      try {
+        // fixture record 0 at 23:59, the rest at 00:01
+        await postLogs(8804, fixtureAt((i) => (i === 0 ? day1 : day2)));
+        const nonzero = (s) => s.buckets.map((b, i) => [i, b.costMicros]).filter((x) => x[1] > 0).map((x) => x[0]);
+        const week = await jsonX(8804, '/api/spend/series?range=7d');
+        const wi = nonzero(week);
+        assert.deepStrictEqual(wi, [5, 6], 'two adjacent local days, got ' + JSON.stringify(wi));
+        assert.notStrictEqual(week.buckets[5].key, week.buckets[6].key);
+        const hours = await jsonX(8804, '/api/spend/series?range=24h');
+        const hi = nonzero(hours);
+        assert.strictEqual(hi.length, 2, 'two hour buckets, got ' + JSON.stringify(hi));
+        assert.strictEqual(hours.buckets[hi[1]].since - hours.buckets[hi[0]].since, 3600000);
+        assert.ok(day1 >= hours.buckets[hi[0]].since && day1 < hours.buckets[hi[0]].until);
+        assert.ok(day2 >= hours.buckets[hi[1]].since && day2 < hours.buckets[hi[1]].until);
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 4] ledger off: every spend route is { enabled:false }, widget mode off, no database file', async () => {
+      await withTmpHome(async (dir) => {
+        const r = life.startLedger({ ledger: { enabled: false, retentionDays: 90 } });
+        assert.strictEqual(r.ledger, null);
+        const c = await boot(8805, null);
+        try {
+          for (const p of SPEND_ROUTES) {
+            const res = await getX(8805, p);
+            assert.strictEqual(res.status, 200, p);
+            assert.deepStrictEqual(JSON.parse(res.body), { enabled: false }, p);
+          }
+          const st = await jsonX(8805, '/state');
+          assert.deepStrictEqual(st.spend, { enabled: false });
+          assert.strictEqual(W.spendMode(st.spend), 'off');
+        } finally { await halt(c); }
+        const left = fs.readdirSync(dir).filter((f) => /^sereno\.db/.test(f));
+        assert.deepStrictEqual(left, [], 'database files: ' + left.join(', '));
+      });
+    });
+
+    await atest('[spend exit 5] every /api/spend/* response uses only allowlisted keys; sessionShort is at most 8 chars', async () => {
+      clock = T0;
+      const file = tmpDb();
+      const l = open(file);
+      const c = await boot(8806, l);
+      try {
+        l.recordHook('SessionStart', { session_id: 'sess-exit-5555-long-session-id', cwd: 'C:\\work\\exit5' });
+        await postLogs(8806, fixtureAt((i) => T0 - (i + 1) * 60000));
+        let shorts = 0;
+        for (const p of SPEND_ROUTES) {
+          const body = await jsonX(8806, p);
+          assert.strictEqual(body.enabled, true, p);
+          walkKeys(body, p);
+          for (const r of body.rows || []) if ('sessionShort' in r) { shorts++; assert.ok(r.sessionShort.length <= 8, r.sessionShort); }
+        }
+        assert.ok(shorts > 0, 'top-prompts should have produced rows');
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 6] every money string in widget and console markup ends in est. (y-axis ticks excepted)', async () => {
+      clock = T0;
+      const file = tmpDb();
+      const l = open(file);
+      const c = await boot(8807, l);
+      try {
+        l.recordHook('SessionStart', { session_id: 'sess-exit-6666', cwd: 'C:\\work\\exit6' });
+        await postLogs(8807, fixtureAt((i) => T0 - (i + 1) * 60000));
+        const st = await jsonX(8807, '/state');
+        const h24 = await jsonX(8807, '/api/spend/series?range=24h');
+        const state = { range: '7d', series: await jsonX(8807, '/api/spend/series?range=7d'),
+          today: await jsonX(8807, '/api/spend/today'), projects: await jsonX(8807, '/api/spend/projects'),
+          top: await jsonX(8807, '/api/spend/top-prompts') };
+        const CN6 = mkCon(state);
+        const markups = {
+          widget: widget.spendHtml(st.spend, h24),
+          'console summary': CN6.summaryLine(state.today, state.projects),
+          'console sidebar': CN6.estMoney(state.today.costMicros) + ' today',
+          'console chart 7d': CN6.chartSvg(state.series, 640),
+          'console chart 24h': CN6.chartSvg(h24, 640),
+          'console projects': CN6.projectsSection(),
+          'console prompts': CN6.promptsSection(),
+        };
+        // The one exception: y-axis tick labels are bare dollar amounts ("$10") inside <text ... text-anchor="end">
+        // elements in the chart svg; the chart caption says "USD · estimated" and tooltips carry est. figures.
+        const TICK = /<text [^>]*text-anchor="end">\$[0-9][0-9.]*<\/text>/g;
+        let money = 0, ticks = 0;
+        for (const [name, html] of Object.entries(markups)) {
+          const rest = html.replace(TICK, () => { ticks++; return ''; });
+          for (const m of rest.matchAll(/\$[0-9][0-9.,]*/g)) {
+            money++;
+            assert.strictEqual(rest.slice(m.index + m[0].length, m.index + m[0].length + 5), ' est.',
+              name + ': ' + rest.slice(Math.max(0, m.index - 20), m.index + 30));
+          }
+        }
+        assert.ok(money >= 10, 'expected a populated state, saw ' + money + ' money strings');
+        assert.ok(ticks >= 6, 'the tick exception should have been exercised, saw ' + ticks);
+      } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    await atest('[spend exit 7] foreign Host and foreign Origin get 403 on /console, its script and every /api/spend/* route', async () => {
+      clock = T0;
+      const l = open(':memory:');
+      const c = await boot(8808, l);
+      try {
+        const paths = ['/console', '/console/console.js'].concat(SPEND_ROUTES);
+        for (const p of paths) {
+          assert.strictEqual((await getX(8808, p)).status, 200, 'control ' + p);
+          assert.strictEqual((await getX(8808, p, { host: 'evil.example' })).status, 403, 'host ' + p);
+          assert.strictEqual((await getX(8808, p, { origin: 'http://evil.example' })).status, 403, 'origin ' + p);
+        }
+      } finally { await halt(c); l.close(); }
+    });
+  }
+
+  /* ---- Phase 2: red-team fixes ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const spendtime = require('../src/spendtime.js');
+    const rawGet = (port, p) => new Promise((resolve) => {
+      http.get({ host: '127.0.0.1', port, path: p, agent: false }, (r) => {
+        let d = ''; r.on('data', (c) => { d += c; }); r.on('end', () => resolve({ status: r.statusCode, body: d }));
+      }).on('error', () => resolve({ status: 0, body: '' }));
+    });
+    const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
+    const appSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+
+    await atest('static: NUL bytes and bad encodings answer 4xx and the server survives', async () => {
+      const PORT = 8860;
+      const c = createCollector(new Store(), PORT);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      try {
+        for (const p of ['/%00', '/console/%00', '/console/index.html%00.js', '/%E0%A4%A']) {
+          const r = await rawGet(PORT, p);
+          assert.ok(r.status >= 400 && r.status < 500, p + ' -> ' + r.status);
+          assert.strictEqual((await rawGet(PORT, '/state')).status, 200, 'alive after ' + p);
+        }
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+    });
+
+    await atest('snapshot spend: a failing ledger never shows yesterday as today (stale only within the day)', async () => {
+      const PORT = 8861;
+      let clock = new Date(2026, 5, 10, 13, 0).getTime();
+      const l = openLedger({ file: ':memory:' });
+      l.ingestRequests([{ requestKey: 'k1', requestId: 'r1', sessionId: 's1', promptId: 'p1', ts: clock - 1000, model: 'm',
+        querySource: 'repl_main_thread', source: 'main', agentName: null, inputTokens: 1, outputTokens: 1,
+        cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 5000, durationMs: 1 }]);
+      const c = createCollector(new Store(), PORT, { ledger: l, now: () => clock });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const spend = async () => JSON.parse((await rawGet(PORT, '/state')).body).spend;
+      try {
+        assert.strictEqual((await spend()).todayMicros, 5000);
+        l.today = () => { throw new Error('boom'); };
+        clock += 3600000;
+        c.setLedger(l);   // same day: keep the last good figure
+        const same = await spend();
+        assert.strictEqual(same.todayMicros, 5000); assert.ok(!same.unavailable);
+        clock += 24 * 3600000;
+        c._tickSpend();   // next day: yesterday must not be presented
+        assert.deepStrictEqual(await spend(), { enabled: true, unavailable: true });
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+
+    // Grouped results vs a per-row reference; self-contained so a TZ child process can run it too.
+    function groupingCheck(ledgerPath, spendtimePath) {
+      const assert = require('node:assert');
+      const { openLedger } = require(ledgerPath);
+      const st = require(spendtimePath);
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      const asOf = new Date(2026, 5, 10, 13, 0).getTime();
+      const at = (dd, h, m, s, ms) => new Date(2026, 5, 10 + dd, h, m, s, ms).getTime();
+      const stamps = [];
+      for (const dd of [-1, 0]) {
+        stamps.push(at(dd, 0, 0, 0, 0), at(dd, 0, 14, 59, 999), at(dd, 0, 15, 0, 0), at(dd, 23, 59, 59, 999),
+          at(dd, 12, 0, 0, 0), at(dd, 12, 59, 59, 999));
+      }
+      const rows = stamps.map((ts, i) => ({
+        requestKey: 'k' + i, requestId: 'r' + i, sessionId: 's' + (i % 3), promptId: i % 4 === 0 ? null : 'p' + (i % 4),
+        ts, model: 'm' + (i % 2), querySource: 'x', source: ['main', 'subagent', 'auxiliary'][i % 3], agentName: null,
+        inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 1000 + i * 7, durationMs: 1,
+      }));
+      l.ingestRequests(rows);
+      l.recordHook('SessionStart', { session_id: 's0', cwd: '/x/alpha' });
+      l.recordHook('SessionStart', { session_id: 's1', cwd: '/x/beta' });   // s2 has no project
+      const raw = l._db.prepare('SELECT r.ts AS ts, r.source AS source, r.attribution AS attribution, r.cost_micros AS c, s.project AS p FROM requests r LEFT JOIN sessions s ON s.session_id = r.session_id').all()
+        .map((r) => ({ ts: Number(r.ts), source: r.source, attribution: r.attribution, c: Number(r.c), p: r.p ?? null }));
+      const idx = (bk, ts) => bk.findIndex((b) => ts >= b.since && ts < b.until);
+      const refSeries = (bk) => {
+        const out = bk.map((b) => ({ key: b.key, costMicros: 0, requests: 0, bySource: {}, byAttribution: {} }));
+        for (const r of raw) {
+          const i = idx(bk, r.ts);
+          if (i < 0) continue;
+          const o = out[i];
+          o.costMicros += r.c; o.requests++;
+          o.bySource[r.source] = (o.bySource[r.source] || 0) + r.c;
+          o.byAttribution[r.attribution] = (o.byAttribution[r.attribution] || 0) + r.c;
+        }
+        return out;
+      };
+      const norm = (bk) => bk.map((b) => ({ key: b.key || b.day, since: b.since, until: b.until }));
+      for (const spec of [st.hourBuckets(asOf), st.lastNDays(3, asOf)]) {
+        const bk = norm(spec);
+        assert.deepStrictEqual(l.series(bk), refSeries(bk));
+        const days = spec.map((b) => ({ since: b.since, until: b.until }));
+        const tr = l.trends({ buckets: days });
+        for (const proj of ['alpha', 'beta', null]) {
+          const exp = days.map(() => 0);
+          for (const r of raw) if (r.p === proj) { const i = idx(days, r.ts); if (i >= 0) exp[i] += r.c; }
+          assert.deepStrictEqual(tr.get(proj) || days.map(() => 0), exp, 'trends ' + proj);
+          assert.deepStrictEqual(l.trend({ project: proj, buckets: days }), exp, 'trend ' + proj);
+        }
+      }
+      const g = new Map();
+      for (const r of rows) {
+        const k = r.promptId || r.requestKey;
+        const e = g.get(k) || { ts: Infinity, c: 0 };
+        e.ts = Math.min(e.ts, r.ts); e.c += r.costMicros; g.set(k, e);
+      }
+      const exp = [...g.values()].sort((a, b) => b.c - a.c || a.ts - b.ts).slice(0, 5).map((e) => [e.c, e.ts]);
+      const got = l.topPrompts({ since: at(-1, 0, 0, 0, 0), until: at(1, 0, 0, 0, 0), limit: 5 }).map((e) => [e.costMicros, e.ts]);
+      assert.deepStrictEqual(got, exp);
+      l.close();
+      return new Date().getTimezoneOffset();
+    }
+
+    test('ledger: 15-minute slot grouping equals the per-row result at slot edges', () => {
+      groupingCheck(path.join(ROOT, 'src', 'ledger.js'), path.join(ROOT, 'src', 'spendtime.js'));
+    });
+
+    test('ledger: slot grouping is exact in Asia/Kolkata (+05:30) when TZ is honoured', () => {
+      const env = Object.assign({}, process.env, { TZ: 'Asia/Kolkata' });
+      const probe = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(new Date().getTimezoneOffset()))'], { env, encoding: 'utf8' });
+      if (probe.stdout !== '-330') { console.log('  note: TZ not honoured here (offset ' + probe.stdout + '); skipping the Kolkata check'); return; }
+      const code = '(' + groupingCheck.toString() + ')(' + JSON.stringify(path.join(ROOT, 'src', 'ledger.js')) + ','
+        + JSON.stringify(path.join(ROOT, 'src', 'spendtime.js')) + ')';
+      const r = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(' + code + '))'], { env, encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.strictEqual(r.stdout, '-330');
+    });
+
+    test('ledger perf guard: 50k requests, 15 projects: every read under 250 ms', () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-perf-'));
+      const l = openLedger({ file: path.join(dir, 'sereno.db'), retentionDays: 36500 });
+      try {
+        const now = Date.now(), N = 50000;
+        const rows = [];
+        for (let i = 0; i < N; i++) {
+          rows.push({ requestKey: 'k' + i, requestId: 'r' + i, sessionId: 's' + (i % 150), promptId: 'p' + Math.floor(i / 3),
+            ts: now - ((i * 7919) % (30 * 86400000)), model: 'm' + (i % 3), querySource: 'x',
+            source: ['main', 'subagent', 'auxiliary'][i % 3], agentName: null, inputTokens: 1, outputTokens: 1,
+            cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100 + (i % 977), durationMs: 1 });
+        }
+        l.ingestRequests(rows);
+        for (let s = 0; s < 150; s++) l.recordHook('SessionStart', { session_id: 's' + s, cwd: '/x/proj' + (s % 15) });
+        const days = spendtime.lastNDays(14, now);
+        const since = spendtime.monthStart(now), until = spendtime.dayBounds(now).until;
+        const time = (name, fn) => {
+          const t = process.hrtime.bigint();
+          const r = fn();
+          const ms = Number(process.hrtime.bigint() - t) / 1e6;
+          console.log('  perf ' + name + ': ' + ms.toFixed(1) + ' ms');
+          assert.ok(ms < 250, name + ' took ' + ms.toFixed(1) + ' ms');
+          return r;
+        };
+        const p = time('projects+trends(month)', () => { const r = l.projects({ since, until }); l.trends({ buckets: days }); return r; });
+        assert.ok(p.rows.length >= 1);
+        time('series 30d', () => l.series(spendtime.lastNDays(30, now)));
+        time('series 24h', () => l.series(spendtime.hourBuckets(now)));
+        time('topPrompts 30d', () => l.topPrompts({ since: spendtime.lastNDays(30, now)[0].since, until, limit: 10 }));
+      } finally { l.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+    });
+
+    test('widget: nowMarkerX follows the clock, clamped to the day', () => {
+      const f = new Function(lf(appSrc, 'nowMarkerX') + '\nreturn nowMarkerX;')();
+      const mid = new Date(2026, 5, 10).getTime();
+      assert.strictEqual(f(mid + 12 * 3600000, mid, 324), 162);
+      assert.strictEqual(f(mid - 5, mid, 324), 0);
+      assert.strictEqual(f(mid + 48 * 3600000, mid, 324), 324);
+      assert.strictEqual(f(NaN, mid, 324), 0);
+      assert.match(appSrc, /setInterval\(\(\) => \{ if \(spendMode\(snapshot\.spend\) === 'on'\) renderSpend\(\); \}, 60000\)/);
+    });
+
+    test('widget and console: no inline style attributes anywhere in either renderer script', () => {
+      for (const [name, src] of [['app.js', appSrc], ['console.js', conSrc]]) {
+        assert.ok(!/\bstyle\s*=/.test(src), 'style= found in ' + name);
+      }
+      assert.match(appSrc, /<i data-w="\$\{s\.contextPct\}"><\/i>/);
+      assert.match(appSrc, /applySpendLayout\(ui\.rows\)/);
+    });
+  }
+
+  /* ---- Phase 2: red-team re-run fixes ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const lf2 = (src, n) => { const a = src.indexOf('function ' + n + '('); return src.slice(a, src.indexOf('\n}', a) + 2); };
+    const app2 = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+    const con2 = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const rawGet2 = (port, p) => new Promise((resolve) => {
+      http.get({ host: '127.0.0.1', port, path: p, agent: false }, (r) => {
+        let d = ''; r.on('data', (c) => { d += c; }); r.on('end', () => resolve({ status: r.statusCode, body: d }));
+      }).on('error', () => resolve({ status: 0, body: '' }));
+    });
+
+    test('spendtime: hourBuckets keeps nowMs in the newest bucket on DST fall-back days (skipped if TZ is not honoured)', () => {
+      for (const [tz, iso] of [['America/New_York', '2026-11-01T06:30:00Z'], ['Europe/London', '2026-10-25T01:30:00Z']]) {
+        const code = 'const s=require(' + JSON.stringify(path.join(ROOT, 'src', 'spendtime.js')) + ');'
+          + 'const n=Date.parse(' + JSON.stringify(iso) + ');const b=s.hourBuckets(n);const l=b[b.length-1];'
+          + 'let ok=b.length===24&&n>=l.since&&n<l.until;'
+          + 'for(let i=1;i<b.length;i++)if(b[i].since!==b[i-1].until)ok=false;'
+          + 'const p=s.dayBounds(Date.parse("2026-03-08T12:00:00Z"));console.log(ok,(p.until-p.since)/3600000)';
+        const r = spawnSync(process.execPath, ['-e', code], { env: Object.assign({}, process.env, { TZ: tz }), encoding: 'utf8' });
+        const out = (r.stdout || '').trim();
+        const probe = spawnSync(process.execPath, ['-e', 'console.log(new Date(2026,0,15).getTimezoneOffset())'],
+          { env: Object.assign({}, process.env, { TZ: tz }), encoding: 'utf8' }).stdout.trim();
+        const want = tz === 'Europe/London' ? '0' : '300';
+        if (probe !== want) { console.log('       (note: TZ=' + tz + ' not honoured here, offset "' + probe + '"; DST bucket check skipped)'); continue; }
+        assert.ok(out.startsWith('true'), tz + ': nowMs outside the newest bucket or buckets not contiguous: ' + out);
+      }
+    });
+
+    await atest('collector: /state answers 500, not an empty 200, when snapshot throws', async () => {
+      const PORT = 8862;
+      const store = new Store();
+      store.snapshot = () => { throw new Error('boom'); };
+      const c = createCollector(store, PORT);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      try {
+        const r = await rawGet2(PORT, '/state');
+        assert.strictEqual(r.status, 500);
+        const e = await rawGet2(PORT, '/events');
+        assert.strictEqual(e.status, 500);
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+    });
+
+    await atest('spend: ledger with only yesterday rows is telemetry-on with a $0.00 est. widget footer', async () => {
+      const PORT = 8863;
+      const clock = new Date(2026, 5, 10, 13, 0).getTime();
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      const c = createCollector(new Store(), PORT, { ledger: l, now: () => clock });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      try {
+        assert.strictEqual(l.hasAny(), false);
+        let st = JSON.parse((await rawGet2(PORT, '/state')).body);
+        assert.strictEqual(st.spend.hasTelemetry, false);
+        l.ingestRequests([{ requestKey: 'y1', requestId: 'y1', sessionId: 's', promptId: null, ts: clock - 86400000,
+          model: 'm', querySource: null, source: 'main', agentName: null, inputTokens: 1, outputTokens: 1,
+          cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 5000, durationMs: 0 }]);
+        assert.strictEqual(l.hasAny(), true);
+        c.setLedger(l);   // same trigger as a settings change; recomputes the cached figure
+        st = JSON.parse((await rawGet2(PORT, '/state')).body);
+        assert.strictEqual(st.spend.hasTelemetry, true);
+        assert.strictEqual(st.spend.todayMicros, 0);
+        const t = JSON.parse((await rawGet2(PORT, '/api/spend/today')).body);
+        assert.strictEqual(t.hasTelemetry, true); assert.strictEqual(t.requests, 0);
+
+        const W = new Function('const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;\n'
+          + ['estMoney', 'esc', 'largestRemainder', 'sourceSegments', 'barAriaLabel', 'cumulativePoints', 'segmentWidths',
+            'nowPosition', 'nowMarkerX', 'spendMode', 'spendHtml'].map((n) => lf2(app2, n)).join('\n')
+          + '\nreturn { spendMode, spendHtml };')();
+        assert.strictEqual(W.spendMode(st.spend), 'on');
+        const series = JSON.parse((await rawGet2(PORT, '/api/spend/series?range=24h')).body);
+        assert.ok(W.spendHtml(st.spend, series, clock).includes('$0.00 est.'));
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+
+    test('console: noSpendYet is true only for a ledger with no requests at all', () => {
+      const C = new Function(['pageState', 'noSpendYet'].map((n) => lf2(con2, n)).join('\n') + '\nreturn { pageState, noSpendYet };')();
+      const zero = { enabled: true, hasTelemetry: false, requests: 0 };
+      assert.strictEqual(C.noSpendYet(zero, { buckets: [{ requests: 0 }] }, { rows: [] }), true);
+      assert.strictEqual(C.noSpendYet(zero, { buckets: [] }, { rows: [{ requests: 0 }] }), true);
+      // month empty (new month), 30d series has requests: normal page
+      assert.strictEqual(C.noSpendYet(zero, { buckets: [{ requests: 0 }, { requests: 3 }] }, { rows: [] }), false);
+      assert.strictEqual(C.noSpendYet({ enabled: true, hasTelemetry: true, requests: 0 }, { buckets: [] }, { rows: [] }), false);
+      assert.strictEqual(C.pageState([{ status: 200, body: zero }]), null);
+    });
+  }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

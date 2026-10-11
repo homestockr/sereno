@@ -26,6 +26,7 @@ const ui = {
   setupActionLabel: el('setup-action-label'), setupNote: el('setup-note'),
   settingsToggle: el('settings-toggle'), collapse: el('collapse'),
   autoLaunchRow: el('autolaunch-row'), autoLaunch: el('autolaunch'),
+  spend: el('spend'), consoleLine: el('console-line'),
 };
 
 // null until the first status check; only false means "definitely not wired".
@@ -37,6 +38,100 @@ let expanded = false;
 /* ---------- formatting ---------- */
 
 const money = (v) => '$' + Number(v || 0).toFixed(2);
+
+/* ---------- spend (Today block) ---------- */
+
+/** Integer micros in, '$12.34 est.' out. Every dollar figure carries its label. */
+function estMoney(micros) {
+  const n = Number(micros);
+  const v = Number.isFinite(n) && n > 0 ? n : 0;
+  return '$' + (v / 1e6).toFixed(2) + ' est.';
+}
+
+/** Integer percents that sum to exactly 100 (all 0 when there is nothing to split). */
+function largestRemainder(values) {
+  const v = values.map((x) => (Number.isFinite(Number(x)) && Number(x) > 0 ? Number(x) : 0));
+  const sum = v.reduce((a, b) => a + b, 0);
+  if (sum <= 0) return v.map(() => 0);
+  const exact = v.map((x) => (x / sum) * 100);
+  const out = exact.map(Math.floor);
+  let left = 100 - out.reduce((a, b) => a + b, 0);
+  exact.map((x, i) => ({ i, f: x - Math.floor(x) }))
+    .sort((a, b) => (b.f - a.f) || (a.i - b.i))
+    .forEach((e) => { if (left > 0) { out[e.i] += 1; left -= 1; } });
+  return out;
+}
+
+/**
+ * Today's spend as bar segments: Main, Subagent, Auxiliary, then the unattributed
+ * share last. Unattributed is an overlay on source in the ledger (those rows also
+ * have a source), so it is carved out of the source segments, subagent first, to
+ * keep the bar summing to the day's total. Zero segments are left out.
+ */
+function sourceSegments(spend) {
+  const sp = spend || {};
+  const num = (x) => (Number.isFinite(Number(x)) && Number(x) > 0 ? Number(x) : 0);
+  const src = sp.bySource || {};
+  const m = { main: num(src.main), subagent: num(src.subagent), auxiliary: num(src.auxiliary) };
+  const known = m.main + m.subagent + m.auxiliary;
+  const un = Math.min(num((sp.byAttribution || {}).unknown), known);
+  let left = un;
+  for (const k of ['subagent', 'main', 'auxiliary']) {
+    const take = Math.min(m[k], left);
+    m[k] -= take; left -= take;
+  }
+  const segs = [
+    { key: 'main', label: 'Main', micros: m.main },
+    { key: 'subagent', label: 'Subagent', micros: m.subagent },
+    { key: 'auxiliary', label: 'Auxiliary', micros: m.auxiliary },
+    { key: 'unattributed', label: 'Unattributed', micros: un },
+  ].filter((x) => x.micros > 0);
+  const pcts = largestRemainder(segs.map((x) => x.micros));
+  return segs.map((x, i) => Object.assign(x, { pct: pcts[i] }));
+}
+
+function barAriaLabel(segs) {
+  if (!segs.length) return 'No estimated spend today';
+  return 'Estimated spend today by source: '
+    + segs.map((x) => x.label + ' ' + x.pct + '%, ' + estMoney(x.micros)).join('; ');
+}
+
+/**
+ * Cumulative spend since local midnight as an SVG point list "x,y x,y ...".
+ * Only buckets that start at or after midnight and before asOf count (the 24h
+ * series reaches back before today). x is time of day across the local day,
+ * y runs from h (nothing yet) up to 0 (today's total), never decreasing.
+ */
+function cumulativePoints(buckets, midnight, asOf, w, h) {
+  const d = new Date(midnight);
+  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+  const span = end - midnight;
+  const xAt = (t) => Math.min(w, Math.max(0, ((t - midnight) / span) * w));
+  const cost = (b) => (Number(b.costMicros) > 0 ? Number(b.costMicros) : 0);
+  const rows = (buckets || [])
+    .filter((b) => b && b.since >= midnight && b.since < asOf)
+    .sort((a, b) => a.since - b.since);
+  const total = rows.reduce((a, b) => a + cost(b), 0);
+  const yAt = (c) => (total > 0 ? h - (c / total) * h : h);
+  const pts = [[xAt(midnight), yAt(0)]];
+  let cum = 0;
+  for (const b of rows) {
+    cum += cost(b);
+    pts.push([xAt(Math.min(b.until, asOf)), yAt(cum)]);
+  }
+  return pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+}
+
+/**
+ * x of the "Now" marker: the real current time across the local day starting at
+ * `midnight`, clamped to the day (a stale series must not push it off the chart).
+ */
+function nowMarkerX(now, midnight, w) {
+  const d = new Date(midnight);
+  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+  const x = ((now - midnight) / (end - midnight)) * w;
+  return Number.isFinite(x) ? Math.min(w, Math.max(0, x)) : 0;
+}
 
 function setupCopy(st) {
   const n = st && st.hookCount;
@@ -136,7 +231,7 @@ function symbolFor(s) {
 
 function metaHtml(s) {
   const ctx = typeof s.contextPct === 'number'
-    ? `<span class="context"><span class="context-track" aria-hidden="true"><i style="width:${s.contextPct}%"></i></span>Context ${s.contextPct}%</span>`
+    ? `<span class="context"><span class="context-track" aria-hidden="true"><i data-w="${s.contextPct}"></i></span>Context ${s.contextPct}%</span>`
     : '<span class="context">Context —</span>';
   const cost = typeof s.costUsd === 'number' ? money(s.costUsd) + ' est.' : '';
   return `<div class="meta">${ctx}<span>${cost}</span></div>`;
@@ -235,6 +330,7 @@ function render() {
     ui.reqCommand.textContent = b.stateArg || b.stateTool || 'Waiting for approval';
     ui.reqMeta.outerHTML = metaHtml(b).replace('class="meta"', 'class="meta" id="request-meta"');
     ui.reqMeta = el('request-meta');
+    applySpendLayout(ui.request);   // data-w geometry (the CSP drops inline style attributes)
 
     // Focusing a terminal needs the session's pid, which only reaches us when the
     // shim posted one. Without it the button would lie, so it is disabled.
@@ -273,6 +369,7 @@ function render() {
     if (expanded) html += tail.map(sessionHtml).join('');
   }
   ui.rows.innerHTML = html;
+  applySpendLayout(ui.rows);
 
   // Footer: every window the payload reports, each named and metered on its own.
   // Collapsing them to max() used to hide the one you were not about to hit,
@@ -301,15 +398,135 @@ function render() {
     ui.usageNote.textContent = '';
     ui.usageCost.textContent = money(snapshot.totalCost) + ' list-price est.';
   } else {
-    ui.footer.hidden = snapshot.totalCost <= 0;
+    ui.footer.hidden = snapshot.totalCost <= 0 && !(snapshot.spend && snapshot.spend.enabled === true);
     if (!ui.footer.hidden) {
       ui.usageWindows.innerHTML = '';
-      ui.usageNote.textContent = 'no allowance data';
-      ui.usageCost.textContent = money(snapshot.totalCost) + ' list-price est.';
+      ui.usageNote.textContent = snapshot.totalCost > 0 ? 'no allowance data' : '';
+      ui.usageCost.textContent = snapshot.totalCost > 0 ? money(snapshot.totalCost) + ' list-price est.' : '';
     }
   }
+  renderSpend();
 
   reportHeight();
+}
+
+/* ---------- Today block ---------- */
+
+// Chart geometry in viewBox units; the svg scales to the footer width.
+const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;
+const SERIES_MIN_MS = 30000;
+
+let spendSeries = null;            // last good /api/spend/series?range=24h body
+let seriesFetched = { micros: null, day: null, at: 0 };
+let seriesTimer = null;
+
+const localDay = (ms) => { const d = new Date(ms); return d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate(); };
+
+/** 'on' | 'waiting' | 'unavailable' | 'off': what the footer may say about spend. */
+function spendMode(sp) {
+  if (!sp || sp.enabled !== true) return 'off';
+  if (sp.unavailable) return 'unavailable';
+  return sp.hasTelemetry === true ? 'on' : 'waiting';
+}
+
+/** Percent widths of the source bar segments (summing to 100). */
+function segmentWidths(segs) {
+  const sum = segs.reduce((a, b) => a + b.micros, 0);
+  return segs.map((x) => (sum > 0 ? x.micros / sum * 100 : 0).toFixed(3));
+}
+
+/** The "now" marker as percentages of the chart box, so it survives any width. */
+function nowPosition(x, y) {
+  const H = SPEND_H + SPEND_TOP + 2;
+  return { left: (x / SPEND_W * 100).toFixed(2), top: ((SPEND_TOP + y) / H * 100).toFixed(2) };
+}
+
+// The page CSP drops inline style attributes, so geometry rides in data-* and is
+// applied through the CSSOM (allowed) right after the markup is inserted.
+function applySpendLayout(root) {
+  root.querySelectorAll('[data-w]').forEach((el) => { el.style.width = el.getAttribute('data-w') + '%'; });
+  root.querySelectorAll('[data-left]').forEach((el) => {
+    el.style.left = el.getAttribute('data-left') + '%';
+    el.style.top = el.getAttribute('data-top') + '%';
+  });
+}
+
+function spendHtml(sp, series, now) {
+  const segs = sourceSegments(sp);
+  const total = Number(sp.todayMicros) > 0 ? Number(sp.todayMicros) : 0;
+  const asOf = series && Number.isFinite(series.asOf) ? series.asOf : Date.now();
+  const d = new Date(asOf);
+  const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const buckets = series && Array.isArray(series.buckets) ? series.buckets : [];
+  const requests = buckets.filter((b) => b.since >= midnight && b.since < asOf)
+    .reduce((a, b) => a + (Number(b.requests) || 0), 0);
+  const chartLabel = 'Estimated spend today ' + estMoney(total) + ', ' + requests + (requests === 1 ? ' request' : ' requests');
+
+  let chart = '';
+  if (series) {
+    const pts = cumulativePoints(buckets, midnight, asOf, SPEND_W, SPEND_H);
+    const last = pts.split(' ').pop().split(',').map(Number);
+    // x follows the clock (asOf only moves when spend does); y is today's running total.
+    const nowX = nowMarkerX(Number.isFinite(now) ? now : Date.now(), midnight, SPEND_W);
+    const flip = nowX > SPEND_W * 0.8;
+    const np = nowPosition(nowX, last[1]);
+    chart = `<div class="spend-chart" role="img" aria-label="${esc(chartLabel)}">
+      <svg viewBox="0 0 ${SPEND_W} ${SPEND_H + SPEND_TOP + 2}" focusable="false" aria-hidden="true">
+        <line class="spend-base" x1="0" y1="${SPEND_TOP + SPEND_H}" x2="${SPEND_W}" y2="${SPEND_TOP + SPEND_H}" vector-effect="non-scaling-stroke"/>
+        <g transform="translate(0 ${SPEND_TOP})">
+          <polyline class="spend-line" points="${pts}" vector-effect="non-scaling-stroke"/>
+        </g>
+      </svg>
+      <span class="spend-dot" aria-hidden="true" data-left="${np.left}" data-top="${np.top}"></span>
+      <span class="spend-now${flip ? ' flip' : ''}" data-left="${np.left}" data-top="${np.top}">Now</span>
+    </div>
+    <div class="spend-axis"><span>00:00</span><span>24:00</span></div>`;
+  }
+
+  const widths = segmentWidths(segs);
+  const bar = segs.length
+    ? `<div class="spend-bar" role="img" aria-label="${esc(barAriaLabel(segs))}">${segs.map((x, i) =>
+        `<span class="seg seg-${x.key}" data-w="${widths[i]}"></span>`).join('')}</div>
+      <div class="spend-legend">${segs.map((x) =>
+        `<span><i class="sw seg-${x.key}" aria-hidden="true"></i>${esc(x.label)} ${x.pct}%</span>`).join('')}</div>`
+    : '';
+
+  return `<div class="spend-head"><span>Today · estimated usage</span><span class="spend-total">${esc(estMoney(total))}</span></div>${chart}${bar}`;
+}
+
+function renderSpend() {
+  const mode = spendMode(snapshot.spend);
+  ui.spend.hidden = mode === 'off';
+  ui.consoleLine.hidden = mode === 'off';
+  if (mode === 'off') { ui.spend.innerHTML = ''; return; }
+  if (mode === 'unavailable') ui.spend.innerHTML = '<p class="spend-hint">Spend history unavailable</p>';
+  else if (mode === 'waiting') ui.spend.innerHTML = '<p class="spend-hint">Waiting for telemetry from new Claude Code sessions</p>';
+  else { ui.spend.innerHTML = spendHtml(snapshot.spend, spendSeries); applySpendLayout(ui.spend); }
+}
+
+/**
+ * Refetch the 24h series only when today's total or the local day changed, and
+ * at most once per 30 s (trailing: a change inside the window is picked up when
+ * it closes). Never when spend is off, unavailable, or has no telemetry.
+ */
+function maybeFetchSeries() {
+  const sp = snapshot.spend;
+  if (spendMode(sp) !== 'on') return;
+  const day = localDay(Date.now());
+  if (spendSeries && seriesFetched.micros === sp.todayMicros && seriesFetched.day === day) return;
+  const wait = seriesFetched.at + SERIES_MIN_MS - Date.now();
+  if (wait > 0) {
+    if (!seriesTimer) seriesTimer = setTimeout(() => { seriesTimer = null; maybeFetchSeries(); }, wait);
+    return;
+  }
+  seriesFetched.at = Date.now();
+  const want = { micros: sp.todayMicros, day };
+  fetch('/api/spend/series?range=24h').then((r) => (r.ok ? r.json() : null)).then((body) => {
+    if (!body || body.enabled !== true || !Array.isArray(body.buckets)) return;
+    spendSeries = body;
+    seriesFetched.micros = want.micros; seriesFetched.day = want.day;
+    render();
+  }).catch(() => {});
 }
 
 /** Ticks the timers in place, so the DOM is not rebuilt every second. */
@@ -364,6 +581,8 @@ function reportHeight() {
 /* ---------- interaction ---------- */
 
 document.addEventListener('click', (ev) => {
+  // In the widget, main opens the console; the page never chooses the URL.
+  if (ev.target.closest('#open-console') && api && api.openConsole) { ev.preventDefault(); api.openConsole(); return; }
   const more = ev.target.closest('.more');
   if (more) { expanded = !expanded; render(); return; }
 
@@ -559,6 +778,7 @@ function connect() {
     try { snapshot = JSON.parse(ev.data); } catch (_) { return; }
     ui.offline.hidden = true;
     render();
+    maybeFetchSeries();
   };
   es.onerror = () => { ui.offline.hidden = false; };   // EventSource retries on its own
 }
@@ -567,6 +787,8 @@ connect();
 render();
 refreshWiring().then(refreshSettings);
 setInterval(tick, 500);
+// The Now marker follows the clock: re-render the Today block (no refetch) once a minute.
+setInterval(() => { if (spendMode(snapshot.spend) === 'on') renderSpend(); }, 60000);
 // Cheap enough to re-check: it also catches an unwire done outside the app.
 setInterval(() => { refreshWiring().then(refreshSettings); }, 15000);
 window.addEventListener('resize', reportHeight);

@@ -9,6 +9,8 @@
  *   GET  /state   -> one snapshot as JSON
  *   POST /v1/logs, /v1/traces <- OTLP/JSON (only with a ledger; else 200 and drop)
  *   GET  /ledger/summary -> ledger totals
+ *   GET  /api/spend/{today,series,projects,top-prompts} -> spend views (ledger only)
+ *   GET  /console[/*] -> the console pages (src/renderer/console)
  *   GET  /        -> the widget page (also works in a plain browser tab)
  *
  * Bound to 127.0.0.1 only. Nothing here is authenticated because nothing here
@@ -20,8 +22,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const otlp = require('./otlp.js');
+const spendtime = require('./spendtime.js');
 
 const RENDERER_DIR = path.join(__dirname, 'renderer');
+const CONSOLE_DIR = path.join(RENDERER_DIR, 'console');
+const SPEND_TICK_MS = 60 * 1000;   // checks for a local-day rollover
 const BROADCAST_COALESCE_MS = 120;   // statusline fires ~1.5s/session; do not flood
 const HEARTBEAT_MS = 15000;
 const MAX_BODY = 1024 * 1024;
@@ -73,11 +78,87 @@ function readRaw(req, cap, cb) {
   req.on('aborted', () => finish('aborted'));
 }
 
+// Serves one file confined to `dir`. A bare startsWith is not enough: it also
+// matches SIBLING directories that share the prefix, so "/../renderer-something/x"
+// escaped that check and was served. Requiring the separator confines it.
+function serveStatic(res, dir, rel) {
+  // No synchronous throw may escape: a NUL byte makes fs.readFile throw ERR_INVALID_ARG_VALUE.
+  let file;
+  try {
+    rel = decodeURIComponent(rel);
+    if (rel.includes('\0')) { res.writeHead(400).end('bad request'); return; }
+    file = path.resolve(dir, rel);
+    if (file !== dir && !file.startsWith(dir + path.sep)) {
+      res.writeHead(403).end('forbidden');
+      return;
+    }
+    fs.readFile(file, (err, buf) => {
+      if (err) { res.writeHead(404).end('not found'); return; }
+      const ext = path.extname(file);
+      const headers = {
+        'content-type': TYPES[ext] || 'application/octet-stream',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      };
+      // frame-ancestors is ignored in a meta CSP, so HTML needs it as a real header.
+      if (ext === '.html') headers['content-security-policy'] = "frame-ancestors 'none'";
+      res.writeHead(200, headers);
+      res.end(buf);
+    });
+  } catch (_) {
+    try { if (!res.headersSent) res.writeHead(400).end('bad request'); else res.end(); } catch (_e) {}
+  }
+}
+
+const SPEND_RANGES_SERIES = ['24h', '7d', '30d'];
+const SPEND_RANGES_PERIOD = ['7d', '30d', 'month'];
+
 function createCollector(store, port, opts) {
   // Swappable at runtime (setLedger): the tray toggles it without a restart.
   let ledger = (opts && opts.ledger) || null;
+  const now = (opts && typeof opts.now === 'function') ? opts.now : Date.now;
   const clients = new Set();
   let timer = null;
+
+  // Spend in the snapshot: a cached ledger.today(), recomputed only on a logs
+  // ingest, setLedger(), a local-day rollover, or first use. Never per broadcast.
+  let spendCache = null;
+  let spendDay = null;
+  function computeSpend() {
+    if (!ledger) { spendCache = { enabled: false }; spendDay = spendtime.dayStart(now()); return; }
+    try {
+      const t = ledger.today(now());
+      const any = ledger.hasAny();
+      spendCache = {
+        enabled: true,
+        todayMicros: t.costMicros,
+        bySource: Object.assign({}, t.bySource),
+        byAttribution: Object.assign({}, t.byAttribution),
+        unattributedN: t.unattributedN,
+        hasTelemetry: any === true,
+      };
+      spendDay = spendtime.dayStart(now());
+    } catch (_) {
+      // Keep a stale figure only within the same local day; never present yesterday's as today's.
+      let sameDay = false;
+      try { sameDay = spendDay !== null && spendtime.dayStart(now()) === spendDay; } catch (_) {}
+      if (!spendCache || spendCache.unavailable || !spendCache.enabled || !sameDay) spendCache = { enabled: true, unavailable: true };
+    }
+  }
+  function spendState() {
+    if (!spendCache) computeSpend();
+    return spendCache;
+  }
+  function snapshot() { return Object.assign(store.snapshot(), { spend: spendState() }); }
+  function refreshSpend() { computeSpend(); broadcast(); }
+  function tickSpend() {
+    if (spendCache === null) return;   // nobody has asked yet; first use computes
+    let d;
+    try { d = spendtime.dayStart(now()); } catch (_) { return; }
+    if (d !== spendDay) refreshSpend();
+  }
+  const spendTimer = setInterval(tickSpend, SPEND_TICK_MS);
+  if (spendTimer.unref) spendTimer.unref();
 
   /*
    * The collector is unauthenticated by design - it trusts the local user. That
@@ -124,7 +205,7 @@ function createCollector(store, port, opts) {
       if (!clients.size) return;
       let frame;
       try {
-        frame = 'data: ' + JSON.stringify(store.snapshot()) + '\n\n';
+        frame = 'data: ' + JSON.stringify(snapshot()) + '\n\n';
       } catch (_) { return; }
       for (const res of clients) {
         try { res.write(frame); } catch (_) { clients.delete(res); }
@@ -133,7 +214,82 @@ function createCollector(store, port, opts) {
     if (timer.unref) timer.unref();
   }
 
-  const server = http.createServer((req, res) => {
+  function sendJson(res, code, obj) {
+    res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(obj));
+  }
+  const pick = (o) => Object.assign({}, o);   // plain-copy a { key: micros } map
+
+  // Every response is built from an explicit key list: nothing the ledger returns
+  // can leak into the API by accident.
+  function handleApi(req, res, url) {
+    const m = /^\/api\/spend\/(today|series|projects|top-prompts)$/.exec(url);
+    if (!m) { res.writeHead(404, { 'content-type': 'text/plain' }).end('not found'); return; }
+    if (!ledger) { sendJson(res, 200, { enabled: false }); return; }
+    let sp;
+    try { sp = new URL(req.url, 'http://x').searchParams; } catch (_) { sp = new URLSearchParams(); }
+    const bad = (why) => res.writeHead(400, { 'content-type': 'text/plain' }).end(why);
+    const asOf = now();
+    try {
+      if (m[1] === 'today') {
+        const t = ledger.today(asOf);
+        const hasTelemetry = ledger.hasAny() === true;
+        sendJson(res, 200, {
+          enabled: true, hasTelemetry, asOf, day: t.day, costMicros: t.costMicros, requests: t.requests,
+          bySource: pick(t.bySource), byAttribution: pick(t.byAttribution), unattributedN: t.unattributedN,
+        });
+        return;
+      }
+      if (m[1] === 'series') {
+        const range = sp.get('range') === null ? '30d' : sp.get('range');
+        if (!SPEND_RANGES_SERIES.includes(range)) return bad('range must be 24h, 7d or 30d');
+        const spec = range === '24h' ? spendtime.hourBuckets(asOf) : spendtime.lastNDays(range === '7d' ? 7 : 30, asOf);
+        const rows = ledger.series(spec.map((b) => ({ key: b.key || b.day, since: b.since, until: b.until })));
+        sendJson(res, 200, {
+          enabled: true, asOf, range,
+          buckets: rows.map((r, i) => ({
+            key: r.key, since: spec[i].since, until: spec[i].until, costMicros: r.costMicros, requests: r.requests,
+            bySource: pick(r.bySource), byAttribution: pick(r.byAttribution),
+          })),
+        });
+        return;
+      }
+      // projects and top-prompts share the period ranges
+      const range = sp.get('range') === null ? 'month' : sp.get('range');
+      if (!SPEND_RANGES_PERIOD.includes(range)) return bad('range must be 7d, 30d or month');
+      const until = spendtime.dayBounds(asOf).until;
+      const since = range === 'month' ? spendtime.monthStart(asOf) : spendtime.lastNDays(range === '7d' ? 7 : 30, asOf)[0].since;
+      if (m[1] === 'projects') {
+        const p = ledger.projects({ since, until });
+        const days = spendtime.lastNDays(14, asOf);
+        const tr = ledger.trends({ buckets: days });
+        sendJson(res, 200, {
+          enabled: true, asOf, range,
+          rows: p.rows.map((r) => ({
+            project: r.project, costMicros: r.costMicros, requests: r.requests,
+            bySource: pick(r.bySource), byAttribution: pick(r.byAttribution),
+            trend: tr.get(r.project ?? null) || days.map(() => 0),
+          })),
+          unattributed: { costMicros: p.unattributed.costMicros, requests: p.unattributed.requests },
+        });
+        return;
+      }
+      // top-prompts
+      const lv = sp.get('limit');
+      const limit = lv !== null && lv.trim() !== '' && Number.isFinite(Number(lv)) ? Number(lv) : 10;
+      const rows = ledger.topPrompts({ since, until, limit });
+      sendJson(res, 200, {
+        enabled: true, asOf, range,
+        rows: rows.map((r) => ({
+          ts: r.ts, project: r.project, sessionShort: r.sessionShort, costMicros: r.costMicros,
+          models: r.models.slice(), attribution: r.attribution,
+        })),
+      });
+    } catch (_) {
+      try { res.writeHead(503, { 'content-type': 'text/plain' }).end('ledger unavailable'); } catch (_e) {}
+    }
+  }
+
+  function route(req, res) {
     const url = (req.url || '/').split('?')[0];
 
     if (!localOnly(req, res)) return;
@@ -202,16 +358,18 @@ function createCollector(store, port, opts) {
           let body;
           try { body = JSON.parse(raw.toString('utf8')); } catch (_) { return reply(400, 'invalid json'); }
           if (!ledger) return reply(200);   // ledger off: accept and drop, nothing touches disk
+          let inserted = false;
           try {
             if (url === '/v1/logs') {
               const rows = otlp.parseLogs(body);
-              if (rows.length) ledger.ingestRequests(rows);
+              if (rows.length) { ledger.ingestRequests(rows); inserted = true; }
             } else {
               const spans = otlp.parseTraces(body);
-              if (spans.length) ledger.ingestSpans(spans);
+              if (spans.length) { ledger.ingestSpans(spans); inserted = true; }
             }
           } catch (_) { return reply(503, 'ledger write failed'); }
           reply(200);
+          if (inserted) refreshSpend();
         };
         if (enc !== 'gzip') return handle(buf);
         zlib.gunzip(buf, { maxOutputLength: MAX_OTLP_BODY }, (e, out) => {
@@ -241,6 +399,19 @@ function createCollector(store, port, opts) {
       return;
     }
 
+    // --- spend API ----------------------------------------------------
+    if (req.method === 'GET' && url.startsWith('/api/')) {
+      handleApi(req, res, url);
+      return;
+    }
+
+    // --- console ------------------------------------------------------
+    if (req.method === 'GET' && (url === '/console' || url.startsWith('/console/'))) {
+      const rel = url.slice('/console'.length).replace(/^\/+/, '');
+      serveStatic(res, CONSOLE_DIR, rel === '' ? 'index.html' : rel);
+      return;
+    }
+
     // --- SSE ----------------------------------------------------------
     if (url === '/events') {
       // One widget plus the odd debugging tab. A cap keeps a runaway client from
@@ -249,6 +420,7 @@ function createCollector(store, port, opts) {
         res.writeHead(503, { 'content-type': 'text/plain' }).end('too many subscribers');
         return;
       }
+      const first = 'data: ' + JSON.stringify(snapshot()) + '\n\n';   // before writeHead: a throw is the router's 500
       res.writeHead(200, {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache, no-transform',
@@ -256,7 +428,7 @@ function createCollector(store, port, opts) {
         'x-accel-buffering': 'no',
       });
       res.write('retry: 2000\n\n');
-      try { res.write('data: ' + JSON.stringify(store.snapshot()) + '\n\n'); } catch (_) {}
+      try { res.write(first); } catch (_) {}
       clients.add(res);
 
       const hb = setInterval(() => {
@@ -271,31 +443,21 @@ function createCollector(store, port, opts) {
     }
 
     if (url === '/state') {
+      const body = JSON.stringify(snapshot());   // build first: a throw becomes the router's 500
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(store.snapshot()));
+      res.end(body);
       return;
     }
 
     // --- static widget ------------------------------------------------
-    let rel = url === '/' ? 'index.html' : url.replace(/^\/+/, '');
-    try { rel = decodeURIComponent(rel); } catch (_) { /* keep the raw form */ }
-    const file = path.resolve(RENDERER_DIR, rel);
-
-    // A bare startsWith is not enough: it also matches SIBLING directories that
-    // share the prefix, so "/../renderer-something/x" escaped this check and was
-    // served. Requiring the separator confines it to the directory itself.
-    if (file !== RENDERER_DIR && !file.startsWith(RENDERER_DIR + path.sep)) {
-      res.writeHead(403).end('forbidden');
-      return;
+    serveStatic(res, RENDERER_DIR, url === '/' ? 'index.html' : url.replace(/^\/+/, ''));
+  }
+  // Last line of defence: nothing thrown while routing may take the process down.
+  const server = http.createServer((req, res) => {
+    try { route(req, res); }
+    catch (_) {
+      try { if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' }).end('internal error'); else res.end(); } catch (_e) {}
     }
-    fs.readFile(file, (err, buf) => {
-      if (err) { res.writeHead(404).end('not found'); return; }
-      res.writeHead(200, {
-        'content-type': TYPES[path.extname(file)] || 'application/octet-stream',
-        'cache-control': 'no-store',
-      });
-      res.end(buf);
-    });
   });
   // Slow-client guards: these bound receiving the request, not long-lived SSE responses.
   server.requestTimeout = 30000;
@@ -306,13 +468,15 @@ function createCollector(store, port, opts) {
   return {
     server,
     broadcast,
-    setLedger(l) { ledger = l || null; },
+    setLedger(l) { ledger = l || null; refreshSpend(); },
+    _tickSpend: tickSpend,
     clientCount: () => clients.size,
     listen(cb) {
       server.on('error', (err) => cb && cb(err));
       server.listen(port, '127.0.0.1', () => cb && cb(null, server.address()));
     },
     close() {
+      clearInterval(spendTimer);
       for (const res of clients) { try { res.end(); } catch (_) {} }
       clients.clear();
       try { server.close(); } catch (_) {}

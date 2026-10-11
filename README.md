@@ -170,6 +170,11 @@ An optional local record of what each Claude Code request cost. Off by default.
 **First launch offers to enable it.** You can turn it on or off later in the tray
 menu ("Keep spend history").
 
+Spend is split by source (main thread, subagent, auxiliary) until roles arrive in a later release.
+
+Spend is recorded only while Sereno is running. Telemetry sent while it is closed is
+not kept, so leave "Start Sereno automatically" on.
+
 **What is stored.** `%USERPROFILE%\.sereno\sereno.db` (or `$SERENO_HOME`), SQLite.
 Per request: `request_id`, session and prompt ids, timestamp, model, query source
 (main thread, subagent, session title, ...), token counts, cost estimate, duration,
@@ -178,6 +183,14 @@ the project name), the model, and the last statusline cost. Per subagent: its id
 and start/stop times. Rows older than 90 days are pruned each time Sereno starts. **Never stored**: prompts, responses, code,
 commands, tool inputs, your email, account ids, or organization ids. All dropped at
 ingest.
+
+### In the widget
+
+A "Today · estimated usage" block appears under the usage windows: today's estimated total, a line from local midnight to now, and a bar split into Main, Subagent and Auxiliary, with unattributed spend hatched grey. Requires spend history on and telemetry from Claude Code. Until telemetry arrives it says "Waiting for telemetry from new Claude Code sessions"; with spend history off the footer is exactly as before. The existing `$X.XX list-price est.` line shows the live statusline total of the sessions on screen — a different number. "Open console ↗" in the footer (and "Open console" in the tray) opens the console in your browser.
+
+### Console
+
+`http://127.0.0.1:8787/console`, local only. One tab for now: Spend. It shows today and month-to-date totals with the unattributed share and request count; usage cost by source for 24 hours (hourly), 7 or 30 days; each project by source with its attribution split and a 14-day trend; the ten costliest prompts by time, project, session, cost, model and attribution. Prompt text is never stored, so it never appears. An attention panel turns amber only when a session is waiting on a permission prompt, telling you to answer it in the terminal. Light and dark themes follow your system setting.
 
 **Telemetry.** The ledger needs Claude Code's OpenTelemetry logs exported to Sereno
 at `http://127.0.0.1:8787`. Offered as a **separate confirmation** after you enable
