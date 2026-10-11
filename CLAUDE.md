@@ -92,8 +92,8 @@ Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
 
 1. **Spend ledger (shipped `2.0.0-alpha.1`).** Plan: `docs/plans/phase-1-ledger.md`.
 2. **Spend in view (shipped `2.0.0-alpha.2`).** Plan: `docs/plans/phase-2-spend-in-view.md`.
-3. **Projects + briefs (next).** Repo poller; per-branch briefs in `.sereno/briefs/`.
-   Also: "Review in terminal" from the console (deferred from Phase 2).
+3. **Projects + briefs (in progress).** Plan: `docs/plans/phase-3-projects-briefs.md`.
+   Branch `feat/projects-briefs`, ships as `2.0.0-alpha.3`.
 4. **Pipeline.** `pipeline.json` (configurable models per role, presets, fallback
    policy), agent templates, `/ship`, gate files in `.sereno/gates/<review_run_id>.json`.
 
