@@ -6134,6 +6134,326 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+    /* ---- [projects exit] Phase 3 exit criteria, one end-to-end test each ---- */
+  {
+    const projects = require('../src/projects.js');
+    const repos = require('../src/repos.js');
+    const briefsLib = require('../src/briefs.js');
+    const baseEnv = Object.assign({}, process.env, {
+      GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+      GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+    });
+    const HOUR = 3600 * 1000;
+    const git = (cwd, args, at) => execFileSync('git', args, {
+      cwd, stdio: 'pipe', windowsHide: true,
+      env: at === undefined ? baseEnv : Object.assign({}, baseEnv, { GIT_COMMITTER_DATE: new Date(at).toISOString(), GIT_AUTHOR_DATE: new Date(at).toISOString() }),
+    }).toString().trim();
+    const mkd = (tag) => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-ex-' + tag + '-')));
+    /** a repo on `main` with one commit; returns { d, c0 } */
+    const repoWith = (tag, at, msg) => {
+      const d = mkd(tag);
+      git(d, ['init', '-q', '-b', 'main']);
+      fs.writeFileSync(path.join(d, 'README.md'), 'readme\n');
+      git(d, ['add', '-A']);
+      git(d, ['commit', '-q', '-m', msg || 'SERENO-COMMIT-CANARY first'], at);
+      return { d, c0: git(d, ['rev-parse', 'HEAD']) };
+    };
+    const commitFile = (d, rel, content, msg, at) => {
+      fs.mkdirSync(path.dirname(path.join(d, rel)), { recursive: true });
+      fs.writeFileSync(path.join(d, rel), content);
+      git(d, ['add', '-A']);
+      git(d, ['commit', '-q', '-m', msg], at);
+      return git(d, ['rev-parse', 'HEAD']);
+    };
+    const briefDoc = (branch, sc, o) => [
+      '---', 'branch: ' + branch, 'worktree: C:/somewhere/secret', 'version: 1', 'source_commit: ' + sc,
+      'task: SERENO-TASK-CANARY', 'generated_at: 2026-10-01T10:00:00Z', '---',
+      'Now: ' + ((o && o.now) || 'doing the thing'), 'Next: the next thing', 'Blocked: none', '',
+    ].join('\n');
+    const putBriefFile = (d, branch, sc, o) => {
+      const f = path.join(d, '.sereno', 'briefs', encodeURIComponent(branch) + '.md');
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, briefDoc(branch, sc, o));
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const withEnv = async (fn) => {
+      const home = mkd('home'); const prev = { h: process.env.SERENO_HOME, c: process.env.CLAUDE_CONFIG_DIR };
+      process.env.SERENO_HOME = home;
+      process.env.CLAUDE_CONFIG_DIR = path.join(home, 'claude');
+      try { await fn(home); }
+      finally {
+        if (prev.h === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev.h;
+        if (prev.c === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev.c;
+      }
+    };
+    const rq = (port, o) => new Promise((resolve, reject) => {
+      const body = o.body === undefined ? null : (typeof o.body === 'string' ? o.body : JSON.stringify(o.body));
+      const headers = Object.assign({}, o.headers || {});
+      if (body !== null) headers['content-length'] = Buffer.byteLength(body);
+      const req = http.request({ host: '127.0.0.1', port, path: o.path, method: o.method || 'GET', headers, agent: false }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (c) => { t += c; });
+        r.on('end', () => resolve({ status: r.statusCode, text: t }));
+      });
+      req.on('error', reject);
+      req.end(body === null ? undefined : body);
+    });
+    const boot = async (store, port, opts) => {
+      const c = createCollector(store, port, opts);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return c;
+    };
+    const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const apiProjects = async (port) => JSON.parse((await rq(port, { path: '/api/projects' })).text);
+    const hookStart = (port, id, cwd) => rq(port, { method: 'POST', path: '/hook', headers: { 'content-type': 'application/json' },
+      body: { event: 'SessionStart', payload: { hook_event_name: 'SessionStart', session_id: id, cwd } } });
+    const waitFor = async (cond, ms) => { for (let i = 0; i < (ms || 8000) / 50 && !cond(); i++) await sleep(50); };
+    const byName = (r, tag) => r.projects.find((p) => p.name.startsWith('sereno-ex-' + tag + '-'));
+
+    await atest('[projects exit 1] fresh, behind, stale, none and unknown repos each show exactly the expected freshness in /api/projects', async () => {
+      await withEnv(async () => {
+        const PORT = 8951;
+        const T = Date.parse('2026-10-11T12:00:00Z');   // the injected poller clock
+        const fresh = repoWith('fr', T - 30 * HOUR);
+        putBriefFile(fresh.d, 'main', fresh.c0);
+        const behind = repoWith('bh', T - 30 * HOUR);
+        putBriefFile(behind.d, 'main', behind.c0);
+        commitFile(behind.d, 'src/a.js', 'x\n', 'code change', T - 1 * HOUR);
+        const stale = repoWith('st', T - 40 * HOUR);
+        putBriefFile(stale.d, 'main', stale.c0);
+        commitFile(stale.d, 'src/a.js', 'x\n', 'code change', T - 25 * HOUR);   // the poller clock is 25 h later
+        const none = repoWith('no', T - 30 * HOUR);
+        const unknown = repoWith('un', T - 30 * HOUR);
+        putBriefFile(unknown.d, 'main', 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
+        const reg = projects.createRegistry();
+        const poller = repos.createPoller({ registry: reg, now: () => T });
+        const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        try {
+          const all = [fresh, behind, stale, none, unknown];
+          for (let i = 0; i < all.length; i++) assert.strictEqual((await hookStart(PORT, 's' + i, all[i].d)).status, 204);
+          await waitFor(() => reg.list().length === 5);
+          assert.strictEqual(reg.list().length, 5);
+          await poller.pollNow();
+          const r = await apiProjects(PORT);
+          assert.strictEqual(r.projects.length, 5);
+          const got = {};
+          for (const t of ['fr', 'bh', 'st', 'no', 'un']) got[t] = byName(r, t).freshness;
+          assert.deepStrictEqual(got, { fr: 'fresh', bh: 'behind', st: 'stale', no: 'none', un: 'unknown' });
+          for (const p of r.projects) assert.ok(['fresh', 'behind', 'stale', 'none', 'unknown'].includes(p.freshness));
+          assert.strictEqual(byName(r, 'no').brief, null);
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[projects exit 2] brief-only, STATUS-only and mixed brief+STATUS commits stay fresh; a source commit makes it behind, then stale 25 h later', async () => {
+      await withEnv(async () => {
+        const PORT = 8952;
+        const { d, c0 } = repoWith('c2');
+        putBriefFile(d, 'main', c0);
+        const clock = { t: Date.now() };
+        const reg = projects.createRegistry();
+        const poller = repos.createPoller({ registry: reg, now: () => clock.t });
+        const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        try {
+          await hookStart(PORT, 'x', d);
+          await waitFor(() => reg.list().length === 1);
+          const fr = async () => { await poller.pollNow(); return byName(await apiProjects(PORT), 'c2'); };
+          assert.strictEqual((await fr()).freshness, 'fresh');
+          commitFile(d, '.sereno/briefs/x.md', briefDoc('x', c0), 'brief only');
+          assert.strictEqual((await fr()).freshness, 'fresh', 'a commit touching only .sereno/briefs/x.md');
+          commitFile(d, 'STATUS.md', 'status\n', 'status only');
+          assert.strictEqual((await fr()).freshness, 'fresh', 'a commit touching only STATUS.md');
+          fs.writeFileSync(path.join(d, 'STATUS.md'), 'status 2\n');
+          commitFile(d, '.sereno/briefs/x.md', briefDoc('x', c0, { now: 'again' }), 'both');
+          let p = await fr();
+          assert.strictEqual(p.freshness, 'fresh', 'a commit touching both');
+          assert.strictEqual(p.brief.behindSince, null);
+          commitFile(d, 'src/a.js', 'x\n', 'code', Date.now());
+          p = await fr();
+          assert.strictEqual(p.freshness, 'behind');
+          assert.ok(typeof p.brief.behindSince === 'number');
+          clock.t += 25 * HOUR;
+          assert.strictEqual((await fr()).freshness, 'stale');
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[projects exit 3] sessions in a repo and in its git worktree (other path casing) make one project', async () => {
+      await withEnv(async () => {
+        const PORT = 8953;
+        const { d } = repoWith('c3');
+        const wt = path.join(mkd('c3wt'), 'wt');
+        git(d, ['worktree', 'add', '-q', '-b', 'side', wt]);
+        const reg = projects.createRegistry();
+        const poller = repos.createPoller({ registry: reg });
+        const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        try {
+          const flipped = process.platform === 'win32' ? wt.toUpperCase() : wt;
+          assert.strictEqual((await hookStart(PORT, 'a1', d)).status, 204);
+          assert.strictEqual((await hookStart(PORT, 'a2', flipped)).status, 204);
+          await waitFor(() => reg.list().length >= 1);
+          await sleep(1000);   // give a (wrongly) separate second registration time to land
+          await poller.pollNow();
+          const r = await apiProjects(PORT);
+          assert.strictEqual(r.projects.length, 1, 'one project, not two');
+          assert.strictEqual(reg.list().length, 1);
+          assert.ok(r.projects[0].branches.length >= 1);
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[projects exit 4] /hook and /api/projects answer in under 1 s while the registry git is stubbed to take 3 s', async () => {
+      await withEnv(async () => {
+        const PORT = 8954;
+        let started = 0;
+        const slow = () => { started++; return new Promise((res) => setTimeout(() => res({ stdout: '' }), 3000)); };
+        const reg = projects.createRegistry({ exec: slow });
+        const poller = repos.createPoller({ registry: reg });
+        const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        try {
+          const t0 = Date.now();
+          const r = await hookStart(PORT, 'slow1', mkd('c4'));
+          const dt = Date.now() - t0;
+          assert.strictEqual(r.status, 204);
+          assert.ok(dt < 1000, 'the hook waited on git: ' + dt + ' ms');
+          await waitFor(() => started >= 1, 2000);
+          assert.ok(started >= 1, 'the slow git really was in flight');
+          const t1 = Date.now();
+          assert.strictEqual((await rq(PORT, { path: '/api/projects' })).status, 200);
+          assert.ok(Date.now() - t1 < 1000, 'the API waited on git');
+          const t2 = Date.now();
+          assert.strictEqual((await hookStart(PORT, 'slow2', mkd('c4'))).status, 204);
+          assert.ok(Date.now() - t2 < 1000, 'a second hook waited on git');
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[projects exit 5] both guarded POST routes reject every guard failure with the documented 4xx; valid calls reach the stub and the registry', async () => {
+      await withEnv(async () => {
+        const PORT = 8955;
+        const { d } = repoWith('c5');
+        const store = new Store();
+        store.applyHook('SessionStart', { session_id: 'live1', cwd: 'C:\\work\\live1' }, { ppid: 4242 });
+        const reg = projects.createRegistry();
+        const pid = reg.register(d).id;
+        const poller = repos.createPoller({ registry: reg });
+        await poller.pollNow();
+        const reviewed = [];
+        const c = await boot(store, PORT, { projects: reg, repos: poller, onReview: (s) => { reviewed.push(s); return true; } });
+        const ORIGIN = 'http://127.0.0.1:' + PORT;
+        try {
+          const token = JSON.parse((await rq(PORT, { path: '/api/token' })).text).token;
+          const good = { origin: ORIGIN, 'content-type': 'application/json', 'x-sereno-token': token };
+          const hdr = (o) => { const h = Object.assign({}, good, o); for (const k of Object.keys(h)) if (h[k] === null) delete h[k]; return h; };
+          const flipTok = token.slice(0, -1) + (token.endsWith('A') ? 'B' : 'A');
+          const routes = [
+            { name: 'review', path: '/api/review', body: { sessionId: 'live1' }, unknown: { sessionId: 'ghost' }, extra: { sessionId: 'live1', pid: 1 } },
+            { name: 'hide', path: '/api/projects/' + pid + '/hide', body: { hidden: true }, unknown: null, extra: { hidden: true, extra: 1 } },
+          ];
+          for (const r of routes) {
+            const post = (h, b) => rq(PORT, { method: 'POST', path: r.path, headers: h, body: b });
+            const expect = async (label, res, code) => assert.strictEqual((await res).status, code, r.name + ': ' + label);
+            await expect('foreign Origin', post(hdr({ origin: 'http://evil.example' }), r.body), 403);
+            await expect('missing Origin', post(hdr({ origin: null }), r.body), 403);
+            await expect('wrong token', post(hdr({ 'x-sereno-token': flipTok }), r.body), 403);
+            await expect('missing token', post(hdr({ 'x-sereno-token': null }), r.body), 403);
+            await expect('text/plain', post(hdr({ 'content-type': 'text/plain' }), r.body), 403);
+            await expect('oversize body', post(hdr({}), '{"x":"' + 'a'.repeat(5000) + '"}'), 400);
+            await expect('extra key', post(hdr({}), r.extra), 400);
+            if (r.unknown) await expect('unknown session', post(hdr({}), r.unknown), 404);
+          }
+          const ghost = await rq(PORT, { method: 'POST', path: '/api/projects/deadbeef0000/hide', headers: good, body: { hidden: true } });
+          assert.strictEqual(ghost.status, 404, 'unknown project');
+          assert.strictEqual(reviewed.length, 0, 'no rejected call reached onReview');
+          assert.strictEqual((await apiProjects(PORT)).projects[0].hidden, false, 'no rejected call hid anything');
+          // valid
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/review', headers: good, body: { sessionId: 'live1' } })).status, 204);
+          assert.strictEqual(reviewed.length, 1);
+          assert.strictEqual(reviewed[0].id, 'live1');
+          assert.strictEqual(reviewed[0].pid, 4242, 'the pid comes from the store');
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/projects/' + pid + '/hide', headers: good, body: { hidden: true } })).status, 204);
+          assert.strictEqual((await apiProjects(PORT)).projects[0].hidden, true);
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/projects/' + pid + '/hide', headers: good, body: { hidden: false } })).status, 204);
+          assert.strictEqual((await apiProjects(PORT)).projects[0].hidden, false);
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[projects exit 6] /api/projects carries no commit message, file content, path, hash or path key; brief lines are stripped and capped', async () => {
+      await withEnv(async () => {
+        const PORT = 8956;
+        const { d, c0 } = repoWith('c6', undefined, 'SERENO-COMMIT-CANARY one');
+        const sha = commitFile(d, 'notes.txt', 'SERENO-FILE-CANARY contents\n', 'SERENO-COMMIT-CANARY two');
+        const hostile = 'visible\u0000\u0007\u001b[31m\u0085\u202e\u2066\u2069text' + 'Z'.repeat(300);
+        putBriefFile(d, 'main', c0, { now: hostile });
+        const reg = projects.createRegistry();
+        const poller = repos.createPoller({ registry: reg });
+        const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        try {
+          await hookStart(PORT, 'x', d);
+          await waitFor(() => reg.list().length === 1);
+          await poller.pollNow();
+          const text = (await rq(PORT, { path: '/api/projects' })).text;
+          const r = JSON.parse(text);
+          const p = byName(r, 'c6');
+          assert.ok(p && p.brief, 'the project and its brief are present');
+          assert.ok(!/SERENO-FILE-CANARY/.test(text), 'file content');
+          assert.ok(!/SERENO-TASK-CANARY/.test(text), 'brief front matter other than the lines');
+          assert.ok(!/SERENO-COMMIT-CANARY/.test(text), 'commit message');
+          assert.ok(!/\b[0-9a-f]{40}\b/i.test(text) && !text.includes(sha) && !text.includes(c0), 'no hash');
+          assert.ok(!text.toLowerCase().includes(os.tmpdir().toLowerCase().replace(/\\/g, '\\\\')), 'no path');
+          assert.ok(!text.includes('somewhere/secret'), 'no brief worktree path');
+          const bad = new Set(['cwd', 'worktree', 'worktrees', 'repoPath', 'worktreePath', 'path', 'sourceCommit', 'head']);
+          (function walk(o, where) {
+            if (Array.isArray(o)) return o.forEach((x, i) => walk(x, where + '[' + i + ']'));
+            if (o && typeof o === 'object') for (const k of Object.keys(o)) {
+              assert.ok(!bad.has(k), 'forbidden key ' + where + '.' + k);
+              walk(o[k], where + '.' + k);
+            }
+          })(r, '$');
+          const now = p.brief.now;
+          assert.ok(!/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(now), 'control and bidi characters stripped');
+          assert.ok(now.startsWith('visible[31mtext'), 'the visible text survives: ' + JSON.stringify(now.slice(0, 20)));
+          assert.ok(now.length <= briefsLib.MAX_LINE && now.length < 300, 'capped at ' + now.length);
+          assert.ok(now.endsWith('\u2026'));
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[projects exit 7] /brief install never overwrites a different brief.md (bytes unchanged); Sereno\'s own unedited older copy is updated', async () => {
+      const tmp = mkd('c7');
+      const prev = { c: process.env.CLAUDE_CONFIG_DIR, h: process.env.SERENO_HOME };
+      process.env.CLAUDE_CONFIG_DIR = tmp; process.env.SERENO_HOME = tmp;
+      try {
+        const target = path.join(tmp, 'commands', 'brief.md');
+        const tpl = fs.readFileSync(wiring.commandTemplatePath(), 'utf8');
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        const theirs = Buffer.from('---\ndescription: mine\n---\nSomebody else wrote this brief command.\r\n');
+        fs.writeFileSync(target, theirs);
+        assert.strictEqual(wiring.commandsStatus(), 'conflict');
+        const r = wiring.installCommands();
+        assert.deepStrictEqual(r.conflict, ['commands/brief.md']);
+        assert.ok(fs.readFileSync(target).equals(theirs), 'bytes unchanged');
+        assert.deepStrictEqual(fs.readdirSync(path.dirname(target)), ['brief.md'], 'no temp or backup file left');
+        // Sereno's own older copy, never edited
+        fs.rmSync(target);
+        const oldTpl = path.join(tmp, 'old-template.md');
+        fs.writeFileSync(oldTpl, 'an older Sereno brief command\n');
+        wiring.installCommands({ templatePath: oldTpl });
+        assert.strictEqual(fs.readFileSync(target, 'utf8'), 'an older Sereno brief command\n');
+        assert.strictEqual(wiring.commandsStatus(), 'update-available');
+        const up = wiring.installCommands();
+        assert.strictEqual(up.conflict, null);
+        assert.deepStrictEqual(up.changes, ['commands/brief.md: updated']);
+        assert.strictEqual(fs.readFileSync(target, 'utf8'), tpl);
+        assert.strictEqual(wiring.commandsStatus(), 'installed');
+      } finally {
+        if (prev.c === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev.c;
+        if (prev.h === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev.h;
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
