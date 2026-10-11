@@ -13,9 +13,11 @@
 
 const nodeFs = require('node:fs');
 const path = require('node:path');
+const { isLocalPath } = require('./gitexec.js');
 
 const MAX_BRIEF_BYTES = 16 * 1024;
 const MAX_LINE = 200;
+const REVLIST_MAX_BUFFER = 8 * 1024 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -109,12 +111,15 @@ function validBranchName(b) {
 }
 
 /**
+ * Async throughout (nothing blocks the Electron main thread). Only local drive-letter
+ * worktree paths are touched. Each brief file is read with a bounded read (never more
+ * than MAX_BRIEF_BYTES + 1), and the number of directory entries scanned is capped.
  * @param {string[]} worktreePaths
- * @param {{ fs?: typeof nodeFs, maxFiles?: number }} [opts]
- * @returns {{ byBranch: Map<string, Brief & { file: string, worktree: string | null, worktreePath: string }>, malformed: number }}
+ * @param {{ fsp?: typeof nodeFs.promises, maxFiles?: number }} [opts]
+ * @returns {Promise<{ byBranch: Map<string, Brief & { file: string, worktree: string | null, worktreePath: string }>, malformed: number }>}
  */
-function readBriefs(worktreePaths, opts) {
-  const fs = (opts && opts.fs) || nodeFs;
+async function readBriefs(worktreePaths, opts) {
+  const fsp = (opts && opts.fsp) || nodeFs.promises;
   const maxFiles = (opts && opts.maxFiles) || 200;
   /** @type {Map<string, Brief & { file: string, worktree: string | null, worktreePath: string }>} */
   const byBranch = new Map();
@@ -122,27 +127,39 @@ function readBriefs(worktreePaths, opts) {
   let seen = 0;
   const gen = (/** @type {Brief} */ b) => { const t = Date.parse(b.generatedAt || ''); return Number.isFinite(t) ? t : 0; };
   for (const wt of worktreePaths || []) {
-    let names = [];
+    if (!isLocalPath(wt)) continue;
+    /** @type {string[]} */
+    const names = [];
     const dir = path.join(wt, '.sereno', 'briefs');
     try {
       // A symlinked/junctioned .sereno or briefs dir could point anywhere: skip the worktree's briefs.
-      if (fs.lstatSync(path.join(wt, '.sereno')).isSymbolicLink() || fs.lstatSync(dir).isSymbolicLink()) continue;
-      if (fs.realpath !== undefined && fs.realpathSync) {
-        const root = fs.realpathSync(wt).toLowerCase();
-        const real = fs.realpathSync(dir).toLowerCase();
-        if (real !== root && !real.startsWith(root.replace(/[\\/]+$/, '') + path.sep)) continue;
-      }
-      names = fs.readdirSync(dir);
+      if ((await fsp.lstat(path.join(wt, '.sereno'))).isSymbolicLink() || (await fsp.lstat(dir)).isSymbolicLink()) continue;
+      const root = (await fsp.realpath(wt)).toLowerCase();
+      const real = (await fsp.realpath(dir)).toLowerCase();
+      if (real !== root && !real.startsWith(root.replace(/[\\/]+$/, '') + path.sep)) continue;
+      const d = await fsp.opendir(dir);
+      try {
+        let n = 0;
+        for await (const ent of d) { if (++n > maxFiles * 4) break; names.push(ent.name); }
+      } finally { await d.close().catch(() => {}); }
     } catch (_) { continue; }
     for (const name of names) {
       if (!/\.md$/i.test(name)) continue;
       if (++seen > maxFiles) return { byBranch, malformed };
       try {
         const full = path.join(dir, name);
-        const st = fs.lstatSync(full);
+        const st = await fsp.lstat(full);
         if (st.isSymbolicLink() || !st.isFile()) continue;
         if (st.size > MAX_BRIEF_BYTES) { malformed++; continue; }
-        const b = parseBrief(fs.readFileSync(full, 'utf8'));
+        let text = '';
+        const fh = await fsp.open(full, 'r');
+        try {
+          const buf = Buffer.alloc(MAX_BRIEF_BYTES + 1);
+          const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+          if (bytesRead > MAX_BRIEF_BYTES) { malformed++; continue; }
+          text = buf.toString('utf8', 0, bytesRead);
+        } finally { await fh.close().catch(() => {}); }
+        const b = parseBrief(text);
         const fromName = decodeBriefName(name);
         if (!b || fromName === null || fromName !== b.branch) { malformed++; continue; }
         const cur = byBranch.get(b.branch);
@@ -166,20 +183,28 @@ function classify(oldestMs, now) { return now - oldestMs > DAY_MS ? 'stale' : 'b
  * answer ('fresh' / 'unknown') or the commit time (ms) of the oldest commit past
  * the brief's source that touches anything but .sereno/ and STATUS.md.
  * @param {{ brief: { branch: string, sourceCommit: string | null }, branchHead?: string | null, exec: Exec, cwd: string }} a
- * @returns {Promise<'fresh' | 'unknown' | { oldest: number }>}
+ * @returns {Promise<'fresh' | 'unknown' | 'behind' | { oldest: number }>}
  */
 async function inspectFreshness(a) {
   try {
     const b = a.brief;
     if (!b || !validBranchName(b.branch) || !b.sourceCommit || !/^[0-9a-f]{4,64}$/i.test(b.sourceCommit)) return 'unknown';
-    try { await a.exec('git', ['cat-file', '-e', b.sourceCommit + '^{commit}'], { cwd: a.cwd }); } catch (_) { return 'unknown'; }
+    try { await a.exec('git', ['cat-file', '-e', '--end-of-options', b.sourceCommit + '^{commit}'], { cwd: a.cwd }); } catch (_) { return 'unknown'; }
     const end = a.branchHead && /^[0-9a-f]{40,64}$/i.test(a.branchHead) ? a.branchHead : 'refs/heads/' + b.branch;
-    const out = (await a.exec('git', ['log', '--format=%H%x09%ct', b.sourceCommit + '..' + end, '--',
-      '.', ':(exclude).sereno', ':(exclude)STATUS.md'], { cwd: a.cwd })).stdout;
+    // Plumbing, not `git log`: rev-list ignores log.* config (showSignature would run gpg.program).
+    let out = '';
+    try {
+      out = (await a.exec('git', ['rev-list', '--timestamp', '--end-of-options', b.sourceCommit + '..' + end, '--',
+        '.', ':(exclude).sereno', ':(exclude)STATUS.md'], { cwd: a.cwd, maxBuffer: REVLIST_MAX_BUFFER })).stdout;
+    } catch (e) {
+      // Too many commits to list: we only need to know it is behind.
+      if (e && e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'behind';
+      return 'unknown';
+    }
     let oldest = Infinity;
     for (const line of String(out).split(/\r?\n/)) {
       if (!line.trim()) continue;
-      const t = Number(line.split('\t')[1]);
+      const t = Number(line.split(' ')[0]);
       if (Number.isFinite(t)) oldest = Math.min(oldest, t * 1000);
     }
     return oldest === Infinity ? 'fresh' : { oldest };

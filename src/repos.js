@@ -11,7 +11,8 @@
 
 const os = require('node:os');
 const { execFile } = require('node:child_process');
-const { gitExec } = require('./gitexec.js');
+const nodeFs = require('node:fs');
+const { gitExec, isLocalPath } = require('./gitexec.js');
 const briefsLib = require('./briefs.js');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -64,9 +65,9 @@ function ghExecDefault(args, o) {
 
 /** @param {string} out */
 function parseWorktrees(out) {
-  /** @type {{ path: string, branch: string | null, head: string }[]} */
+  /** @type {{ path: string, branch: string | null, head: string, prunable?: boolean }[]} */
   const list = [];
-  /** @type {{ path: string, branch: string | null, head: string } | null} */
+  /** @type {{ path: string, branch: string | null, head: string, prunable?: boolean } | null} */
   let cur = null;
   for (const raw of String(out).split(/\r?\n/)) {
     const line = raw.trim();
@@ -75,6 +76,7 @@ function parseWorktrees(out) {
       cur = { path: line.slice(9), branch: null, head: '' };
       list.push(cur);
     } else if (cur && line.startsWith('HEAD ')) cur.head = line.slice(5);
+    else if (cur && /^prunable(\s|$)/.test(line)) cur.prunable = true;
     else if (cur && line.startsWith('branch ')) cur.branch = line.slice(7).replace(/^refs\/heads\//, '');
   }
   return list;
@@ -109,11 +111,13 @@ async function pool(items, limit, fn) {
 /**
  * @param {{ registry: { list: () => { id: string, name: string, repoPath: string, hidden: boolean }[] },
  *   exec?: Exec, now?: () => number, intervalMs?: number, concurrency?: number,
+ *   fsp?: typeof nodeFs.promises,
  *   ghExec?: (args: string[], o: { cwd?: string }) => Promise<{ stdout: string }>, ghIntervalMs?: number }} opts
  */
 function createPoller(opts) {
   const registry = opts.registry;
   const exec = opts.exec || gitExec;
+  const fsp = opts.fsp || nodeFs.promises;
   const now = opts.now || Date.now;
   const intervalMs = opts.intervalMs || 30000;
   const concurrency = opts.concurrency || 2;
@@ -135,7 +139,7 @@ function createPoller(opts) {
   /** @type {NodeJS.Timeout | null} */
   let timer = null;
   /** Git half of freshness, keyed by project + branch + head + source commit. Pruned each poll.
-   * @type {Map<string, 'fresh' | { oldest: number }>} */
+   * @type {Map<string, 'fresh' | 'behind' | { oldest: number }>} */
   const freshCache = new Map();
 
   /** @param {string[]} args @param {string} cwd */
@@ -175,21 +179,33 @@ function createPoller(opts) {
   /** @param {{ id: string, name: string, repoPath: string }} p @returns {Promise<RepoState>} */
   async function pollOne(p) {
     const cwd = p.repoPath;
-    const wts = parseWorktrees(await git(['worktree', 'list', '--porcelain'], cwd));
-    const branches = parseBranches(await git(['for-each-ref', 'refs/heads',
-      '--format=%(refname:short)%09%(committerdate:unix)%09%(objectname)'], cwd));
+    if (!isLocalPath(cwd)) throw new Error('not a local path');
+    // Worktree paths come from .git/worktrees/*/gitdir, which the repo controls: only
+    // local drive-letter paths that exist and are not prunable ever become a cwd or a read.
+    const wts = [];
+    for (const w of parseWorktrees(await git(['worktree', 'list', '--porcelain'], cwd))) {
+      if (w.prunable || !isLocalPath(w.path)) continue;
+      try { await fsp.stat(w.path); } catch (_) { continue; }
+      // A branch name that is not a valid ref name never reaches git again.
+      wts.push(Object.assign(w, { branch: briefsLib.validBranchName(w.branch) ? w.branch : null }));
+    }
+    const branches = parseBranches(await git(['for-each-ref', '--count=2000', '--sort=-committerdate', 'refs/heads',
+      '--format=%(refname:short)%09%(committerdate:unix)%09%(objectname)'], cwd))
+      .filter((b) => briefsLib.validBranchName(b.name));
     const names = new Set(branches.map((b) => b.name));
 
     let def = null;
     const sym = await gitOrNull(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], cwd);
     if (sym && sym.trim()) def = sym.trim().replace(/^origin\//, '');
+    if (!briefsLib.validBranchName(def)) def = null;
     if (!def || !names.has(def)) {
       def = names.has('main') ? 'main' : names.has('master') ? 'master' : (wts[0] && wts[0].branch) || null;
     }
+    if (!briefsLib.validBranchName(def)) def = null;
 
     let ahead = null; let behind = null;
     if (def) {
-      const ab = await gitOrNull(['rev-list', '--left-right', '--count', def + '...' + def + '@{upstream}'], cwd);
+      const ab = await gitOrNull(['rev-list', '--left-right', '--count', '--end-of-options', def + '...' + def + '@{upstream}'], cwd);
       const m = ab && /^(\d+)\s+(\d+)/.exec(ab.trim());
       if (m) { ahead = Number(m[1]); behind = Number(m[2]); }
     }
@@ -201,7 +217,7 @@ function createPoller(opts) {
     }
 
     const t = now();
-    const { byBranch, malformed } = briefsLib.readBriefs(wts.map((w) => w.path));
+    const { byBranch, malformed } = await briefsLib.readBriefs(wts.map((w) => w.path), { fsp });
     const byRecent = branches.slice().sort((a, b) => b.lastCommitAt - a.lastCommitAt);
     const hasDef = !!(def && names.has(def));
     const picked = byRecent.filter((b) => b.name !== def && (byBranch.has(b.name) || t - b.lastCommitAt <= RECENT_MS));
@@ -230,8 +246,8 @@ function createPoller(opts) {
           else { freshCache.set(key, got); r = got; }
         }
         if (r !== undefined) {
-          fr = r === 'fresh' ? 'fresh' : briefsLib.classify(r.oldest, t);
-          if (r !== 'fresh') behindSince = r.oldest;
+          fr = r === 'fresh' ? 'fresh' : r === 'behind' ? 'behind' : briefsLib.classify(r.oldest, t);
+          if (typeof r === 'object') behindSince = r.oldest;
         }
       }
       shown.push(Object.assign({}, b, { brief, freshness: fr, behindSince }));

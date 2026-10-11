@@ -355,8 +355,15 @@ function isLiveSession(s) {
     && (s.state === 'running' || s.state === 'thinking' || s.state === 'blocked');
 }
 
-/** Best matching non-stale top-level session state for a project: blocked, running, thinking, idle, or null. */
+/**
+ * Best live session state for a project: blocked, running, thinking, idle, or null.
+ * The server computes p.live (cwd under the repo or any worktree); name matching is only
+ * a fallback for a payload that has no p.live.
+ */
 function liveState(p, sessions) {
+  if (p && p.live && typeof p.live === 'object') {
+    return ['blocked', 'running', 'thinking', 'idle'].includes(p.live.state) ? p.live.state : null;
+  }
   const list = (Array.isArray(sessions) ? sessions : []).filter((s) => s && !s.stale && !s.agent_id && !s.agentId && s.projectName === p.name);
   for (const st of ['blocked', 'running', 'thinking', 'idle']) if (list.some((s) => s.state === st)) return st;
   return null;
@@ -508,7 +515,13 @@ function filterBar(counts, filter) {
 function projectsBody(projects, sessions, filter, showHidden, nowMs) {
   const all = Array.isArray(projects) ? projects : [];
   const live = topSessions({ sessions });
-  const blocked = live.filter((s) => s.state === 'blocked' && !s.stale).length;
+  // Decisions: blocked sessions the server attributed to a project (p.live); name match if no p.live.
+  const owned = new Set();
+  let anyLive = false;
+  for (const p of all) {
+    if (p && p.live && Array.isArray(p.live.sessionIds)) { anyLive = true; for (const id of p.live.sessionIds) owned.add(id); }
+  }
+  const blocked = live.filter((s) => s.state === 'blocked' && !s.stale && (!anyLive || owned.has(s.id))).length;
   if (!all.length) {
     return '<div class="state-panel"><h2>No projects yet</h2><p>Projects appear when a Claude Code session runs in a git repo.</p></div>';
   }

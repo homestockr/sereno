@@ -268,8 +268,16 @@ uncommitted-changes flag, the worktree list, and the brief files. Never commit m
 diffs or other file contents.
 The list of projects, with each repo's path, is kept in `~/.sereno/projects.json`.
 
-Git runs with repo-supplied programs disabled (fsmonitor, hooks, filters, submodules). It
-never prompts and never touches the network. Open PR counts come from `gh`, when it is
+Sereno uses read-only git commands, mostly plumbing (rev-parse, for-each-ref, rev-list,
+cat-file, symbolic-ref, config, worktree list), plus `status` for the uncommitted-changes
+flag. A repo's own config cannot make those run programs: fsmonitor, hooks, content
+filters, submodules and signature programs (gpg, ssh and x509) are all disabled for every
+call. It never prompts, never runs a network git command, and only reads repos on local
+drives.
+
+**Projects on network drives or inside WSL are not tracked.** Only local drive-letter paths
+(`C:...`) are used, so Sereno never opens a share on a path a repo points to. A mapped
+network drive letter looks local and cannot be told apart. Open PR counts come from `gh`, when it is
 installed and signed in, using only the GitHub owner and name from `origin`.
 
 **Review in terminal** is in the console's attention panel. It raises the waiting session's

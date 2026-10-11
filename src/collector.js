@@ -35,6 +35,7 @@ const HEARTBEAT_MS = 15000;
 const MAX_BODY = 1024 * 1024;
 const MAX_OTLP_BODY = 8 * 1024 * 1024;   // /v1/*: raw cap, and the gunzip output cap
 const MAX_SSE_CLIENTS = 16;
+const LIVE_ORDER = ['idle', 'thinking', 'running', 'blocked'];   // worst last
 const MAX_ACTION_BODY = 4 * 1024;   // POST /api/review, /api/projects/<id>/hide
 const HIDE_RE = /^\/api\/projects\/([A-Za-z0-9_-]{1,64})\/hide$/;
 
@@ -309,7 +310,8 @@ function createCollector(store, port, opts) {
     const reg = projects ? projects.list() : [];
     let snap = {};
     try { snap = repos ? repos.snapshot() : {}; } catch (_) { snap = {}; }
-    const sessions = Array.from(store.sessions.values());
+    // publicSession() carries the stale flag; store.sessions holds top-level sessions only.
+    const sessions = Array.from(store.sessions.values()).map((x) => store.publicSession(x));
     const days = spendtime.lastNDays(14, asOf);
     const pathsOf = (p, st) => {
       const set = new Set();
@@ -345,6 +347,14 @@ function createCollector(store, port, opts) {
         if (under(s.cwd, norms) && typeof s.lastSeen === 'number' && (last === null || s.lastSeen > last)) last = s.lastSeen;
       }
       if (sp && sp.lastTs !== null && (last === null || sp.lastTs > last)) last = sp.lastTs;
+      // Live sessions: same cwd-under-worktree join; the best state wins (blocked > running > thinking > idle).
+      const liveIds = [];
+      let liveRank = -1;
+      for (const s of sessions) {
+        if (s.stale || !under(s.cwd, norms)) continue;
+        liveIds.push(s.id);
+        liveRank = Math.max(liveRank, LIVE_ORDER.indexOf(s.state));
+      }
       const b = st && st.brief;
       return {
         id: p.id,
@@ -365,6 +375,7 @@ function createCollector(store, port, opts) {
           : [],
         spend14: sp ? { costMicros: sp.costMicros, trend: sp.trend.slice() } : null,
         lastActivity: last,
+        live: { state: liveRank >= 0 ? LIVE_ORDER[liveRank] : null, sessionIds: liveIds },
         error: st ? st.error === true : false,
         briefsMalformed: st ? (num(st.briefsMalformed) || 0) : 0,
       };

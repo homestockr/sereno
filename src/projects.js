@@ -13,9 +13,22 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const config = require('./config.js');
-const { gitExec } = require('./gitexec.js');
+const { gitExec, isLocalPath } = require('./gitexec.js');
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
+const CACHE_MAX = 500;
+const MAX_CWD = 1024;
+
+/**
+ * Insert into the resolve cache: expired entries go first, then the oldest past the cap.
+ * @param {Map<string, { at: number, val: any }>} cache @param {string} key @param {any} val @param {number} at
+ */
+function cacheSet(cache, key, val, at) {
+  for (const [k, v] of cache) if (at - v.at >= CACHE_TTL_MS) cache.delete(k);
+  cache.delete(key);
+  cache.set(key, { at, val });
+  while (cache.size > CACHE_MAX) cache.delete(/** @type {string} */ (cache.keys().next().value));
+}
 
 /**
  * @typedef {{ stdout: string }} ExecResult
@@ -60,7 +73,8 @@ const firstLine = (s) => String(s).split(/\r?\n/)[0].trim();
  */
 async function resolveRepo(cwd, opts) {
   try {
-    if (typeof cwd !== 'string' || !cwd) return null;
+    // Over-long strings, UNC, device, relative and WSL-style paths never reach exec or fs.
+    if (typeof cwd !== 'string' || !cwd || cwd.length > MAX_CWD || !isLocalPath(cwd)) return null;
     const exec = (opts && opts.exec) || defaultExec;
     const now = (opts && opts.now) || Date.now;
     const cache = opts && opts.cache;
@@ -79,10 +93,11 @@ async function resolveRepo(cwd, opts) {
           const common = firstLine((await exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd })).stdout);
           if (common && path.basename(common).toLowerCase() === '.git') root = path.dirname(common);
         } catch (_) { /* fall back to the toplevel */ }
-        val = { root: displayPath(root), worktree: displayPath(top) };
+        // core.worktree / gitdir files are repo-controlled: a non-local result is not a project.
+        if (isLocalPath(root) && isLocalPath(top)) val = { root: displayPath(root), worktree: displayPath(top) };
       }
     } catch (_) { val = null; }
-    if (cache) cache.set(key, { at: now(), val });
+    if (cache) cacheSet(cache, key, val, now());
     return val;
   } catch (_) { return null; }
 }
@@ -158,7 +173,7 @@ function createRegistry(opts) {
   /** @param {string} cwd @returns {Promise<void>} */
   function noteCwd(cwd) {
     try {
-      if (typeof cwd !== 'string' || !cwd) return Promise.resolve();
+      if (typeof cwd !== 'string' || !cwd || cwd.length > MAX_CWD || !isLocalPath(cwd)) return Promise.resolve();
       const key = normalizePath(cwd);
       const cur = inflight.get(key);
       if (cur) return cur;
@@ -183,4 +198,4 @@ function createRegistry(opts) {
   };
 }
 
-module.exports = { resolveRepo, createRegistry, normalizePath, projectId, CACHE_TTL_MS };
+module.exports = { cacheSet, CACHE_MAX, resolveRepo, createRegistry, normalizePath, projectId, CACHE_TTL_MS };
