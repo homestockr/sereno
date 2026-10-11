@@ -11,6 +11,7 @@
 
 const os = require('node:os');
 const { execFile } = require('node:child_process');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const nodeFs = require('node:fs');
 const { gitExec, isLocalPath } = require('./gitexec.js');
 const briefsLib = require('./briefs.js');
@@ -87,12 +88,17 @@ function parseBranches(out) {
   /** @type {Branch[]} */
   const list = [];
   for (const line of String(out).split(/\r?\n/)) {
-    const [name, ts, head] = line.split('\t');
+    const [full, ts, head] = line.split('\t');
+    // %(refname) is the full ref; %(refname:short) becomes heads/<name> when a tag shares the name.
+    const name = full && full.startsWith('refs/heads/') ? full.slice(11) : full;
     const t = Number(ts);
     if (name && Number.isFinite(t) && ts !== '') list.push({ name, lastCommitAt: t * 1000, head: head || '' });
   }
   return list;
 }
+
+const BACKOFF_START_MS = 5 * 60 * 1000;
+const BACKOFF_MAX_MS = 60 * 60 * 1000;
 
 /**
  * Run fn over items, at most `limit` at a time.
@@ -116,7 +122,19 @@ async function pool(items, limit, fn) {
  */
 function createPoller(opts) {
   const registry = opts.registry;
-  const exec = opts.exec || gitExec;
+  const rawExec = opts.exec || gitExec;
+  /** Per-project poll context: a git call killed by the timeout marks it. @type {AsyncLocalStorage<{ killed: boolean }>} */
+  const pollCtx = new AsyncLocalStorage();
+  /** @type {Exec} */
+  const exec = async (file, args, o) => {
+    try { return await rawExec(file, args, o); } catch (e) {
+      const c = pollCtx.getStore();
+      if (c && e && (e.killed || e.signal)) c.killed = true;
+      throw e;
+    }
+  };
+  /** Timeout backoff per project: skip until `until`; the next wait doubles, up to an hour. @type {Map<string, { until: number, wait: number }>} */
+  const backoff = new Map();
   const fsp = opts.fsp || nodeFs.promises;
   const now = opts.now || Date.now;
   const intervalMs = opts.intervalMs || 30000;
@@ -190,7 +208,7 @@ function createPoller(opts) {
       wts.push(Object.assign(w, { branch: briefsLib.validBranchName(w.branch) ? w.branch : null }));
     }
     const branches = parseBranches(await git(['for-each-ref', '--count=2000', '--sort=-committerdate', 'refs/heads',
-      '--format=%(refname:short)%09%(committerdate:unix)%09%(objectname)'], cwd))
+      '--format=%(refname)%09%(committerdate:unix)%09%(objectname)'], cwd))
       .filter((b) => briefsLib.validBranchName(b.name));
     const names = new Set(branches.map((b) => b.name));
 
@@ -274,17 +292,23 @@ function createPoller(opts) {
     for (const [id, s] of state) if (ids.has(id)) next.set(id, s);
     state = next;
     await pool(list, concurrency, async (p) => {
-      try {
-        state.set(p.id, await pollOne(p));
-      } catch (_) {
-        const prev = state.get(p.id);
-        if (prev) state.set(p.id, Object.assign({}, prev, { name: p.name, error: true }));
-        else state.set(p.id, {
-          id: p.id, name: p.name, defaultBranch: null, ahead: null, behind: null, dirty: null,
-          lastCommitAt: null, worktrees: [], branches: [], polledAt: null, error: true,
-          brief: null, freshness: 'none', briefsMalformed: 0,
-        });
-      }
+      const bo = backoff.get(p.id);
+      if (bo && now() < bo.until) return;   // timed out recently: leave it alone
+      const ctx = { killed: false };
+      let res = null;
+      try { res = await pollCtx.run(ctx, () => pollOne(p)); } catch (_) { res = null; }
+      if (ctx.killed) {
+        const wait = bo ? Math.min(bo.wait * 2, BACKOFF_MAX_MS) : BACKOFF_START_MS;
+        backoff.set(p.id, { until: now() + wait, wait });
+      } else if (res) backoff.delete(p.id);
+      if (res && !ctx.killed) { state.set(p.id, res); return; }
+      const prev = state.get(p.id);
+      if (prev) state.set(p.id, Object.assign({}, prev, { name: p.name, error: true }));
+      else state.set(p.id, {
+        id: p.id, name: p.name, defaultBranch: null, ahead: null, behind: null, dirty: null,
+        lastCommitAt: null, worktrees: [], branches: [], polledAt: null, error: true,
+        brief: null, freshness: 'none', briefsMalformed: 0,
+      });
     });
   }
 
@@ -302,6 +326,7 @@ function createPoller(opts) {
     for (const id of Array.from(state.keys())) if (!ids.has(id)) state.delete(id);
     for (const id of Array.from(prs.keys())) if (!ids.has(id)) prs.delete(id);
     for (const id of Array.from(ghAt.keys())) if (!ids.has(id)) ghAt.delete(id);
+    for (const id of Array.from(backoff.keys())) if (!ids.has(id)) backoff.delete(id);
   }
 
   async function runGh() {

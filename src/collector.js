@@ -321,11 +321,14 @@ function createCollector(store, port, opts) {
       }
       return Array.from(set);
     };
-    const under = (cwd, norms) => {
-      if (typeof cwd !== 'string' || !cwd) return false;
+    // Length of the longest worktree path that is a prefix of cwd (0 = none), so a nested repo wins.
+    const depth = (cwd, norms) => {
+      if (typeof cwd !== 'string' || !cwd) return 0;
       let n;
-      try { n = normalizePath(cwd); } catch (_) { return false; }
-      return norms.some((x) => n === x || n.startsWith(x + '/'));
+      try { n = normalizePath(cwd); } catch (_) { return 0; }
+      let best = 0;
+      for (const x of norms) if ((n === x || n.startsWith(x + '/')) && x.length > best) best = x.length;
+      return best;
     };
     // A hidden project is not polled, so it shows no git state even if a stale entry lingers.
     const meta = reg.map((p) => ({ p, st: p.hidden ? undefined : snap[p.id] }));
@@ -339,19 +342,25 @@ function createCollector(store, port, opts) {
       } catch (_) { spend = null; }
     }
     const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const normsOf = new Map(meta.map((m) => [m.p.id, pathsOf(m.p, m.st)]));
+    const owns = (cwd, id) => {
+      const mine = depth(cwd, normsOf.get(id) || []);
+      if (!mine) return false;
+      for (const [oid, ns] of normsOf) if (oid !== id && depth(cwd, ns) > mine) return false;
+      return true;
+    };
     const out = meta.map(({ p, st }) => {
       const sp = spend && spend.get(p.id);
-      const norms = pathsOf(p, st);
       let last = st ? num(st.lastCommitAt) : null;
       for (const s of sessions) {
-        if (under(s.cwd, norms) && typeof s.lastSeen === 'number' && (last === null || s.lastSeen > last)) last = s.lastSeen;
+        if (owns(s.cwd, p.id) && typeof s.lastSeen === 'number' && (last === null || s.lastSeen > last)) last = s.lastSeen;
       }
       if (sp && sp.lastTs !== null && (last === null || sp.lastTs > last)) last = sp.lastTs;
       // Live sessions: same cwd-under-worktree join; the best state wins (blocked > running > thinking > idle).
       const liveIds = [];
       let liveRank = -1;
       for (const s of sessions) {
-        if (s.stale || !under(s.cwd, norms)) continue;
+        if (s.stale || !owns(s.cwd, p.id)) continue;
         liveIds.push(s.id);
         liveRank = Math.max(liveRank, LIVE_ORDER.indexOf(s.state));
       }

@@ -270,15 +270,23 @@ The list of projects, with each repo's path, is kept in `~/.sereno/projects.json
 
 Sereno uses read-only git commands, mostly plumbing (rev-parse, for-each-ref, rev-list,
 cat-file, symbolic-ref, config, worktree list), plus `status` for the uncommitted-changes
-flag. A repo's own config cannot make those run programs: fsmonitor, hooks, content
-filters, submodules and signature programs (gpg, ssh and x509) are all disabled for every
-call. It never prompts, never runs a network git command, and only reads repos on local
-drives.
+flag. It never runs a network git command itself, never prompts, and only reads repos on
+local drives.
+
+**Threat model.** Sereno defends against what a clone or an archive's working tree can
+deliver: `.gitattributes` and content filters, submodules, symlinks and junctions, branch
+and ref names, brief files, huge files and names shaped like options. Filters and
+submodules are turned off for every call. On top of that it adds defence in depth for a
+repo's `.git` config: fsmonitor, hooks, signature programs (gpg, ssh and x509), lazy
+fetching of missing objects and every transport protocol are switched off. That is not a
+guarantee: a repo's `.git/config` is not something Sereno can fully fence off.
+Treat a repo's .git folder like you would for git itself: Sereno runs git there with the same trust Claude Code does.
 
 **Projects on network drives or inside WSL are not tracked.** Only local drive-letter paths
-(`C:...`) are used, so Sereno never opens a share on a path a repo points to. A mapped
-network drive letter looks local and cannot be told apart. Open PR counts come from `gh`, when it is
-installed and signed in, using only the GitHub owner and name from `origin`.
+(`C:...`) are ever used as a working directory or read, so Sereno does not pass a path a
+repo points to on to a share. A mapped network drive letter looks local and cannot be told
+apart. Open PR counts come from `gh`, when it is installed and signed in, using only the
+GitHub owner and name from `origin`.
 
 **Review in terminal** is in the console's attention panel. It raises the waiting session's
 terminal, as the widget's button does. It is not available under `npm run serve`.

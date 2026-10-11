@@ -6794,6 +6794,159 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 3: red-team round 2 ---- */
+  {
+    const repos = require('../src/repos.js');
+    const { gitExec, SAFE_ARGS, safeEnv } = require('../src/gitexec.js');
+    const baseEnv = Object.assign({}, process.env, {
+      GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+      GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+    });
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: baseEnv, stdio: 'pipe', windowsHide: true }).toString();
+    const mkd = (tag) => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-rt2-' + tag + '-')));
+    const fw = (p) => p.split(path.sep).join('/');
+    const mkRepo = (branch) => {
+      const d = mkd('repo');
+      git(d, 'init', '-q', '-b', branch || 'main');
+      fs.writeFileSync(path.join(d, 'a.js'), 'one');
+      git(d, 'add', 'a.js');
+      git(d, 'commit', '-q', '-m', 'init');
+      return d;
+    };
+    const fake = (dirs) => ({ list: () => dirs.map((d, i) => ({ id: 'p' + i, name: path.basename(d), repoPath: d, hidden: false })) });
+
+    test('rt2: SAFE_ARGS turn off every transport protocol, and the env turns off lazy fetch', () => {
+      const j = SAFE_ARGS.join(' ');
+      for (const k of ['file', 'ssh', 'http', 'https', 'git', 'ext']) assert.ok(j.includes('protocol.' + k + '.allow=never'), k);
+      assert.strictEqual(safeEnv({}).GIT_NO_LAZY_FETCH, '1');
+    });
+
+    test('rt2: gitexec header states the threat model and README drops the false claims', () => {
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'gitexec.js'), 'utf8');
+      assert.match(src, /Threat model/);
+      assert.match(src, /does NOT/);
+      const md = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+      assert.ok(!/cannot make those run programs/.test(md));
+      assert.ok(!/never opens a share on a path a repo points to/.test(md));
+      assert.match(md, /Treat a repo's \.git folder like you would for git itself/);
+      assert.match(md, /Threat model/);
+    });
+
+    // A promisor repo with one missing blob and an uploadpack that runs a marker program.
+    await atest('rt2: promisor repo: plain git lazy-fetches (runs the marker); Sereno git, freshness and the poller do not', async () => {
+      const d = mkRepo();
+      const blob = git(d, 'rev-parse', 'HEAD:a.js').trim();
+      const prog = path.join(mkd('mk'), 'marker.js');
+      fs.writeFileSync(prog, "require('fs').appendFileSync(process.argv[2], 'x');");
+      const marker = path.join(path.dirname(prog), 'ran.txt');
+      git(d, 'config', 'core.repositoryformatversion', '1');
+      for (const [k, v] of [['extensions.partialclone', 'origin'], ['remote.origin.promisor', 'true'],
+        ['remote.origin.partialclonefilter', 'blob:none'], ['protocol.file.allow', 'always'], ['remote.origin.url', d],
+        ['remote.origin.uploadpack', 'node ' + fw(prog) + ' ' + fw(marker) + ' #']]) git(d, 'config', k, v);
+      fs.unlinkSync(path.join(d, '.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+      const ran = () => { const r = fs.existsSync(marker); try { fs.unlinkSync(marker); } catch (_) {} return r; };
+      for (const a of [['cat-file', '-p', blob], ['rev-list', '--objects', 'HEAD']]) {
+        try { git(d, ...a); } catch (_) {}
+        assert.ok(ran(), 'control: plain git ' + a[0] + ' must run the marker');
+      }
+      const fut = new Date(Date.now() + 3600000);
+      fs.writeFileSync(path.join(d, 'a.js'), 'one'); fs.utimesSync(path.join(d, 'a.js'), fut, fut);   // stat-dirty on purpose
+      for (const a of [['cat-file', '-p', blob], ['rev-list', '--objects', 'HEAD'], ['status', '--porcelain', '--ignore-submodules=all'],
+        ['for-each-ref', 'refs/heads', '--format=%(refname)']]) {
+        try { await gitExec('git', a, { cwd: d }); } catch (_) { /* may fail: fine */ }
+        assert.ok(!ran(), 'Sereno git ' + a[0] + ' ran the marker');
+      }
+      const p = repos.createPoller({ registry: fake([d]) });
+      await p.pollNow();
+      assert.ok(!ran(), 'the poller ran the marker');
+    });
+
+    await atest('rt2: a git call killed by the timeout backs the project off (5 min, doubling), others keep polling, success resets', async () => {
+      const a = mkRepo(); const b = mkRepo();
+      const clock = { t: 1000000 };
+      const calls = { a: 0, b: 0 };
+      let killA = true;
+      const exec = (f, args, o) => {
+        if (o.cwd === a) {
+          calls.a++;
+          if (killA) return Promise.reject(Object.assign(new Error('timeout'), { killed: true, signal: 'SIGTERM' }));
+        }
+        if (o.cwd === b) calls.b++;
+        return gitExec(f, args, o);
+      };
+      const p = repos.createPoller({ registry: fake([a, b]), exec, now: () => clock.t });
+      const MIN = 60000;
+      await p.pollNow();
+      assert.strictEqual(p.snapshot().p0.error, true);
+      assert.strictEqual(p.snapshot().p1.error, false);
+      const a1 = calls.a; const b1 = calls.b;
+      clock.t += 1 * MIN; await p.pollNow();
+      assert.strictEqual(calls.a, a1, 'A is skipped while backed off');
+      assert.ok(calls.b > b1, 'B keeps polling');
+      assert.strictEqual(p.snapshot().p0.error, true);
+      clock.t += 4 * MIN + 1; await p.pollNow();
+      assert.ok(calls.a > a1, 'A polled again after 5 minutes');
+      const a2 = calls.a;
+      clock.t += 9 * MIN; await p.pollNow();
+      assert.strictEqual(calls.a, a2, 'second backoff is 10 minutes');
+      killA = false;
+      clock.t += 1 * MIN + 1; await p.pollNow();
+      assert.ok(calls.a > a2);
+      assert.strictEqual(p.snapshot().p0.error, false, 'a good poll clears the error');
+      killA = true;
+      const a3 = calls.a;
+      clock.t += 1; await p.pollNow();
+      assert.ok(calls.a > a3, 'backoff was reset by the success');
+      const a4 = calls.a;
+      clock.t += 4 * MIN; await p.pollNow();
+      assert.strictEqual(calls.a, a4, 'and starts again at 5 minutes, not 20');
+    });
+
+    await atest('rt2: a session counts only for the project with the longest matching worktree path (nested repos)', async () => {
+      const outer = mkd('outer'); const inner = path.join(outer, 'inner');
+      fs.mkdirSync(path.join(inner, 'sub'), { recursive: true });
+      const store = new Store();
+      store.applyHook('SessionStart', { session_id: 'n1', cwd: path.join(inner, 'sub') });
+      store.applyHook('Notification', { session_id: 'n1', cwd: path.join(inner, 'sub'), notification_type: 'permission_prompt' });
+      const reg = { list: () => [
+        { id: 'out', name: 'outer', repoPath: outer, hidden: false },
+        { id: 'in', name: 'inner', repoPath: inner, hidden: false }] };
+      const PORT = 8962;
+      const c = createCollector(store, PORT, { projects: reg, repos: { snapshot: () => ({}) } });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      try {
+        const r = await new Promise((resolve, reject) => {
+          http.get({ host: '127.0.0.1', port: PORT, path: '/api/projects', agent: false }, (rs) => {
+            let t = ''; rs.setEncoding('utf8'); rs.on('data', (x) => { t += x; }); rs.on('end', () => resolve(JSON.parse(t)));
+          }).on('error', reject);
+        });
+        const o = r.projects.find((x) => x.id === 'out'); const i = r.projects.find((x) => x.id === 'in');
+        assert.strictEqual(i.live.state, 'blocked');
+        assert.deepStrictEqual(i.live.sessionIds, ['n1']);
+        assert.strictEqual(o.live.state, null);
+        assert.deepStrictEqual(o.live.sessionIds, []);
+        assert.ok(typeof i.lastActivity === 'number');
+        assert.strictEqual(o.lastActivity, null, 'the outer repo gets no lastActivity from the inner session');
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+    });
+
+    await atest('rt2: a branch named like a tag still shows its brief (refname, not refname:short)', async () => {
+      const d = mkRepo();
+      const sc = git(d, 'rev-parse', 'HEAD').trim();
+      git(d, 'branch', 'tagged'); git(d, 'tag', 'tagged');
+      git(d, 'checkout', '-q', 'tagged');
+      const dir = path.join(d, '.sereno', 'briefs'); fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'tagged.md'),
+        '---\nbranch: tagged\nversion: 1\nsource_commit: ' + sc + '\ngenerated_at: 2026-10-01T10:00:00Z\n---\nNow: tagged work\nNext: y\nBlocked: none\n');
+      const p = repos.createPoller({ registry: fake([d]) });
+      await p.pollNow();
+      const row = p.snapshot().p0.branches.find((x) => x.name === 'tagged');
+      assert.ok(row, 'branch row is named tagged');
+      assert.ok(row.brief && row.brief.now === 'tagged work');
+      assert.deepStrictEqual(repos.parseBranches('refs/heads/feat/x\t100\tabc\nmain\t5\tdef').map((b) => b.name), ['feat/x', 'main']);
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
