@@ -10,6 +10,7 @@
  *   POST /v1/logs, /v1/traces <- OTLP/JSON (only with a ledger; else 200 and drop)
  *   GET  /ledger/summary -> ledger totals
  *   GET  /api/spend/{today,series,projects,top-prompts} -> spend views (ledger only)
+ *   GET  /api/projects, /api/token; POST /api/review, /api/projects/<id>/hide (guarded)
  *   GET  /console[/*] -> the console pages (src/renderer/console)
  *   GET  /        -> the widget page (also works in a plain browser tab)
  *
@@ -21,8 +22,10 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
+const crypto = require('node:crypto');
 const otlp = require('./otlp.js');
 const spendtime = require('./spendtime.js');
+const { normalizePath } = require('./projects.js');
 
 const RENDERER_DIR = path.join(__dirname, 'renderer');
 const CONSOLE_DIR = path.join(RENDERER_DIR, 'console');
@@ -32,6 +35,8 @@ const HEARTBEAT_MS = 15000;
 const MAX_BODY = 1024 * 1024;
 const MAX_OTLP_BODY = 8 * 1024 * 1024;   // /v1/*: raw cap, and the gunzip output cap
 const MAX_SSE_CLIENTS = 16;
+const MAX_ACTION_BODY = 4 * 1024;   // POST /api/review, /api/projects/<id>/hide
+const HIDE_RE = /^\/api\/projects\/([A-Za-z0-9_-]{1,64})\/hide$/;
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -118,6 +123,10 @@ function createCollector(store, port, opts) {
   let ledger = (opts && opts.ledger) || null;
   const now = (opts && typeof opts.now === 'function') ? opts.now : Date.now;
   const projects = (opts && opts.projects) || null;   // project registry (src/projects.js)
+  const repos = (opts && opts.repos) || null;   // repo poller (src/repos.js)
+  const onReview = (opts && typeof opts.onReview === 'function') ? opts.onReview : null;   // absent under npm run serve
+  // Per-launch secret for the console's POST actions; handed out by GET /api/token.
+  const token = crypto.randomBytes(24).toString('base64url');
   const clients = new Set();
   let timer = null;
 
@@ -290,6 +299,130 @@ function createCollector(store, port, opts) {
     }
   }
 
+  /*
+   * GET /api/projects. Built from explicit key lists and from the poller's
+   * in-memory snapshot, so a request never runs git. No path, hash, cwd or commit
+   * message leaves here; brief lines are already capped and control-stripped.
+   */
+  function buildProjects() {
+    const asOf = now();
+    const reg = projects ? projects.list() : [];
+    let snap = {};
+    try { snap = repos ? repos.snapshot() : {}; } catch (_) { snap = {}; }
+    const sessions = Array.from(store.sessions.values());
+    const days = spendtime.lastNDays(14, asOf);
+    const pathsOf = (p, st) => {
+      const set = new Set();
+      for (const x of [p.repoPath].concat(st && Array.isArray(st.worktrees) ? st.worktrees.map((w) => w.path) : [])) {
+        if (typeof x !== 'string' || !x) continue;
+        try { set.add(normalizePath(x).replace(/\/$/, '')); } catch (_) {}
+      }
+      return Array.from(set);
+    };
+    const under = (cwd, norms) => {
+      if (typeof cwd !== 'string' || !cwd) return false;
+      let n;
+      try { n = normalizePath(cwd); } catch (_) { return false; }
+      return norms.some((x) => n === x || n.startsWith(x + '/'));
+    };
+    // A hidden project is not polled, so it shows no git state even if a stale entry lingers.
+    const meta = reg.map((p) => ({ p, st: p.hidden ? undefined : snap[p.id] }));
+    let spend = null;
+    if (ledger) {
+      try {
+        spend = ledger.spendByCwdPrefix({
+          prefixes: meta.map((m) => ({ key: m.p.id, paths: pathsOf(m.p, m.st) })),
+          buckets: days,
+        });
+      } catch (_) { spend = null; }
+    }
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const out = meta.map(({ p, st }) => {
+      const sp = spend && spend.get(p.id);
+      const norms = pathsOf(p, st);
+      let last = st ? num(st.lastCommitAt) : null;
+      for (const s of sessions) {
+        if (under(s.cwd, norms) && typeof s.lastSeen === 'number' && (last === null || s.lastSeen > last)) last = s.lastSeen;
+      }
+      if (sp && sp.lastTs !== null && (last === null || sp.lastTs > last)) last = sp.lastTs;
+      const b = st && st.brief;
+      return {
+        id: p.id,
+        name: p.name,
+        hidden: p.hidden === true,
+        freshness: st && typeof st.freshness === 'string' ? st.freshness : 'none',
+        brief: b ? { now: b.now ?? null, next: b.next ?? null, blocked: b.blocked ?? null, generatedAt: b.generatedAt ?? null } : null,
+        git: {
+          defaultBranch: st && typeof st.defaultBranch === 'string' ? st.defaultBranch : null,
+          ahead: st ? num(st.ahead) : null,
+          behind: st ? num(st.behind) : null,
+          dirty: st && typeof st.dirty === 'boolean' ? st.dirty : null,
+          lastCommitAt: st ? num(st.lastCommitAt) : null,
+        },
+        prs: st ? num(st.prs) : null,
+        branches: st && Array.isArray(st.branches)
+          ? st.branches.map((x) => ({ name: x.name, freshness: x.freshness || 'none', now: x.brief ? (x.brief.now ?? null) : null }))
+          : [],
+        spend14: sp ? { costMicros: sp.costMicros, trend: sp.trend.slice() } : null,
+        lastActivity: last,
+        error: st ? st.error === true : false,
+        briefsMalformed: st ? (num(st.briefsMalformed) || 0) : 0,
+      };
+    });
+    return { asOf, projects: out };
+  }
+
+  // The POST guard for console actions; localOnly (Host/Origin) has already run.
+  // Every failure is a bare 403: no hint about which part failed.
+  function actionGuard(req, res) {
+    const deny = () => { res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden'); return false; };
+    const origin = req.headers.origin;
+    if (typeof origin !== 'string' || (origin !== 'http://127.0.0.1:' + port && origin !== 'http://localhost:' + port)) return deny();
+    if (!/^application\/json\s*(;|$)/i.test(String(req.headers['content-type'] || ''))) return deny();
+    const got = Buffer.from(String(req.headers['x-sereno-token'] || ''));
+    const want = Buffer.from(token);
+    if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) return deny();
+    return true;
+  }
+
+  function handleAction(req, res, url) {
+    if (!actionGuard(req, res)) { req.resume(); return; }
+    const plain = (code, text) => { try { res.writeHead(code, { 'content-type': 'text/plain' }).end(text); } catch (_) {} };
+    const bad = () => { try { res.writeHead(400, { 'content-type': 'text/plain', connection: 'close' }).end('bad request'); } catch (_) {} };
+    const len = Number(req.headers['content-length']);
+    if (Number.isFinite(len) && len > MAX_ACTION_BODY) { bad(); res.on('finish', () => req.destroy()); return; }
+    readRaw(req, MAX_ACTION_BODY, (err, buf) => {
+      if (err === 'big') { bad(); res.on('finish', () => req.destroy()); return; }
+      if (err) return;
+      let body;
+      try { body = JSON.parse(buf.toString('utf8')); } catch (_) { return bad(); }
+      const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : null;
+      const hideM = HIDE_RE.exec(url);
+      try {
+        if (!hideM) {   // review: the only input is a session id; the pid is the store's, never the request's
+          if (!keys || keys.length !== 1 || keys[0] !== 'sessionId' || typeof body.sessionId !== 'string'
+            || !body.sessionId || body.sessionId.length > 200) return bad();
+          const s = store.sessions.get(body.sessionId);   // top-level sessions only
+          if (!s) return plain(404, 'not found');
+          if (!onReview) return plain(501, 'not available here');
+          Promise.resolve().then(() => onReview(store.publicSession(s))).then(
+            (ok) => { if (ok === false) plain(502, 'could not raise the terminal'); else { try { res.writeHead(204).end(); } catch (_) {} } },
+            () => plain(500, 'failed'),
+          );
+          return;
+        }
+        if (!keys || keys.length !== 1 || keys[0] !== 'hidden' || typeof body.hidden !== 'boolean') return bad();
+        if (!projects) return plain(404, 'not found');
+        const ok = body.hidden ? projects.hide(hideM[1]) : projects.unhide(hideM[1]);
+        if (!ok) return plain(404, 'not found');
+        res.writeHead(204).end();
+        if (repos && typeof repos.refresh === 'function') { try { Promise.resolve(repos.refresh()).catch(() => {}); } catch (_) {} }
+      } catch (_) {
+        try { if (!res.headersSent) plain(500, 'internal error'); } catch (_e) {}
+      }
+    });
+  }
+
   function route(req, res) {
     const url = (req.url || '/').split('?')[0];
 
@@ -406,6 +539,11 @@ function createCollector(store, port, opts) {
       res.writeHead(200, { 'content-type': 'application/json' }).end(out);
       return;
     }
+
+    // --- console actions ----------------------------------------------
+    if (req.method === 'GET' && url === '/api/token') { sendJson(res, 200, { token }); return; }
+    if (req.method === 'GET' && url === '/api/projects') { sendJson(res, 200, buildProjects()); return; }
+    if (req.method === 'POST' && (url === '/api/review' || HIDE_RE.test(url))) { handleAction(req, res, url); return; }
 
     // --- spend API ----------------------------------------------------
     if (req.method === 'GET' && url.startsWith('/api/')) {

@@ -9,12 +9,46 @@
  * (hardened for untrusted repos). Nothing here throws.
  */
 
+const os = require('node:os');
+const { execFile } = require('node:child_process');
 const { gitExec } = require('./gitexec.js');
 const briefsLib = require('./briefs.js');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RECENT_MS = 14 * DAY_MS;
 const MAX_BRANCHES = 8;
+const GH_INTERVAL_MS = 5 * 60 * 1000;
+const GH_TIMEOUT_MS = 10000;
+const GH_ARGS = ['pr', 'list', '--state', 'open', '--json', 'number', '--limit', '100'];
+const NAME_RE = /^[A-Za-z0-9_.-]+$/;
+
+/**
+ * owner/name from a github.com remote URL (https, scp-style ssh, ssh://). Credentials
+ * in the URL are dropped. Anything else, or a hostile-looking name, is null.
+ * @param {unknown} url @returns {{ owner: string, name: string } | null}
+ */
+function parseGithubRemote(url) {
+  if (typeof url !== 'string') return null;
+  const u = url.trim();
+  const m = /^https:\/\/(?:[^@\/\s]+@)?github\.com\/([^\/\s]+)\/([^\/\s]+?)(?:\.git)?\/?$/i.exec(u)
+    || /^(?:ssh:\/\/)?git@github\.com[:\/]([^\/\s]+)\/([^\/\s]+?)(?:\.git)?\/?$/i.exec(u);
+  if (!m) return null;
+  for (const x of [m[1], m[2]]) if (!NAME_RE.test(x) || x.startsWith('-')) return null;
+  return { owner: m[1], name: m[2] };
+}
+
+/**
+ * Runs `gh` in a repo. Never prompts, never checks for updates.
+ * @param {string[]} args @param {{ cwd?: string }} o @returns {Promise<{ stdout: string }>}
+ */
+function ghExecDefault(args, o) {
+  return new Promise((resolve, reject) => {
+    execFile('gh', args, {
+      cwd: o && o.cwd, windowsHide: true, timeout: GH_TIMEOUT_MS, encoding: 'utf8', maxBuffer: 1024 * 1024,
+      env: Object.assign({}, process.env, { GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' }),
+    }, (err, stdout) => (err ? reject(err) : resolve({ stdout: String(stdout) })));
+  });
+}
 
 /**
  * @typedef {import('./gitexec.js').Exec} Exec
@@ -23,7 +57,8 @@ const MAX_BRANCHES = 8;
  * @typedef {{
  *   id: string, name: string, defaultBranch: string | null, ahead: number | null, behind: number | null,
  *   dirty: boolean | null, lastCommitAt: number | null, worktrees: Worktree[], branches: Branch[],
- *   polledAt: number | null, error: boolean, brief: any, freshness: string, briefsMalformed: number
+ *   polledAt: number | null, error: boolean, brief: any, freshness: string, briefsMalformed: number,
+ *   prs?: number | null
  * }} RepoState
  */
 
@@ -73,7 +108,8 @@ async function pool(items, limit, fn) {
 
 /**
  * @param {{ registry: { list: () => { id: string, name: string, repoPath: string, hidden: boolean }[] },
- *   exec?: Exec, now?: () => number, intervalMs?: number, concurrency?: number }} opts
+ *   exec?: Exec, now?: () => number, intervalMs?: number, concurrency?: number,
+ *   ghExec?: (args: string[], o: { cwd?: string }) => Promise<{ stdout: string }>, ghIntervalMs?: number }} opts
  */
 function createPoller(opts) {
   const registry = opts.registry;
@@ -81,6 +117,17 @@ function createPoller(opts) {
   const now = opts.now || Date.now;
   const intervalMs = opts.intervalMs || 30000;
   const concurrency = opts.concurrency || 2;
+  const ghExec = opts.ghExec || ghExecDefault;
+  const ghIntervalMs = opts.ghIntervalMs || GH_INTERVAL_MS;
+  /** Open PR count per project (null = unknown / signed out / not a GitHub repo). @type {Map<string, number | null>} */
+  const prs = new Map();
+  /** When each project's gh was last tried. @type {Map<string, number>} */
+  const ghAt = new Map();
+  let ghOff = false;   // gh is not installed: off for the rest of the run
+  /** @type {Promise<void> | null} */
+  let ghRunning = null;
+  /** @type {NodeJS.Timeout | null} */
+  let ghTimer = null;
   /** @type {Map<string, RepoState>} */
   let state = new Map();
   /** @type {Promise<void> | null} */
@@ -227,22 +274,83 @@ function createPoller(opts) {
     return running;
   }
 
+  /** Drops everything held for projects that are hidden or gone. */
+  function prune() {
+    let ids;
+    try { ids = new Set(registry.list().filter((p) => !p.hidden).map((p) => p.id)); } catch (_) { return; }
+    for (const id of Array.from(state.keys())) if (!ids.has(id)) state.delete(id);
+    for (const id of Array.from(prs.keys())) if (!ids.has(id)) prs.delete(id);
+    for (const id of Array.from(ghAt.keys())) if (!ids.has(id)) ghAt.delete(id);
+  }
+
+  async function runGh() {
+    if (ghOff) return;
+    let list = [];
+    try { list = registry.list().filter((p) => !p.hidden); } catch (_) { return; }
+    const t = now();
+    const due = list.filter((p) => !ghAt.has(p.id) || t - /** @type {number} */ (ghAt.get(p.id)) >= ghIntervalMs);
+    await pool(due, 1, async (p) => {
+      if (ghOff) return;
+      ghAt.set(p.id, now());
+      try {
+        // gh must not run inside an untrusted repo (it shells out to git there, unhardened):
+        // read the remote with the hardened git, then run gh from the temp dir with --repo.
+        let remote = null;
+        try { remote = parseGithubRemote((await exec('git', ['config', '--get', 'remote.origin.url'], { cwd: p.repoPath })).stdout); } catch (_) {}
+        if (!remote) { prs.set(p.id, null); return; }
+        const args = GH_ARGS.slice(0, 2).concat(['--repo', remote.owner + '/' + remote.name], GH_ARGS.slice(2));
+        const out = (await ghExec(args, { cwd: os.tmpdir() })).stdout;
+        const arr = JSON.parse(String(out));
+        prs.set(p.id, Array.isArray(arr) ? arr.length : null);
+      } catch (e) {
+        if (e && e.code === 'ENOENT') { ghOff = true; prs.clear(); return; }
+        prs.set(p.id, null);   // signed out, not a GitHub repo, timeout, bad output
+      }
+    });
+  }
+
+  /** Polls gh for projects whose last try is over the interval old. Overlapping calls share one run. @returns {Promise<void>} */
+  function pollGh() {
+    if (ghRunning) return ghRunning;
+    ghRunning = runGh().catch(() => {}).finally(() => { ghRunning = null; });
+    return ghRunning;
+  }
+
+  /** After a hide/unhide: forget hidden projects at once, then poll so an unhidden one fills in. */
+  function refresh() {
+    prune();
+    pollGh();
+    return pollNow();
+  }
+
   return {
     pollNow,
+    pollGh,
+    refresh,
     start() {
       if (timer) return;
       timer = setInterval(() => { pollNow(); }, intervalMs);
       timer.unref();
       pollNow();
+      // gh is slower and rate-limited upstream: its own, much longer timer.
+      ghTimer = setInterval(() => { pollGh(); }, ghIntervalMs);
+      ghTimer.unref();
+      pollGh();
     },
-    stop() { if (timer) { clearInterval(timer); timer = null; } },
+    stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+      if (ghTimer) { clearInterval(ghTimer); ghTimer = null; }
+    },
     snapshot() {
       /** @type {Record<string, RepoState>} */
       const out = {};
-      for (const [id, s] of state) out[id] = JSON.parse(JSON.stringify(s));
+      for (const [id, s] of state) {
+        out[id] = JSON.parse(JSON.stringify(s));
+        out[id].prs = prs.has(id) ? prs.get(id) : null;
+      }
       return out;
     },
   };
 }
 
-module.exports = { createPoller, parseWorktrees, parseBranches, RECENT_MS, MAX_BRANCHES };
+module.exports = { createPoller, parseGithubRemote, GH_INTERVAL_MS, GH_ARGS, parseWorktrees, parseBranches, RECENT_MS, MAX_BRANCHES };

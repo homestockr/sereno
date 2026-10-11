@@ -5505,6 +5505,374 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- Phase 3 step 4: projects API ---- */
+  {
+    const projects = require('../src/projects.js');
+    const repos = require('../src/repos.js');
+    const { openLedger } = require('../src/ledger.js');
+    const baseEnv = Object.assign({}, process.env, {
+      GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+      GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+    });
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: baseEnv, stdio: 'pipe', windowsHide: true }).toString();
+    const mk = () => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-api-')));
+    const mkRepo = () => {
+      const d = mk();
+      git(d, 'init', '-q', '-b', 'main');
+      git(d, 'commit', '-q', '--allow-empty', '-m', 'secret commit message');
+      return d;
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const withHome = async (fn) => {
+      const home = mk(); const prev = process.env.SERENO_HOME;
+      const prevCfg = process.env.CLAUDE_CONFIG_DIR;
+      process.env.SERENO_HOME = home;
+      process.env.CLAUDE_CONFIG_DIR = path.join(home, 'claude');
+      try { await fn(home); }
+      finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        if (prevCfg === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevCfg;
+      }
+    };
+    const rq = (port, o) => new Promise((resolve, reject) => {
+      const body = o.body === undefined ? null : (typeof o.body === 'string' ? o.body : JSON.stringify(o.body));
+      const headers = Object.assign({}, o.headers || {});
+      if (body !== null) headers['content-length'] = Buffer.byteLength(body);
+      const req = http.request({ host: '127.0.0.1', port, path: o.path, method: o.method || 'GET', headers }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (c) => { t += c; });
+        r.on('end', () => resolve({ status: r.statusCode, text: t }));
+      });
+      req.on('error', reject);
+      req.end(body === null ? undefined : body);
+    });
+    const boot = async (store, port, opts) => {
+      const c = createCollector(store, port, opts);
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      return c;
+    };
+    const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const getJson = async (port, p) => JSON.parse((await rq(port, { path: p })).text);
+
+    const PROJECT_KEYS = ['id', 'name', 'hidden', 'freshness', 'brief', 'git', 'prs', 'branches', 'spend14', 'lastActivity', 'error', 'briefsMalformed'];
+    const FORBIDDEN_KEYS = new Set(['repoPath', 'worktree', 'worktrees', 'worktreePath', 'cwd', 'path', 'head', 'sourceCommit', 'file', 'message']);
+    const walk = (o, where, cb) => {
+      if (Array.isArray(o)) { o.forEach((x, i) => walk(x, where + '[' + i + ']', cb)); return; }
+      if (o && typeof o === 'object') { for (const k of Object.keys(o)) { cb(k, o[k], where + '.' + k); walk(o[k], where + '.' + k, cb); } }
+    };
+
+    await atest('projects api: /api/projects shape, explicit keys, and nothing path- or hash-like anywhere (exit 6)', async () => {
+      await withHome(async () => {
+        const PORT = 8941;
+        const d = mkRepo();
+        const sha = git(d, 'rev-parse', 'HEAD').trim();
+        fs.mkdirSync(path.join(d, '.sereno', 'briefs'), { recursive: true });
+        fs.writeFileSync(path.join(d, '.sereno', 'briefs', 'main.md'),
+          '---\nbranch: main\nversion: 1\nsource_commit: ' + sha + '\ngenerated_at: 2026-10-11T10:00:00Z\n---\nNow: wire the api\nNext: draw the cards\nBlocked: nothing\n');
+        const reg = projects.createRegistry();
+        reg.register(d);
+        const hiddenRepo = mkRepo();
+        const hid = reg.register(hiddenRepo).id;
+        reg.hide(hid);
+        const poller = repos.createPoller({ registry: reg, ghExec: () => Promise.reject(Object.assign(new Error('x'), { code: 'ENOENT' })) });
+        await poller.pollNow();
+        const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        try {
+          const r = await getJson(PORT, '/api/projects');
+          assert.deepStrictEqual(Object.keys(r).sort(), ['asOf', 'projects']);
+          assert.strictEqual(typeof r.asOf, 'number');
+          assert.strictEqual(r.projects.length, 2, 'hidden projects are included, flagged');
+          const p = r.projects.find((x) => !x.hidden);
+          assert.deepStrictEqual(Object.keys(p).sort(), PROJECT_KEYS.slice().sort());
+          assert.deepStrictEqual(Object.keys(p.git).sort(), ['ahead', 'behind', 'defaultBranch', 'dirty', 'lastCommitAt']);
+          assert.deepStrictEqual(Object.keys(p.brief).sort(), ['blocked', 'generatedAt', 'next', 'now']);
+          assert.strictEqual(p.freshness, 'fresh');
+          assert.strictEqual(p.brief.now, 'wire the api');
+          assert.strictEqual(p.git.defaultBranch, 'main');
+          assert.strictEqual(p.spend14, null, 'ledger off: absent, not zero');
+          assert.strictEqual(p.prs, null);
+          assert.ok(p.branches.length >= 1 && Object.keys(p.branches[0]).sort().join() === 'freshness,name,now');
+          assert.ok(typeof p.lastActivity === 'number');
+          const h = r.projects.find((x) => x.hidden);
+          assert.strictEqual(h.id, hid);
+          assert.strictEqual(h.freshness, 'none');
+          assert.strictEqual(h.brief, null);
+          // exit 6: no path, hash, commit message anywhere in the body
+          const body = JSON.stringify(r);
+          assert.ok(!/secret commit message/.test(body));
+          assert.ok(!body.includes(sha), 'no commit hash');
+          walk(r, '$', (k, v, where) => {
+            assert.ok(!FORBIDDEN_KEYS.has(k), 'forbidden key ' + where);
+            if (typeof v === 'string') {
+              assert.ok(!/[a-zA-Z]:[\\/]/.test(v) && !v.startsWith('/') && !v.includes('\\'), 'path-like value at ' + where + ': ' + v);
+              assert.ok(!/\b[0-9a-f]{40}\b/i.test(v), 'hash-like value at ' + where);
+            }
+          });
+          assert.ok(!body.includes(d.replace(/\\/g, '\\\\')) && !body.toLowerCase().includes(path.basename(path.dirname(d)).toLowerCase() + '\\'));
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('projects api: spend14 joins ledger sessions by cwd under any worktree, case-insensitively; null with the ledger off', async () => {
+      const PORT = 8942;
+      const clock = Date.now();
+      const d = mk(); const wt = mk(); const other = mk();
+      const flip = (s) => (process.platform === 'win32' ? s.toUpperCase() : s);
+      const ledger = openLedger({ file: ':memory:' });
+      const addSess = (id, cwd) => ledger._db.prepare('INSERT INTO sessions (session_id, first_seen, last_seen, cwd, project) VALUES (?,?,?,?,?)').run(id, clock, clock, cwd, 'x');
+      const addReq = (k, id, micros, ts) => ledger._db.prepare(`INSERT INTO requests (request_key, request_id, session_id, ts, source, attribution, cost_micros)
+        VALUES (?,?,?,?,?,?,?)`).run(k, k, id, ts, 'main', 'explicit', micros);
+      addSess('s-main', path.join(d, 'sub')); addSess('s-wt', flip(wt)); addSess('s-other', other);
+      addReq('r1', 's-main', 1000, clock - 60000); addReq('r2', 's-wt', 2500, clock - 5000); addReq('r3', 's-other', 9999, clock - 5000);
+      const reg = { list: () => [{ id: 'p1', name: 'proj', repoPath: d, hidden: false, firstSeen: 0 }], noteCwd: () => Promise.resolve() };
+      const stub = { snapshot: () => ({ p1: { id: 'p1', worktrees: [{ path: wt, branch: 'x' }], branches: [], error: false, freshness: 'none', brief: null, lastCommitAt: null } }) };
+      const c = await boot(new Store(), PORT, { ledger, projects: reg, repos: stub, now: () => clock });
+      try {
+        const p = (await getJson(PORT, '/api/projects')).projects[0];
+        assert.strictEqual(p.spend14.costMicros, 3500, 'main repo subfolder + worktree, not the other dir');
+        assert.strictEqual(p.spend14.trend.length, 14);
+        assert.strictEqual(p.spend14.trend.reduce((a, b) => a + b, 0), 3500);
+        assert.strictEqual(p.lastActivity, clock - 5000, 'last request time counts as activity');
+        c.setLedger(null);
+        assert.strictEqual((await getJson(PORT, '/api/projects')).projects[0].spend14, null);
+      } finally { await halt(c); ledger.close(); }
+    });
+
+    await atest('projects exit 3: sessions in the main repo and in a worktree make one project', async () => {
+      await withHome(async () => {
+        const PORT = 8943;
+        const d = mkRepo();
+        const wt = path.join(mk(), 'wt');
+        git(d, 'worktree', 'add', '-q', '-b', 'side', wt);
+        const reg = projects.createRegistry();
+        const poller = repos.createPoller({ registry: reg });
+        const store = new Store();
+        const c = await boot(store, PORT, { projects: reg, repos: poller });
+        try {
+          const hook = (id, cwd) => rq(PORT, { method: 'POST', path: '/hook', headers: { 'content-type': 'application/json' },
+            body: { event: 'SessionStart', payload: { hook_event_name: 'SessionStart', session_id: id, cwd } } });
+          assert.strictEqual((await hook('a1', d)).status, 204);
+          assert.strictEqual((await hook('a2', wt)).status, 204);
+          for (let i = 0; i < 60 && reg.list().length < 1; i++) await sleep(100);
+          await sleep(500);
+          await poller.pollNow();
+          const r = await getJson(PORT, '/api/projects');
+          assert.strictEqual(r.projects.length, 1, 'one project, not two');
+          assert.ok(r.projects[0].lastActivity !== null);
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('projects exit 4: /hook answers while a slow git (3 s) is in flight', async () => {
+      await withHome(async () => {
+        const PORT = 8944;
+        let started = 0;
+        const slow = () => { started++; return new Promise((res) => setTimeout(() => res({ stdout: '' }), 3000)); };
+        const reg = projects.createRegistry({ exec: slow });
+        const c = await boot(new Store(), PORT, { projects: reg });
+        try {
+          const t0 = Date.now();
+          const r = await rq(PORT, { method: 'POST', path: '/hook', headers: { 'content-type': 'application/json' },
+            body: { event: 'SessionStart', payload: { hook_event_name: 'SessionStart', session_id: 'slow1', cwd: mk() } } });
+          assert.strictEqual(r.status, 204);
+          assert.ok(Date.now() - t0 < 1000, 'hook waited on git: ' + (Date.now() - t0) + ' ms');
+          await sleep(100);
+          assert.ok(started >= 1, 'the slow git really was in flight');
+          assert.strictEqual((await rq(PORT, { path: '/state' })).status, 200);
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('projects exit 5: POST /api/review and /api/projects/<id>/hide reject every guard failure; valid calls pass', async () => {
+      await withHome(async () => {
+        const PORT = 8945;
+        const store = new Store();
+        store.applyHook('SessionStart', { session_id: 'live1', cwd: 'C:\\work\\live1' }, { ppid: 4242 });
+        const reg = projects.createRegistry();
+        const pid = reg.register(mk()).id;
+        let refreshes = 0;
+        const stubRepos = { snapshot: () => ({}), refresh: () => { refreshes++; return Promise.resolve(); } };
+        const reviewed = [];
+        const c = await boot(store, PORT, { projects: reg, repos: stubRepos, onReview: (s) => { reviewed.push(s); return true; } });
+        const ORIGIN = 'http://127.0.0.1:' + PORT;
+        try {
+          const tokRes = await rq(PORT, { path: '/api/token' });
+          assert.strictEqual(tokRes.status, 200);
+          const token = JSON.parse(tokRes.text).token;
+          assert.ok(typeof token === 'string' && token.length >= 32);
+          assert.strictEqual((await rq(PORT, { path: '/api/token', headers: { origin: 'http://evil.example' } })).status, 403, 'token is behind the Origin rule');
+          assert.strictEqual((await rq(PORT, { path: '/api/token', headers: { host: 'evil.example' } })).status, 403, 'and the Host rule');
+
+          const good = { origin: ORIGIN, 'content-type': 'application/json', 'x-sereno-token': token };
+          const routes = [
+            { name: 'review', path: '/api/review', body: { sessionId: 'live1' }, bad: { sessionId: 'nope' } },
+            { name: 'hide', path: '/api/projects/' + pid + '/hide', body: { hidden: true }, bad: null },
+          ];
+          for (const r of routes) {
+            const post = (headers, body) => rq(PORT, { method: 'POST', path: r.path, headers, body });
+            const hdr = (o) => { const h = Object.assign({}, good, o); for (const k of Object.keys(h)) if (h[k] === null) delete h[k]; return h; };
+            const before = reviewed.length;
+            const expect = async (label, res, code) => assert.strictEqual((await res).status, code, r.name + ': ' + label);
+            await expect('foreign Origin', post(hdr({ origin: 'http://evil.example' }), r.body), 403);
+            await expect('foreign Origin, right port', post(hdr({ origin: 'http://127.0.0.1:1' }), r.body), 403);
+            await expect('missing Origin', post(hdr({ origin: null }), r.body), 403);
+            await expect('wrong token', post(hdr({ 'x-sereno-token': token.slice(0, -1) + (token.endsWith('A') ? 'B' : 'A') }), r.body), 403);
+            await expect('short token', post(hdr({ 'x-sereno-token': 'x' }), r.body), 403);
+            await expect('missing token', post(hdr({ 'x-sereno-token': null }), r.body), 403);
+            await expect('text/plain', post(hdr({ 'content-type': 'text/plain' }), r.body), 403);
+            await expect('missing content-type', post(hdr({ 'content-type': null }), r.body), 403);
+            await expect('oversize body', post(hdr({}), '{"x":"' + 'a'.repeat(5000) + '"}'), 400);
+            await expect('extra key', post(hdr({}), Object.assign({ extra: 1 }, r.body)), 400);
+            await expect('not json', post(hdr({}), 'nope'), 400);
+            await expect('array body', post(hdr({}), []), 400);
+            await expect('wrong value type', post(hdr({}), { [Object.keys(r.body)[0]]: 7 }), 400);
+            assert.strictEqual(reviewed.length, before, 'nothing was raised by a rejected call');
+            assert.strictEqual(reg.list()[0].hidden, false, 'nothing was hidden by a rejected call');
+            if (r.bad) await expect('unknown session', post(hdr({}), r.bad), 404);
+          }
+          // review never takes a pid
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/review', headers: good, body: { sessionId: 'live1', pid: 1 } })).status, 400);
+          assert.strictEqual(reviewed.length, 0);
+          // unknown project
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/projects/deadbeef0000/hide', headers: good, body: { hidden: true } })).status, 404);
+          // valid
+          const ok = await rq(PORT, { method: 'POST', path: '/api/review', headers: good, body: { sessionId: 'live1' } });
+          assert.strictEqual(ok.status, 204);
+          assert.strictEqual(reviewed.length, 1);
+          assert.strictEqual(reviewed[0].id, 'live1');
+          assert.strictEqual(reviewed[0].pid, 4242, 'the pid is the store\'s');
+          // localhost origin is accepted too (localOnly accepts that Host)
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/projects/' + pid + '/hide', headers: Object.assign({}, good, { origin: 'http://localhost:' + PORT }), body: { hidden: true } })).status, 204);
+          assert.strictEqual(reg.list()[0].hidden, true);
+          assert.strictEqual(refreshes, 1, 'hide asks the poller to refresh');
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/projects/' + pid + '/hide', headers: good, body: { hidden: false } })).status, 204);
+          assert.strictEqual(reg.list()[0].hidden, false);
+          assert.strictEqual(refreshes, 2);
+          // a failed raise is not a success
+          const c2 = await boot(store, 8946, { projects: reg, onReview: () => false });
+          try {
+            const t2 = JSON.parse((await rq(8946, { path: '/api/token' })).text).token;
+            const r2 = await rq(8946, { method: 'POST', path: '/api/review', headers: { origin: 'http://127.0.0.1:8946', 'content-type': 'application/json', 'x-sereno-token': t2 }, body: { sessionId: 'live1' } });
+            assert.strictEqual(r2.status, 502);
+            // the first collector's token means nothing to the second
+            const r3 = await rq(8946, { method: 'POST', path: '/api/review', headers: { origin: 'http://127.0.0.1:8946', 'content-type': 'application/json', 'x-sereno-token': token }, body: { sessionId: 'live1' } });
+            assert.strictEqual(r3.status, 403);
+          } finally { await halt(c2); }
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('projects exit 5: under serve (no onReview) review answers 501 after the guard and the session lookup', async () => {
+      await withHome(async () => {
+        const PORT = 8947;
+        const store = new Store();
+        store.applyHook('SessionStart', { session_id: 'live2', cwd: 'C:\\work\\live2' }, { ppid: 99 });
+        const c = await boot(store, PORT, { projects: projects.createRegistry() });
+        try {
+          const token = JSON.parse((await rq(PORT, { path: '/api/token' })).text).token;
+          const h = { origin: 'http://127.0.0.1:' + PORT, 'content-type': 'application/json', 'x-sereno-token': token };
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/review', headers: h, body: { sessionId: 'live2' } })).status, 501);
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/review', headers: Object.assign({}, h, { origin: 'http://evil.example' }), body: { sessionId: 'live2' } })).status, 403);
+          assert.strictEqual((await rq(PORT, { method: 'POST', path: '/api/review', headers: h, body: { sessionId: 'ghost' } })).status, 404);
+        } finally { await halt(c); }
+      });
+    });
+
+    test('projects api: main and serve both wire the registry and poller; the focus code path is shared', () => {
+      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const serve = fs.readFileSync(path.join(ROOT, 'tools', 'serve.js'), 'utf8');
+      assert.ok(/createRegistry\(\)/.test(main) && /createPoller\(/.test(main) && /projects: registry, repos: poller/.test(main));
+      assert.ok(/poller\.start\(\)/.test(main) && /poller\.stop\(\)/.test(main));
+      assert.ok(/onReview: \(session\) => raiseTerminal\(session\.pid\)/.test(main));
+      assert.ok(/ipcMain\.handle\('sereno:focus', \(_e, pid\) => raiseTerminal\(pid\)\)/.test(main));
+      assert.ok(/createRegistry\(\)/.test(serve) && /projects: registry, repos: poller/.test(serve) && /poller\.start\(\)/.test(serve) && /poller\.stop\(\)/.test(serve));
+      assert.ok(!/onReview/.test(serve.replace(/\/\/.*$/gm, '')), 'serve passes no onReview');
+    });
+
+    // ---- gh PR counts ----
+    const ghRepoList = (n) => ({ list: () => Array.from({ length: n }, (_, i) => ({ id: 'g' + i, name: 'g' + i, repoPath: 'C:\\x\\g' + i, hidden: false })) });
+    const failGit = () => Promise.reject(new Error('no git'));
+    const remoteGit = (url) => (f, a) => (a[0] === 'config' ? Promise.resolve({ stdout: url + '\n' }) : Promise.reject(new Error('no git')));
+    const ghPoller = (n, gh, clock, extra) => repos.createPoller(Object.assign({
+      registry: ghRepoList(n), exec: remoteGit('https://github.com/o/n.git'), ghExec: gh, now: () => clock.t,
+    }, extra || {}));
+
+    await atest('gh: counts open PRs with the documented command, env-safe options, and one call per project', async () => {
+      const clock = { t: 1000 }; const calls = [];
+      const p = ghPoller(2, (args, o) => { calls.push({ args, cwd: o.cwd }); return Promise.resolve({ stdout: '[{"number":3},{"number":9}]' }); }, clock);
+      await p.pollNow(); await p.pollGh();
+      assert.strictEqual(calls.length, 2);
+      assert.deepStrictEqual(calls[0].args, ['pr', 'list', '--repo', 'o/n', '--state', 'open', '--json', 'number', '--limit', '100']);
+      assert.strictEqual(calls[0].cwd, os.tmpdir(), 'gh never runs inside the repo');
+      assert.strictEqual(p.snapshot().g0.prs, 2);
+      assert.strictEqual(p.snapshot().g1.prs, 2);
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'repos.js'), 'utf8');
+      for (const k of ['GH_PROMPT_DISABLED', 'GH_NO_UPDATE_NOTIFIER', 'windowsHide: true', 'GH_TIMEOUT_MS = 10000']) assert.ok(src.includes(k), k);
+    });
+
+    await atest('gh: not installed (ENOENT) turns gh off for the run; signed out or odd output gives null for that project', async () => {
+      const clock = { t: 1000 };
+      let calls = 0;
+      const missing = ghPoller(3, () => { calls++; return Promise.reject(Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' })); }, clock);
+      await missing.pollNow(); await missing.pollGh();
+      assert.strictEqual(calls, 1, 'stops at the first ENOENT');
+      clock.t += 10 * 60 * 1000;
+      await missing.pollGh();
+      assert.strictEqual(calls, 1, 'off for the rest of the run');
+      assert.ok(Object.values(missing.snapshot()).every((s) => s.prs === null));
+
+      const outs = [
+        () => Promise.reject(Object.assign(new Error('exit 1'), { code: 1 })),   // signed out / not a GitHub repo
+        () => Promise.resolve({ stdout: 'not json' }),
+        () => Promise.resolve({ stdout: '{"number":1}' }),
+        () => Promise.resolve({ stdout: '[]' }),
+      ];
+      let i = 0;
+      const odd = ghPoller(4, () => outs[i++](), clock);
+      await odd.pollNow(); await odd.pollGh();
+      const s = odd.snapshot();
+      assert.deepStrictEqual([s.g0.prs, s.g1.prs, s.g2.prs, s.g3.prs], [null, null, null, 0]);
+    });
+
+    test('gh: remote URL parsing, credentials dropped, hostile or non-GitHub gives null', () => {
+      const P = repos.parseGithubRemote;
+      for (const u of ['https://github.com/o/n', 'https://github.com/o/n.git', 'git@github.com:o/n.git', 'ssh://git@github.com/o/n.git', 'https://user:tok@github.com/o/n']) {
+        assert.deepStrictEqual(P(u), { owner: 'o', name: 'n' }, u);
+      }
+      for (const u of ['https://gitlab.com/o/n', 'https://evilgithub.com/o/n', '-o/x', 'https://github.com/-o/x', 'git@github.com:-o/x.git', 'https://github.com/o/n/extra', 'https://github.com/o/n x', '', null]) {
+        assert.strictEqual(P(u), null, String(u));
+      }
+    });
+
+    await atest('gh: the URL token never reaches gh; no remote or a non-GitHub remote means null and gh is not called', async () => {
+      const clock = { t: 1 }; const calls = [];
+      const gh = (args, o) => { calls.push({ args, o }); return Promise.resolve({ stdout: '[]' }); };
+      const p = ghPoller(1, gh, clock, { exec: remoteGit('https://user:tok@github.com/o/n') });
+      await p.pollNow(); await p.pollGh();
+      assert.strictEqual(calls.length, 1);
+      assert.ok(!JSON.stringify(calls).includes('tok'), 'credentials stay out of the gh call');
+      for (const exec of [failGit, remoteGit('https://gitlab.com/o/n'), remoteGit('')]) {
+        const q = ghPoller(1, gh, clock, { exec });
+        await q.pollNow(); await q.pollGh();
+        assert.strictEqual(q.snapshot().g0.prs, null);
+      }
+      assert.strictEqual(calls.length, 1, 'gh was not called for them');
+    });
+
+    await atest('gh: polled every 5 minutes on its own, not with the 30 s git poll; hidden projects are skipped', async () => {
+      const clock = { t: 1000 }; let calls = 0;
+      const hiddenReg = { list: () => [{ id: 'a', name: 'a', repoPath: 'C:\\x\\a', hidden: false }, { id: 'b', name: 'b', repoPath: 'C:\\x\\b', hidden: true }] };
+      const p = repos.createPoller({ registry: hiddenReg, exec: remoteGit('git@github.com:o/n.git'), now: () => clock.t, ghExec: () => { calls++; return Promise.resolve({ stdout: '[]' }); } });
+      await p.pollGh(); assert.strictEqual(calls, 1, 'first poll, hidden project skipped');
+      clock.t += 30 * 1000; await p.pollNow(); await p.pollGh();
+      assert.strictEqual(calls, 1, 'a git poll 30 s later does not poll gh');
+      clock.t += 4 * 60 * 1000; await p.pollGh();
+      assert.strictEqual(calls, 1, 'still inside 5 minutes');
+      clock.t += 60 * 1000; await p.pollGh();
+      assert.strictEqual(calls, 2, 'due at 5 minutes');
+      assert.strictEqual(repos.GH_INTERVAL_MS, 5 * 60 * 1000);
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
