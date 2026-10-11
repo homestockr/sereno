@@ -18,6 +18,8 @@ const { gitExec, isLocalPath } = require('./gitexec.js');
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const CACHE_MAX = 500;
 const MAX_CWD = 1024;
+const MAX_CONCURRENT = 2;   // resolveRepo runs at most this many at once
+const MAX_PENDING = 50;     // distinct uncached cwds waiting or running; more are dropped until it drains
 
 /**
  * Insert into the resolve cache: expired entries go first, then the oldest past the cap.
@@ -112,6 +114,17 @@ function createRegistry(opts) {
   const cache = new Map();
   /** @type {Map<string, Promise<void>>} */
   const inflight = new Map();
+  let running = 0;
+  /** @type {(() => void)[]} */
+  const waiters = [];
+  function acquire() {
+    if (running < MAX_CONCURRENT) { running++; return Promise.resolve(); }
+    return new Promise((res) => { waiters.push(res); });
+  }
+  function release() {
+    const next = waiters.shift();
+    if (next) next(); else running--;   // a waiter inherits the slot
+  }
   /** @type {Project[] | null} */
   let projects = null;
 
@@ -177,11 +190,18 @@ function createRegistry(opts) {
       const key = normalizePath(cwd);
       const cur = inflight.get(key);
       if (cur) return cur;
+      const hit = cache.get(key);
+      if (hit && now() - hit.at < CACHE_TTL_MS) {   // cached: answers at once, no git, no slot
+        if (hit.val) register(hit.val.root);
+        return Promise.resolve();
+      }
+      if (inflight.size >= MAX_PENDING) return Promise.resolve();
       const p = (async () => {
+        await acquire();
         try {
           const repo = await resolveRepo(cwd, { exec: o.exec, now, cache });
           if (repo) register(repo.root);
-        } catch (_) { /* never throws */ }
+        } catch (_) { /* never throws */ } finally { release(); }
       })().finally(() => { inflight.delete(key); });
       inflight.set(key, p);
       return p;
@@ -194,6 +214,7 @@ function createRegistry(opts) {
     unhide: (id) => setHidden(id, false),
     list: () => load().map(copy),
     noteCwd,
+    pendingCount: () => inflight.size,
     resolve: (cwd) => resolveRepo(cwd, { exec: o.exec, now, cache }),
   };
 }

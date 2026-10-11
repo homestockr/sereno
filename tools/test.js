@@ -1437,14 +1437,15 @@ test('missing rate_limits degrades instead of throwing', () => {
   console.log('\n[*] collector round trip');
 
   const store = new Store();
-  const collector = createCollector(store, 8799);
-  await new Promise((res, rej) => collector.listen((e) => (e ? rej(e) : res())));
+  let collPort = 0;   // port 0: the OS picks a free one
+  const collector = createCollector(store, 0);
+  await new Promise((res, rej) => collector.listen((e, a) => (e ? rej(e) : (collPort = a.port, res()))));
 
   function post(p, body) {
     return new Promise((res) => {
       const b = JSON.stringify(body);
       const req = http.request({
-        host: '127.0.0.1', port: 8799, path: p, method: 'POST',
+        host: '127.0.0.1', port: collPort, path: p, method: 'POST',
         headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(b) },
       }, (r) => { r.resume(); r.on('end', res); });
       req.on('error', res);
@@ -1452,7 +1453,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
   const get = (p) => new Promise((res) => {
-    http.get({ host: '127.0.0.1', port: 8799, path: p }, (r) => {
+    http.get({ host: '127.0.0.1', port: collPort, path: p }, (r) => {
       let d = ''; r.on('data', (c) => (d += c)); r.on('end', () => res(d));
     }).on('error', () => res(''));
   });
@@ -1486,7 +1487,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     await new Promise((res) => {
       const req = http.request({
-        host: '127.0.0.1', port: 8799, path: '/hook', method: 'POST',
+        host: '127.0.0.1', port: collPort, path: '/hook', method: 'POST',
         headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
       }, (r) => { r.resume(); r.on('end', res); });
       req.on('error', res);
@@ -1502,7 +1503,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
   function raw(opts, body) {
     return new Promise((resolve) => {
-      const r = http.request(Object.assign({ host: '127.0.0.1', port: 8799 }, opts), (res) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port: collPort }, opts), (res) => {
         let d = '';
         res.on('data', (c) => { d += c; });
         res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: d }));
@@ -1558,7 +1559,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
   await atest('garbage body does not kill the collector', async () => {
     await new Promise((res) => {
-      const req = http.request({ host: '127.0.0.1', port: 8799, path: '/hook', method: 'POST' }, (r) => { r.resume(); r.on('end', res); });
+      const req = http.request({ host: '127.0.0.1', port: collPort, path: '/hook', method: 'POST' }, (r) => { r.resume(); r.on('end', res); });
       req.on('error', res);
       req.end('<<<not json>>>');
     });
@@ -1580,7 +1581,7 @@ test('missing rate_limits degrades instead of throwing', () => {
   await atest('the real emit.js reaches a live collector', async () => {
     execFileSync(process.execPath, [EMIT, 'hook', 'Notification'], {
       input: JSON.stringify(sid('shim', { notification_type: 'permission_prompt', message: 'Claude needs your permission' })),
-      env: Object.assign({}, process.env, { CLAUDE_HUD_PORT: '8799' }),
+      env: Object.assign({}, process.env, { CLAUDE_HUD_PORT: String(collPort) }),
       timeout: 10000,
     });
     await new Promise((r) => setTimeout(r, 250));
@@ -2511,7 +2512,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const { openLedger } = require('../src/ledger.js');
     const logsFx = fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-logs.json'), 'utf8');
     const tracesFx = fs.readFileSync(path.join(__dirname, 'fixtures', 'otlp-traces.json'), 'utf8');
-    const PORT = 8798;
+    let PORT = 0;   // port 0: the OS picks a free one
     const rq = (opts, body) => new Promise((resolve) => {
       const r = http.request(Object.assign({ host: '127.0.0.1', port: PORT, agent: false }, opts), (res) => {
         let d = '';
@@ -2526,8 +2527,8 @@ test('missing rate_limits degrades instead of throwing', () => {
     const getJ = async (p) => JSON.parse((await rq({ method: 'GET', path: p })).body);
     const start = async (ledger) => {
       const st = new Store();
-      const c = createCollector(st, PORT, { ledger });
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(st, 0, { ledger });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       return { st, c };
     };
     const stop = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
@@ -2730,14 +2731,14 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('collector.setLedger: /ledger/summary flips at runtime without a restart', async () => {
       const { openLedger } = require('../src/ledger.js');
-      const PORT = 8799;
+      let PORT = 0;   // port 0: the OS picks a free one
       const get = () => new Promise((resolve) => {
         http.get({ host: '127.0.0.1', port: PORT, path: '/ledger/summary', agent: false }, (res) => {
           let d = ''; res.on('data', (c) => { d += c; }); res.on('end', () => resolve(JSON.parse(d)));
         });
       });
-      const c = createCollector(new Store(), PORT);
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(new Store(), 0);
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       const l = openLedger({ file: ':memory:' });
       try {
         assert.deepStrictEqual(await get(), { enabled: false });
@@ -2929,7 +2930,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const fxDir = path.join(__dirname, 'fixtures');
     const logsRaw = fs.readFileSync(path.join(fxDir, 'otlp-logs.json'), 'utf8');
     const tracesRaw = fs.readFileSync(path.join(fxDir, 'otlp-traces.json'), 'utf8');
-    const PORT = 8800;
+    let PORT = 0;   // port 0: the OS picks a free one
     const rq = (opts, body) => new Promise((resolve) => {
       const r = http.request(Object.assign({ host: '127.0.0.1', port: PORT, agent: false }, opts), (res) => {
         let d = '';
@@ -2941,8 +2942,8 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     const post = (p, body) => rq({ method: 'POST', path: p, headers: { 'content-type': 'application/json' } }, typeof body === 'string' ? body : JSON.stringify(body));
     const start = async (ledger) => {
-      const c = createCollector(new Store(), PORT, { ledger });
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(new Store(), 0, { ledger });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       return c;
     };
     const stop = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
@@ -3452,7 +3453,7 @@ test('missing rate_limits degrades instead of throwing', () => {
   /* ---- Phase 2 step 1: spend API ---- */
   {
     const { openLedger } = require('../src/ledger.js');
-    const PORT = 8801;
+    let PORT = 0;   // port 0: the OS picks a free one
     const NOW0 = new Date(2026, 5, 10, 13, 45).getTime();
     let clock = NOW0;
     const rq = (opts, body) => new Promise((resolve) => {
@@ -3482,8 +3483,8 @@ test('missing rate_limits degrades instead of throwing', () => {
     ]);
     const mkLedger = () => openLedger({ file: ':memory:', retentionDays: 36500 });
     const start = async (ledger) => {
-      const c = createCollector(new Store(), PORT, { ledger, now: () => clock });
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(new Store(), 0, { ledger, now: () => clock });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       return c;
     };
     const stop = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
@@ -4384,9 +4385,9 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('static responses: nosniff everywhere, frame-ancestors header on html', async () => {
-      const PORT = 8796;
-      const c = createCollector(new Store(), PORT);
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      let PORT = 0;   // port 0: the OS picks a free one
+      const c = createCollector(new Store(), 0);
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       const get = (p) => new Promise((resolve) => {
         http.get({ host: '127.0.0.1', port: PORT, path: p, agent: false }, (r) => { r.resume(); r.on('end', () => resolve(r)); })
           .on('error', () => resolve({ statusCode: 0, headers: {} }));
@@ -4431,8 +4432,9 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     const T0 = new Date(2026, 5, 10, 13, 45).getTime();
     let clock = T0;
+    const portMap = new Map();   // the logical id each test passes -> the port the OS gave
     const rqx = (port, opts) => new Promise((resolve) => {
-      const r = http.request(Object.assign({ host: '127.0.0.1', port, agent: false }, opts), (res) => {
+      const r = http.request(Object.assign({ host: '127.0.0.1', port: portMap.get(port) || port, agent: false }, opts), (res) => {
         let d = '';
         res.on('data', (c) => { d += c; });
         res.on('end', () => resolve({ status: res.statusCode, body: d }));
@@ -4455,8 +4457,8 @@ test('missing rate_limits degrades instead of throwing', () => {
     const tmpDb = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-exit-')), 'sereno.db');
     const open = (file) => openLedger({ file, retentionDays: 36500 });
     const boot = async (port, ledger) => {
-      const c = createCollector(new Store(), port, { ledger, now: () => clock });
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(new Store(), 0, { ledger, now: () => clock });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (portMap.set(port, a.port), res()))));
       return c;
     };
     const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
@@ -4658,9 +4660,9 @@ test('missing rate_limits degrades instead of throwing', () => {
     const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
 
     await atest('static: NUL bytes and bad encodings answer 4xx and the server survives', async () => {
-      const PORT = 8860;
-      const c = createCollector(new Store(), PORT);
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      let PORT = 0;   // port 0: the OS picks a free one
+      const c = createCollector(new Store(), 0);
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       try {
         for (const p of ['/%00', '/console/%00', '/console/index.html%00.js', '/%E0%A4%A']) {
           const r = await rawGet(PORT, p);
@@ -4671,14 +4673,14 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('snapshot spend: a failing ledger never shows yesterday as today (stale only within the day)', async () => {
-      const PORT = 8861;
+      let PORT = 0;   // port 0: the OS picks a free one
       let clock = new Date(2026, 5, 10, 13, 0).getTime();
       const l = openLedger({ file: ':memory:' });
       l.ingestRequests([{ requestKey: 'k1', requestId: 'r1', sessionId: 's1', promptId: 'p1', ts: clock - 1000, model: 'm',
         querySource: 'repl_main_thread', source: 'main', agentName: null, inputTokens: 1, outputTokens: 1,
         cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 5000, durationMs: 1 }]);
-      const c = createCollector(new Store(), PORT, { ledger: l, now: () => clock });
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(new Store(), 0, { ledger: l, now: () => clock });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       const spend = async () => JSON.parse((await rawGet(PORT, '/state')).body).spend;
       try {
         assert.strictEqual((await spend()).todayMicros, 5000);
@@ -4851,11 +4853,11 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('collector: /state answers 500, not an empty 200, when snapshot throws', async () => {
-      const PORT = 8862;
+      let PORT = 0;   // port 0: the OS picks a free one
       const store = new Store();
       store.snapshot = () => { throw new Error('boom'); };
-      const c = createCollector(store, PORT);
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(store, 0);
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       try {
         const r = await rawGet2(PORT, '/state');
         assert.strictEqual(r.status, 500);
@@ -4865,11 +4867,11 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('spend: ledger with only yesterday rows is telemetry-on with a $0.00 est. widget footer', async () => {
-      const PORT = 8863;
+      let PORT = 0;   // port 0: the OS picks a free one
       const clock = new Date(2026, 5, 10, 13, 0).getTime();
       const l = openLedger({ file: ':memory:', retentionDays: 36500 });
-      const c = createCollector(new Store(), PORT, { ledger: l, now: () => clock });
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(new Store(), 0, { ledger: l, now: () => clock });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       try {
         assert.strictEqual(l.hasAny(), false);
         let st = JSON.parse((await rawGet2(PORT, '/state')).body);
@@ -5040,11 +5042,11 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('projects: /hook answers 204 promptly while noteCwd never resolves; /status never notes', async () => {
-      const PORT = 8921;
+      let PORT = 0;   // port 0: the OS picks a free one
       const noted = [];
       const stub = { noteCwd: (c) => { noted.push(c); return new Promise(() => {}); } };
-      const c = createCollector(new Store(), PORT, { projects: stub });
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(new Store(), 0, { projects: stub });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       const send = (p, body) => new Promise((resolve, reject) => {
         const b = JSON.stringify(body);
         const req = http.request({
@@ -5212,11 +5214,13 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(single > 0);
       assert.deepStrictEqual(Object.keys(p.snapshot()), ['p0']);
       calls = 0;
-      const rs = [p.pollNow(), p.pollNow(), p.pollNow()];
+      // (a second poll of an unchanged repo is cheap by design, so the overlap check uses a fresh poller)
+      const p2 = repos.createPoller({ registry: reg, exec });
+      const rs = [p2.pollNow(), p2.pollNow(), p2.pollNow()];
       await Promise.all(rs);
       assert.strictEqual(calls, single, 'three overlapping calls ran git once');
-      await p.pollNow();
-      assert.strictEqual(calls, single * 2, 'a later call runs again');
+      await p2.pollNow();
+      assert.ok(calls > single, 'a later call runs again (cheaply: nothing changed)');
     });
 
     await atest('repos: stop() leaves no timer, and a started poller never keeps the process alive', async () => {
@@ -5806,8 +5810,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       req.end(body === null ? undefined : body);
     });
     const boot = async (store, port, opts) => {
-      const c = createCollector(store, port, opts);
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(store, 0, opts);
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
       return c;
     };
     const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
@@ -5822,7 +5826,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('projects api: /api/projects shape, explicit keys, and nothing path- or hash-like anywhere (exit 6)', async () => {
       await withHome(async () => {
-        const PORT = 8941;
+        let PORT = 0;   // port 0: the OS picks a free one
         const d = mkRepo();
         const sha = git(d, 'rev-parse', 'HEAD').trim();
         fs.mkdirSync(path.join(d, '.sereno', 'briefs'), { recursive: true });
@@ -5836,6 +5840,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const poller = repos.createPoller({ registry: reg, ghExec: () => Promise.reject(Object.assign(new Error('x'), { code: 'ENOENT' })) });
         await poller.pollNow();
         const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        PORT = c.port;
         try {
           const r = await getJson(PORT, '/api/projects');
           assert.deepStrictEqual(Object.keys(r).sort(), ['asOf', 'projects']);
@@ -5874,7 +5879,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('projects api: spend14 joins ledger sessions by cwd under any worktree, case-insensitively; null with the ledger off', async () => {
-      const PORT = 8942;
+      let PORT = 0;   // port 0: the OS picks a free one
       const clock = Date.now();
       const d = mk(); const wt = mk(); const other = mk();
       const flip = (s) => (process.platform === 'win32' ? s.toUpperCase() : s);
@@ -5887,6 +5892,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const reg = { list: () => [{ id: 'p1', name: 'proj', repoPath: d, hidden: false, firstSeen: 0 }], noteCwd: () => Promise.resolve() };
       const stub = { snapshot: () => ({ p1: { id: 'p1', worktrees: [{ path: wt, branch: 'x' }], branches: [], error: false, freshness: 'none', brief: null, lastCommitAt: null } }) };
       const c = await boot(new Store(), PORT, { ledger, projects: reg, repos: stub, now: () => clock });
+      PORT = c.port;
       try {
         const p = (await getJson(PORT, '/api/projects')).projects[0];
         assert.strictEqual(p.spend14.costMicros, 3500, 'main repo subfolder + worktree, not the other dir');
@@ -5900,7 +5906,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('projects exit 3: sessions in the main repo and in a worktree make one project', async () => {
       await withHome(async () => {
-        const PORT = 8943;
+        let PORT = 0;   // port 0: the OS picks a free one
         const d = mkRepo();
         const wt = path.join(mk(), 'wt');
         git(d, 'worktree', 'add', '-q', '-b', 'side', wt);
@@ -5908,6 +5914,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const poller = repos.createPoller({ registry: reg });
         const store = new Store();
         const c = await boot(store, PORT, { projects: reg, repos: poller });
+        PORT = c.port;
         try {
           const hook = (id, cwd) => rq(PORT, { method: 'POST', path: '/hook', headers: { 'content-type': 'application/json' },
             body: { event: 'SessionStart', payload: { hook_event_name: 'SessionStart', session_id: id, cwd } } });
@@ -5925,11 +5932,12 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('projects exit 4: /hook answers while a slow git (3 s) is in flight', async () => {
       await withHome(async () => {
-        const PORT = 8944;
+        let PORT = 0;   // port 0: the OS picks a free one
         let started = 0;
         const slow = () => { started++; return new Promise((res) => setTimeout(() => res({ stdout: '' }), 3000)); };
         const reg = projects.createRegistry({ exec: slow });
         const c = await boot(new Store(), PORT, { projects: reg });
+        PORT = c.port;
         try {
           const t0 = Date.now();
           const r = await rq(PORT, { method: 'POST', path: '/hook', headers: { 'content-type': 'application/json' },
@@ -5945,7 +5953,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('projects exit 5: POST /api/review and /api/projects/<id>/hide reject every guard failure; valid calls pass', async () => {
       await withHome(async () => {
-        const PORT = 8945;
+        let PORT = 0;   // port 0: the OS picks a free one
         const store = new Store();
         store.applyHook('SessionStart', { session_id: 'live1', cwd: 'C:\\work\\live1' }, { ppid: 4242 });
         const reg = projects.createRegistry();
@@ -5954,6 +5962,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const stubRepos = { snapshot: () => ({}), refresh: () => { refreshes++; return Promise.resolve(); } };
         const reviewed = [];
         const c = await boot(store, PORT, { projects: reg, repos: stubRepos, onReview: (s) => { reviewed.push(s); return true; } });
+        PORT = c.port;
         const ORIGIN = 'http://127.0.0.1:' + PORT;
         try {
           const tokRes = await rq(PORT, { path: '/api/token' });
@@ -6009,13 +6018,13 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(reg.list()[0].hidden, false);
           assert.strictEqual(refreshes, 2);
           // a failed raise is not a success
-          const c2 = await boot(store, 8946, { projects: reg, onReview: () => false });
+          const c2 = await boot(store, 0, { projects: reg, onReview: () => false });
           try {
-            const t2 = JSON.parse((await rq(8946, { path: '/api/token' })).text).token;
-            const r2 = await rq(8946, { method: 'POST', path: '/api/review', headers: { origin: 'http://127.0.0.1:8946', 'content-type': 'application/json', 'x-sereno-token': t2 }, body: { sessionId: 'live1' } });
+            const t2 = JSON.parse((await rq(c2.port, { path: '/api/token' })).text).token;
+            const r2 = await rq(c2.port, { method: 'POST', path: '/api/review', headers: { origin: 'http://127.0.0.1:' + c2.port, 'content-type': 'application/json', 'x-sereno-token': t2 }, body: { sessionId: 'live1' } });
             assert.strictEqual(r2.status, 502);
             // the first collector's token means nothing to the second
-            const r3 = await rq(8946, { method: 'POST', path: '/api/review', headers: { origin: 'http://127.0.0.1:8946', 'content-type': 'application/json', 'x-sereno-token': token }, body: { sessionId: 'live1' } });
+            const r3 = await rq(c2.port, { method: 'POST', path: '/api/review', headers: { origin: 'http://127.0.0.1:' + c2.port, 'content-type': 'application/json', 'x-sereno-token': token }, body: { sessionId: 'live1' } });
             assert.strictEqual(r3.status, 403);
           } finally { await halt(c2); }
         } finally { await halt(c); }
@@ -6024,10 +6033,11 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('projects exit 5: under serve (no onReview) review answers 501 after the guard and the session lookup', async () => {
       await withHome(async () => {
-        const PORT = 8947;
+        let PORT = 0;   // port 0: the OS picks a free one
         const store = new Store();
         store.applyHook('SessionStart', { session_id: 'live2', cwd: 'C:\\work\\live2' }, { ppid: 99 });
         const c = await boot(store, PORT, { projects: projects.createRegistry() });
+        PORT = c.port;
         try {
           const token = JSON.parse((await rq(PORT, { path: '/api/token' })).text).token;
           const h = { origin: 'http://127.0.0.1:' + PORT, 'content-type': 'application/json', 'x-sereno-token': token };
@@ -6198,8 +6208,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       req.end(body === null ? undefined : body);
     });
     const boot = async (store, port, opts) => {
-      const c = createCollector(store, port, opts);
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      const c = createCollector(store, 0, opts);
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
       return c;
     };
     const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
@@ -6211,7 +6221,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('[projects exit 1] fresh, behind, stale, none and unknown repos each show exactly the expected freshness in /api/projects', async () => {
       await withEnv(async () => {
-        const PORT = 8951;
+        let PORT = 0;   // port 0: the OS picks a free one
         const T = Date.parse('2026-10-11T12:00:00Z');   // the injected poller clock
         const fresh = repoWith('fr', T - 30 * HOUR);
         putBriefFile(fresh.d, 'main', fresh.c0);
@@ -6227,6 +6237,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const reg = projects.createRegistry();
         const poller = repos.createPoller({ registry: reg, now: () => T });
         const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        PORT = c.port;
         try {
           const all = [fresh, behind, stale, none, unknown];
           for (let i = 0; i < all.length; i++) assert.strictEqual((await hookStart(PORT, 's' + i, all[i].d)).status, 204);
@@ -6246,13 +6257,14 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('[projects exit 2] brief-only, STATUS-only and mixed brief+STATUS commits stay fresh; a source commit makes it behind, then stale 25 h later', async () => {
       await withEnv(async () => {
-        const PORT = 8952;
+        let PORT = 0;   // port 0: the OS picks a free one
         const { d, c0 } = repoWith('c2');
         putBriefFile(d, 'main', c0);
         const clock = { t: Date.now() };
         const reg = projects.createRegistry();
         const poller = repos.createPoller({ registry: reg, now: () => clock.t });
         const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        PORT = c.port;
         try {
           await hookStart(PORT, 'x', d);
           await waitFor(() => reg.list().length === 1);
@@ -6279,13 +6291,14 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('[projects exit 3] sessions in a repo and in its git worktree (other path casing) make one project', async () => {
       await withEnv(async () => {
-        const PORT = 8953;
+        let PORT = 0;   // port 0: the OS picks a free one
         const { d } = repoWith('c3');
         const wt = path.join(mkd('c3wt'), 'wt');
         git(d, ['worktree', 'add', '-q', '-b', 'side', wt]);
         const reg = projects.createRegistry();
         const poller = repos.createPoller({ registry: reg });
         const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        PORT = c.port;
         try {
           const flipped = process.platform === 'win32' ? wt.toUpperCase() : wt;
           assert.strictEqual((await hookStart(PORT, 'a1', d)).status, 204);
@@ -6303,12 +6316,13 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('[projects exit 4] /hook and /api/projects answer in under 1 s while the registry git is stubbed to take 3 s', async () => {
       await withEnv(async () => {
-        const PORT = 8954;
+        let PORT = 0;   // port 0: the OS picks a free one
         let started = 0;
         const slow = () => { started++; return new Promise((res) => setTimeout(() => res({ stdout: '' }), 3000)); };
         const reg = projects.createRegistry({ exec: slow });
         const poller = repos.createPoller({ registry: reg });
         const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        PORT = c.port;
         try {
           const t0 = Date.now();
           const r = await hookStart(PORT, 'slow1', mkd('c4'));
@@ -6329,7 +6343,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('[projects exit 5] both guarded POST routes reject every guard failure with the documented 4xx; valid calls reach the stub and the registry', async () => {
       await withEnv(async () => {
-        const PORT = 8955;
+        let PORT = 0;   // port 0: the OS picks a free one
         const { d } = repoWith('c5');
         const store = new Store();
         store.applyHook('SessionStart', { session_id: 'live1', cwd: 'C:\\work\\live1' }, { ppid: 4242 });
@@ -6339,6 +6353,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         await poller.pollNow();
         const reviewed = [];
         const c = await boot(store, PORT, { projects: reg, repos: poller, onReview: (s) => { reviewed.push(s); return true; } });
+        PORT = c.port;
         const ORIGIN = 'http://127.0.0.1:' + PORT;
         try {
           const token = JSON.parse((await rq(PORT, { path: '/api/token' })).text).token;
@@ -6380,7 +6395,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     await atest('[projects exit 6] /api/projects carries no commit message, file content, path, hash or path key; brief lines are stripped and capped', async () => {
       await withEnv(async () => {
-        const PORT = 8956;
+        let PORT = 0;   // port 0: the OS picks a free one
         const { d, c0 } = repoWith('c6', undefined, 'SERENO-COMMIT-CANARY one');
         const sha = commitFile(d, 'notes.txt', 'SERENO-FILE-CANARY contents\n', 'SERENO-COMMIT-CANARY two');
         const hostile = 'visible\u0000\u0007\u001b[31m\u0085\u202e\u2066\u2069text' + 'Z'.repeat(300);
@@ -6388,6 +6403,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const reg = projects.createRegistry();
         const poller = repos.createPoller({ registry: reg });
         const c = await boot(new Store(), PORT, { projects: reg, repos: poller });
+        PORT = c.port;
         try {
           await hookStart(PORT, 'x', d);
           await waitFor(() => reg.list().length === 1);
@@ -6590,9 +6606,9 @@ test('missing rate_limits degrades instead of throwing', () => {
         const reg = projects.createRegistry({ exec, file: path.join(home, 'projects.json') });
         for (const u of UNCS.concat(['C:\\' + 'a'.repeat(1100)])) { await reg.noteCwd(u); assert.strictEqual(await reg.resolve(u), null); }
         assert.strictEqual(calls.length, 0, 'exec never called');
-        const PORT = 8963;
-        const c = createCollector(new Store(), PORT, { projects: reg });
-        await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+        let PORT = 0;   // port 0: the OS picks a free one
+        const c = createCollector(new Store(), 0, { projects: reg });
+        await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
         try {
           for (const u of UNCS) {
             await new Promise((resolve, reject) => {
@@ -6709,9 +6725,9 @@ test('missing rate_limits degrades instead of throwing', () => {
         store.sessions.get('wt-1').state = 'blocked';
         store.sessions.get('old-1').state = 'running';
         store.sessions.get('old-1').lastSeen = Date.now() - 60 * 60 * 1000;   // stale
-        const PORT = 8964;
-        const c = createCollector(store, PORT, { projects: reg, repos: poller });
-        await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+        let PORT = 0;   // port 0: the OS picks a free one
+        const c = createCollector(store, 0, { projects: reg, repos: poller });
+        await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
         try {
           const j = await new Promise((resolve, reject) => {
             http.get({ host: '127.0.0.1', port: PORT, path: '/api/projects' }, (r) => { let t = ''; r.on('data', (x) => { t += x; }); r.on('end', () => resolve(JSON.parse(t))); }).on('error', reject);
@@ -6911,9 +6927,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       const reg = { list: () => [
         { id: 'out', name: 'outer', repoPath: outer, hidden: false },
         { id: 'in', name: 'inner', repoPath: inner, hidden: false }] };
-      const PORT = 8962;
-      const c = createCollector(store, PORT, { projects: reg, repos: { snapshot: () => ({}) } });
-      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      let PORT = 0;   // port 0: the OS picks a free one
+      const c = createCollector(store, 0, { projects: reg, repos: { snapshot: () => ({}) } });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (PORT = a.port, res()))));
       try {
         const r = await new Promise((resolve, reject) => {
           http.get({ host: '127.0.0.1', port: PORT, path: '/api/projects', agent: false }, (rs) => {
@@ -6944,6 +6960,273 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(row, 'branch row is named tagged');
       assert.ok(row.brief && row.brief.now === 'tagged work');
       assert.deepStrictEqual(repos.parseBranches('refs/heads/feat/x\t100\tabc\nmain\t5\tdef').map((b) => b.name), ['feat/x', 'main']);
+    });
+  }
+
+  /* ---- Phase 3: final fixes ---- */
+  {
+    const projects = require('../src/projects.js');
+    const repos = require('../src/repos.js');
+    const briefsLib = require('../src/briefs.js');
+    const { gitExec } = require('../src/gitexec.js');
+    const baseEnv = Object.assign({}, process.env, {
+      GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid',
+      GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid',
+    });
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: baseEnv, stdio: 'pipe', windowsHide: true }).toString();
+    const mk = () => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-ff-')));
+    const mkRepo = () => {
+      const d = mk();
+      git(d, 'init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(d, 'a.txt'), 'one');
+      git(d, 'add', 'a.txt');
+      git(d, 'commit', '-q', '-m', 'init');
+      return d;
+    };
+    const fake = (dirs) => ({ list: () => dirs.map((d, i) => ({ id: 'p' + i, name: path.basename(d), repoPath: d, hidden: false })) });
+    const counting = () => {
+      const c = { n: 0, args: [] };
+      c.exec = (f, a, o) => { c.n++; c.args.push(a.join(' ')); return gitExec(f, a, o); };
+      return c;
+    };
+
+    await atest('ff1: noteCwd runs at most 2 resolves at once and holds at most 50 distinct cwds', async () => {
+      let live = 0; let maxLive = 0; let started = 0; let maxPending = 0;
+      const gate = [];
+      let reg;
+      const exec = () => {
+        started++; live++; maxLive = Math.max(maxLive, live); maxPending = Math.max(maxPending, reg.pendingCount());
+        return new Promise((res) => { gate.push(() => { live--; res({ stdout: '' }); }); });
+      };
+      reg = projects.createRegistry({ exec, file: path.join(mk(), 'projects.json') });
+      const all = [];
+      for (let i = 0; i < 300; i++) {
+        all.push(reg.noteCwd('C:\\ff1\\dir' + i));
+        maxPending = Math.max(maxPending, reg.pendingCount());
+      }
+      assert.strictEqual(reg.pendingCount(), 50, 'distinct cwds beyond 50 are dropped while the queue is full');
+      // drain: release whatever is running until nothing is left
+      for (let spins = 0; spins < 200 && (gate.length || reg.pendingCount()); spins++) {
+        while (gate.length) gate.shift()();
+        await new Promise((r) => setImmediate(r));
+      }
+      await Promise.all(all);
+      assert.strictEqual(reg.pendingCount(), 0);
+      assert.ok(maxLive >= 1 && maxLive <= 2, 'concurrent execs: ' + maxLive);
+      assert.ok(maxPending <= 50, 'pending: ' + maxPending);
+      assert.ok(started <= 100, 'only the accepted cwds reached exec: ' + started);
+      // after it drains, new cwds are accepted again
+      const before = started;
+      const more = reg.noteCwd('C:\\ff1\\after');
+      for (let spins = 0; spins < 20 && !gate.length; spins++) await new Promise((r) => setImmediate(r));
+      while (gate.length) gate.shift()();
+      await more;
+      assert.ok(started > before);
+    });
+
+    await atest('ff1: an already-cached cwd still answers instantly while the queue is full', async () => {
+      let n = 0; const gate = [];
+      const exec = (f, a) => {
+        n++;
+        if (a.includes('--show-toplevel') && n === 1) return Promise.resolve({ stdout: 'C:/ff1c/repo\n' });
+        if (a.includes('--git-common-dir') && n === 2) return Promise.resolve({ stdout: 'C:/ff1c/repo/.git\n' });
+        return new Promise((res) => { gate.push(() => res({ stdout: '' })); });
+      };
+      const reg = projects.createRegistry({ exec, file: path.join(mk(), 'projects.json') });
+      await reg.noteCwd('C:\\ff1c\\repo');
+      assert.strictEqual(reg.list().length, 1);
+      for (let i = 0; i < 80; i++) reg.noteCwd('C:\\ff1c\\other' + i);
+      assert.strictEqual(reg.pendingCount(), 50);
+      await new Promise((r) => setImmediate(r));
+      const execBefore = n;
+      await reg.noteCwd('C:\\ff1c\\repo');   // cached: resolves although every slot is busy
+      assert.strictEqual(n, execBefore, 'no git for a cached cwd');
+      while (gate.length) gate.shift()();
+    });
+
+    await atest('ff2: an unchanged repo is not re-read: the second poll spawns at most 2 git processes', async () => {
+      const d = mkRepo();
+      let clock = Date.now();
+      const c = counting();
+      const p = repos.createPoller({ registry: fake([d]), exec: c.exec, now: () => clock });
+      await p.pollNow();
+      assert.ok(c.n > 4, 'first poll reads everything: ' + c.n);
+      const first = p.snapshot().p0;
+      c.n = 0; clock += 1000;
+      await p.pollNow();
+      assert.ok(c.n <= 2, 'second poll spawned ' + c.n + ': ' + c.args.join(' | '));
+      const second = p.snapshot().p0;
+      assert.strictEqual(second.defaultBranch, first.defaultBranch);
+      assert.strictEqual(second.dirty, false);
+      assert.ok(second.polledAt > first.polledAt, 'still stamped as polled');
+    });
+
+    await atest('ff2: touching the index, committing, or editing a brief forces a re-check; so does 5 minutes', async () => {
+      const d = mkRepo();
+      let clock = Date.now();
+      const c = counting();
+      const p = repos.createPoller({ registry: fake([d]), exec: c.exec, now: () => clock });
+      await p.pollNow();
+      const settle = async () => { clock += 1000; c.n = 0; await p.pollNow(); const n = c.n; return n; };
+      assert.ok(await settle() <= 2);
+      // index touched
+      const later = new Date(Date.now() + 5000);
+      fs.utimesSync(path.join(d, '.git', 'index'), later, later);
+      assert.ok(await settle() > 2, 'index mtime change re-reads');
+      assert.ok(await settle() <= 2, 'and then it is quiet again');
+      // a commit
+      const before = p.snapshot().p0.lastCommitAt;
+      fs.writeFileSync(path.join(d, 'a.txt'), 'two');
+      git(d, 'commit', '-q', '-a', '-m', 'second');
+      assert.ok(await settle() > 2, 'commit re-reads');
+      assert.ok(p.snapshot().p0.lastCommitAt >= before);
+      assert.ok(await settle() <= 2);
+      // a brief file appears
+      const dir = path.join(d, '.sereno', 'briefs'); fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'main.md'), '---\nbranch: main\nversion: 1\n---\nNow: x\nNext: y\nBlocked: none\n');
+      assert.ok(await settle() > 2, 'new brief re-reads');
+      assert.ok(await settle() <= 2);
+      // dirty tracked file: invisible until the forced full re-check
+      fs.writeFileSync(path.join(d, 'a.txt'), 'three');
+      assert.ok(await settle() <= 2);
+      clock += 5 * 60 * 1000;
+      c.n = 0; await p.pollNow();
+      assert.ok(c.n > 2, 'full re-check after 5 minutes');
+      assert.strictEqual(p.snapshot().p0.dirty, true);
+    });
+
+    await atest('ff2: tiers: a quiet repo is polled every 5 min, a hot one every 30 s, hidden never', async () => {
+      const d = mkRepo(); const h = mkRepo();
+      let clock = Date.now() + 3 * 24 * 3600 * 1000;   // the commits are then older than a day
+      const c = counting();
+      let hot = [];
+      const list = [{ id: 'q', name: 'q', repoPath: d, hidden: false }, { id: 'h', name: 'h', repoPath: h, hidden: false },
+        { id: 'x', name: 'x', repoPath: mkRepo(), hidden: true }];
+      const p = repos.createPoller({ registry: { list: () => list }, exec: c.exec, now: () => clock, hotIds: () => hot });
+      await p.tick();
+      assert.ok(c.n > 0); assert.ok(!p.snapshot().x, 'hidden never polled');
+      c.n = 0; clock += 60 * 1000;
+      await p.tick();
+      assert.strictEqual(c.n, 0, 'nothing is due after 60 s');
+      hot = ['h'];
+      clock += 31 * 1000;
+      await p.tick();
+      const hotCalls = c.n;
+      assert.ok(hotCalls > 0 && hotCalls <= 2, 'only the hot repo, and cheaply: ' + hotCalls + ' ' + c.args.join(' | '));
+      c.n = 0; clock += 31 * 1000;
+      await p.tick();
+      assert.ok(c.n > 0 && c.n <= 2, 'hot again 30 s later');
+      hot = [];
+      c.n = 0; clock += 5 * 60 * 1000;
+      await p.tick();
+      assert.ok(c.n > 0, 'the quiet repo is due after 5 minutes');
+    });
+
+    await atest('ff2: a repo with a commit in the last 24 h is hot without any session', async () => {
+      const d = mkRepo();
+      let clock = Date.now();
+      const c = counting();
+      const p = repos.createPoller({ registry: fake([d]), exec: c.exec, now: () => clock });
+      await p.tick();
+      c.n = 0; clock += 31 * 1000;
+      await p.tick();
+      assert.ok(c.n > 0, 'recent commit: due at 30 s');
+    });
+
+    test('ff3: aggregateDirty is true if any, false only if every worktree is clean, else null', () => {
+      const a = repos.aggregateDirty;
+      assert.strictEqual(a([{ dirty: true }, { dirty: false }]), true);
+      assert.strictEqual(a([{ dirty: null }, { dirty: true }]), true);
+      assert.strictEqual(a([{ dirty: false }, { dirty: false }]), false);
+      assert.strictEqual(a([{ dirty: false }, { dirty: null }]), null);
+      assert.strictEqual(a([{ dirty: null }]), null);
+      assert.strictEqual(a([]), null);
+    });
+
+    await atest('ff3: a worktree whose status cannot be read leaves the project dirty flag unknown, not clean', async () => {
+      const d = mkRepo();
+      const wt = path.join(mk(), 'wt');
+      git(d, 'worktree', 'add', '-q', '-b', 'side', wt);
+      const wtKey = wt.split(path.sep).join('/').toLowerCase();
+      const exec = (f, a, o) => {
+        if (a.includes('status') && String(o.cwd).split(path.sep).join('/').toLowerCase() === wtKey) return Promise.reject(new Error('boom'));
+        return gitExec(f, a, o);
+      };
+      const p = repos.createPoller({ registry: fake([d]), exec });
+      await p.pollNow();
+      assert.strictEqual(p.snapshot().p0.dirty, null);
+      const q = repos.createPoller({ registry: fake([d]) });
+      await q.pollNow();
+      assert.strictEqual(q.snapshot().p0.dirty, false);
+      fs.writeFileSync(path.join(wt, 'a.txt'), 'changed');
+      const r = repos.createPoller({ registry: fake([d]) });
+      await r.pollNow();
+      assert.strictEqual(r.snapshot().p0.dirty, true);
+    });
+
+    test('ff3: the console shows no dirty marker unless dirty is exactly true', () => {
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+      assert.ok(/p\.git\.dirty === true/.test(src));
+    });
+
+    await atest('ff4: /hook is answered before noteCwd (and so before any git) starts', async () => {
+      const order = [];
+      const reg = projects.createRegistry({ exec: () => { order.push('exec'); return Promise.resolve({ stdout: '' }); }, file: path.join(mk(), 'projects.json') });
+      const real = reg.noteCwd;
+      reg.noteCwd = (cwd) => { order.push('noteCwd'); return real(cwd); };
+      const c = createCollector(new Store(), 0, { projects: reg });
+      await new Promise((res, rej) => c.listen((e) => (e ? rej(e) : res())));
+      c.server.on('request', (req, res) => {
+        const end = res.end.bind(res);
+        res.end = (...a) => { order.push('end'); return end(...a); };
+      });
+      try {
+        const port = c.server.address().port;
+        const body = JSON.stringify({ event: 'SessionStart', payload: { hook_event_name: 'SessionStart', session_id: 'ord1', cwd: 'C:\\ff4\\work' } });
+        const status = await new Promise((resolve, reject) => {
+          const req = http.request({ host: '127.0.0.1', port, path: '/hook', method: 'POST',
+            headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode)); });
+          req.on('error', reject); req.end(body);
+        });
+        assert.strictEqual(status, 204);
+        await new Promise((r) => setTimeout(r, 50));
+        assert.deepStrictEqual(order.slice(0, 3), ['end', 'noteCwd', 'exec']);
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+    });
+
+    test('ff5: README threat model says filters are blanked for status and submodules are never entered', () => {
+      const md = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+      assert.ok(/blanked for `status`, the only call Sereno makes that can run them/.test(md));
+      assert.ok(/submodules are never entered/.test(md));
+    });
+
+    test('ff6: branch names with bidi, zero-width, BOM or control characters are rejected', () => {
+      const v = briefsLib.validBranchName;
+      assert.strictEqual(v('main'), true);
+      assert.strictEqual(v('feat/x-1'), true);
+      for (const bad of ['main\u202e', 'ma\u200bin', 'ma\u200fin', '\u202ablah', 'a\u2066b', 'a\u2069b', '\ufeffmain', 'ma\u0085in', 'ma\u009fin', 'ma\u0007in', 'ma\u007fin']) {
+        assert.strictEqual(v(bad), false, JSON.stringify(bad));
+      }
+    });
+
+    await atest('ff6: a worktree on a disguised branch name is shown without a branch', async () => {
+      const d = mkRepo();
+      const wt = path.join(mk(), 'wt');
+      git(d, 'worktree', 'add', '-q', '-b', 'side', wt);
+      const exec = async (f, a, o) => {
+        const r = await gitExec(f, a, o);
+        if (a[0] === 'worktree') return { stdout: r.stdout.replace('refs/heads/side', 'refs/heads/side\u202e') };
+        return r;
+      };
+      const p = repos.createPoller({ registry: fake([d]), exec });
+      await p.pollNow();
+      const w = p.snapshot().p0.worktrees.find((x) => x.path.toLowerCase().endsWith('wt'));
+      assert.ok(w && w.branch === null);
+    });
+
+    test('ff7: the suite binds no fixed listen port', () => {
+      const src = fs.readFileSync(__filename, 'utf8');
+      assert.ok(!/createCollector\([^;]*?,\s*(PORT|port|\d{4,5})\b/.test(src.replace(/test\('ff7[\s\S]*$/, '')), 'every collector in the suite listens on port 0');
     });
   }
 

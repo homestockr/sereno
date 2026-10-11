@@ -397,7 +397,7 @@ function createCollector(store, port, opts) {
   function actionGuard(req, res) {
     const deny = () => { res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden'); return false; };
     const origin = req.headers.origin;
-    if (typeof origin !== 'string' || (origin !== 'http://127.0.0.1:' + port && origin !== 'http://localhost:' + port)) return deny();
+    if (typeof origin !== 'string' || (!allowedOrigins.has(origin) || origin.includes('[::1]'))) return deny();
     if (!/^application\/json\s*(;|$)/i.test(String(req.headers['content-type'] || ''))) return deny();
     const got = Buffer.from(String(req.headers['x-sereno-token'] || ''));
     const want = Buffer.from(token);
@@ -469,12 +469,14 @@ function createCollector(store, port, opts) {
           if (url === '/hook') store.applyHook(event, msg.payload, meta);
           else store.applyStatus(msg.payload, meta);
         } catch (_) { /* a bad payload must never take the HUD down */ }
-        // Project registration runs git, so it is fire-and-forget after the 204.
+        // Project registration runs git, so it runs after the response has been written.
         if (url === '/hook' && projects) {
-          try {
-            const cwd = msg.payload.cwd;
-            if (typeof cwd === 'string' && cwd) Promise.resolve(projects.noteCwd(cwd)).catch(() => {});
-          } catch (_) { /* never affects the store or the response */ }
+          const cwd = msg.payload.cwd;
+          if (typeof cwd === 'string' && cwd) {
+            setImmediate(() => {
+              try { Promise.resolve(projects.noteCwd(cwd)).catch(() => {}); } catch (_) { /* never affects the store or the response */ }
+            });
+          }
         }
         // The ledger is a record, not the live view: its failures stay here.
         if (ledger) {
@@ -639,7 +641,15 @@ function createCollector(store, port, opts) {
     clientCount: () => clients.size,
     listen(cb) {
       server.on('error', (err) => cb && cb(err));
-      server.listen(port, '127.0.0.1', () => cb && cb(null, server.address()));
+      server.listen(port, '127.0.0.1', () => {
+        const addr = server.address();
+        // Port 0 asks the OS for a free port: the Host/Origin checks must then accept the real one.
+        if (port === 0 && addr && typeof addr === 'object') {
+          port = addr.port;
+          for (const h of ['127.0.0.1', 'localhost', '[::1]']) { allowedHosts.add(h + ':' + port); allowedOrigins.add('http://' + h + ':' + port); }
+        }
+        if (cb) cb(null, addr);
+      });
     },
     close() {
       clearInterval(spendTimer);

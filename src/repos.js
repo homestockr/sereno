@@ -97,6 +97,20 @@ function parseBranches(out) {
   return list;
 }
 
+const QUIET_MS = 5 * 60 * 1000;     // a project nobody is working in is polled this often
+const FULL_RECHECK_MS = 5 * 60 * 1000;   // an unchanged repo is still fully re-read this often
+
+/**
+ * Project dirty flag from its worktrees: true if any is dirty, false only when
+ * every worktree answered clean, otherwise unknown (null).
+ * @param {{ dirty: boolean | null }[]} worktrees @returns {boolean | null}
+ */
+function aggregateDirty(worktrees) {
+  if (worktrees.some((w) => w.dirty === true)) return true;
+  if (worktrees.length && worktrees.every((w) => w.dirty === false)) return false;
+  return null;
+}
+
 const BACKOFF_START_MS = 5 * 60 * 1000;
 const BACKOFF_MAX_MS = 60 * 60 * 1000;
 
@@ -118,6 +132,7 @@ async function pool(items, limit, fn) {
  * @param {{ registry: { list: () => { id: string, name: string, repoPath: string, hidden: boolean }[] },
  *   exec?: Exec, now?: () => number, intervalMs?: number, concurrency?: number,
  *   fsp?: typeof nodeFs.promises,
+ *   quietMs?: number, hotIds?: () => Iterable<string>,
  *   ghExec?: (args: string[], o: { cwd?: string }) => Promise<{ stdout: string }>, ghIntervalMs?: number }} opts
  */
 function createPoller(opts) {
@@ -138,6 +153,15 @@ function createPoller(opts) {
   const fsp = opts.fsp || nodeFs.promises;
   const now = opts.now || Date.now;
   const intervalMs = opts.intervalMs || 30000;
+  const quietMs = opts.quietMs || QUIET_MS;
+  /** Projects with live (non-stale) sessions; supplied by the host. */
+  const hotIds = opts.hotIds || (() => []);
+  /** When each project was last attempted (tiered polling). @type {Map<string, number>} */
+  const lastTry = new Map();
+  /** Last good result per project with the fingerprint it was read under. @type {Map<string, { fp: string, at: number, result: RepoState }>} */
+  const good = new Map();
+  /** Resolved git dirs per worktree path (one rev-parse each). @type {Map<string, { dir: string, common: string } | null>} */
+  const gitDirs = new Map();
   const concurrency = opts.concurrency || 2;
   const ghExec = opts.ghExec || ghExecDefault;
   const ghIntervalMs = opts.ghIntervalMs || GH_INTERVAL_MS;
@@ -194,6 +218,61 @@ function createPoller(opts) {
     } catch (_) { return null; }
   }
 
+  const mtime = async (/** @type {string} */ f) => {
+    try { return String(Math.round((await fsp.stat(f)).mtimeMs)); } catch (_) { return '-'; }
+  };
+
+  /** Brief files' names, sizes and mtimes for one worktree; stat only, never opened. @param {string} wt */
+  async function briefsStamp(wt) {
+    try {
+      const sereno = wt + '/.sereno';
+      const dir = sereno + '/briefs';
+      let ls;
+      try { ls = await fsp.lstat(sereno); } catch (_) { return '-'; }
+      if (ls.isSymbolicLink()) return 's';
+      try { ls = await fsp.lstat(dir); } catch (_) { return '-'; }
+      if (ls.isSymbolicLink()) return 's';
+      const names = (await fsp.readdir(dir)).filter((n) => /\.md$/i.test(n)).sort().slice(0, 200);
+      const parts = [];
+      for (const n of names) {
+        try { const st = await fsp.lstat(dir + '/' + n); parts.push(n + ':' + Math.round(st.mtimeMs) + ':' + st.size); }
+        catch (_) { parts.push(n + ':?'); }
+      }
+      return parts.join(',');
+    } catch (_) { return '?'; }
+  }
+
+  /**
+   * Cheap change detector for a project: HEAD, index, packed-refs, refs/heads and the HEAD
+   * reflog mtimes per worktree, plus the brief files. Local paths and fs.stat only.
+   * Null when anything cannot be resolved, which means "no skipping".
+   * @param {{ path: string, branch: string | null, head: string }[]} wts @returns {Promise<string | null>}
+   */
+  async function fingerprint(wts) {
+    try {
+      const parts = [];
+      for (const w of wts) {
+        let g = gitDirs.get(w.path);
+        if (g === undefined) {
+          g = null;
+          try {
+            const out = (await git(['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], w.path)).split(/\r?\n/);
+            const dir = (out[0] || '').trim(); const common = (out[1] || '').trim();
+            if (dir && common && isLocalPath(dir) && isLocalPath(common)) g = { dir, common };
+          } catch (_) { g = null; }
+          if (gitDirs.size >= 200) gitDirs.clear();
+          gitDirs.set(w.path, g);
+        }
+        if (!g) return null;
+        parts.push([w.path, w.branch || '', w.head,
+          await mtime(g.dir + '/HEAD'), await mtime(g.dir + '/index'), await mtime(g.dir + '/logs/HEAD'),
+          await mtime(g.common + '/packed-refs'), await mtime(g.common + '/refs/heads'),
+          await briefsStamp(w.path)].join('|'));
+      }
+      return parts.join('\n');
+    } catch (_) { return null; }
+  }
+
   /** @param {{ id: string, name: string, repoPath: string }} p @returns {Promise<RepoState>} */
   async function pollOne(p) {
     const cwd = p.repoPath;
@@ -207,6 +286,15 @@ function createPoller(opts) {
       // A branch name that is not a valid ref name never reaches git again.
       wts.push(Object.assign(w, { branch: briefsLib.validBranchName(w.branch) ? w.branch : null }));
     }
+    // Nothing changed since the last good read and it is recent: reuse it without config/status/briefs.
+    const fp = await fingerprint(wts);
+    const prevGood = good.get(p.id);
+    if (fp !== null && prevGood && prevGood.fp === fp && now() - prevGood.at < FULL_RECHECK_MS) {
+      pendingGood.set(p.id, prevGood);   // still the last full read, so the 5 minute clock keeps running
+      return Object.assign({}, prevGood.result, { polledAt: now() });
+    }
+    const fullAt = now();
+    if (prevGood && now() - prevGood.at >= FULL_RECHECK_MS) gitDirs.clear();
     const branches = parseBranches(await git(['for-each-ref', '--count=2000', '--sort=-committerdate', 'refs/heads',
       '--format=%(refname)%09%(committerdate:unix)%09%(objectname)'], cwd))
       .filter((b) => briefsLib.validBranchName(b.name));
@@ -273,27 +361,50 @@ function createPoller(opts) {
     for (const k of Array.from(freshCache.keys())) if (k.startsWith(p.id + '\u0000') && !used.has(k)) freshCache.delete(k);
     const headline = shown.find((b) => b.name === def);
 
-    return {
+    const result = {
       id: p.id, name: p.name, defaultBranch: def, ahead, behind,
-      dirty: worktrees.some((w) => w.dirty === true),
+      dirty: aggregateDirty(worktrees),
       lastCommitAt: branches.length ? Math.max(...branches.map((b) => b.lastCommitAt)) : null,
       worktrees: worktrees.map((w) => ({ path: w.path, branch: w.branch, dirty: w.dirty })),
       branches: shown, polledAt: t, error: false,
       brief: headline ? headline.brief : null, freshness: headline ? headline.freshness : 'none',
       behindSince: headline ? headline.behindSince : null, briefsMalformed: malformed,
     };
+    if (fp !== null) pendingGood.set(p.id, { fp, at: fullAt, result });
+    return result;
   }
 
-  async function runPoll() {
+  /** Set by pollOne, committed by runPoll only when the poll was not killed. @type {Map<string, { fp: string, at: number, result: RepoState }>} */
+  const pendingGood = new Map();
+
+  /** @param {{ id: string }} p */
+  function isHot(p) {
+    try { for (const id of hotIds()) if (id === p.id) return true; } catch (_) { /* host callback failed: not hot */ }
+    const st = state.get(p.id);
+    return !!(st && typeof st.lastCommitAt === 'number' && now() - st.lastCommitAt < DAY_MS);
+  }
+
+  /** @param {boolean} onlyDue */
+  async function runPoll(onlyDue) {
     let list = [];
     try { list = registry.list().filter((p) => !p.hidden); } catch (_) { return; }
     const next = new Map();
     const ids = new Set(list.map((p) => p.id));
     for (const [id, s] of state) if (ids.has(id)) next.set(id, s);
     state = next;
+    if (onlyDue) {
+      const t0 = now();
+      list = list.filter((p) => {
+        const last = lastTry.get(p.id);
+        if (last === undefined) return true;
+        return t0 - last >= (isHot(p) ? intervalMs * 0.9 : quietMs);
+      });
+    }
     await pool(list, concurrency, async (p) => {
       const bo = backoff.get(p.id);
       if (bo && now() < bo.until) return;   // timed out recently: leave it alone
+      lastTry.set(p.id, now());
+      pendingGood.delete(p.id);
       const ctx = { killed: false };
       let res = null;
       try { res = await pollCtx.run(ctx, () => pollOne(p)); } catch (_) { res = null; }
@@ -301,7 +412,14 @@ function createPoller(opts) {
         const wait = bo ? Math.min(bo.wait * 2, BACKOFF_MAX_MS) : BACKOFF_START_MS;
         backoff.set(p.id, { until: now() + wait, wait });
       } else if (res) backoff.delete(p.id);
-      if (res && !ctx.killed) { state.set(p.id, res); return; }
+      if (res && !ctx.killed) {
+        state.set(p.id, res);
+        const g = pendingGood.get(p.id);
+        if (g) good.set(p.id, g); else good.delete(p.id);
+        pendingGood.delete(p.id);
+        return;
+      }
+      pendingGood.delete(p.id);
       const prev = state.get(p.id);
       if (prev) state.set(p.id, Object.assign({}, prev, { name: p.name, error: true }));
       else state.set(p.id, {
@@ -315,7 +433,14 @@ function createPoller(opts) {
   /** Overlapping calls share the in-flight poll; nothing is queued. @returns {Promise<void>} */
   function pollNow() {
     if (running) return running;
-    running = runPoll().catch(() => {}).finally(() => { running = null; });
+    running = runPoll(false).catch(() => {}).finally(() => { running = null; });
+    return running;
+  }
+
+  /** Timer tick: polls only the projects that are due (hot every interval, the rest every few minutes). @returns {Promise<void>} */
+  function tick() {
+    if (running) return running;
+    running = runPoll(true).catch(() => {}).finally(() => { running = null; });
     return running;
   }
 
@@ -327,6 +452,8 @@ function createPoller(opts) {
     for (const id of Array.from(prs.keys())) if (!ids.has(id)) prs.delete(id);
     for (const id of Array.from(ghAt.keys())) if (!ids.has(id)) ghAt.delete(id);
     for (const id of Array.from(backoff.keys())) if (!ids.has(id)) backoff.delete(id);
+    for (const id of Array.from(lastTry.keys())) if (!ids.has(id)) lastTry.delete(id);
+    for (const id of Array.from(good.keys())) if (!ids.has(id)) good.delete(id);
   }
 
   async function runGh() {
@@ -371,11 +498,12 @@ function createPoller(opts) {
 
   return {
     pollNow,
+    tick,
     pollGh,
     refresh,
     start() {
       if (timer) return;
-      timer = setInterval(() => { pollNow(); }, intervalMs);
+      timer = setInterval(() => { tick(); }, intervalMs);
       timer.unref();
       pollNow();
       // gh is slower and rate-limited upstream: its own, much longer timer.
@@ -399,4 +527,4 @@ function createPoller(opts) {
   };
 }
 
-module.exports = { createPoller, parseGithubRemote, GH_INTERVAL_MS, GH_ARGS, parseWorktrees, parseBranches, RECENT_MS, MAX_BRANCHES };
+module.exports = { createPoller, aggregateDirty, QUIET_MS, FULL_RECHECK_MS, parseGithubRemote, GH_INTERVAL_MS, GH_ARGS, parseWorktrees, parseBranches, RECENT_MS, MAX_BRANCHES };

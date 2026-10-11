@@ -33,7 +33,9 @@
  * possible, because plumbing ignores porcelain config such as log.*):
  *   projects.js  rev-parse --show-toplevel                 plumbing, prints a path
  *                rev-parse --path-format=absolute --git-common-dir   plumbing
- *   repos.js     worktree list --porcelain                 reads .git/worktrees, no hooks
+ *   repos.js     rev-parse --path-format=absolute --git-dir --git-common-dir   plumbing, once per worktree
+ *                  (the git dirs are then only fs.stat'ed for change detection)
+ *                worktree list --porcelain                 reads .git/worktrees, no hooks
  *                for-each-ref refs/heads                   plumbing, ref names/dates/ids only
  *                symbolic-ref --short refs/remotes/origin/HEAD   plumbing, reads a ref
  *                rev-list --left-right --count A...B@{upstream}  plumbing, counts only

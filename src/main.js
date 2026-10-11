@@ -642,7 +642,22 @@ if (CLI_UNWIRE) {
     }
 
     const registry = projectsLib.createRegistry();
-    poller = reposLib.createPoller({ registry });
+    // Hot projects (polled every 30 s): a live, non-stale session's cwd is under the repo or one of its worktrees.
+    poller = reposLib.createPoller({
+      registry,
+      hotIds: () => {
+        const hot = [];
+        const cwds = Array.from(store.sessions.values()).map((x) => store.publicSession(x)).filter((x) => !x.stale && typeof x.cwd === 'string')
+          .map((x) => projectsLib.normalizePath(x.cwd));
+        if (!cwds.length) return hot;
+        const snap = poller ? poller.snapshot() : {};
+        for (const pr of registry.list()) {
+          const roots = [pr.repoPath].concat(((snap[pr.id] && snap[pr.id].worktrees) || []).map((w) => w.path)).map(projectsLib.normalizePath);
+          if (cwds.some((c) => roots.some((r) => c === r || c.startsWith(r.endsWith('/') ? r : r + '/')))) hot.push(pr.id);
+        }
+        return hot;
+      },
+    });
     collector = createCollector(store, PORT, {
       ledger, projects: registry, repos: poller,
       // The pid comes from the store's own record, never from the request.

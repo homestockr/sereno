@@ -275,8 +275,9 @@ local drives.
 
 **Threat model.** Sereno defends against what a clone or an archive's working tree can
 deliver: `.gitattributes` and content filters, submodules, symlinks and junctions, branch
-and ref names, brief files, huge files and names shaped like options. Filters and
-submodules are turned off for every call. On top of that it adds defence in depth for a
+and ref names, brief files, huge files and names shaped like options. Content-filter
+drivers are blanked for `status`, the only call Sereno makes that can run them, and
+submodules are never entered (`--ignore-submodules=all`). On top of that it adds defence in depth for a
 repo's `.git` config: fsmonitor, hooks, signature programs (gpg, ssh and x509), lazy
 fetching of missing objects and every transport protocol are switched off. That is not a
 guarantee: a repo's `.git/config` is not something Sereno can fully fence off.
