@@ -93,12 +93,11 @@ Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
 1. **Spend ledger (shipped `2.0.0-alpha.1`).** Plan: `docs/plans/phase-1-ledger.md`.
 2. **Spend in view (shipped `2.0.0-alpha.2`).** Plan: `docs/plans/phase-2-spend-in-view.md`.
 3. **Projects + briefs (shipped `2.0.0-alpha.3`).** Plan: `docs/plans/phase-3-projects-briefs.md`.
-4. **Pipeline (next).** `pipeline.json` (configurable models per role, presets, fallback
-   policy), agent templates, `/ship`, gate files in `.sereno/gates/<review_run_id>.json`.
-
-Exploring: shipping the Phase 4 pipeline as a Claude Code plugin (agents, `/ship`
-skill, gate-writing hooks) so it works without the app; the app then observes the
-gate and brief files the plugin writes. Not started; decide before Phase 4.
+4. **Pipeline (in progress), in two releases.** Decided 2026-10-13: a standalone Claude
+   Code plugin owns everything that acts; the app only observes the files it writes.
+   - 4a, the plugin (`plugin/`, marketplace at the repo root): plan
+     `docs/plans/phase-4a-plugin.md`, branch `feat/plugin-pipeline`.
+   - 4b, the app side: Pipeline tab, role spend, pipeline alerts, offer the plugin.
 
 ### Phase 1 notes
 
