@@ -236,6 +236,63 @@ cost estimate.
 
 **Requires Node ≥ 22.13** for `npm run serve` (built-in `node:sqlite`).
 
+## Projects and briefs (alpha)
+
+The console opens on **Projects**, at `http://127.0.0.1:8787/console`. Every git repo a
+Claude Code session runs in appears there by itself. A worktree counts as its repo, not as
+a second project. Hide a project from its **⋯** menu. Hidden projects are not polled.
+
+**Briefs.** A brief is `.sereno/briefs/<branch>.md` in a repo: front matter, then three
+lines, `Now:`, `Next:` and `Blocked:`. The `/` in a branch name becomes `%2F`, so `feat/x`
+is `feat%2Fx.md`. The `/brief` command in Claude Code writes it. Sereno never writes to your
+repos; it only reads briefs.
+
+Install `/brief` from the widget's settings panel (after a confirmation), or run
+`npm run wire -- --commands`. Install never overwrites a different `brief.md` already in
+`~/.claude/commands/`; it reports the conflict instead. Remove it with
+`npm run unwire -- --commands`, which deletes it only if it is unchanged.
+
+**Freshness** compares a brief with its branch:
+
+- **fresh**: no commit on the branch since the brief's `source_commit` touches anything
+  outside `.sereno/` and `STATUS.md`.
+- **behind**: such a commit exists. Commits that touch only `.sereno/` or `STATUS.md` never
+  make a brief behind.
+- **stale**: the oldest such commit is more than a day old.
+- **No brief**: the branch has no brief file.
+- **Brief source not found**: the brief's `source_commit` is not in this repo.
+
+**What Sereno reads from your repos.** Branch names, commit times and hashes (the hashes
+stay inside the app), ahead and behind against the default branch's upstream, an
+uncommitted-changes flag, the worktree list, and the brief files. Never commit messages,
+diffs or other file contents. Between full checks (at most 5 minutes) Sereno may not notice
+uncommitted edits, a fetch, or a new branch in a subfolder.
+The list of projects, with each repo's path, is kept in `~/.sereno/projects.json`.
+
+Sereno uses read-only git commands, mostly plumbing (rev-parse, for-each-ref, rev-list,
+cat-file, symbolic-ref, config, worktree list), plus `status` for the uncommitted-changes
+flag. It never runs a network git command itself, never prompts, and only reads repos on
+local drives.
+
+**Threat model.** Sereno defends against what a clone or an archive's working tree can
+deliver: `.gitattributes` and content filters, submodules, symlinks and junctions, branch
+and ref names, brief files, huge files and names shaped like options. Content-filter
+drivers are blanked for `status`, the only call Sereno makes that can run them, and
+submodules are never entered (`--ignore-submodules=all`). On top of that it adds defence in depth for a
+repo's `.git` config: fsmonitor, hooks, signature programs (gpg, ssh and x509), lazy
+fetching of missing objects and every transport protocol are switched off. That is not a
+guarantee: a repo's `.git/config` is not something Sereno can fully fence off.
+Treat a repo's .git folder like you would for git itself: Sereno runs git there with the same trust Claude Code does.
+
+**Projects on network drives or inside WSL are not tracked.** Only local drive-letter paths
+(`C:...`) are ever used as a working directory or read, so Sereno does not pass a path a
+repo points to on to a share. A mapped network drive letter looks local and cannot be told
+apart. Open PR counts come from `gh`, when it is installed and signed in, using only the
+GitHub owner and name from `origin`.
+
+**Review in terminal** is in the console's attention panel. It raises the waiting session's
+terminal, as the widget's button does. It is not available under `npm run serve`.
+
 ## Sizing
 
 The widget scales for the display you actually have.

@@ -16,6 +16,8 @@ const { createCollector, BROADCAST_COALESCE_MS } = require('./collector.js');
 const wiring = require('./wiring.js');
 const config = require('./config.js');
 const ledgerLife = require('./ledger-life.js');
+const projectsLib = require('./projects.js');
+const reposLib = require('./repos.js');
 
 const PORT = Number(process.env.CLAUDE_HUD_PORT) || 8787;
 
@@ -61,6 +63,7 @@ const legacyStateFile = path.join(app.getPath('appData'), 'claude-hud', 'window.
 
 let win = null;
 let collector = null;
+let poller = null;               // repo poller (src/repos.js); works with the ledger off
 let ui = { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1, collapsed: false, trayHintShown: false };
 let tray = null;
 let trayState = null;      // '<state>/<theme>', so a theme flip repaints too
@@ -638,7 +641,19 @@ if (CLI_UNWIRE) {
       console.error('[sereno] running without a tray: ' + e.message);
     }
 
-    collector = createCollector(store, PORT, { ledger });
+    const registry = projectsLib.createRegistry();
+    // Hot projects (polled every 30 s): a live, non-stale session's cwd is under the repo or one of its worktrees.
+    poller = reposLib.createPoller({
+      registry,
+      hotIds: () => reposLib.hotProjectIds(
+        Array.from(store.sessions.values()).map((x) => store.publicSession(x)).filter((x) => !x.stale).map((x) => x.cwd),
+        registry.list(), poller ? poller.snapshot() : {}),
+    });
+    collector = createCollector(store, PORT, {
+      ledger, projects: registry, repos: poller,
+      // The pid comes from the store's own record, never from the request.
+      onReview: (session) => raiseTerminal(session.pid),
+    });
 
     // createCollector takes store.onChange for its broadcast; chain the tray on
     // rather than replacing it, so both stay in step with every event.
@@ -651,6 +666,7 @@ if (CLI_UNWIRE) {
         return;
       }
       console.log('[sereno] collector on http://127.0.0.1:' + addr.port);
+      try { poller.start(); } catch (_) {}   // after the collector is listening; git stays off the hook path
       createWindow();
       askLedgerOptIn();
     });
@@ -744,10 +760,42 @@ if (CLI_UNWIRE) {
     catch (e) { return { ok: false, error: e.message }; }
   });
 
-  ipcMain.handle('sereno:focus', async (_e, pid) => {
+  ipcMain.handle('sereno:commands-status', () => {
+    try { return { ok: true, status: wiring.commandsStatus() }; }
+    catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  // The renderer only asks; the confirmation and the write both happen here.
+  ipcMain.handle('sereno:commands-toggle', async () => {
+    try {
+      const cur = wiring.commandsStatus();
+      if (cur === 'conflict') return { ok: true, status: cur, changed: false };
+      const removing = cur === 'installed';
+      const updating = cur === 'update-available';
+      const { response } = await dialog.showMessageBox({
+        type: 'question',
+        message: removing ? 'Remove the /brief command from ~/.claude/commands?'
+          : updating ? 'Update the /brief command in ~/.claude/commands?'
+            : 'Install the /brief command into ~/.claude/commands?',
+        detail: removing ? 'Sereno removes that one file if you have not changed it, and changes nothing else.'
+          : 'Sereno writes one file and changes nothing else.',
+        buttons: [removing ? 'Remove /brief' : updating ? 'Update /brief' : 'Install /brief', 'Cancel'],
+        defaultId: 1,   // Enter / Escape never write
+        cancelId: 1,
+        noLink: true,
+      });
+      if (response !== 0) return { ok: true, status: cur, changed: false };
+      if (removing) wiring.uninstallCommands(); else wiring.installCommands();
+      return { ok: true, status: wiring.commandsStatus(), changed: true };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  // Raises the terminal that owns a Claude Code pid. Shared by the widget's
+  // button (sereno:focus) and the console's POST /api/review.
+  function raiseTerminal(pid) {
     const target = Number(pid);
-    if (!Number.isInteger(target) || target <= 0) return false;
-    if (process.platform !== 'win32') return false;
+    if (!Number.isInteger(target) || target <= 0) return Promise.resolve(false);
+    if (process.platform !== 'win32') return Promise.resolve(false);
     return new Promise((resolve) => {
       execFile('powershell.exe', [
         '-NoProfile', '-ExecutionPolicy', 'Bypass',
@@ -759,13 +807,16 @@ if (CLI_UNWIRE) {
         resolve(!err && /^OK/.test(String(stdout).trim()));
       });
     });
-  });
+  }
+
+  ipcMain.handle('sereno:focus', (_e, pid) => raiseTerminal(pid));
 
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', () => {
     flushUi();
     if (tray && !tray.isDestroyed()) { tray.destroy(); tray = null; }
     if (collector) collector.close();
+    try { if (poller) poller.stop(); } catch (_) {}
     try { if (ledger) ledger.close(); } catch (_) {}
     ledger = null;
   });

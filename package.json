@@ -1,6 +1,6 @@
 {
   "name": "sereno",
-  "version": "2.0.0-alpha.2",
+  "version": "2.0.0-alpha.3",
   "private": true,
   "description": "Sereno - an always-on-top widget for live Claude Code sessions",
   "author": {
@@ -58,6 +58,7 @@
     "files": [
       "src/**/*",
       "bin/**/*",
+      "templates/**/*",
       "package.json"
     ],
     "asarUnpack": [

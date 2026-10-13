@@ -26,6 +26,7 @@ const ui = {
   setupActionLabel: el('setup-action-label'), setupNote: el('setup-note'),
   settingsToggle: el('settings-toggle'), collapse: el('collapse'),
   autoLaunchRow: el('autolaunch-row'), autoLaunch: el('autolaunch'),
+  briefRow: el('brief-row'), briefStatus: el('brief-status'), briefAction: el('brief-action'),
   spend: el('spend'), consoleLine: el('console-line'),
 };
 
@@ -741,12 +742,50 @@ async function refreshSettings() {
   ui.autoLaunchRow.hidden = !wired;
 }
 
+/** The /brief command row. Hidden in a browser tab: there is no main process to write the file. */
+const BRIEF_STATUS = {
+  'installed': ['Installed', 'Remove /brief'],
+  'not-installed': ['Not installed', 'Install /brief'],
+  'update-available': ['Update available', 'Update /brief'],
+  'conflict': ['Conflict: a different brief.md exists', 'Install /brief'],
+};
+
+async function refreshBrief() {
+  if (!api || !api.commandsStatus) { ui.briefRow.hidden = true; return; }
+  if (ui.briefAction.disabled && ui.briefAction.dataset.status !== 'conflict') return;   // a click is in flight
+  let st;
+  try { st = await api.commandsStatus(); } catch (_) { return; }
+  if (!st || !st.ok || !BRIEF_STATUS[st.status]) { ui.briefRow.hidden = true; return; }
+  ui.briefRow.hidden = false;
+  ui.briefStatus.textContent = BRIEF_STATUS[st.status][0];
+  ui.briefAction.textContent = BRIEF_STATUS[st.status][1];
+  ui.briefAction.dataset.status = st.status;
+  ui.briefAction.disabled = st.status === 'conflict';
+}
+
+ui.briefAction.addEventListener('click', async () => {
+  if (!api || !api.toggleBriefCommand) return;
+  ui.briefAction.disabled = true;
+  ui.briefAction.dataset.status = 'busy';
+  let res;
+  try { res = await api.toggleBriefCommand(); } catch (e) { res = { ok: false, error: e.message }; }
+  ui.briefAction.disabled = false;
+  ui.briefAction.dataset.status = '';
+  if (!res || !res.ok) {
+    ui.setupNote.hidden = false;
+    ui.setupNote.textContent = 'Could not update the /brief command: ' + ((res && res.error) || 'unknown error');
+  }
+  await refreshBrief();
+  reportHeight();
+});
+
 ui.settingsToggle.addEventListener('click', async () => {
   settingsOpen = !settingsOpen;
   ui.settingsToggle.setAttribute('aria-expanded', settingsOpen ? 'true' : 'false');
   ui.setupNote.hidden = true;
   await refreshWiring();
   await refreshSettings();
+  await refreshBrief();
   reportHeight();
 });
 
@@ -785,10 +824,10 @@ function connect() {
 
 connect();
 render();
-refreshWiring().then(refreshSettings);
+refreshWiring().then(refreshSettings).then(refreshBrief);
 setInterval(tick, 500);
 // The Now marker follows the clock: re-render the Today block (no refetch) once a minute.
 setInterval(() => { if (spendMode(snapshot.spend) === 'on') renderSpend(); }, 60000);
 // Cheap enough to re-check: it also catches an unwire done outside the app.
-setInterval(() => { refreshWiring().then(refreshSettings); }, 15000);
+setInterval(() => { refreshWiring().then(refreshSettings).then(refreshBrief); }, 15000);
 window.addEventListener('resize', reportHeight);

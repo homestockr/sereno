@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('sereno', {
   connect: (opts) => ipcRenderer.invoke('sereno:wire', opts || {}),
   disconnect: () => ipcRenderer.invoke('sereno:unwire'),
 
+  // The /brief slash command (one file in ~/.claude/commands, written after a native confirmation).
+  commandsStatus: () => ipcRenderer.invoke('sereno:commands-status'),
+  toggleBriefCommand: () => ipcRenderer.invoke('sereno:commands-toggle'),
+
   // Sereno's own settings, which live nowhere near Claude Code's.
   settings: () => ipcRenderer.invoke('sereno:settings'),
   setAutoLaunch: (on) => ipcRenderer.invoke('sereno:set-auto-launch', !!on),

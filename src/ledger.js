@@ -317,6 +317,59 @@ function openLedger(opts = {}) {
     return m;
   }
 
+  // Spend per group of directories, joined on the session's cwd: ONE query over the span,
+  // prefixes matched in JS on the normalised cwd (case-insensitive on Windows). A cwd that
+  // lies under several groups goes to the longest matching path. Map: key -> totals.
+  /** @param {{ prefixes: { key: string, paths: string[] }[], buckets: { since: number, until: number }[] }} o
+   *  @returns {Map<string, { costMicros: number, trend: number[], lastTs: number | null }>} */
+  function spendByCwdPrefix(o) {
+    live();
+    const buckets = (o && o.buckets) || [];
+    const groups = (o && o.prefixes) || [];
+    /** @type {Map<string, { costMicros: number, trend: number[], lastTs: number | null }>} */
+    const out = new Map();
+    for (const g of groups) out.set(g.key, { costMicros: 0, trend: buckets.map(() => 0), lastTs: null });
+    if (!buckets.length || !groups.length) return out;
+    const { normalizePath } = require('./projects.js');
+    /** @type {{ key: string, n: string }[]} */
+    const flat = [];
+    for (const g of groups) for (const pth of g.paths || []) {
+      try { if (typeof pth === 'string' && pth) flat.push({ key: g.key, n: normalizePath(pth).replace(/\/$/, '') }); } catch (_) {}
+    }
+    flat.sort((a, b) => b.n.length - a.n.length);
+    /** @type {Map<string, string | null>} */
+    const owner = new Map();
+    const ownerOf = (/** @type {string} */ cwd) => {
+      let k = owner.get(cwd);
+      if (k !== undefined) return k;
+      k = null;
+      try {
+        const n = normalizePath(cwd);
+        for (const f of flat) if (n === f.n || n.startsWith(f.n + '/')) { k = f.key; break; }
+      } catch (_) {}
+      owner.set(cwd, k);
+      return k;
+    };
+    const slot = slotFor(buckets);
+    const rows = db.prepare(`SELECT sessions.cwd AS cwd, requests.ts - (requests.ts % ${slot}) AS slot,
+      SUM(requests.cost_micros) AS c, MAX(requests.ts) AS last FROM requests
+      JOIN sessions ON sessions.session_id = requests.session_id
+      WHERE requests.ts >= ? AND requests.ts < ? AND sessions.cwd IS NOT NULL GROUP BY sessions.cwd, slot`)
+      .all(buckets[0].since, buckets[buckets.length - 1].until);
+    for (const r of rows) {
+      const i = bucketIndex(buckets, Number(r.slot));
+      if (i < 0) continue;
+      const key = ownerOf(String(r.cwd));
+      const e = key === null ? undefined : out.get(key);
+      if (!e) continue;
+      const c = Number(r.c);
+      e.trend[i] += c; e.costMicros += c;
+      const l = Number(r.last);
+      if (e.lastTs === null || l > e.lastTs) e.lastTs = l;
+    }
+    return out;
+  }
+
   /** @param {{ project: string|null, buckets: { since: number, until: number }[] }} o */
   function trend(o) {
     live();
@@ -413,7 +466,7 @@ function openLedger(opts = {}) {
   }
 
   prune(retentionDays);
-  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, topPrompts, today, hasAny, reconcile, prune, close, _db: db };
+  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, today, hasAny, reconcile, prune, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }
