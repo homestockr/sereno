@@ -67,8 +67,11 @@ Sources:
 - **Tests run the way the repo says.** The test command comes from
   `.sereno/pipeline.json` `tests.command`, else `npm test` when `package.json` has a
   `test` script, else `/sereno:ship` stops and asks.
-  - The base suite runs in a temporary `git worktree` of the base commit, at the same
-    time as the head suite. The worktree is removed afterwards.
+  - The base suite runs in a temporary `git worktree` of the base commit, never in your
+    working copy. It runs before the head suite by default (`tests.parallel: true` runs
+    them together; repos whose suites share ports or temp files should not). Its result
+    is cached per base commit, so repeated `/sereno:ship` runs on one base reuse it. The
+    worktree is removed afterwards.
   - A failure that already fails at base is not counted.
   - A suspected flaky failure, meaning one that fails at head but passes at base, is
     re-run once.
@@ -109,8 +112,8 @@ Automated (`tools/test.js`, under `[plugin exit]`):
    only when `claude` is on PATH; otherwise a JSON-schema check of both manifests stands
    in.
 2. A test that already fails at the base commit is not counted as a defect, and the base
-   suite ran in its own worktree while the head suite ran. Shown with a temp repo whose
-   base already fails one test.
+   suite ran in its own worktree, not the working copy. Shown with a temp repo whose base
+   already fails one test.
 3. An environment failure retries without using the repair: the attempt records show
    `diagnosis: "environment"` and an unchanged repair count.
 4. A second defect goes to the architect and raises "Review needs a decision": the gate
@@ -148,7 +151,8 @@ Manual (recorded in the plan's log by the architect):
 
 ### Step 2 — `sereno.js test`: base worktree and failure diff
 - `sereno.js test --base <sha> --head <sha>` creates a temp worktree at base and runs
-  the suite in both at once.
+  the suite there, then at head. It runs them in parallel only with `tests.parallel`, and
+  caches the base result per base commit under `.sereno/cache/`.
 - Parse failures by test name where the runner prints them (a TAP-ish "not ok", or
   lines starting with "FAIL"/"✗"). Otherwise compare exit codes only, and say so.
 - Re-run head-only failures once.

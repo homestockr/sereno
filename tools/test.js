@@ -7367,6 +7367,242 @@ test('missing rate_limits degrades instead of throwing', () => {
     }
   }
 
+  /* ---- Phase 4a step 1: sereno.js core ---- */
+  {
+    const SERENO = path.join(ROOT, 'plugin', 'bin', 'sereno.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    function mkRepo() {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'task/demo');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't');
+      git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      const base = git(dir, 'rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+      git(dir, 'commit', '-q', '-am', 'head');
+      fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'specs', 'demo.md'), '# spec\n');
+      return { dir, base, head: git(dir, 'rev-parse', 'HEAD'), home: mk() };
+    }
+    function run(r, args, input) {
+      const res = spawnSync(process.execPath, [SERENO, ...args], {
+        cwd: r.dir, input, encoding: 'utf8', timeout: 30000,
+        env: Object.assign({}, process.env, { HOME: r.home, USERPROFILE: r.home }),
+      });
+      const raw = res.stdout;
+      assert.strictEqual(raw.trim().split('\n').length, 1, 'stdout is one line: ' + raw);
+      return { status: res.status, out: JSON.parse(raw), raw, stderr: res.stderr };
+    }
+    const setCfg = (r, obj) => { fs.mkdirSync(path.join(r.dir, '.sereno'), { recursive: true }); fs.writeFileSync(path.join(r.dir, '.sereno', 'pipeline.json'), JSON.stringify(obj)); };
+    const gateArgs = (r, extra) => ['gate', '--stdin', '--task', 'demo', '--base', r.base, '--head', r.head, '--session', 's-1', '--agent', 'a_1', '--model', 'claude-opus-5-5', '--tests-passed', 'true'].concat(extra || []);
+    const readJson = (r, rel) => JSON.parse(fs.readFileSync(path.join(r.dir, rel), 'utf8'));
+
+    test('[4a1] config: built-in default preset, source builtin, hash format', () => {
+      const r = mkRepo(); const { status, out } = run(r, ['config', '--json']);
+      assert.strictEqual(status, 0); assert.strictEqual(out.ok, true); assert.strictEqual(out.source, 'builtin');
+      assert.strictEqual(out.config.preset, 'default');
+      assert.strictEqual(out.config.roles.redTeam.agent, 'red-team');
+      assert.strictEqual(out.config.roles.redTeam.fallback, 'red-team-lean');
+      assert.strictEqual(out.config.roles.builder.options.opus.maxTurns, 120);
+      assert.match(out.config_hash, /^sha256:[0-9a-f]{64}$/);
+    });
+    test('[4a1] config: lean preset expands and roles.* keys override it; unknown keys kept', () => {
+      const r = mkRepo();
+      setCfg(r, { preset: 'lean', roles: { redTeam: { maxBlockedRuns: 5 } }, futureThing: { x: 1 } });
+      const { status, out } = run(r, ['config']);
+      assert.strictEqual(status, 0);
+      assert.strictEqual(out.config.roles.redTeam.agent, 'red-team-lean');
+      assert.strictEqual(out.config.roles.redTeam.fallback, null);
+      assert.strictEqual(out.config.roles.redTeam.maxBlockedRuns, 5);
+      assert.strictEqual(out.config.roles.builder.default, 'sonnet');
+      assert.deepStrictEqual(out.config.futureThing, { x: 1 });
+      assert.ok(out.source.endsWith('pipeline.json') && out.source.includes('.sereno'));
+    });
+    test('[4a1] config: repo file beats ~/.sereno, which beats the built-in default', () => {
+      const r = mkRepo();
+      fs.mkdirSync(path.join(r.home, '.sereno'));
+      fs.writeFileSync(path.join(r.home, '.sereno', 'pipeline.json'), JSON.stringify({ preset: 'lean' }));
+      assert.strictEqual(run(r, ['config']).out.config.preset, 'lean');
+      setCfg(r, { preset: 'default' });
+      assert.strictEqual(run(r, ['config']).out.config.preset, 'default');
+    });
+    test('[4a1] config: invalid values give config_invalid with every error listed (exit 3)', () => {
+      const r = mkRepo();
+      setCfg(r, { roles: { builder: { options: { sonnet: { agent: 'evil', maxTurns: -1 } } }, redTeam: { onFallback: 'sometimes', maxBlockedRuns: 1.5 } } });
+      const { status, out } = run(r, ['config']);
+      assert.strictEqual(status, 3); assert.strictEqual(out.ok, false); assert.strictEqual(out.code, 'config_invalid');
+      assert.ok(out.errors.length >= 4, JSON.stringify(out.errors));
+      assert.ok(out.errors.some((e) => /sonnet\.agent/.test(e)) && out.errors.some((e) => /onFallback/.test(e)));
+      setCfg(r, { preset: 'nope' }); assert.strictEqual(run(r, ['config']).out.code, 'config_invalid');
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'pipeline.json'), '{ not json');
+      assert.strictEqual(run(r, ['config']).out.code, 'config_invalid');
+    });
+    test('[4a1] config_hash is stable across key order and changes with content', () => {
+      const a = mkRepo(), b = mkRepo(), c = mkRepo();
+      setCfg(a, { recovery: { repairs: 1, infraRetries: 3 }, preset: 'lean' });
+      setCfg(b, { preset: 'lean', recovery: { infraRetries: 3, repairs: 1 } });
+      setCfg(c, { preset: 'lean', recovery: { infraRetries: 4, repairs: 1 } });
+      const h = (r) => run(r, ['config']).out.config_hash;
+      assert.strictEqual(h(a), h(b)); assert.notStrictEqual(h(a), h(c));
+    });
+    test('[4a1] run-id: rr_<UTC stamp>_<7 hex>; bad sha is refused', () => {
+      const r = mkRepo(); const { status, out } = run(r, ['run-id', '--head', r.head]);
+      assert.strictEqual(status, 0);
+      assert.match(out.review_run_id, /^rr_\d{8}T\d{6}Z_[0-9a-f]{7}$/);
+      assert.ok(out.review_run_id.endsWith('_' + r.head.slice(0, 7)));
+      const bad = run(r, ['run-id', '--head', 'zzz']); assert.strictEqual(bad.out.ok, false); assert.notStrictEqual(bad.status, 0);
+    });
+    test('[4a1] gate: file has exactly the schema keys and the right values', () => {
+      const r = mkRepo();
+      const verdict = { outcome: 'needs-context', evil: 'x', findings: [{ severity: 'high', kind: 'bug', file: 'a.txt', line: 3, summary: 'x', extra: 1 }], context_requests: ['a.txt'] };
+      const { status, out } = run(r, gateArgs(r), JSON.stringify(verdict));
+      assert.strictEqual(status, 0); assert.strictEqual(out.ok, true);
+      const gate = readJson(r, out.path);
+      assert.deepStrictEqual(Object.keys(gate), ['review_run_id', 'task_id', 'spec', 'spec_hash', 'branch', 'base_commit', 'head_commit', 'session_id', 'agent_id', 'model', 'outcome', 'tests_passed', 'findings', 'context_requests', 'reviewed_at', 'config_hash']);
+      assert.strictEqual(out.path, '.sereno/gates/' + gate.review_run_id + '.json');
+      assert.strictEqual(gate.outcome, 'needs_context'); assert.strictEqual(gate.tests_passed, true);
+      assert.strictEqual(gate.base_commit, r.base); assert.strictEqual(gate.head_commit, r.head);
+      assert.strictEqual(gate.branch, 'task/demo'); assert.strictEqual(gate.spec, '.sereno/specs/demo.md');
+      assert.match(gate.spec_hash, /^sha256:[0-9a-f]{64}$/); assert.match(gate.config_hash, /^sha256:[0-9a-f]{64}$/);
+      assert.ok(!isNaN(Date.parse(gate.reviewed_at)) && gate.reviewed_at.endsWith('Z'));
+      assert.deepStrictEqual(gate.findings, [{ severity: 'high', kind: 'bug', file: 'a.txt', line: 3, summary: 'x' }]);
+      assert.deepStrictEqual(gate.context_requests, ['a.txt']);
+      assert.deepStrictEqual(fs.readdirSync(path.join(r.dir, '.sereno', 'gates')), [path.basename(out.path)], 'no tmp file left behind');
+    });
+    test('[4a1] gate: unknown enums become "unknown"; --file works and unwraps a fenced block', () => {
+      const r = mkRepo();
+      const vf = path.join(mk(), 'v.json');
+      fs.writeFileSync(vf, '```json\n' + JSON.stringify({ outcome: 'maybe', findings: [{ severity: 'catastrophic', kind: 7, file: 'a.txt', line: 'x', summary: 's' }] }) + '\n```');
+      const { out } = run(r, gateArgs(r).filter((x) => x !== '--stdin').concat(['--file', vf]));
+      assert.strictEqual(out.ok, true, JSON.stringify(out));
+      const gate = readJson(r, out.path);
+      assert.strictEqual(gate.outcome, 'unknown'); assert.strictEqual(gate.findings[0].severity, 'unknown');
+      assert.strictEqual(gate.findings[0].kind, 'unknown'); assert.strictEqual(gate.findings[0].line, null);
+    });
+    test('[4a1] gate: findings capped at 50, summaries stripped and capped, outside paths dropped', () => {
+      const r = mkRepo();
+      const many = [];
+      for (let i = 0; i < 60; i++) many[many.length] = { severity: 'low', kind: 'style', file: 'a.txt', line: i + 1, summary: 'n' + i };
+      many[0] = { severity: 'high', kind: 'bug', file: 'a.txt', line: 1, summary: 'ev\u202eil\u0007 \u200bt\nx' + 'y'.repeat(500) };
+      many[1] = { severity: 'low', kind: 'k', file: '../../etc/passwd', line: 4, summary: 'up' };
+      many[2] = { severity: 'low', kind: 'k', file: 'C:\\Windows\\win.ini', line: 4, summary: 'abs' };
+      many[3] = { severity: 'low', kind: 'k', file: '/etc/passwd', line: 4, summary: 'abs2' };
+      many[4] = { severity: 'low', kind: 'k', file: 'src\\..\\..\\x', line: 4, summary: 'sneaky' };
+      many[5] = { severity: 'low', kind: 'k', file: 'src\\sub\\f.js', line: 0, summary: 'ok-win-path' };
+      const { out } = run(r, gateArgs(r), JSON.stringify({ outcome: 'block', findings: many, context_requests: ['a.txt', '../secret', '/abs'] }));
+      const gate = readJson(r, out.path);
+      assert.strictEqual(gate.findings.length, 50);
+      assert.ok(gate.findings[0].summary.length <= 300);
+      assert.ok(!/[\u202e\u0007\u200b\n]/.test(gate.findings[0].summary), JSON.stringify(gate.findings[0].summary));
+      for (const i of [1, 2, 3, 4]) { assert.strictEqual(gate.findings[i].file, null); assert.strictEqual(gate.findings[i].line, null); }
+      assert.strictEqual(gate.findings[5].file, 'src/sub/f.js'); assert.strictEqual(gate.findings[5].line, null);
+      assert.deepStrictEqual(gate.context_requests, ['a.txt']);
+    });
+    test('[4a1] gate: bad inputs fail cleanly (option-shaped ref, bad JSON, missing input, unknown flag)', () => {
+      const r = mkRepo();
+      const nc = run(r, ['gate', '--stdin', '--task', 'demo', '--base', '--upload-pack=x', '--head', r.head], '{}');
+      assert.strictEqual(nc.out.ok, false); assert.notStrictEqual(nc.status, 0);
+      const nc2 = run(r, ['gate', '--stdin', '--task', 'demo', '--base=--output=x', '--head', r.head], '{}');
+      assert.strictEqual(nc2.out.code, 'invalid_arg');
+      assert.strictEqual(run(r, gateArgs(r), 'not json').out.code, 'invalid_arg');
+      assert.strictEqual(run(r, ['gate', '--task', 'demo']).out.code, 'usage');
+      assert.strictEqual(run(r, ['gate', '--stdin', '--bogus', '1']).out.code, 'usage');
+      assert.strictEqual(run(r, ['nope']).out.code, 'usage');
+    });
+    test('[4a1] attempt: numbers continue from the highest existing; exact keys; enums fall back to unknown', () => {
+      const r = mkRepo();
+      const args = ['attempt', '--task', 'demo', '--project', 'p1', '--builder', 'sonnet', '--agent', 'ag_1', '--kind', 'telepathy', '--diagnosis', 'defect', '--outcome', 'pass', '--started-at', '2026-10-13T10:00:00Z'];
+      assert.strictEqual(run(r, args).out.attempt, 1);
+      assert.strictEqual(run(r, args).out.attempt, 2);
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'attempts', 'demo-7.json'), '{}');
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'attempts', 'demo-9-x.json'), '{}');
+      const third = run(r, args.concat(['--fixes', 'earlier', '--review-run-id', 'rr_20261013T100000Z_abcdef0']));
+      assert.strictEqual(third.out.attempt, 8); assert.strictEqual(third.out.path, '.sereno/attempts/demo-8.json');
+      const a = readJson(r, third.out.path);
+      assert.deepStrictEqual(Object.keys(a), ['project_id', 'task_id', 'spec_revision', 'attempt', 'builder_requested', 'agent_id', 'config_hash', 'kind', 'fixes', 'diagnosis', 'outcome', 'review_run_id', 'started_at', 'ended_at']);
+      assert.strictEqual(a.kind, 'unknown'); assert.strictEqual(a.builder_requested, 'sonnet'); assert.strictEqual(a.diagnosis, 'defect');
+      assert.strictEqual(a.attempt, 8); assert.strictEqual(a.spec_revision, 1); assert.strictEqual(a.fixes, 'earlier');
+      assert.strictEqual(a.started_at, '2026-10-13T10:00:00.000Z'); assert.strictEqual(a.ended_at, null);
+      assert.match(a.config_hash, /^sha256:[0-9a-f]{64}$/);
+      const other = run(r, ['attempt', '--task', 'other', '--builder', 'gpt']);
+      assert.strictEqual(other.out.attempt, 1); assert.strictEqual(readJson(r, other.out.path).builder_requested, 'unknown');
+    });
+    test('[4a1] paths: prints the .sereno layout', () => {
+      const r = mkRepo(); const { out } = run(r, ['paths']);
+      assert.strictEqual(out.ok, true); assert.strictEqual(out.layout.gates, '.sereno/gates/<review_run_id>.json');
+      assert.strictEqual(path.resolve(out.repo_root).toLowerCase(), path.resolve(r.dir).toLowerCase());
+    });
+    test('[4a1] writers refuse task names that are paths (path_refused, exit 6)', () => {
+      const r = mkRepo();
+      for (const t of ['../x', '..\\x', '/abs/x', 'C:\\x', 'a/b']) {
+        const att = run(r, ['attempt', '--task', t]);
+        assert.strictEqual(att.status, 6, t); assert.strictEqual(att.out.code, 'path_refused');
+        assert.strictEqual(run(r, gateArgs(r).map((x) => (x === 'demo' ? t : x)), '{}').out.code, 'path_refused');
+      }
+      const sp = run(r, gateArgs(r, ['--spec', '../outside.md']), '{}');
+      assert.strictEqual(sp.status, 6); assert.strictEqual(sp.out.code, 'path_refused');
+      assert.ok(!fs.existsSync(path.join(path.dirname(r.dir), 'x')));
+    });
+    test('[4a1] fsafe: only paths under .sereno/ are writable', () => {
+      const { createSafeFs } = require('../plugin/bin/lib/fsafe.js');
+      const r = mkRepo(); const f = createSafeFs(r.dir);
+      for (const p of ['../x', '..\\x', path.join(r.dir, 'abs.txt'), '/etc/x', 'C:/x', 'a.txt', 'src/x.js', '.sereno', '.sereno/../a.txt', '.sereno/gates/../../a.txt', '.sereno//x', '.sereno/a:b', '.sereno/x.', '']) {
+        assert.throws(() => f.writeFile(p, 'x'), (e) => e.code === 'path_refused', JSON.stringify(p));
+      }
+      assert.strictEqual(fs.readFileSync(path.join(r.dir, 'a.txt'), 'utf8'), 'two\n');
+      f.writeJson('.sereno/gates/ok.json', { a: 1 });
+      assert.deepStrictEqual(readJson(r, '.sereno/gates/ok.json'), { a: 1 });
+    });
+    test('[4a1] fsafe: a symlinked or junctioned .sereno (or subdir) is refused, nothing escapes (exit 6)', () => {
+      const link = (target, at) => fs.symlinkSync(target, at, process.platform === 'win32' ? 'junction' : 'dir');
+      const r = mkRepo(); const outside = mk();
+      fs.rmSync(path.join(r.dir, '.sereno'), { recursive: true });
+      link(outside, path.join(r.dir, '.sereno'));
+      const a = run(r, ['attempt', '--task', 'demo']);
+      assert.strictEqual(a.status, 6); assert.strictEqual(a.out.code, 'path_refused');
+      assert.strictEqual(run(r, gateArgs(r), '{}').out.ok, false);
+      assert.deepStrictEqual(fs.readdirSync(outside), []);
+      const r2 = mkRepo(); const outside2 = mk();
+      link(outside2, path.join(r2.dir, '.sereno', 'attempts'));
+      const b = run(r2, ['attempt', '--task', 'demo']);
+      assert.strictEqual(b.status, 6); assert.strictEqual(b.out.code, 'path_refused');
+      assert.deepStrictEqual(fs.readdirSync(outside2), []);
+    });
+    test('[4a1] not inside a git repo: writers fail with not_a_repo, config still works', () => {
+      const r = { dir: mk(), home: mk() };
+      const a = run(r, ['attempt', '--task', 'demo']);
+      assert.strictEqual(a.status, 5); assert.strictEqual(a.out.code, 'not_a_repo');
+      assert.strictEqual(run(r, ['config']).out.ok, true);
+    });
+    test('[4a1] plugin/ contains no "push" anywhere (the plugin never pushes)', () => {
+      const hits = [];
+      (function walk(d) {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          const p = path.join(d, e.name);
+          if (e.isDirectory()) walk(p);
+          else if (/push/i.test(fs.readFileSync(p, 'utf8')) || /push/i.test(e.name)) hits[hits.length] = path.relative(ROOT, p);
+        }
+      })(path.join(ROOT, 'plugin'));
+      assert.deepStrictEqual(hits, []);
+    });
+    test('[4a1] plugin/bin requires only node: built-ins and its own ./ modules', () => {
+      (function walk(d) {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          const p = path.join(d, e.name);
+          if (e.isDirectory()) { walk(p); continue; }
+          if (!p.endsWith('.js')) continue;
+          for (const m of fs.readFileSync(p, 'utf8').matchAll(/require\('([^']+)'\)/g)) {
+            assert.ok(m[1].startsWith('node:') || (m[1].startsWith('./') && !m[1].includes('..')), p + ' requires ' + m[1]);
+          }
+        }
+      })(path.join(ROOT, 'plugin', 'bin'));
+    });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
