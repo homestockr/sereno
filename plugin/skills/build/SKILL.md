@@ -21,7 +21,7 @@ missing or `builder` is not one of those three, stop and tell the user to run
 ## 2. Get on the task branch
 
 The working tree must have no uncommitted changes to tracked files. Check with
-`git -c core.fsmonitor=false status --porcelain --untracked-files=no -- . ':(exclude).sereno'` (changes under `.sereno/` do not count); if it prints anything, stop and say so.
+`node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" clean` (it runs at the repo root, whatever your directory, and ignores only the generated dirs `.sereno/attempts`, `gates`, `briefs` and `cache`); if `clean` is false, stop and list `files`.
 Then run `git switch task/<task>`. If the branch does not exist, stop and point to
 `/sereno:task`. Note the starting commit: `git rev-parse HEAD`, and the time (UTC,
 ISO 8601).
@@ -32,10 +32,10 @@ One Builder run is one attempt record. Write it now, as `running`, so an interru
 still leaves a trace:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start>
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start> --spec .sereno/specs/<task>.md
 ```
 
-Add `--fixes` only when the spec has one. The result is `{ ok, path, attempt }`; keep the
+`--spec` pins the spec: it records the sha256 of the spec file as `spec_hash`, and the later test and gate steps refuse with `spec_changed` if the spec is edited afterwards. Add `--fixes` only when the spec has one. The result is `{ ok, path, attempt }`; keep the
 `attempt` number. If `ok` is false, show the error and stop.
 
 ## 4. Spawn the Builder
@@ -56,9 +56,9 @@ in the prompt and tell the Builder to fix only them.
 
 ## 5. Check the result
 
-When the Builder returns, run `git -c core.fsmonitor=false status --porcelain --untracked-files=no -- . ':(exclude).sereno'`,
+When the Builder returns, run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" clean`,
 `git rev-parse HEAD` and `git branch --show-current`. It succeeded only if HEAD moved
-from the starting commit, the tree is clean (ignoring `.sereno/`) and the current branch
+from the starting commit, `clean` is true and the current branch
 is still `task/<task>`. If the branch is anything else, the outcome is `error`: say so
 in the note and do not switch branches yourself. If it did not commit, or left changes behind, do not commit for it: the
 outcome is `error`.

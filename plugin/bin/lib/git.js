@@ -6,9 +6,13 @@
  * This is a DELIBERATE COPY of the SAFE_ARGS / safeEnv approach in the app's
  * src/gitexec.js (see that file for the threat model). The plugin must not
  * require anything outside plugin/, so the two are kept in step by hand.
- * Only local commands are used here: rev-parse, symbolic-ref, status, merge-base,
- * ls-tree, show, and worktree add / remove / prune (the base-suite checkout). Every
- * revision is validated first and follows --end-of-options.
+ * Only local commands are used. Every git verb the plugin runs, anywhere (git.js,
+ * spec.js, testrun.js, doctor.js, sereno.js):
+ *   rev-parse, symbolic-ref, status (the clean-tree check, `cleanFiles`), merge-base
+ *   (skills), ls-tree, show, show-ref (spec.js: does the branch exist), branch (spec.js:
+ *   create task/<name>), worktree add / list / remove / prune (the base-suite checkout
+ *   and the stale sweep), and --version (doctor).
+ * Every revision is validated first and follows --end-of-options.
  */
 
 const os = require('node:os');
@@ -66,6 +70,21 @@ function isRefName(s) {
     && !s.includes('..') && !s.endsWith('/') && !s.endsWith('.lock') && !s.includes('//');
 }
 
+/** Plugin-generated directories under .sereno/: the only paths a clean-tree check ignores. */
+const GENERATED_DIRS = ['.sereno/attempts', '.sereno/gates', '.sereno/briefs', '.sereno/cache'];
+
+/**
+ * Tracked files with uncommitted changes, checked from the repo root whatever the
+ * caller's cwd (root-anchored pathspecs). null when git fails. Generated .sereno/ dirs
+ * are ignored; .sereno/pipeline.json and .sereno/specs/ are not.
+ * @param {string} root @returns {string[] | null}
+ */
+function cleanFiles(root) {
+  const out = git(root, ['status', '--porcelain', '--untracked-files=no', '--', ':/'].concat(GENERATED_DIRS.map((d) => ':(exclude,top)' + d)));
+  if (out === null) return null;
+  return out.split(/\r?\n/).filter(Boolean).map((l) => l.replace(/^[ MADRCTU]{1,2} /, '')); // git() trims, so line 1 may lack its leading space
+}
+
 /** @param {string} cwd @returns {string | null} */
 function toplevel(cwd) {
   const out = git(cwd, ['rev-parse', '--show-toplevel']);
@@ -107,4 +126,4 @@ function showBlob(cwd, commit, rel, maxBytes) {
   return { kind: 'blob', size: parseInt(m[3], 10), bytes: Buffer.from(r.stdout).subarray(0, maxBytes) };
 }
 
-module.exports = { setExec, SAFE_ARGS, safeEnv, git, showBlob, isSha, isRefName, toplevel, resolveCommit, currentBranch };
+module.exports = { cleanFiles, GENERATED_DIRS, setExec, SAFE_ARGS, safeEnv, git, showBlob, isSha, isRefName, toplevel, resolveCommit, currentBranch };

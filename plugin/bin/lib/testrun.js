@@ -80,7 +80,32 @@ function parseCounts(output) {
 }
 
 /**
- * @typedef {{ exitCode: number | null, timedOut: boolean, startFailed: boolean, output: string, failures: string[], parsed?: boolean, count?: number, top?: number, plan?: number | null }} Suite
+ * Is the TAP evidence trustworthy? Not if top-level test numbers repeat, if more than one
+ * plan line is printed, or if the plan comes after results and anything TAP follows it
+ * (a plan printed last must be the last TAP line). A test that deliberately prints fake
+ * TAP lines can still mislead the count; the red team reviews the diff for that.
+ * @param {string} output @returns {boolean}
+ */
+function tapValid(output) {
+  const seen = new Set();
+  let results = 0, plans = 0, planAfterResults = false, resultAfterLatePlan = false;
+  for (const raw of stripAnsi(output).split(/\r?\n/)) {
+    const m = /^(?:not ok|ok)\s+(\d+)/.exec(raw);
+    if (m) {
+      if (seen.has(m[1])) return false;
+      seen.add(m[1]);
+      results++;
+      if (planAfterResults) resultAfterLatePlan = true;
+    } else if (/^1\.\.\d+\s*$/.test(raw)) {
+      plans++;
+      if (results > 0) planAfterResults = true;
+    }
+  }
+  return plans <= 1 && !resultAfterLatePlan;
+}
+
+/**
+ * @typedef {{ exitCode: number | null, timedOut: boolean, startFailed: boolean, output: string, failures: string[], parsed?: boolean, tapValid?: boolean, count?: number, top?: number, plan?: number | null }} Suite
  */
 
 /**
@@ -121,7 +146,7 @@ function runSuite(command, cwd, timeoutSec) {
         || (code !== 0 && code !== null && output.length < 2000 && /is not recognized as an internal or external command|command not found|: not found/i.test(output));
       const counts = parseCounts(output);
       resolve({
-        count: counts.count, top: counts.top, plan: counts.plan,
+        count: counts.count, top: counts.top, plan: counts.plan, tapValid: tapValid(output),
         exitCode: code, timedOut, startFailed: spawnError || (!timedOut && notFound),
         output, failures: code === 0 ? [] : parseFailures(output),
         parsed: code !== 0 && parseFailures(output).length > 0 || /^\s*(?:not ok|ok)\s+\d+/m.test(stripAnsi(output)),
@@ -162,6 +187,7 @@ function resolveCommand(config, root) {
  */
 function headCompletion(head, base) {
   // No result counts and no plan anywhere (a non-TAP runner): nothing to prove completion with.
+  if (head.tapValid === false) return 'unknown'; // repeated numbers or a misplaced plan: not evidence
   if (!head.count && !base.count && head.plan == null && base.plan == null) return 'unknown';
   if ((head.count || 0) < (base.count || 0)) return 'incomplete';
   if (head.plan != null) return (head.top || 0) >= head.plan ? 'complete' : 'incomplete';
@@ -192,6 +218,49 @@ function readBaseCache(root, sha, configHash, command) {
   } catch (_e) { return null; }
 }
 
+const BASE_PREFIX = 'sereno-base-';
+const BASE_MARKER = '.sereno-plugin-base';
+const STALE_MS = 60 * 60 * 1000;
+
+/**
+ * Remove sereno-base-* temp dirs this plugin made (marker file inside) that are older
+ * than maxAgeMs, left behind by an interrupted run. A node_modules junction is removed
+ * first and never followed; if it cannot be removed the dir is left alone.
+ * @param {string} root @param {number} [maxAgeMs] @returns {number} dirs removed
+ */
+function sweepStale(root, maxAgeMs) {
+  const age = maxAgeMs === undefined ? STALE_MS : maxAgeMs;
+  let removed = 0;
+  let tmpRoot;
+  let names;
+  try { tmpRoot = fs.realpathSync.native(os.tmpdir()); names = fs.readdirSync(tmpRoot); } catch (_e) { return 0; }
+  for (const name of names) {
+    if (!name.startsWith(BASE_PREFIX)) continue;
+    const dir = path.join(tmpRoot, name);
+    try {
+      const st = fs.lstatSync(dir);
+      if (!st.isDirectory() || st.isSymbolicLink()) continue;
+      const mk = fs.lstatSync(path.join(dir, BASE_MARKER));
+      if (!mk.isFile() || Date.now() - mk.mtimeMs < age) continue;
+      const wt = path.join(dir, 'wt');
+      const link = path.join(wt, 'node_modules');
+      let l = null;
+      try { l = fs.lstatSync(link); } catch (_e) { l = null; }
+      if (l) {
+        try { fs.unlinkSync(link); } catch (_e) { try { fs.rmdirSync(link); } catch (_e2) { /* checked below */ } }
+        try { fs.lstatSync(link); continue; } catch (_e) { /* gone */ }
+      }
+      let registered = false;
+      try { registered = fs.existsSync(wt) && fs.existsSync(path.join(wt, '.git')); } catch (_e) { registered = false; }
+      if (registered) gitlib.git(root, ['worktree', 'remove', '--force', wt]);
+      fs.rmSync(dir, { recursive: true, force: true });
+      removed++;
+    } catch (_e) { /* best effort */ }
+  }
+  if (removed) gitlib.git(root, ['worktree', 'prune']);
+  return removed;
+}
+
 /**
  * Run the base suite in its own worktree; the worktree is always removed.
  * @param {string} root @param {string} sha @param {string} command @param {number} timeoutSec
@@ -199,7 +268,8 @@ function readBaseCache(root, sha, configHash, command) {
  */
 async function runAtBase(root, sha, command, timeoutSec, setup, wtTimeoutSec) {
   const wtMs = (wtTimeoutSec || DEFAULT_WORKTREE_TIMEOUT_SEC) * 1000;
-  const tmp = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'sereno-base-'));
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), BASE_PREFIX));
+  try { fs.writeFileSync(path.join(tmp, BASE_MARKER), 'sereno plugin base worktree'); } catch (_e) { /* the sweep then skips this dir */ }
   const fold = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
   if (fold(tmp).startsWith(fold(root + path.sep))) {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_e) { /* best effort */ }
@@ -261,9 +331,9 @@ async function runTests(o) {
 
   const cur = gitlib.resolveCommit(root, 'HEAD');
   if (cur !== o.head) throw new SerenoError('head_mismatch', 'HEAD is not the commit given in --head');
-  // .sereno/ is the plugin's own state (attempts, specs, gates): never a reason to refuse.
-  const dirty = gitlib.git(root, ['status', '--porcelain', '--untracked-files=no', '--', '.', ':(exclude).sereno']);
-  if (dirty === null || dirty !== '') throw new SerenoError('head_mismatch', 'the working tree has uncommitted changes to tracked files');
+  // Only the plugin's generated dirs under .sereno/ are ignored; pipeline.json and specs/ count.
+  const dirty = gitlib.cleanFiles(root);
+  if (dirty === null || dirty.length) throw new SerenoError('head_mismatch', 'the working tree has uncommitted changes to tracked files');
 
   const cached = readBaseCache(root, o.base, o.configHash, command);
   const baseCached = cached !== null;
@@ -281,7 +351,7 @@ async function runTests(o) {
   } else if (parallel) {
     [baseSuite, head] = await Promise.all([runAtBase(root, o.base, command, timeoutSec, setup, wtTimeoutSec), runSuite(command, root, timeoutSec)]);
   } else {
-    baseSuite = await runAtBase(root, o.base, command, timeoutSec, setup);
+    baseSuite = await runAtBase(root, o.base, command, timeoutSec, setup, wtTimeoutSec);
     head = await runSuite(command, root, timeoutSec);
   }
   addLog(baseCached ? 'base (cached, not re-run)' : 'base', baseSuite);
@@ -338,6 +408,14 @@ async function runTests(o) {
           const still = new Set(again.failures);
           newFailures = candidates.filter((n) => still.has(n) || (again.exitCode !== 0 && again.failures.length === 0));
           flaky = candidates.filter((n) => !newFailures.includes(n));
+          // "Flaky" is only believable if both head runs reached the end of their suite.
+          if (!newFailures.length) {
+            const okFirst = headCompletion(head, baseSuite) === 'complete';
+            const okAgain = again.exitCode === 0 || headCompletion(again, baseSuite) === 'complete';
+            if (!okFirst || !okAgain) {
+              passed = false; diagnosis = 'unknown_baseline'; note = 'head suite did not complete'; flaky = [];
+            }
+          }
         }
       }
     } else if (!baseFailed) {
@@ -369,4 +447,4 @@ async function runTests(o) {
   };
 }
 
-module.exports = { runAtBase, parseCounts, runTests, parseFailures, resolveCommand, abortAll, runSuite };
+module.exports = { sweepStale, tapValid, runAtBase, parseCounts, runTests, parseFailures, resolveCommand, abortAll, runSuite };

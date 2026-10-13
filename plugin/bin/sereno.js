@@ -12,7 +12,7 @@
  * Nothing else is written to stdout. Node built-ins only. The only files it
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
- * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, context, recovery, brief, doctor.
+ * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, clean, context, recovery, brief, doctor.
  */
 
 const fs = require('node:fs');
@@ -42,7 +42,7 @@ function agentModel(name) {
   return m ? m[1] : null;
 }
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -124,6 +124,30 @@ function readSpec(root, specArg) {
   return { rel, hash: rec.sha256(readCapped(real)) };
 }
 
+/**
+ * The spec hash pinned by the task's newest attempt (set when /sereno:build opened it).
+ * If the spec file on disk now hashes differently, refuse. No attempt, or an attempt with
+ * no spec_hash, pins nothing. Returns the pinned hash, or null.
+ * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {string} specArg
+ * @returns {string | null}
+ */
+function checkSpecPin(root, fsafe, task, specArg) {
+  const re = new RegExp('^' + task.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&') + '-(\\d+)\\.json$');
+  let best = 0;
+  for (const f of fsafe.listDir('.sereno/attempts')) { const m = re.exec(f); if (m) best = Math.max(best, parseInt(m[1], 10)); }
+  if (!best) return null;
+  let pinned = null;
+  try {
+    const file = path.join(root, '.sereno', 'attempts', task + '-' + best + '.json');
+    const st = fs.lstatSync(file);
+    if (st.isFile() && st.size <= MAX_INPUT) pinned = JSON.parse(fs.readFileSync(file, 'utf8')).spec_hash;
+  } catch (_e) { return null; }
+  if (typeof pinned !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(pinned)) return null;
+  const now = readSpec(root, specArg).hash;
+  if (now !== pinned) throw new SerenoError('spec_changed', 'the spec changed since /sereno:build opened attempt ' + best + '; re-run the build (or restore the spec)');
+  return pinned;
+}
+
 const COMMANDS = {
   config(/** @type {string[]} */ argv) {
     parseArgs(argv, { value: [], bool: ['json'] });
@@ -155,7 +179,10 @@ const COMMANDS = {
     if (branchArg !== undefined && !gitlib.isRefName(branchArg)) throw new SerenoError('invalid_arg', '--branch is not a valid branch name');
     const branch = branchArg || gitlib.currentBranch(root);
     if (!branch) throw new SerenoError('invalid_arg', 'no branch: HEAD is detached and --branch was not given');
-    const spec = readSpec(root, str(a, 'spec') || '.sereno/specs/' + task + '.md');
+    const specArg = str(a, 'spec') || '.sereno/specs/' + task + '.md';
+    const spec = readSpec(root, specArg);
+    const pinned = checkSpecPin(root, fsafe, task, specArg);
+    if (pinned) spec.hash = pinned;
     const tp = str(a, 'tests-passed');
     if (tp !== undefined && tp !== 'true' && tp !== 'false') throw new SerenoError('invalid_arg', '--tests-passed must be true or false');
     const id = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -199,7 +226,7 @@ const COMMANDS = {
 
   attempt(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id'],
+      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash'],
       bool: ['json'],
     });
     const task = rec.checkTask(str(a, 'task'));
@@ -211,6 +238,10 @@ const COMMANDS = {
     if (rr !== undefined && !rec.RUN_ID.test(rr)) throw new SerenoError('invalid_arg', '--review-run-id has an invalid format');
     const revArg = str(a, 'spec-revision');
     if (revArg !== undefined && !/^[1-9]\d{0,5}$/.test(revArg)) throw new SerenoError('invalid_arg', '--spec-revision must be a positive integer');
+    const shArg = str(a, 'spec-hash');
+    if (shArg !== undefined && !/^sha256:[0-9a-f]{64}$/.test(shArg)) throw new SerenoError('invalid_arg', '--spec-hash must be sha256:<64 hex>');
+    if (shArg !== undefined && str(a, 'spec') !== undefined) throw new SerenoError('usage', 'give --spec or --spec-hash, not both');
+    const specHash = shArg !== undefined ? shArg : (str(a, 'spec') !== undefined ? readSpec(root, /** @type {string} */ (str(a, 'spec'))).hash : null);
     const agent = str(a, 'agent') !== undefined ? str(a, 'agent') : str(a, 'agent-id');
     if (agent !== undefined) matchId(agent, '--agent', /^[A-Za-z0-9._:-]{1,128}$/);
 
@@ -239,6 +270,7 @@ const COMMANDS = {
       ended_at: isoOrNull(str(a, 'ended-at'), '--ended-at'),
     };
     // Exclusive create: if two writers race for the same number, the loser takes the next one.
+    if (specHash !== null) /** @type {any} */ (record).spec_hash = specHash;
     for (let tries = 0; tries < 20; tries++, n++) {
       record.attempt = n;
       const rel = '.sereno/attempts/' + task + '-' + n + '.json';
@@ -253,8 +285,13 @@ const COMMANDS = {
   },
 
   async test(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['base', 'head'], bool: ['json'] });
+    const a = parseArgs(argv, { value: ['base', 'head', 'task', 'spec'], bool: ['json'] });
     const { root, fsafe } = needRepo();
+    if (str(a, 'task') !== undefined) {
+      const t = rec.checkTask(str(a, 'task'));
+      checkSpecPin(root, fsafe, t, str(a, 'spec') || '.sereno/specs/' + t + '.md');
+    }
+    testrun.sweepStale(root);
     const base = gitlib.resolveCommit(root, str(a, 'base') || '');
     const head = gitlib.resolveCommit(root, str(a, 'head') || '');
     if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
@@ -276,6 +313,14 @@ const COMMANDS = {
     const task = rec.checkTask(str(a, 'task'));
     const { root } = needRepo();
     return speclib.createTaskBranch({ root, task });
+  },
+
+  clean(/** @type {string[]} */ argv) {
+    parseArgs(argv, { value: [], bool: ['json'] });
+    const { root } = needRepo();
+    const files = gitlib.cleanFiles(root);
+    if (files === null) throw new SerenoError('invalid_arg', 'could not read the working tree status');
+    return { clean: files.length === 0, files: files.slice(0, 50) };
   },
 
   context(/** @type {string[]} */ argv) {
@@ -344,7 +389,7 @@ const COMMANDS = {
  * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, string | boolean>} a
  */
 function updateAttempt(root, fsafe, task, a) {
-  for (const k of ['project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'started-at']) {
+  for (const k of ['spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'started-at']) {
     if (a[k] !== undefined) throw new SerenoError('usage', '--' + k + ' cannot be combined with --update');
   }
   const nArg = str(a, 'update');

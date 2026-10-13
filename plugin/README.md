@@ -168,8 +168,11 @@ keep the generated parts out of git:
 
 When the runner prints no result counts or plan (so completion cannot be checked), a failing head is never passed: `sereno.js test` reports `unknown_baseline` and the run goes to a decision; a head that exits 0 still passes.
 
-The clean-tree checks in `sereno.js test`, `sereno.js branch` and the build and ship
-skills ignore anything under `.sereno/`, so a tracked file there never blocks a run.
+The clean-tree check (`sereno.js clean`, also used inside `sereno.js test` and `branch`, and by the build and ship
+skills) runs at the repo root and ignores only the generated dirs `.sereno/attempts`, `gates`, `briefs` and `cache`. A change to a
+tracked `.sereno/pipeline.json` or `.sereno/specs/` blocks a run. `/sereno:build` pins the spec's sha256 in the attempt; `test` and `gate` refuse with `spec_changed` if the spec differs.
+
+**Recovery and tests.** The head suite is only trusted to have finished if its TAP output holds up: no repeated test numbers, and a plan line printed last is the last TAP line with no results after it. A test that deliberately prints fake TAP lines can still mislead the count; the red team reviews the diff for that. `sereno.js test` also removes stale `sereno-base-*` temp dirs (older than an hour, made by this plugin) before it starts.
 The Builder agents are told to stage only the files they changed and never `.sereno/`.
 
 ## Privacy and trust

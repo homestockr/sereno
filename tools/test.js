@@ -8221,9 +8221,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(fmm && /^name: ship$/m.test(fmm[1]) && /^disable-model-invocation: true$/m.test(fmm[1]) && /^argument-hint:/m.test(fmm[1]));
       const order = [];
       for (const m of SHIP.matchAll(/sereno\.js" ([a-z-]+)/g)) if (!order.includes(m[1])) order[order.length] = m[1];
-      assert.deepStrictEqual(order, ['config', 'test', 'attempt', 'run-id', 'context', 'gate', 'brief', 'recovery']);
+      assert.deepStrictEqual(order, ['clean', 'config', 'test', 'attempt', 'run-id', 'context', 'gate', 'brief', 'recovery']);
       const at = (s) => SHIP.indexOf(s);
-      const seq = ['bin/sereno.js" test --base', 'bin/sereno.js" run-id --head', 'bin/sereno.js" context --head', 'bin/sereno.js" gate --stdin', '--review-run-id <review_run_id> --diagnosis', 'bin/sereno.js" recovery --task', '## 6. Merge prompt'];
+      const seq = ['bin/sereno.js" test --task', 'bin/sereno.js" run-id --head', 'bin/sereno.js" context --head', 'bin/sereno.js" gate --stdin', '--review-run-id <review_run_id> --diagnosis', 'bin/sereno.js" recovery --task', '## 6. Merge prompt'];
       for (let i = 1; i < seq.length; i++) assert.ok(at(seq[i - 1]) >= 0 && at(seq[i]) > at(seq[i - 1]), seq[i] + ' after ' + seq[i - 1]);
       assert.ok(SHIP.includes('Review needs a decision'));
       for (const s of ['clarify the spec', 'stronger Builder', 'stop']) assert.ok(SHIP.includes(s), s);
@@ -8791,11 +8791,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       "if(s.plan) console.log('1..'+s.tests.length);",
       "process.exit(fails.length?2:0);",
     ].join('\n');
-    function mkRepo(baseSpec, headSpec, extraCfg) {
+    function mkRepo(baseSpec, headSpec, extraCfg, files) {
       const dir = mk();
       git(dir, 'init', '-q', '-b', 'task/demo');
       git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
       fs.writeFileSync(path.join(dir, 't2.js'), T2);
+      for (const k of Object.keys(files || {})) fs.writeFileSync(path.join(dir, k), files[k]);
       fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
       fs.writeFileSync(path.join(dir, 'spec.json'), JSON.stringify(baseSpec));
       git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
@@ -8916,7 +8917,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       }
       for (const n of ['build', 'ship']) {
         const t = fs.readFileSync(path.join(PLUGIN, 'skills', n, 'SKILL.md'), 'utf8');
-        assert.ok(t.includes("-- . ':(exclude).sereno'"), n);
+        assert.ok(t.includes('/bin/sereno.js" clean'), n + ' uses sereno.js clean (round 2 replaced the raw git status)');
         assert.ok(!/status --porcelain --untracked-files=no`/.test(t), n + ' still has an unexcluded status check');
       }
       const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
@@ -8983,6 +8984,156 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[4a-rf11] build skill step 5 requires the current branch to be task/<task>', () => {
       const t = fs.readFileSync(path.join(PLUGIN, 'skills', 'build', 'SKILL.md'), 'utf8');
       assert.match(t, /git branch --show-current/); assert.match(t, /current branch\nis still `task\/<task>`/);
+    });
+
+    /* ---- Phase 4a: red-team round 2 ---- */
+    const commitAll = (dir, msg) => { git(dir, 'add', '-f', '.'); git(dir, 'commit', '-q', '-m', msg); return git(dir, 'rev-parse', 'HEAD'); };
+    test('[4a-r2-1] a flaky "re-run" where the head crashes both times is not passed (headCompletion on both runs)', () => {
+      const FLK = [
+        "const fs=require('fs');",
+        "if(process.cwd().includes('sereno-base-')){console.log('ok 1 - X\\nnot ok 2 - M\\nok 3 - Y\\n1..3');process.exit(1);}",
+        "let n=0;try{n=+fs.readFileSync('counter.txt','utf8')}catch(e){}fs.writeFileSync('counter.txt',String(n+1));",
+        "if(n===0){console.log('ok 1 - X\\nnot ok 2 - M\\nnot ok 3 - N');process.exit(1);}",
+        "console.log('not ok 2 - M');process.exit(1);",
+      ].join('\n');
+      const r = mkRepo({ tests: ['X'] }, { tests: ['X'] }, { command: 'node flk.js' }, { 'flk.js': FLK });
+      const { out } = runT(r);
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'unknown_baseline');
+      assert.strictEqual(out.note, 'head suite did not complete');
+    });
+    test('[4a-r2-1] a genuinely flaky failure (both head runs complete, re-run passes) still passes', () => {
+      const FLK = [
+        "const fs=require('fs');",
+        "if(process.cwd().includes('sereno-base-')){console.log('ok 1 - X\\nok 2 - Y\\n1..2');process.exit(0);}",
+        "let n=0;try{n=+fs.readFileSync('counter.txt','utf8')}catch(e){}fs.writeFileSync('counter.txt',String(n+1));",
+        "if(n===0){console.log('ok 1 - X\\nnot ok 2 - Y\\n1..2');process.exit(1);}",
+        "console.log('ok 1 - X\\nok 2 - Y\\n1..2');",
+      ].join('\n');
+      const r = mkRepo({ tests: ['X', 'Y'] }, { tests: ['X', 'Y'] }, { command: 'node flk.js' }, { 'flk.js': FLK });
+      const { out } = runT(r);
+      assert.strictEqual(out.passed, true, JSON.stringify(out)); assert.deepStrictEqual(out.flaky, ['Y']);
+    });
+    test('[4a-r2-2] clean check: tracked .sereno/pipeline.json and specs/ count; generated dirs do not', () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] });
+      fs.mkdirSync(path.join(r.dir, '.sereno', 'attempts'), { recursive: true });
+      fs.mkdirSync(path.join(r.dir, '.sereno', 'specs'), { recursive: true });
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'attempts', 'x-1.json'), '{"a":1}\n');
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'specs', 'x.md'), 'spec one\n');
+      const head = commitAll(r.dir, 'track .sereno');
+      assert.strictEqual(S(r.dir, ['clean']).out.clean, true);
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'attempts', 'x-1.json'), '{"a":2}\n');
+      assert.strictEqual(S(r.dir, ['clean']).out.clean, true, 'generated dir change ignored');
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: { command: 'node t2.js', timeoutSec: 5 } }));
+      const c = S(r.dir, ['clean']).out;
+      assert.strictEqual(c.clean, false); assert.deepStrictEqual(c.files, ['.sereno/pipeline.json']);
+      const t = S(r.dir, ['test', '--base', r.base, '--head', head, '--json']);
+      assert.strictEqual(t.out.code, 'head_mismatch');
+      assert.strictEqual(S(r.dir, ['branch', '--task', 'zz']).out.code, 'dirty_tree');
+      git(r.dir, 'checkout', '--', '.sereno/pipeline.json');
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'specs', 'x.md'), 'spec two\n');
+      assert.deepStrictEqual(S(r.dir, ['clean']).out.files, ['.sereno/specs/x.md']);
+    });
+    test('[4a-r2-2] spec pin: attempt records spec_hash; test and gate refuse spec_changed after an edit', () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] });
+      const specPath = path.join(r.dir, '.sereno', 'specs', 'demo.md');
+      fs.mkdirSync(path.dirname(specPath), { recursive: true });
+      fs.writeFileSync(specPath, 'criteria one\n');
+      const at = S(r.dir, ['attempt', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'built', '--spec', '.sereno/specs/demo.md']).out;
+      assert.strictEqual(at.ok, true, JSON.stringify(at));
+      const hash = 'sha256:' + require('node:crypto').createHash('sha256').update(fs.readFileSync(specPath)).digest('hex');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(r.dir, at.path), 'utf8')).spec_hash, hash);
+      const VERDICT = JSON.stringify({ outcome: 'pass', findings: [], context_requests: [] });
+      const gateArgs = ['gate', '--stdin', '--task', 'demo', '--base', r.base, '--head', r.head, '--branch', 'task/demo', '--tests-passed', 'true'];
+      const g = S(r.dir, gateArgs, VERDICT).out;
+      assert.strictEqual(g.ok, true, JSON.stringify(g));
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(r.dir, g.path), 'utf8')).spec_hash, hash, 'gate records the pinned hash');
+      assert.strictEqual(S(r.dir, ['test', '--task', 'demo', '--base', r.base, '--head', r.head]).out.ok, true);
+      fs.writeFileSync(specPath, 'criteria two\n');
+      const t = S(r.dir, ['test', '--task', 'demo', '--base', r.base, '--head', r.head]);
+      assert.strictEqual(t.out.code, 'spec_changed'); assert.notStrictEqual(t.status, 0);
+      assert.strictEqual(S(r.dir, gateArgs, VERDICT).out.code, 'spec_changed');
+      assert.strictEqual(S(r.dir, ['attempt', '--task', 'demo', '--spec-hash', 'zz']).out.code, 'invalid_arg');
+    });
+    test('[4a-r2-3] sereno.js clean from a subdirectory reports a dirty tracked file at the repo root', () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] });
+      const sub = path.join(r.dir, 'deep', 'er'); fs.mkdirSync(sub, { recursive: true });
+      assert.strictEqual(S(sub, ['clean', '--json']).out.clean, true);
+      fs.writeFileSync(path.join(r.dir, 'a.txt'), 'dirty\n');
+      const c = S(sub, ['clean', '--json']).out;
+      assert.strictEqual(c.ok, true); assert.strictEqual(c.clean, false); assert.deepStrictEqual(c.files, ['a.txt']);
+    });
+    test('[4a-r2-3] build and ship skills use sereno.js clean, not a raw git status', () => {
+      for (const n of ['build', 'ship']) {
+        const t = fs.readFileSync(path.join(PLUGIN, 'skills', n, 'SKILL.md'), 'utf8');
+        assert.ok(t.includes('/bin/sereno.js" clean'), n); assert.ok(!/git [^\n]*status/.test(t), n + ' still has git status');
+      }
+      assert.match(fs.readFileSync(path.join(PLUGIN, 'skills', 'build', 'SKILL.md'), 'utf8'), /--spec \.sereno\/specs\/<task>\.md/);
+    });
+    await atest('[4a-r2-4] the sequential path passes tests.worktreeTimeoutSec to the base worktree git calls', async () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] }, { worktreeTimeoutSec: 77 });
+      const { createSafeFs } = require('../plugin/bin/lib/fsafe.js');
+      const seen = [];
+      gitlib.setExec((cmd, args, opts) => {
+        if (args.includes('worktree')) {
+          seen[seen.length] = opts.timeout;
+          if (args.includes('add')) { const e = new Error('ETIMEDOUT'); e.code = 'ETIMEDOUT'; throw e; }
+          return '';
+        }
+        return execFileSync(cmd, args, opts);
+      });
+      try {
+        const { config, config_hash } = loadConfig(r.dir);
+        await assert.rejects(testrun.runTests({ root: r.dir, fsafe: createSafeFs(r.dir), config, configHash: config_hash, base: r.base, head: r.head, runId: 'rr_20260101T000000Z_abcdef0' }), /worktree add failed/);
+      } finally { gitlib.setExec(null); }
+      assert.ok(seen.length >= 2 && seen.every((t) => t === 77000), JSON.stringify(seen));
+    });
+    test('[4a-r2-5] tapValid: repeated numbers, a plan with results after it, and two plans are not completion evidence', () => {
+      assert.strictEqual(testrun.tapValid('ok 1 - a\nok 2 - b\n1..2\n'), true);
+      assert.strictEqual(testrun.tapValid('1..2\nok 1 - a\nok 2 - b\n'), true);
+      assert.strictEqual(testrun.tapValid('ok 1 - a\nok 1 - b\n'), false);
+      assert.strictEqual(testrun.tapValid('ok 1 - a\n1..2\nok 2 - b\n'), false);
+      assert.strictEqual(testrun.tapValid('ok 1 - a\n1..1\n1..1\n'), false);
+      assert.strictEqual(testrun.tapValid('ok 1 - a\n    ok 1 - nested\nok 2 - b\n1..2\n'), true, 'nested numbering is not top level');
+    });
+    test('[4a-r2-5] a failing head with repeated test numbers is never passed, even when its failures are known at base', () => {
+      const DUP = [
+        "if(process.cwd().includes('sereno-base-')){console.log('not ok 1 - A\\nok 2 - B\\nok 3 - C');process.exit(1);}",
+        "console.log('not ok 1 - A\\nok 1 - B\\nok 1 - C');process.exit(1);",
+      ].join('\n');
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] }, { command: 'node dup.js' }, { 'dup.js': DUP });
+      const { out } = runT(r);
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'unknown_baseline');
+      assert.match(fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8'), /deliberately prints fake\s+TAP lines can still mislead the count/);
+    });
+    test('[4a-r2-6] sweepStale removes an old plugin base dir without following its node_modules junction; fresh and unmarked dirs stay', () => {
+      const sentinel = mk(); fs.writeFileSync(path.join(sentinel, 'keep.txt'), 'keep');
+      const tmpRoot = fs.realpathSync(os.tmpdir());
+      const mkBase = (marked) => {
+        const d = fs.mkdtempSync(path.join(tmpRoot, 'sereno-base-'));
+        fs.mkdirSync(path.join(d, 'wt'));
+        if (marked) fs.writeFileSync(path.join(d, '.sereno-plugin-base'), 'x');
+        return d;
+      };
+      const stale = mkBase(true), fresh = mkBase(true), unmarked = mkBase(false);
+      fs.symlinkSync(sentinel, path.join(stale, 'wt', 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+      const old = new Date(Date.now() - 2 * 3600 * 1000);
+      fs.utimesSync(path.join(stale, '.sereno-plugin-base'), old, old);
+      fs.utimesSync(path.join(unmarked, 'wt'), old, old);
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] });
+      try {
+        assert.ok(testrun.sweepStale(r.dir) >= 1);
+        assert.strictEqual(fs.existsSync(stale), false, 'stale dir gone');
+        assert.strictEqual(fs.readFileSync(path.join(sentinel, 'keep.txt'), 'utf8'), 'keep', 'the junction target survives');
+        assert.strictEqual(fs.existsSync(fresh), true); assert.strictEqual(fs.existsSync(unmarked), true);
+      } finally { for (const d of [stale, fresh, unmarked]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } } }
+    });
+    test('[4a-r2-6] ship skill gives the Bash timeout guidance for sereno.js test', () => {
+      const t = fs.readFileSync(path.join(PLUGIN, 'skills', 'ship', 'SKILL.md'), 'utf8');
+      assert.match(t, /2 x `tests\.timeoutSec` \+ 60 seconds/); assert.match(t, /600000/); assert.match(t, /test --task <task> --base/);
+    });
+    test('[4a-r2-7] git.js header lists every git verb the plugin runs', () => {
+      const t = fs.readFileSync(path.join(PLUGIN, 'bin', 'lib', 'git.js'), 'utf8').split('*/')[0];
+      for (const c of ['rev-parse', 'symbolic-ref', 'status', 'merge-base', 'ls-tree', 'show-ref', 'branch', 'worktree add', 'list', 'remove', 'prune', '--version']) assert.ok(t.includes(c), c);
     });
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }

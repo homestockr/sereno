@@ -19,7 +19,7 @@ Every script result is one JSON object; if `ok` is false, show the `error` and s
 ## 0. Preconditions
 
 - You are on branch `task/<task>` with no uncommitted changes to tracked files
-  (`git -c core.fsmonitor=false status --porcelain --untracked-files=no -- . ':(exclude).sereno'` prints nothing; changes under `.sereno/` do not count). If not, stop and say so.
+  (`node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" clean` returns `clean: true`; only the generated `.sereno/` dirs are ignored). If not, stop and say so.
 - Read `.sereno/specs/<task>.md`. Take `base_branch` from its front matter. If it is null
   or missing, ask the user which branch this task merges into.
 - Read the effective config once:
@@ -37,8 +37,14 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" config
 ## 1. Run the tests
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" test --base <base> --head <head>
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" test --task <task> --base <base> --head <head>
 ```
+
+Run it with a Bash tool `timeout` of at least 2 x `tests.timeoutSec` + 60 seconds, in
+milliseconds (the tool's maximum is 600000). If the suite may take longer than that, set
+`tests.timeoutSec` lower in `.sereno/pipeline.json` first, so the script's own timeout
+fires before the tool's. A refusal with `code: "spec_changed"` means the spec was edited
+after `/sereno:build`: stop and say so.
 
 The result has `passed`, `diagnosis` (`none`, `environment`, `defect`, `unknown_baseline`),
 `newFailures` and `note`. Failures that already fail at the base are not counted.
@@ -154,7 +160,7 @@ outcome (or "skipped, the red team is switched off"), the number of findings, th
 attempt count and the head commit. Then ask the user whether to merge `task/<task>` into
 `<base_branch>`, and wait for an explicit yes. Anything else means do not merge.
 
-Only after a yes, with a clean tracked tree (same check as step 0, which ignores `.sereno/`):
+Only after a yes, with a clean tracked tree (the same clean check as step 0):
 
 ```
 git switch <base_branch>
