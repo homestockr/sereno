@@ -11,7 +11,7 @@
  */
 
 const os = require('node:os');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 
 const GIT_TIMEOUT_MS = 10000;
 
@@ -79,4 +79,26 @@ function currentBranch(cwd) {
   return out && isRefName(out) ? out : null;
 }
 
-module.exports = { SAFE_ARGS, safeEnv, git, isSha, isRefName, toplevel, resolveCommit, currentBranch };
+/**
+ * Blob at <commit>:<path>, read from the object database (never the working tree,
+ * so a symlink in the worktree cannot redirect it). The caller has already
+ * validated commit (40 hex) and rel (clean repo-relative path).
+ * @param {string} cwd @param {string} commit @param {string} rel @param {number} maxBytes
+ * @returns {{ kind: 'blob' | 'symlink' | 'other', size: number, bytes: Buffer } | null} null when absent
+ */
+function showBlob(cwd, commit, rel, maxBytes) {
+  if (!/^[0-9a-f]{40}$/.test(commit)) return null;
+  const tree = git(cwd, ['-c', 'core.quotePath=false', 'ls-tree', '-l', '--end-of-options', commit, '--', rel]);
+  if (!tree) return null;
+  const m = /^(\d{6}) (\w+) [0-9a-f]+\s+(\d+|-)\t(.*)$/.exec(tree);
+  if (!m || m[4] !== rel) return null;
+  if (m[1] === '120000') return { kind: 'symlink', size: 0, bytes: Buffer.alloc(0) };
+  if (m[2] !== 'blob') return { kind: 'other', size: 0, bytes: Buffer.alloc(0) };
+  const r = spawnSync('git', SAFE_ARGS.concat(['show', '--no-textconv', '--end-of-options', commit + ':' + rel]), {
+    cwd, env: safeEnv(), timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer: maxBytes + 1, stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (!r.stdout) return null;
+  return { kind: 'blob', size: parseInt(m[3], 10), bytes: Buffer.from(r.stdout).subarray(0, maxBytes) };
+}
+
+module.exports = { SAFE_ARGS, safeEnv, git, showBlob, isSha, isRefName, toplevel, resolveCommit, currentBranch };

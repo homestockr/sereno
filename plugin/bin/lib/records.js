@@ -21,7 +21,8 @@ const SEVERITIES = ['high', 'medium', 'low'];
 const BUILDERS = ['haiku', 'sonnet', 'opus'];
 const KINDS = ['mechanical', 'feature', 'fix', 'refactor'];
 const DIAGNOSES = ['environment', 'spec', 'defect', 'none'];
-const ATTEMPT_OUTCOMES = ['pass', 'block', 'needs_context', 'error', 'skipped', 'stopped', 'running'];
+const ATTEMPT_OUTCOMES = ['pass', 'block', 'needs_context', 'error', 'skipped', 'stopped', 'running', 'built'];
+const FINAL_OUTCOMES = ['pass', 'block', 'needs_context', 'error', 'skipped', 'stopped'];
 
 // Control characters, DEL, C1, zero-width, bidi marks and isolates, line/paragraph separators.
 const STRIP = new RegExp('[' + ['\\u0000-\\u0008', '\\u000b-\\u001f', '\\u007f-\\u009f', '\\u061c', '\\u200b-\\u200f', '\\u2028-\\u202e', '\\u2060-\\u2069', '\\ufeff'].join('') + ']', 'g');
@@ -106,5 +107,5 @@ function checkTask(t) {
 
 module.exports = {
   sanitizeVerdict, cleanText, enumOr, repoRelative, sha256, makeRunId, checkTask, compactUtc,
-  RUN_ID, BUILDERS, KINDS, DIAGNOSES, ATTEMPT_OUTCOMES, GATE_OUTCOMES, MAX_FINDINGS,
+  RUN_ID, FINAL_OUTCOMES, BUILDERS, KINDS, DIAGNOSES, ATTEMPT_OUTCOMES, GATE_OUTCOMES, MAX_FINDINGS,
 };

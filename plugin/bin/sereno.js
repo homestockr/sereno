@@ -12,7 +12,7 @@
  * Nothing else is written to stdout. Node built-ins only. The only files it
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
- * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch.
+ * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, context, recovery.
  */
 
 const fs = require('node:fs');
@@ -24,8 +24,10 @@ const { loadConfig } = require('./lib/config.js');
 const rec = require('./lib/records.js');
 const testrun = require('./lib/testrun.js');
 const speclib = require('./lib/spec.js');
+const contextlib = require('./lib/context.js');
+const recovery = require('./lib/recovery.js');
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, record_final: 12, not_found: 13, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -74,7 +76,7 @@ function matchId(v, what, re) {
 /** @param {string | undefined} v @param {string} what @returns {string | null} ISO string */
 function isoOrNull(v, what) {
   if (v === undefined) return null;
-  const d = new Date(v);
+  const d = v === 'now' ? new Date() : new Date(v);
   if (isNaN(d.getTime())) throw new SerenoError('invalid_arg', what + ' is not a valid timestamp');
   return d.toISOString();
 }
@@ -175,11 +177,12 @@ const COMMANDS = {
 
   attempt(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at'],
+      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update'],
       bool: ['json'],
     });
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
+    if (a.update !== undefined) return updateAttempt(root, fsafe, task, a);
     const { config_hash } = loadConfig(root);
     const fixes = str(a, 'fixes');
     const rr = str(a, 'review-run-id');
@@ -238,11 +241,11 @@ const COMMANDS = {
   },
 
   spec(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes'], bool: ['json', 'stdin'] });
+    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes', 'base-branch'], bool: ['json', 'stdin'] });
     if (!a.stdin) throw new SerenoError('usage', 'the acceptance criteria come on stdin: pass --stdin');
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
-    return speclib.writeSpec({ root, fsafe, task, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), body: readStdin() });
+    return speclib.writeSpec({ root, fsafe, task, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), body: readStdin() });
   },
 
   branch(/** @type {string[]} */ argv) {
@@ -250,6 +253,31 @@ const COMMANDS = {
     const task = rec.checkTask(str(a, 'task'));
     const { root } = needRepo();
     return speclib.createTaskBranch({ root, task });
+  },
+
+  context(/** @type {string[]} */ argv) {
+    // Positional file names follow the flags; flags are parsed first.
+    /** @type {string[]} */ const flags = [];
+    /** @type {string[]} */ const files = [];
+    for (let i = 0; i < argv.length; i++) {
+      if (argv[i] === '--head') { flags[flags.length] = argv[i]; flags[flags.length] = argv[i + 1] === undefined ? '' : argv[++i]; }
+      else if (argv[i].startsWith('--head=') || argv[i] === '--json') flags[flags.length] = argv[i];
+      else files[files.length] = argv[i];
+    }
+    const a = parseArgs(flags, { value: ['head'], bool: ['json'] });
+    const { root } = needRepo();
+    const head = gitlib.resolveCommit(root, str(a, 'head') || '');
+    if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
+    const r = contextlib.readContext({ root, head, files });
+    return { head, files: r.files, missing: r.missing };
+  },
+
+  recovery(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root, fsafe } = needRepo();
+    const { config } = loadConfig(root);
+    return recovery.decide({ root, task, config, listAttempts: () => fsafe.listDir('.sereno/attempts') });
   },
 
   paths(/** @type {string[]} */ argv) {
@@ -271,6 +299,47 @@ const COMMANDS = {
     };
   },
 };
+
+/**
+ * attempt --update <n>: merge outcome, diagnosis, review run id and end time into
+ * an existing record. A record whose outcome is final is never changed.
+ * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, string | boolean>} a
+ */
+function updateAttempt(root, fsafe, task, a) {
+  for (const k of ['project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'started-at']) {
+    if (a[k] !== undefined) throw new SerenoError('usage', '--' + k + ' cannot be combined with --update');
+  }
+  const nArg = str(a, 'update');
+  if (nArg === undefined || !/^[1-9]\d{0,5}$/.test(nArg)) throw new SerenoError('invalid_arg', '--update must be an attempt number');
+  const rel = '.sereno/attempts/' + task + '-' + nArg + '.json';
+  let record;
+  try {
+    const file = path.join(root, rel);
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || st.size > MAX_INPUT) throw new Error('not a regular file');
+    record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (_e) { throw new SerenoError('not_found', 'no attempt record ' + rel); }
+  if (!record || typeof record !== 'object' || Array.isArray(record)) throw new SerenoError('not_found', 'attempt record is not an object');
+  if (rec.FINAL_OUTCOMES.includes(record.outcome)) throw new SerenoError('record_final', 'attempt ' + nArg + ' is already final (' + record.outcome + ')');
+  const outcome = str(a, 'outcome'), diagnosis = str(a, 'diagnosis'), rr = str(a, 'review-run-id'), ended = str(a, 'ended-at');
+  if (outcome !== undefined) {
+    const v = rec.enumOr(outcome, rec.ATTEMPT_OUTCOMES);
+    if (v === 'unknown') throw new SerenoError('invalid_arg', '--outcome must be one of: ' + rec.ATTEMPT_OUTCOMES.join(', '));
+    record.outcome = v;
+  }
+  if (diagnosis !== undefined) {
+    const v = rec.enumOr(diagnosis, rec.DIAGNOSES);
+    if (v === 'unknown') throw new SerenoError('invalid_arg', '--diagnosis must be one of: ' + rec.DIAGNOSES.join(', '));
+    record.diagnosis = v;
+  }
+  if (rr !== undefined) {
+    if (!rec.RUN_ID.test(rr)) throw new SerenoError('invalid_arg', '--review-run-id has an invalid format');
+    record.review_run_id = rr;
+  }
+  if (ended !== undefined) record.ended_at = isoOrNull(ended, '--ended-at');
+  fsafe.writeJson(rel, record);
+  return { path: rel, attempt: parseInt(nArg, 10), task_id: task, outcome: record.outcome, diagnosis: record.diagnosis };
+}
 
 function readStdin() {
   const chunks = [];

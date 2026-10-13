@@ -45,7 +45,10 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" branch --task <name>
 
 It prints one JSON object. If `ok` is false, show the `error` to the user and stop. It
 refuses an existing branch, a dirty working tree and an invalid name. Do not work around
-a refusal. If the branch already exists, you are revising the spec: skip this step.
+a refusal. Note `from_branch` in the result: it is the branch the task branch was created
+from, and `/sereno:ship` merges back into it. If it is null (detached HEAD), ask the user
+which branch the work should merge into. If the branch already exists, you are revising
+the spec: skip this step.
 
 ## 4. Write the spec
 
@@ -65,7 +68,8 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|s
 SPEC
 ```
 
-Add `--fixes "<task>"` when it applies. The result is `{ ok, path, spec_revision, spec_hash }`.
+Add `--base-branch <from_branch>` when you just created the branch (a spec revision keeps
+the earlier value when you omit it). Add `--fixes "<task>"` when it applies. The result is `{ ok, path, spec_revision, spec_hash }`.
 
 ## 5. Report
 

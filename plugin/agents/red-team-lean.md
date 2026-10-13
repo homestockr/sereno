@@ -41,6 +41,6 @@ Output exactly ONE fenced json block and nothing after it:
 
 - `outcome` is one of `pass`, `block`, `needs_context`, `error`.
 - `severity` is `high`, `medium` or `low`. `kind` is a short label (defect, security,
-  spec, test, privacy, ...). `file` is repo-relative; `line` is a number or null.
+  spec, test, privacy, ...). Use `spec` when the code does not meet the spec. `file` is repo-relative; `line` is a number or null.
 - `block` means at least one finding must be fixed before merge. `pass` has no
   high or medium findings.

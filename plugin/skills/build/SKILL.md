@@ -26,7 +26,19 @@ Then run `git switch task/<task>`. If the branch does not exist, stop and point 
 `/sereno:task`. Note the starting commit: `git rev-parse HEAD`, and the time (UTC,
 ISO 8601).
 
-## 3. Spawn the Builder
+## 3. Record the attempt before the Builder starts
+
+One Builder run is one attempt record. Write it now, as `running`, so an interrupted run
+still leaves a trace:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start>
+```
+
+Add `--fixes` only when the spec has one. The result is `{ ok, path, attempt }`; keep the
+`attempt` number. If `ok` is false, show the error and stop.
+
+## 4. Spawn the Builder
 
 Map the spec's `builder` to an agent by name and call the Agent tool with
 `subagent_type` set to it. Do not pass a `model` parameter; the agent fixes its own model.
@@ -42,26 +54,28 @@ Prompt: "Implement the task spec at `.sereno/specs/<task>.md` on the current bra
 If `fixes` is set, or this is a repair run with review findings, include those findings
 in the prompt and tell the Builder to fix only them.
 
-## 4. Check the result
+## 5. Check the result
 
 When the Builder returns, run `git status --porcelain --untracked-files=no` and
 `git rev-parse HEAD`. It succeeded only if HEAD moved from the starting commit and the
 tree is clean. If it did not commit, or left changes behind, do not commit for it: the
 outcome is `error`.
 
-## 5. Record the attempt
+## 6. Update the attempt
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome <running|error> --started-at <start> --ended-at <now>
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --update <attempt> --outcome <built|error> --diagnosis <none|environment> --ended-at now
 ```
 
-Use `--outcome running` when the Builder committed (the attempt is built and waiting
-for review; `/sereno:ship` records its final outcome) and `--outcome error` when it did
-not. Add `--fixes` only when the spec has one. The result is `{ ok, path, attempt }`;
-if `ok` is false, show the error.
+Use `--outcome built` when the Builder committed (it now waits for review; `/sereno:ship`
+records the final outcome). Use `--outcome error` when it did not commit or the run
+failed. For `error`, use `--diagnosis environment` if the cause was the environment (a
+StopFailure, an API or rate-limit error, a missing tool or key), and `--diagnosis none`
+otherwise, including a turn or budget stop. The result is `{ ok, path, attempt }`; if
+`ok` is false, show the error.
 
-## 6. Stop
+## 7. Stop
 
 Reply in a few lines: the Builder used, the commit, and the Builder's own report in
-one line. Tell the user to run `/sereno:ship <task>` when it exists, or review the
-branch. Do not run tests, review the diff, merge or switch branches again.
+one line. Tell the user to run `/sereno:ship <task>` next. Do not run tests, review the
+diff, merge or switch branches again.

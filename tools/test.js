@@ -7915,11 +7915,12 @@ test('missing rate_limits degrades instead of throwing', () => {
         for (const m of body.matchAll(/^.*sereno\.js.*$/gm)) assert.ok(m[0].includes('node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js"'), d + ': ' + m[0]);
         assert.ok(!/\bnpm\b|\bnpx\b/.test(body), d + ' uses npm/npx');
         assert.ok(!/\$CLAUDE_PLUGIN_ROOT|\$env:CLAUDE_PLUGIN_ROOT|%CLAUDE_PLUGIN_ROOT%/.test(body.replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, '')), d + ' uses a shell plugin-root variable');
-        assert.ok(!/--model\b/.test(body), d + ' must not pass a model');
+        // The gate's --model records which model reviewed; it is not an Agent parameter.
+        assert.ok(!/--model\b/.test(body.replace(/^.*sereno\.js" gate .*$/gm, '')), d + ' must not pass a model');
       }
       const build = front(path.join(PLUGIN, 'skills', 'build', 'SKILL.md')).body;
       for (const a of ['sereno:builder', 'sereno:builder-haiku', 'sereno:builder-opus']) assert.ok(build.includes('`' + a + '`'));
-      assert.ok(/attempt --task/.test(build) && /--outcome <running\|error>/.test(build));
+      assert.ok(/attempt --task/.test(build) && /--outcome running/.test(build) && /--outcome <built\|error>/.test(build));
       const task = front(path.join(PLUGIN, 'skills', 'task', 'SKILL.md')).body;
       assert.ok(/spec --task/.test(task) && /branch --task/.test(task) && /--stdin/.test(task) && /authentication/.test(task));
     });
@@ -7989,6 +7990,321 @@ test('missing rate_limits degrades instead of throwing', () => {
       const mine = require('../plugin/bin/lib/spec.js').validBranchName, app = require('../src/briefs.js').validBranchName;
       for (const n of ['task/a', 'feat/x-1', '', '-a', 'a b', 'a..b', 'a.lock', 'a/.b', '@', 'a@{1}', 'a​b', 'a‮b', 'a‍b', 'x/', 'a\\b', 'a~1']) assert.strictEqual(mine(n), app(n), JSON.stringify(n));
     });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
+  /* ---- Phase 4a step 4: ship ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const recoveryLib = require('../plugin/bin/lib/recovery.js');
+    const { loadConfig } = require('../plugin/bin/lib/config.js');
+    const { spawnSync } = require('node:child_process');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a4-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const runS = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const initRepo = (branch) => {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', branch || 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      return dir;
+    };
+    const RR = (n) => 'rr_20261013T00000' + n + 'Z_abcdef' + n;
+    const readAttempt = (dir, n) => JSON.parse(fs.readFileSync(path.join(dir, '.sereno', 'attempts', 'demo-' + n + '.json'), 'utf8'));
+
+    /* recovery helper: table-driven over hand-written attempt and gate files */
+    const A = (outcome, diagnosis, extra) => Object.assign({ outcome, diagnosis: diagnosis || 'none', review_run_id: null }, extra || {});
+    const gateFile = (id, outcome, findings) => ({ review_run_id: id, outcome, tests_passed: true, findings: findings || [] });
+    const F = (kind, severity) => ({ severity: severity || 'high', kind, file: 'a.js', line: 1, summary: 'x' });
+    function decide(attempts, gates, cfgOver) {
+      const dir = mk();
+      fs.mkdirSync(path.join(dir, '.sereno', 'attempts'), { recursive: true });
+      fs.mkdirSync(path.join(dir, '.sereno', 'gates'), { recursive: true });
+      attempts.forEach((a, i) => fs.writeFileSync(path.join(dir, '.sereno', 'attempts', 'demo-' + (i + 1) + '.json'), JSON.stringify(a)));
+      for (const [id, g] of Object.entries(gates || {})) fs.writeFileSync(path.join(dir, '.sereno', 'gates', id + '.json'), JSON.stringify(g));
+      const config = loadConfig(null).config;
+      if (cfgOver) cfgOver(config);
+      return recoveryLib.decide({ root: dir, task: 'demo', config, listAttempts: () => fs.readdirSync(path.join(dir, '.sereno', 'attempts')) });
+    }
+    const BLOCK_DEFECT = [A('block', 'defect', { review_run_id: RR(1) })];
+    const G_DEFECT = { [RR(1)]: gateFile(RR(1), 'block', [F('defect')]) };
+    const TABLE = [
+      ['built attempt is reviewed', [A('built')], {}, null, 'review', 0, 0],
+      ['environment failure retries, repair untouched', [A('error', 'environment')], {}, null, 'retry', 0, 0],
+      ['second environment failure still retries', [A('error', 'environment'), A('error', 'environment')], {}, null, 'retry', 0, 1],
+      ['infraRetries used up goes to decide', [A('error', 'environment'), A('error', 'environment'), A('error', 'environment')], {}, null, 'decide', 0, 2],
+      ['infraRetries 0 never retries', [A('error', 'environment')], {}, (c) => { c.recovery.infraRetries = 0; }, 'decide', 0, 0],
+      ['first test defect repairs', [A('block', 'defect')], {}, null, 'repair', 0, 0],
+      ['first gate block on a defect repairs', BLOCK_DEFECT, G_DEFECT, null, 'repair', 0, 0],
+      ['security finding is a defect', [A('block', 'defect', { review_run_id: RR(1) })], { [RR(1)]: gateFile(RR(1), 'block', [F('security')]) }, null, 'repair', 0, 0],
+      ['second defect goes to decide', [A('block', 'defect'), A('block', 'defect', { review_run_id: RR(1) })], G_DEFECT, null, 'decide', 1, 0],
+      ['a third defect is still decide, never another repair', [A('block', 'defect'), A('block', 'defect'), A('block', 'defect')], {}, null, 'decide', 2, 0],
+      ['environment failure during the repair retries without a second repair', [A('block', 'defect'), A('error', 'environment')], {}, null, 'retry', 1, 0],
+      ['defect, env failure, defect: the repair was used', [A('block', 'defect'), A('error', 'environment'), A('block', 'defect')], {}, null, 'decide', 1, 1],
+      ['repairs 0 never repairs', [A('block', 'defect')], {}, (c) => { c.recovery.repairs = 0; }, 'decide', 0, 0],
+      ['gate block of kind spec (spec violation) repairs', [A('block', 'defect', { review_run_id: RR(1) })], { [RR(1)]: gateFile(RR(1), 'block', [F('spec')]) }, null, 'repair', 0, 0],
+      ['second spec-violation block goes to decide', [A('block', 'defect', { review_run_id: RR(1) }), A('block', 'defect', { review_run_id: RR(2) })], { [RR(1)]: gateFile(RR(1), 'block', [F('spec')]), [RR(2)]: gateFile(RR(2), 'block', [F('spec-violation')]) }, null, 'decide', 1, 0],
+      ['gate block of an unknown kind goes to decide', [A('block', 'spec', { review_run_id: RR(1) })], { [RR(1)]: gateFile(RR(1), 'block', [F('vibes')]) }, null, 'decide', 0, 0],
+      ['gate block with only low defect findings goes to decide', [A('block', 'defect', { review_run_id: RR(1) })], { [RR(1)]: gateFile(RR(1), 'block', [F('defect', 'low')]) }, null, 'decide', 0, 0],
+      ['maxBlockedRuns 1 caps the first block', BLOCK_DEFECT, G_DEFECT, (c) => { c.roles.redTeam.maxBlockedRuns = 1; }, 'decide', 0, 0],
+      ['needs_context goes to decide', [A('needs_context')], {}, null, 'decide', 0, 0],
+      ['unknown baseline (needs_context, no review) goes to decide', [A('needs_context', 'none')], {}, null, 'decide', 0, 0],
+      ['error that is not environment (turn cap, review error) goes to decide', [A('error', 'none')], {}, null, 'decide', 0, 0],
+      ['a running attempt goes to decide', [A('running')], {}, null, 'decide', 0, 0],
+      ['pass with a passing gate merges', [A('pass', 'none', { review_run_id: RR(1) })], { [RR(1)]: gateFile(RR(1), 'pass') }, null, 'merge', 0, 0],
+      ['pass without a gate record does not merge', [A('pass', 'none', { review_run_id: RR(1) })], {}, null, 'decide', 0, 0],
+      ['pass whose gate says block does not merge', [A('pass', 'none', { review_run_id: RR(1) })], { [RR(1)]: gateFile(RR(1), 'block', [F('defect')]) }, null, 'decide', 0, 0],
+      ['repair then pass merges', [A('block', 'defect'), A('pass', 'none', { review_run_id: RR(2) })], { [RR(2)]: gateFile(RR(2), 'pass') }, null, 'merge', 1, 0],
+      ['gate disabled: skipped merges', [A('skipped')], {}, (c) => { c.roles.redTeam.enabled = false; }, 'merge', 0, 0],
+      ['skipped while the red team is enabled does not merge', [A('skipped')], {}, null, 'decide', 0, 0],
+      ['stopped is done', [A('stopped')], {}, null, 'done', 0, 0],
+    ];
+    for (const [name, attempts, gates, cfg, next, repairs, infra] of TABLE) {
+      test('[4a4] recovery: ' + name, () => {
+        const r = decide(attempts, gates, cfg);
+        assert.strictEqual(r.next, next, JSON.stringify(r));
+        assert.strictEqual(r.repairsUsed, repairs); assert.strictEqual(r.infraRetriesUsed, infra);
+        assert.ok(typeof r.reason === 'string' && r.reason.length > 5);
+      });
+    }
+    test('[4a4] recovery CLI: JSON shape, no attempts is not_found, a bad task is refused', () => {
+      const dir = initRepo();
+      const none = runS(dir, ['recovery', '--task', 'demo']);
+      assert.strictEqual(none.out.code, 'not_found'); assert.notStrictEqual(none.status, 0);
+      assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running']).out.ok, true);
+      assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--update', '1', '--outcome', 'built', '--ended-at', 'now']).out.ok, true);
+      const r = runS(dir, ['recovery', '--task', 'demo']);
+      assert.strictEqual(r.status, 0);
+      assert.deepStrictEqual(Object.keys(r.out).sort(), ['attempt', 'gate_enabled', 'infraRetriesUsed', 'next', 'ok', 'reason', 'repairsUsed']);
+      assert.strictEqual(r.out.next, 'review');
+      assert.strictEqual(runS(dir, ['recovery', '--task', '../x']).out.ok, false);
+    });
+
+    /* attempt update mode */
+    test('[4a4] attempt --update merges fields into one record; final records are refused', () => {
+      const dir = initRepo();
+      const first = runS(dir, ['attempt', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--spec-revision', '3', '--outcome', 'running', '--started-at', '2026-10-13T10:00:00Z']);
+      assert.strictEqual(first.out.attempt, 1);
+      const before = readAttempt(dir, 1);
+      assert.strictEqual(before.outcome, 'running'); assert.strictEqual(before.ended_at, null);
+      const built = runS(dir, ['attempt', '--task', 'demo', '--update', '1', '--outcome', 'built', '--ended-at', 'now']);
+      assert.strictEqual(built.status, 0, JSON.stringify(built.out)); assert.strictEqual(built.out.outcome, 'built');
+      const mid = readAttempt(dir, 1);
+      assert.strictEqual(mid.outcome, 'built'); assert.ok(!isNaN(Date.parse(mid.ended_at)));
+      for (const k of ['project_id', 'task_id', 'spec_revision', 'attempt', 'builder_requested', 'agent_id', 'config_hash', 'kind', 'fixes', 'started_at']) assert.deepStrictEqual(mid[k], before[k], k + ' unchanged');
+      assert.strictEqual(fs.readdirSync(path.join(dir, '.sereno', 'attempts')).length, 1, 'one attempt = one record');
+      const fin = runS(dir, ['attempt', '--task', 'demo', '--update', '1', '--outcome', 'pass', '--diagnosis', 'none', '--review-run-id', RR(1), '--ended-at', '2026-10-13T11:00:00Z']);
+      assert.strictEqual(fin.status, 0); assert.strictEqual(fin.out.diagnosis, 'none');
+      const done = readAttempt(dir, 1);
+      assert.strictEqual(done.outcome, 'pass'); assert.strictEqual(done.review_run_id, RR(1)); assert.strictEqual(done.ended_at, '2026-10-13T11:00:00.000Z');
+      for (const o of ['pass', 'block', 'needs_context', 'error', 'skipped', 'stopped']) {
+        const r = initRepo();
+        runS(r, ['attempt', '--task', 'demo', '--outcome', o]);
+        const u = runS(r, ['attempt', '--task', 'demo', '--update', '1', '--outcome', 'built']);
+        assert.strictEqual(u.out.code, 'record_final', o); assert.notStrictEqual(u.status, 0);
+        assert.strictEqual(readAttempt(r, 1).outcome, o);
+      }
+      const bad = (args) => runS(dir, ['attempt', '--task', 'demo', ...args]);
+      assert.strictEqual(bad(['--update', '9', '--outcome', 'built']).out.code, 'not_found');
+      assert.strictEqual(bad(['--update', 'x']).out.code, 'invalid_arg');
+      const d2 = initRepo(); runS(d2, ['attempt', '--task', 'demo', '--outcome', 'running']);
+      const up = (args) => runS(d2, ['attempt', '--task', 'demo', '--update', '1', ...args]);
+      assert.strictEqual(up(['--outcome', 'weird']).out.code, 'invalid_arg');
+      assert.strictEqual(up(['--diagnosis', 'weird']).out.code, 'invalid_arg');
+      assert.strictEqual(up(['--review-run-id', 'nope']).out.code, 'invalid_arg');
+      assert.strictEqual(up(['--builder', 'opus']).out.code, 'usage');
+      assert.strictEqual(up(['--ended-at', 'yesterday-ish']).out.code, 'invalid_arg');
+      assert.strictEqual(readAttempt(d2, 1).outcome, 'running');
+    });
+    test('[4a4] attempt: built is a valid outcome at creation too', () => {
+      const dir = initRepo();
+      assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--outcome', 'built']).out.ok, true);
+      assert.strictEqual(readAttempt(dir, 1).outcome, 'built');
+    });
+
+    /* spec base_branch */
+    test('[4a4] spec records base_branch and keeps it across revisions', () => {
+      const dir = initRepo('main');
+      fs.writeFileSync(path.join(dir, 'a.txt'), '1\n'); git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      const body = '## Goal\nx\n';
+      const spec = (extra) => runS(dir, ['spec', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--stdin', ...(extra || [])], body);
+      const br = runS(dir, ['branch', '--task', 'demo']);
+      assert.strictEqual(br.out.from_branch, 'main');
+      assert.strictEqual(spec(['--base-branch', br.out.from_branch]).out.ok, true);
+      const text = () => fs.readFileSync(path.join(dir, '.sereno', 'specs', 'demo.md'), 'utf8');
+      assert.ok(/^base_branch: "main"$/m.test(text()));
+      assert.strictEqual(spec().out.spec_revision, 2);
+      assert.ok(/^base_branch: "main"$/m.test(text()), 'kept on revision');
+      assert.strictEqual(spec(['--base-branch=--evil']).out.code, 'invalid_arg');
+      assert.ok(/^base_branch: "main"$/m.test(text()));
+      assert.strictEqual(runS(dir, ['spec', '--task', 'other', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--stdin'], body).out.ok, true);
+      assert.ok(/^base_branch: null$/m.test(fs.readFileSync(path.join(dir, '.sereno', 'specs', 'other.md'), 'utf8')));
+    });
+
+    /* context */
+    test('[4a4] context: reads from git at head, caps sizes, flags binary and truncation', () => {
+      const dir = initRepo();
+      fs.writeFileSync(path.join(dir, 'small.txt'), 'hello\n');
+      fs.writeFileSync(path.join(dir, 'big.txt'), 'x'.repeat(40 * 1024));
+      fs.writeFileSync(path.join(dir, 'bin.dat'), Buffer.from([1, 2, 0, 3, 4]));
+      fs.mkdirSync(path.join(dir, 'src')); fs.writeFileSync(path.join(dir, 'src', 'ünï.js'), 'ok\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'one');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      const r = runS(dir, ['context', '--head', head, 'small.txt', 'big.txt', 'bin.dat', 'src/ünï.js', 'nope.txt']);
+      assert.strictEqual(r.status, 0, JSON.stringify(r.out));
+      const by = Object.fromEntries(r.out.files.map((f) => [f.path, f]));
+      assert.deepStrictEqual(by['small.txt'], { path: 'small.txt', content: 'hello\n', truncated: false });
+      assert.strictEqual(by['big.txt'].content.length, 32 * 1024); assert.strictEqual(by['big.txt'].truncated, true);
+      assert.deepStrictEqual(by['bin.dat'], { path: 'bin.dat', content: null, truncated: false });
+      assert.strictEqual(by['src/ünï.js'].content, 'ok\n');
+      assert.deepStrictEqual(r.out.missing, ['nope.txt']);
+      assert.strictEqual(runS(dir, ['context', 'small.txt', '--head', head]).out.files[0].content, 'hello\n', 'flags may follow the files');
+      fs.writeFileSync(path.join(dir, 'small.txt'), 'edited\n');
+      assert.strictEqual(runS(dir, ['context', '--head', head, 'small.txt']).out.files[0].content, 'hello\n', 'the file as committed');
+      for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(dir, 'f' + i + '.txt'), String(i).repeat(40 * 1024));
+      git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'two');
+      const h2 = git(dir, 'rev-parse', 'HEAD');
+      const t = runS(dir, ['context', '--head', h2, 'f0.txt', 'f1.txt', 'f2.txt', 'f3.txt', 'f4.txt']);
+      const total = t.out.files.reduce((n, f) => n + (f.content ? Buffer.byteLength(f.content) : 0), 0);
+      assert.ok(total <= 96 * 1024, 'total ' + total);
+      assert.strictEqual(t.out.files.length, 5);
+      assert.strictEqual(t.out.files[3].content, null); assert.strictEqual(t.out.files[3].truncated, true);
+    });
+    test('[4a4] context: refusals', () => {
+      const dir = initRepo();
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n'); git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'one');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      for (const bad of ['/etc/passwd', 'C:\\Windows\\win.ini', '../a.txt', 'src/../../a.txt', '..', '.', 'a\u0001b', '\\\\server\\share\\x']) {
+        const r = runS(dir, ['context', '--head', head, bad]);
+        assert.strictEqual(r.out.ok, false, JSON.stringify(bad)); assert.strictEqual(r.out.code, 'path_refused', JSON.stringify(bad)); assert.notStrictEqual(r.status, 0);
+      }
+      assert.strictEqual(runS(dir, ['context', '--head', head, 'a', 'b', 'c', 'd', 'e', 'f']).out.code, 'invalid_arg', 'more than five files');
+      assert.strictEqual(runS(dir, ['context', '--head', head]).out.code, 'usage');
+      assert.strictEqual(runS(dir, ['context', 'a.txt']).out.code, 'invalid_arg');
+      assert.strictEqual(runS(dir, ['context', '--head', '--evil', 'a.txt']).out.ok, false);
+      assert.strictEqual(runS(dir, ['context', '--head', 'deadbeef', 'a.txt']).out.code, 'invalid_arg');
+      assert.strictEqual(runS(mk(), ['context', '--head', head, 'a.txt']).out.code, 'not_a_repo');
+    });
+    test('[4a4] context: a symlink in the worktree pointing outside is not followed; a committed symlink is not read', () => {
+      const dir = initRepo();
+      const outside = path.join(mk(), 'secret.txt');
+      fs.writeFileSync(outside, 'TOP-SECRET\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'committed\n'); git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'one');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      let linked = true;
+      fs.rmSync(path.join(dir, 'a.txt'));
+      try { fs.symlinkSync(outside, path.join(dir, 'a.txt')); } catch (_e) { linked = false; }
+      if (!linked) { console.log('  skip worktree symlink part (cannot create symlinks here)'); fs.writeFileSync(path.join(dir, 'a.txt'), 'committed\n'); }
+      const r = runS(dir, ['context', '--head', head, 'a.txt']);
+      assert.strictEqual(r.out.files[0].content, 'committed\n');
+      assert.ok(!JSON.stringify(r.out).includes('TOP-SECRET'));
+      const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: dir, input: outside, encoding: 'utf8' }).trim();
+      execFileSync('git', ['update-index', '--add', '--cacheinfo', '120000,' + blob + ',link.txt'], { cwd: dir });
+      git(dir, 'commit', '-q', '-m', 'two');
+      const s = runS(dir, ['context', '--head', git(dir, 'rev-parse', 'HEAD'), 'link.txt']);
+      assert.deepStrictEqual(s.out.files, []); assert.deepStrictEqual(s.out.missing, ['link.txt']);
+    });
+
+    /* the skill text */
+    const SHIP = fs.readFileSync(path.join(PLUGIN, 'skills', 'ship', 'SKILL.md'), 'utf8');
+    const SHIP1 = SHIP.replace(/\s+/g, ' ');
+    test('[4a4] ship skill: front matter, subcommands in order, decision label, no push, asks before merging', () => {
+      const fmm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(SHIP);
+      assert.ok(fmm && /^name: ship$/m.test(fmm[1]) && /^disable-model-invocation: true$/m.test(fmm[1]) && /^argument-hint:/m.test(fmm[1]));
+      const order = [];
+      for (const m of SHIP.matchAll(/sereno\.js" ([a-z-]+)/g)) if (!order.includes(m[1])) order[order.length] = m[1];
+      assert.deepStrictEqual(order, ['config', 'test', 'attempt', 'run-id', 'context', 'gate', 'recovery']);
+      const at = (s) => SHIP.indexOf(s);
+      const seq = ['bin/sereno.js" test --base', 'bin/sereno.js" run-id --head', 'bin/sereno.js" context --head', 'bin/sereno.js" gate --stdin', '--review-run-id <review_run_id> --diagnosis', 'bin/sereno.js" recovery --task', '## 6. Merge prompt'];
+      for (let i = 1; i < seq.length; i++) assert.ok(at(seq[i - 1]) >= 0 && at(seq[i]) > at(seq[i - 1]), seq[i] + ' after ' + seq[i - 1]);
+      assert.ok(SHIP.includes('Review needs a decision'));
+      for (const s of ['clarify the spec', 'stronger Builder', 'stop']) assert.ok(SHIP.includes(s), s);
+      assert.ok(!/push/i.test(SHIP), 'no push');
+      assert.ok(/wait for an explicit yes/.test(SHIP1) && /never merge without an explicit yes/.test(SHIP1));
+      assert.ok(at('wait for an explicit yes') < at('git merge --no-ff task/<task>'), 'the ask comes before the merge command');
+      assert.ok(/git merge-base task\/<task> <base_branch>/.test(SHIP) && /git switch <base_branch>/.test(SHIP));
+      assert.ok(/sereno:red-team-lean/.test(SHIP) && /onFallback/.test(SHIP) && /One round only/.test(SHIP));
+      assert.ok(/--tests-passed true/.test(SHIP) && /--run-id <review_run_id>/.test(SHIP));
+      assert.ok(/pass no `model`\s+parameter/.test(SHIP1.replace('`model` parameter', '`model` parameter')) || /pass no `model` parameter/.test(SHIP1));
+      assert.ok(/SAME Builder/.test(SHIP) && /never change which Builder is used by yourself/.test(SHIP1));
+    });
+    test('[4a4] ship skill: spawns the red team by configured agent name only', () => {
+      const names = [...SHIP.matchAll(/`sereno:([^`]*)`/g)].map((m) => m[1]);
+      for (const n of names) assert.ok(['red-team-lean', 'scribe', ''].includes(n), 'only the fallback and the scribe are named: ' + n);
+      assert.ok(/`sereno:` plus `roles\.redTeam\.agent`/.test(SHIP1));
+      assert.ok(!/sereno:red-team`/.test(SHIP) && !/sereno:builder/.test(SHIP), 'no hard-coded red team or builder');
+      assert.ok(!/\bnpm\b|\bnpx\b/.test(SHIP));
+    });
+    test('[4a4] build skill: running record before the Builder, then update to built or error', () => {
+      const B = fs.readFileSync(path.join(PLUGIN, 'skills', 'build', 'SKILL.md'), 'utf8');
+      const run = B.indexOf('--outcome running'), spawn = B.indexOf('## 4. Spawn the Builder'), upd = B.indexOf('--update <attempt> --outcome <built|error>');
+      assert.ok(run > 0 && spawn > run && upd > spawn, 'running, then spawn, then update');
+      assert.ok(/--diagnosis environment/.test(B) && /StopFailure/.test(B));
+    });
+
+    /* exit criterion 6: a full simulated ship writes only under .sereno/ */
+    test('[plugin exit 6] a simulated ship (test, gate, attempts, recovery) changes only .sereno/; the local merge follows', () => {
+      const dir = initRepo('main');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: { command: 'node -e "process.exit(0)"' } }));
+      const br = runS(dir, ['branch', '--task', 'demo']);
+      assert.strictEqual(br.out.from_branch, 'main');
+      assert.strictEqual(runS(dir, ['spec', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', 'main', '--stdin'], '## Goal\nchange a\n').out.ok, true);
+      git(dir, 'switch', '-q', 'task/demo');
+      assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--started-at', 'now']).out.attempt, 1);
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); git(dir, 'commit', '-q', '-am', 'builder work');
+      assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--update', '1', '--outcome', 'built', '--ended-at', 'now']).out.ok, true);
+      assert.strictEqual(runS(dir, ['recovery', '--task', 'demo']).out.next, 'review');
+      const base = git(dir, 'merge-base', 'task/demo', 'main'), head = git(dir, 'rev-parse', 'HEAD');
+      assert.notStrictEqual(base, head);
+      const tr = runS(dir, ['test', '--base', base, '--head', head]);
+      assert.strictEqual(tr.out.passed, true, JSON.stringify(tr.out));
+      const rid = runS(dir, ['run-id', '--head', head]).out.review_run_id;
+      const verdict = '```json\n{"outcome":"pass","findings":[],"context_requests":[]}\n```\n';
+      const g = runS(dir, ['gate', '--stdin', '--task', 'demo', '--spec', '.sereno/specs/demo.md', '--base', base, '--head', head, '--branch', 'task/demo', '--run-id', rid, '--model', 'claude-fable-5-1', '--tests-passed', 'true'], verdict);
+      assert.strictEqual(g.out.outcome, 'pass', JSON.stringify(g.out));
+      assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--update', '1', '--outcome', 'pass', '--review-run-id', rid, '--diagnosis', 'none', '--ended-at', 'now']).out.ok, true);
+      const rec = runS(dir, ['recovery', '--task', 'demo']);
+      assert.strictEqual(rec.out.next, 'merge', JSON.stringify(rec.out));
+      const status = git(dir, 'status', '--porcelain', '--untracked-files=all').split('\n').filter(Boolean);
+      assert.ok(status.length > 0);
+      for (const line of status) assert.ok(/^\?\? \.sereno\//.test(line), 'only .sereno/ changed: ' + line);
+      assert.strictEqual(git(dir, 'rev-parse', 'HEAD'), head, 'the scripts made no commits');
+      assert.strictEqual(git(dir, 'branch', '--show-current'), 'task/demo');
+      assert.strictEqual(git(dir, 'worktree', 'list').split('\n').length, 1, 'the base worktree is gone');
+      git(dir, 'switch', '-q', 'main'); git(dir, 'merge', '-q', '--no-ff', '-m', 'merge task/demo', 'task/demo');
+      assert.strictEqual(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8').replace(/\r\n/g, '\n'), 'two\n');
+      assert.strictEqual(git(dir, 'remote'), '');
+    });
+    test('[plugin exit 3 and 4] attempts driven through sereno.js: environment retry keeps the repair, second defect stops at decide', () => {
+      const dir = initRepo('main');
+      const add = (outcome, diagnosis) => {
+        const n = runS(dir, ['attempt', '--task', 'demo', '--outcome', 'running']).out.attempt;
+        assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--update', String(n), '--outcome', outcome, '--diagnosis', diagnosis, '--ended-at', 'now']).out.ok, true);
+      };
+      add('error', 'environment');
+      let r = runS(dir, ['recovery', '--task', 'demo']).out;
+      assert.deepStrictEqual([r.next, r.repairsUsed, r.infraRetriesUsed], ['retry', 0, 0]);
+      add('error', 'environment');
+      r = runS(dir, ['recovery', '--task', 'demo']).out;
+      assert.deepStrictEqual([r.next, r.repairsUsed, r.infraRetriesUsed], ['retry', 0, 1]);
+      for (const n of [1, 2]) assert.ok(readAttempt(dir, n).diagnosis === 'environment' && readAttempt(dir, n).outcome === 'error');
+      add('block', 'defect');
+      assert.strictEqual(runS(dir, ['recovery', '--task', 'demo']).out.next, 'repair');
+      add('block', 'defect');
+      r = runS(dir, ['recovery', '--task', 'demo']).out;
+      assert.strictEqual(r.next, 'decide'); assert.ok(r.repairsUsed >= 1);
+      assert.strictEqual(fs.readdirSync(path.join(dir, '.sereno', 'attempts')).length, 4, 'no third repair attempt was suggested or created');
+    });
+
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 
