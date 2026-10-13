@@ -42,7 +42,7 @@ function agentModel(name) {
   return m ? m[1] : null;
 }
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -124,28 +124,61 @@ function readSpec(root, specArg) {
   return { rel, hash: rec.sha256(readCapped(real)) };
 }
 
+/** @param {string} task */
+function attemptRe(task) { return new RegExp('^' + task.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&') + '-(\\d+)\\.json$'); }
+
 /**
- * The spec hash pinned by the task's newest attempt (set when /sereno:build opened it).
- * If the spec file on disk now hashes differently, refuse. No attempt, or an attempt with
- * no spec_hash, pins nothing. Returns the pinned hash, or null.
+ * The newest attempt of the task that carries a spec_hash key (set when /sereno:build
+ * opened it). A malformed value is returned as-is, so callers can refuse it.
+ * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task
+ * @returns {{ n: number, hash: unknown } | null}
+ */
+function newestPin(root, fsafe, task) {
+  const re = attemptRe(task);
+  const nums = [];
+  for (const f of fsafe.listDir('.sereno/attempts')) { const m = re.exec(f); if (m) nums[nums.length] = parseInt(m[1], 10); }
+  nums.sort((x, y) => y - x);
+  for (const n of nums) {
+    let j;
+    try {
+      const file = path.join(root, '.sereno', 'attempts', task + '-' + n + '.json');
+      const st = fs.lstatSync(file);
+      if (!st.isFile() || st.size > MAX_INPUT) continue;
+      j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (_e) { continue; }
+    if (j && typeof j === 'object' && j.spec_hash !== undefined && j.spec_hash !== null) return { n, hash: j.spec_hash };
+  }
+  return null;
+}
+
+/**
+ * If the newest pinned attempt's spec hash differs from the spec on disk, refuse. A task
+ * with no pinned attempt pins nothing. A malformed pin is refused, never passed.
  * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {string} specArg
  * @returns {string | null}
  */
 function checkSpecPin(root, fsafe, task, specArg) {
-  const re = new RegExp('^' + task.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&') + '-(\\d+)\\.json$');
-  let best = 0;
-  for (const f of fsafe.listDir('.sereno/attempts')) { const m = re.exec(f); if (m) best = Math.max(best, parseInt(m[1], 10)); }
-  if (!best) return null;
-  let pinned = null;
-  try {
-    const file = path.join(root, '.sereno', 'attempts', task + '-' + best + '.json');
-    const st = fs.lstatSync(file);
-    if (st.isFile() && st.size <= MAX_INPUT) pinned = JSON.parse(fs.readFileSync(file, 'utf8')).spec_hash;
-  } catch (_e) { return null; }
-  if (typeof pinned !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(pinned)) return null;
+  const pin = newestPin(root, fsafe, task);
+  if (!pin) return null;
+  if (typeof pin.hash !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(pin.hash)) throw new SerenoError('spec_changed', 'attempt ' + pin.n + ' has a malformed spec_hash; re-run the build');
   const now = readSpec(root, specArg).hash;
-  if (now !== pinned) throw new SerenoError('spec_changed', 'the spec changed since /sereno:build opened attempt ' + best + '; re-run the build (or restore the spec)');
-  return pinned;
+  if (now !== pin.hash) throw new SerenoError('spec_changed', 'the spec changed since /sereno:build opened attempt ' + pin.n + '; re-run the build (or restore the spec)');
+  return pin.hash;
+}
+
+/**
+ * Without --task, refuse when the current branch is task/<name> and the repo has attempt
+ * records for that task: the spec pin must not be skippable by leaving the flag out.
+ * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string | undefined} branchArg
+ */
+function requireTaskIfRecorded(root, fsafe, branchArg) {
+  const branch = branchArg || gitlib.currentBranch(root);
+  const m = branch && /^task\/(.+)$/.exec(branch);
+  if (!m) return;
+  let t;
+  try { t = rec.checkTask(m[1]); } catch (_e) { return; }
+  const re = attemptRe(t);
+  if (fsafe.listDir('.sereno/attempts').some((f) => re.test(f))) throw new SerenoError('task_required', 'this branch has attempt records for task ' + t + '; pass --task ' + t);
 }
 
 const COMMANDS = {
@@ -169,8 +202,9 @@ const COMMANDS = {
       bool: ['json', 'stdin'],
     });
     if (!!a.file === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --file or --stdin');
-    const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
+    if (str(a, 'task') === undefined) requireTaskIfRecorded(root, fsafe, str(a, 'branch'));
+    const task = rec.checkTask(str(a, 'task'));
     const base = gitlib.resolveCommit(root, str(a, 'base') || '');
     const head = gitlib.resolveCommit(root, str(a, 'head') || '');
     if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
@@ -242,10 +276,11 @@ const COMMANDS = {
     if (shArg !== undefined && !/^sha256:[0-9a-f]{64}$/.test(shArg)) throw new SerenoError('invalid_arg', '--spec-hash must be sha256:<64 hex>');
     if (shArg !== undefined && str(a, 'spec') !== undefined) throw new SerenoError('usage', 'give --spec or --spec-hash, not both');
     const specHash = shArg !== undefined ? shArg : (str(a, 'spec') !== undefined ? readSpec(root, /** @type {string} */ (str(a, 'spec'))).hash : null);
+    if (specHash === null && newestPin(root, fsafe, task)) throw new SerenoError('spec_required', 'an earlier attempt of this task pinned a spec; pass --spec .sereno/specs/' + task + '.md');
     const agent = str(a, 'agent') !== undefined ? str(a, 'agent') : str(a, 'agent-id');
     if (agent !== undefined) matchId(agent, '--agent', /^[A-Za-z0-9._:-]{1,128}$/);
 
-    const re = new RegExp('^' + task.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&') + '-(\\d+)\\.json$');
+    const re = attemptRe(task);
     const existing = fsafe.listDir('.sereno/attempts');
     let n = 1;
     for (const f of existing) {
@@ -290,7 +325,7 @@ const COMMANDS = {
     if (str(a, 'task') !== undefined) {
       const t = rec.checkTask(str(a, 'task'));
       checkSpecPin(root, fsafe, t, str(a, 'spec') || '.sereno/specs/' + t + '.md');
-    }
+    } else requireTaskIfRecorded(root, fsafe, undefined);
     testrun.sweepStale(root);
     const base = gitlib.resolveCommit(root, str(a, 'base') || '');
     const head = gitlib.resolveCommit(root, str(a, 'head') || '');

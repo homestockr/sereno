@@ -40,10 +40,13 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" config
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" test --task <task> --base <base> --head <head>
 ```
 
-Run it with a Bash tool `timeout` of at least 2 x `tests.timeoutSec` + 60 seconds, in
-milliseconds (the tool's maximum is 600000). If the suite may take longer than that, set
-`tests.timeoutSec` lower in `.sereno/pipeline.json` first, so the script's own timeout
-fires before the tool's. A refusal with `code: "spec_changed"` means the spec was edited
+Run it with the Bash tool's `run_in_background: true`, not in the foreground (the foreground
+cap is 600 s and a suite may need up to `tests.timeoutSec`, default 900, per suite). Wait for the
+completion notice, then read the output file it names: the one JSON line is the result. Do not
+poll and do not re-run it meanwhile. To shorten the limit for yourself, a personal override goes
+in `~/.sereno/pipeline.json`; never edit the tracked `.sereno/pipeline.json` for it.
+Always pass `--task <task>` to `test` and `gate`; without it the script refuses with
+`task_required` once the task has attempt records. A refusal with `code: "spec_changed"` means the spec was edited
 after `/sereno:build`: stop and say so.
 
 The result has `passed`, `diagnosis` (`none`, `environment`, `defect`, `unknown_baseline`),
@@ -136,8 +139,9 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" recovery --task <task>
 
 The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `next`:
 
-- **`retry`** or **`repair`**: start a new attempt exactly as `/sereno:build` does
-  (write the `running` record first, then update it), spawning the SAME Builder agent
+- **`retry`** or **`repair`**: start a new attempt (write the `running` record first, then update it):
+  `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start> --spec .sereno/specs/<task>.md`
+  (without `--spec` the script refuses with `spec_required`), then the same update as `/sereno:build`, spawning the SAME Builder agent
   by name that the spec names. For `repair`, give it the gate's findings (file, line,
   summary) and tell it to fix only those; for `retry` after a test failure, give it the
   failing test names. Then go back to step 1 with the new head. A repair never changes

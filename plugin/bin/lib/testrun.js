@@ -56,10 +56,11 @@ function parseFailures(output) {
     let name = null;
     let m = /^\s*not ok\s+\d+\s*-?\s*(.*)$/.exec(raw);
     if (m) { if (!/#\s*(SKIP|TODO)\b/i.test(m[1])) name = m[1]; }
-    else if ((m = /^\s*(?:FAIL|✗|✕)\s+(.+)$/.exec(raw))) name = m[1];
+    else if ((m = /^\s*(?:FAIL|✗|✕|✖)\s+(.+)$/.exec(raw))) name = m[1];
     else if ((m = /^\s*\d+\)\s+(.+)$/.exec(raw))) name = m[1];
     if (name === null) continue;
-    name = name.replace(/\s+/g, ' ').trim().slice(0, 200);
+    name = name.replace(/\s+/g, ' ').trim().replace(/\s*\(\d+(?:\.\d+)?\s*m?s\)$/, '').slice(0, 200);
+    if (/^failing tests?\b.*:$/i.test(name)) continue; // a summary header, not a test
     if (name && seen.size < MAX_NAMES) seen.add(name);
   }
   return Array.from(seen);
@@ -224,7 +225,7 @@ const STALE_MS = 60 * 60 * 1000;
 
 /**
  * Remove sereno-base-* temp dirs this plugin made (marker file inside) that are older
- * than maxAgeMs, left behind by an interrupted run. A node_modules junction is removed
+ * than maxAgeMs, left behind by an interrupted run. A node_modules link is removed
  * first and never followed; if it cannot be removed the dir is left alone.
  * @param {string} root @param {number} [maxAgeMs] @returns {number} dirs removed
  */
@@ -246,7 +247,9 @@ function sweepStale(root, maxAgeMs) {
       const link = path.join(wt, 'node_modules');
       let l = null;
       try { l = fs.lstatSync(link); } catch (_e) { l = null; }
-      if (l) {
+      // Only a link (a junction reports as a symlink on Windows) is unlinked; a real directory
+      // is removed with the rest by rmSync, which does not follow links.
+      if (l && l.isSymbolicLink()) {
         try { fs.unlinkSync(link); } catch (_e) { try { fs.rmdirSync(link); } catch (_e2) { /* checked below */ } }
         try { fs.lstatSync(link); continue; } catch (_e) { /* gone */ }
       }
@@ -379,7 +382,7 @@ async function runTests(o) {
 
   /** @type {string[]} */ let newFailures = [];
   /** @type {string[]} */ let flaky = [];
-  let passed = true, diagnosis = 'none', baseFailing = false;
+  let passed = true, diagnosis = 'none', baseFailing = false, incompleteRuns = false;
   /** @type {string | null} */ let note = null;
   const timedOut = head.timedOut || baseSuite.timedOut;
   const baseFailures = !baseUsable ? [] : baseSuite.failures.slice();
@@ -391,30 +394,31 @@ async function runTests(o) {
   } else if (headFailed) {
     if (mode === 'names') {
       const known = new Set(baseSuite.failures);
-      const candidates = head.failures.filter((n) => !known.has(n));
-      if (!candidates.length) {
+      const firstNew = head.failures.filter((n) => !known.has(n));
+      if (!firstNew.length) {
         const c = headCompletion(head, baseSuite);
         if (c !== 'complete') {
           passed = false; diagnosis = 'unknown_baseline';
           note = c === 'unknown' ? 'cannot confirm the head suite completed' : 'head suite did not complete';
         }
-      }
-      if (candidates.length) {
+      } else {
+        // Re-run the WHOLE head suite once. Only a clean, complete re-run excuses the first
+        // run's new failures as flaky; a failing re-run is never passed.
         const again = await runSuite(command, root, timeoutSec);
         addLog('head re-run', again);
         if (again.timedOut || again.startFailed) {
-          newFailures = candidates;
+          newFailures = firstNew;
+        } else if (again.exitCode === 0) {
+          if (headCompletion(again, baseSuite) === 'incomplete') {
+            passed = false; diagnosis = 'unknown_baseline'; note = 'head suite did not complete';
+          } else {
+            flaky = firstNew;
+          }
         } else {
-          const still = new Set(again.failures);
-          newFailures = candidates.filter((n) => still.has(n) || (again.exitCode !== 0 && again.failures.length === 0));
-          flaky = candidates.filter((n) => !newFailures.includes(n));
-          // "Flaky" is only believable if both head runs reached the end of their suite.
-          if (!newFailures.length) {
-            const okFirst = headCompletion(head, baseSuite) === 'complete';
-            const okAgain = again.exitCode === 0 || headCompletion(again, baseSuite) === 'complete';
-            if (!okFirst || !okAgain) {
-              passed = false; diagnosis = 'unknown_baseline'; note = 'head suite did not complete'; flaky = [];
-            }
+          newFailures = firstNew.concat(again.failures.filter((n) => !known.has(n) && !firstNew.includes(n)));
+          // Nothing is believable about a run that did not reach its end: needs a decision.
+          if (headCompletion(head, baseSuite) === 'incomplete' || headCompletion(again, baseSuite) === 'incomplete') {
+            passed = false; diagnosis = 'unknown_baseline'; note = 'head suite did not complete'; incompleteRuns = true;
           }
         }
       }
@@ -427,7 +431,7 @@ async function runTests(o) {
       baseFailing = true; passed = false; diagnosis = 'unknown_baseline';
       note = 'exit-code mode: the suite fails at base too, so the baseline says nothing about this failure; needs a decision';
     }
-    if (newFailures.length) { passed = false; diagnosis = 'defect'; }
+    if (newFailures.length && !incompleteRuns) { passed = false; diagnosis = 'defect'; }
   }
 
   const logRel = '.sereno/cache/test-' + o.runId + '.log';

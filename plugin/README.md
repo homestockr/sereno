@@ -112,7 +112,7 @@ invalid file stops the pipeline and lists the errors.
 | `tests.command` | `null` | Test command. `null` uses `npm test` when `package.json` has a `test` script. Otherwise `/sereno:ship` asks. |
 | `tests.setup` | `null` | Command run in the temporary base worktree before the base suite. |
 | `tests.parallel` | `false` | `true` runs base and head together. Leave it `false` if the suites share ports or temp files. |
-| `tests.timeoutSec` | `900` | Time limit for each suite run, in seconds. |
+| `tests.timeoutSec` | `900` | Time limit for each suite run, in seconds. `/sereno:ship` runs the tests in the background, so this can exceed the Bash tool's 600 s foreground cap. For a personal override use `~/.sereno/pipeline.json`, not the tracked file. |
 
 A minimal example:
 
@@ -173,6 +173,9 @@ skills) runs at the repo root and ignores only the generated dirs `.sereno/attem
 tracked `.sereno/pipeline.json` or `.sereno/specs/` blocks a run. `/sereno:build` pins the spec's sha256 in the attempt; `test` and `gate` refuse with `spec_changed` if the spec differs.
 
 **Recovery and tests.** The head suite is only trusted to have finished if its TAP output holds up: no repeated test numbers, and a plan line printed last is the last TAP line with no results after it. A test that deliberately prints fake TAP lines can still mislead the count; the red team reviews the diff for that. `sereno.js test` also removes stale `sereno-base-*` temp dirs (older than an hour, made by this plugin) before it starts.
+Failing test names are read from TAP (`not ok`), `FAIL`, and the markers `✗`, `✕` and `✖`, with a trailing duration such as `(3 ms)` removed. For `node --test`, `--test-reporter=tap` is the most precise option (for example `"command": "node --test --test-reporter=tap"`).
+If you delete tests while a base failure persists, the head's result count falls below the base's and `/sereno:ship` stops at "Review needs a decision" (never a wrong pass). The same happens with a test command that chains two TAP producers, because the repeated test numbers are not trusted as evidence.
+Once any attempt of a task has pinned a spec, creating another attempt needs `--spec` (`spec_required`), and `test` and `gate` need `--task` on a task branch (`task_required`).
 The Builder agents are told to stage only the files they changed and never `.sereno/`.
 
 ## Privacy and trust
