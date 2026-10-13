@@ -6,6 +6,10 @@ disable-model-invocation: true
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
+## How to run commands
+
+Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
+
 Write or refresh the Sereno brief for the branch I am on. Sereno reads this file to show
 where the project stands. Arguments: `$ARGUMENTS` (an optional task name).
 

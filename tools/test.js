@@ -9416,6 +9416,22 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(g.out.code, 'task_required'); assert.strictEqual(g.status, 19);
     });
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+    /* ---- Phase 4a: bash tool rule ---- */
+    {
+      const skillsDir = path.join(ROOT, 'plugin', 'skills');
+      for (const d of fs.readdirSync(skillsDir)) {
+        test('[4a-bash] skill ' + d + ': Bash-tool rule present, allowed-tools has Bash and not PowerShell', () => {
+          const t = fs.readFileSync(path.join(skillsDir, d, 'SKILL.md'), 'utf8');
+          const m = t.match(/^allowed-tools:\s*(.*)$/m);
+          assert.ok(m, 'allowed-tools');
+          const tools = m[1].split(',').map((s) => s.trim());
+          assert.ok(tools.includes('Bash'));
+          assert.ok(!tools.some((s) => /powershell/i.test(s)));
+          assert.ok(/## How to run commands/.test(t));
+          assert.ok(/with the Bash tool, never PowerShell or cmd/.test(t));
+        });
+      }
+    }
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

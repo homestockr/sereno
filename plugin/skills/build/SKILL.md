@@ -6,6 +6,10 @@ disable-model-invocation: true
 allowed-tools: Bash, Read, Agent
 ---
 
+## How to run commands
+
+Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
+
 You are the architect. You run the Builder the spec names and record what happened.
 You do not write the feature code yourself.
 

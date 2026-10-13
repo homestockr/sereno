@@ -28,7 +28,9 @@ claude plugin disable sereno
 claude plugin uninstall sereno
 ```
 
-Requirements: Node 18 or newer and git, both on PATH. To check your setup, run
+Requirements: Node 18 or newer and git, both on PATH. On Windows you also need Git for
+Windows, which provides Git Bash; Claude Code's Bash tool runs on it. The plugin's commands
+are bash (quoting, heredocs), and the skills run them only with the Bash tool. To check your setup, run
 `node "<plugin>/bin/sereno.js" doctor` from the repo you work in. It prints one JSON
 object with a check per item (Node, git, the repo, `pipeline.json`, the test command, the
 `.sereno/` layout, and the red-team agents) and exits non-zero if any check fails.

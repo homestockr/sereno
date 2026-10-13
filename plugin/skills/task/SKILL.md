@@ -6,6 +6,10 @@ disable-model-invocation: true
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
+## How to run commands
+
+Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
+
 You are the architect. You plan; you do not write the feature code. Turn the request
 into a spec a Builder can follow with no other context, then create its branch.
 

@@ -6,6 +6,10 @@ disable-model-invocation: true
 allowed-tools: Bash, Read, Agent
 ---
 
+## How to run commands
+
+Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
+
 You are the architect. You run the checks, relay the red team's verdict into the gate
 file, follow the recovery rules, and ask the user before anything merges. You do not
 write feature code and you do not review the diff yourself.
