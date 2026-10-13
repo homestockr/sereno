@@ -241,3 +241,24 @@ Found and fixed before release:
 - The scribe's Next line once went beyond the spec.
 - Attempt records left `agent_id` and `project_id` empty; the default run's gate left
   `model` and `session_id` empty.
+
+### Re-run on the final code (architect, 2026-10-13)
+
+`default` preset, task `square`, Claude Code 2.1.296, throwaway repo. Three real
+permission problems surfaced and were fixed before it went through:
+- `echo … | node … gate` needed its own permission. Fix: skills pass input without pipes.
+- The model chose the PowerShell tool on Windows. Fix: skills require the Bash tool.
+- Claude Code's Bash tool refuses any command containing `{"`, so JSON can't sit on a
+  command line. Fix: the verdict and spec body go through one fixed file under
+  `.sereno/cache/`, pre-allowed by an `Edit(...)` rule (Claude Code matches path rules
+  only against Edit, which covers Write), read by `sereno.js` and deleted after use.
+
+Final run: tests passed against the base worktree, then the red team (Fable) passed with
+0 findings. The gate recorded model, agent_id, session_id and spec_hash; the attempt
+recorded `pass` with agent_id, project_id and the pinned spec_hash. The merge `63973d0`
+ran after "yes", the briefs were refreshed, the verdict file was deleted, and no worktree
+was left.
+
+Not verifiable headless: in an untrusted folder Claude Code ignored the skill's
+`allowed-tools` path rule, so the cache write was allowed on the command line. In a
+trusted repo you see at most one prompt for that file.
