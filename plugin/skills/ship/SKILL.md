@@ -114,7 +114,8 @@ non-low finding has a kind of `defect`, `bug`, `security`, `privacy`, `test`,
 ## 5. Recovery
 
 Ask `sereno:scribe` to refresh the brief for this branch (after every gate run and every
-Builder failure). Then ask the rules what is next:
+Builder failure). Tell it the plugin root (`${CLAUDE_PLUGIN_ROOT}`) and to pass the version it read as
+`--expect-version`, as `/sereno:brief` does. Then ask the rules what is next:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" recovery --task <task>

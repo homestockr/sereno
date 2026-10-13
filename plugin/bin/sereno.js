@@ -12,7 +12,7 @@
  * Nothing else is written to stdout. Node built-ins only. The only files it
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
- * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, context, recovery.
+ * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, context, recovery, brief, doctor.
  */
 
 const fs = require('node:fs');
@@ -26,8 +26,10 @@ const testrun = require('./lib/testrun.js');
 const speclib = require('./lib/spec.js');
 const contextlib = require('./lib/context.js');
 const recovery = require('./lib/recovery.js');
+const briefLib = require('./lib/brief.js');
+const doctorLib = require('./lib/doctor.js');
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, record_final: 12, not_found: 13, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -280,6 +282,21 @@ const COMMANDS = {
     return recovery.decide({ root, task, config, listAttempts: () => fsafe.listDir('.sereno/attempts') });
   },
 
+  brief(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['branch', 'now', 'next', 'blocked', 'task', 'expect-version'], bool: ['json'] });
+    const branch = str(a, 'branch'), now = str(a, 'now'), next = str(a, 'next');
+    if (branch === undefined || now === undefined || next === undefined) throw new SerenoError('usage', 'brief needs --branch, --now, --next and --blocked');
+    const ev = str(a, 'expect-version');
+    if (ev !== undefined && !/^\d{1,9}$/.test(ev)) throw new SerenoError('invalid_arg', '--expect-version must be a non-negative integer');
+    const { root, fsafe } = needRepo();
+    return briefLib.writeBrief({ root, fsafe, branch, now, next, blocked: str(a, 'blocked') || '', task: str(a, 'task'), expectVersion: ev === undefined ? undefined : Number(ev) });
+  },
+
+  doctor(/** @type {string[]} */ argv) {
+    parseArgs(argv, { value: [], bool: ['json'] });
+    return doctorLib.runDoctor(process.cwd());
+  },
+
   paths(/** @type {string[]} */ argv) {
     parseArgs(argv, { value: [], bool: ['json'] });
     const top = gitlib.toplevel(process.cwd());
@@ -369,7 +386,8 @@ async function main() {
       throw new SerenoError('usage', 'usage: sereno.js <' + Object.keys(COMMANDS).join('|') + '> [--json] ...');
     }
     const result = await /** @type {Record<string, (a: string[]) => object | Promise<object>>} */ (COMMANDS)[cmd](rest);
-    finish(Object.assign({ ok: true }, result), 0);
+    const out = Object.assign({ ok: true }, result);
+    finish(out, out.ok === false ? 1 : 0);
   } catch (e) {
     if (e instanceof SerenoError) {
       finish(Object.assign({ ok: false, error: e.message, code: e.code }, e.extra), /** @type {Record<string, number>} */ (EXIT)[e.code] || 1);

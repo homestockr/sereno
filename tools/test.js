@@ -8308,6 +8308,191 @@ test('missing rate_limits degrades instead of throwing', () => {
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 
+  /* ---- Phase 4a step 5: brief and doctor ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const { spawnSync } = require('node:child_process');
+    const appBriefs = require('../src/briefs.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a5-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const runS = (cwd, args) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, stderr: r.stderr, out: JSON.parse(r.stdout) };
+    };
+    const initRepo = (branch) => {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', branch || 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', 'a.txt'); git(dir, 'commit', '-q', '-m', 'init');
+      return dir;
+    };
+    const brief = (dir, branch, extra) => runS(dir, ['brief', '--branch', branch, '--now', 'Wiring the button', '--next', 'Add tests', '--blocked', 'None'].concat(extra || []));
+    const briefFile = (dir, branch) => path.join(dir, '.sereno', 'briefs', encodeURIComponent(branch) + '.md');
+
+    test('[4a5] brief: written file parses with the app parseBrief, identical fields', () => {
+      const dir = initRepo('feat/x');
+      const r = brief(dir, 'feat/x', ['--task', 'add-export']);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+      assert.strictEqual(r.out.path, '.sereno/briefs/feat%2Fx.md');
+      assert.strictEqual(r.out.version, 1);
+      const head = git(dir, 'rev-parse', 'HEAD');
+      assert.strictEqual(r.out.source_commit, head);
+      const text = fs.readFileSync(briefFile(dir, 'feat/x'), 'utf8');
+      const b = appBriefs.parseBrief(text);
+      assert.ok(b, 'app parser accepts it');
+      assert.strictEqual(b.branch, 'feat/x');
+      assert.strictEqual(b.version, 1);
+      assert.strictEqual(b.sourceCommit, head);
+      assert.strictEqual(b.task, 'add-export');
+      assert.strictEqual(b.worktree, dir.replace(/\\/g, '/'));
+      assert.match(b.generatedAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+      assert.deepStrictEqual([b.now, b.next, b.blocked], ['Wiring the button', 'Add tests', 'None']);
+      assert.strictEqual(appBriefs.decodeBriefName(path.basename(briefFile(dir, 'feat/x'))), 'feat/x');
+    });
+    test('[4a5] brief: a brief in the app template format is read by the plugin version check', () => {
+      const dir = initRepo('feat/x');
+      fs.mkdirSync(path.join(dir, '.sereno', 'briefs'), { recursive: true });
+      const tpl = ['---', 'branch: feat/x', 'worktree: C:/Users/me/code/app', 'version: 3', 'source_commit: 0123456789abcdef0123456789abcdef01234567',
+        'task: add-export-button', 'generated_at: 2026-10-11T14:05:00Z', '---', 'Now: Wiring it.', 'Next: Tests.', 'Blocked: None', ''].join('\n');
+      fs.writeFileSync(briefFile(dir, 'feat/x'), tpl);
+      assert.strictEqual(appBriefs.parseBrief(tpl).version, 3);
+      const r = brief(dir, 'feat/x', ['--expect-version', '3']);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out)); assert.strictEqual(r.out.version, 4);
+      assert.strictEqual(appBriefs.parseBrief(fs.readFileSync(briefFile(dir, 'feat/x'), 'utf8')).version, 4);
+    });
+    test('[4a5] brief: version bumps; version_conflict writes nothing and exits 14', () => {
+      const dir = initRepo('main');
+      assert.strictEqual(brief(dir, 'main', ['--expect-version', '0']).out.version, 1);
+      assert.strictEqual(brief(dir, 'main', ['--expect-version', '1']).out.version, 2);
+      const before = fs.readFileSync(briefFile(dir, 'main'), 'utf8');
+      const r = brief(dir, 'main', ['--expect-version', '1']);
+      assert.deepStrictEqual([r.out.ok, r.out.code, r.out.current, r.status], [false, 'version_conflict', 2, 14]);
+      assert.strictEqual(fs.readFileSync(briefFile(dir, 'main'), 'utf8'), before);
+      assert.deepStrictEqual(fs.readdirSync(path.join(dir, '.sereno', 'briefs')), ['main.md'], 'no tmp file left');
+      assert.strictEqual(brief(dir, 'main').out.version, 3, 'no --expect-version: just bumps');
+    });
+    test('[4a5] brief: 120-char cap, control and bidi stripped, empty blocked is None', () => {
+      const dir = initRepo('main');
+      const long = 'x'.repeat(300);
+      const r = runS(dir, ['brief', '--branch', 'main', '--now', long, '--next', 'a\u202eb\u0007c\u200bd\u2066e', '--blocked', '   ']);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+      const text = fs.readFileSync(briefFile(dir, 'main'), 'utf8');
+      const lines = text.split('\n');
+      const now = lines.find((l) => l.startsWith('Now: ')).slice(5);
+      assert.strictEqual(now.length, 120); assert.ok(now.endsWith('\u2026'));
+      assert.strictEqual(lines.find((l) => l.startsWith('Next: ')), 'Next: abcde');
+      assert.strictEqual(lines.find((l) => l.startsWith('Blocked: ')), 'Blocked: None');
+      assert.ok(!/[\u202e\u0007\u200b\u2066]/.test(text));
+      const b = appBriefs.parseBrief(text); assert.ok(b && b.now.length === 120);
+    });
+    test('[4a5] brief: invalid branch and detached HEAD are refused; nothing is written', () => {
+      const dir = initRepo('main');
+      for (const bad of ['-x', 'a..b', 'a b', 'x/', '@', 'a\u202eb']) {
+        const r = brief(dir, bad);
+        assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'invalid_arg'], JSON.stringify(bad));
+      }
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno')));
+      git(dir, 'checkout', '-q', '--detach');
+      const r = brief(dir, 'main');
+      assert.deepStrictEqual([r.out.ok, r.out.code, r.status], [false, 'detached_head', 15]);
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno')));
+      assert.strictEqual(runS(dir, ['brief', '--branch', 'main', '--now', 'x']).out.code, 'usage');
+    });
+
+    test('[4a5] brief: a branch other than the checked-out one is refused (branch_mismatch, exit 16), nothing written', () => {
+      const dir = initRepo('main');
+      git(dir, 'branch', 'other');
+      const r = brief(dir, 'other');
+      assert.deepStrictEqual([r.out.ok, r.out.code, r.status], [false, 'branch_mismatch', 16]);
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno')));
+    });
+
+    const doctor = (dir) => runS(dir, ['doctor']);
+    const byName = (r, n) => r.out.checks.find((c) => c.name === n);
+    test('[4a5] doctor: all ok in a repo with a test command', () => {
+      const dir = initRepo('main');
+      fs.mkdirSync(path.join(dir, '.sereno'));
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: { command: 'node t.js' } }));
+      const r = doctor(dir);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out)); assert.strictEqual(r.status, 0);
+      assert.deepStrictEqual(r.out.checks.map((c) => c.name), ['node', 'git', 'git repo', 'pipeline.json', 'test command', '.sereno writable', 'red-team agents']);
+      assert.ok(r.out.checks.every((c) => c.ok && typeof c.detail === 'string'));
+      assert.match(byName(r, 'pipeline.json').detail, /sha256:[0-9a-f]{64}/);
+      assert.match(byName(r, 'test command').detail, /tests\.command: node t\.js/);
+      assert.deepStrictEqual(fs.readdirSync(path.join(dir, '.sereno', 'cache')), [], 'probe file removed');
+    });
+    test('[4a5] doctor: package.json test script counts; the npm default does not', () => {
+      const dir = initRepo('main');
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }));
+      let r = doctor(dir);
+      assert.deepStrictEqual([r.out.ok, byName(r, 'test command').ok, r.status], [false, false, 1]);
+      assert.strictEqual(r.out.checks.filter((c) => !c.ok).length, 1, 'only the test command fails');
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node t.js' } }));
+      r = doctor(dir);
+      assert.strictEqual(r.out.ok, true); assert.match(byName(r, 'test command').detail, /package\.json/);
+    });
+    test('[4a5] doctor: invalid config and a missing repo are reported without throwing', () => {
+      const dir = initRepo('main');
+      fs.mkdirSync(path.join(dir, '.sereno'));
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), '{"preset":"nope"');
+      let r = doctor(dir);
+      assert.strictEqual(r.out.ok, false);
+      assert.strictEqual(byName(r, 'pipeline.json').ok, false); assert.match(byName(r, 'pipeline.json').detail, /JSON|invalid/i);
+      assert.strictEqual(byName(r, 'test command').ok, false);
+      assert.strictEqual(byName(r, 'red-team agents').ok, false);
+      assert.strictEqual(byName(r, 'git repo').ok, true);
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { redTeam: { enabled: 'yes' } } }));
+      r = doctor(dir);
+      assert.strictEqual(byName(r, 'pipeline.json').ok, false); assert.match(byName(r, 'pipeline.json').detail, /enabled/);
+      const bare = mk();
+      r = doctor(bare);
+      assert.strictEqual(r.out.ok, false);
+      assert.strictEqual(byName(r, 'git repo').ok, false); assert.strictEqual(byName(r, '.sereno writable').ok, false);
+      assert.ok(!fs.existsSync(path.join(bare, '.sereno')));
+      assert.ok(!/at .*\.js:\d+/.test(JSON.stringify(r.out)) && r.stderr === '');
+    });
+    test('[4a5] doctor: a red-team agent name with no file under plugin/agents is reported', () => {
+      const dir = initRepo('main');
+      fs.mkdirSync(path.join(dir, '.sereno'));
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: { command: 'x' } }));
+      const agentFile = path.join(PLUGIN, 'agents', 'red-team-lean.md');
+      assert.ok(fs.existsSync(agentFile));
+      const { runDoctor } = require('../plugin/bin/lib/doctor.js');
+      const realExists = fs.existsSync;
+      fs.existsSync = (p) => (String(p) === agentFile ? false : realExists(p));
+      let d;
+      try { d = runDoctor(dir); } finally { fs.existsSync = realExists; }
+      const c = d.checks.find((x) => x.name === 'red-team agents');
+      assert.deepStrictEqual([c.ok, d.ok], [false, false]); assert.match(c.detail, /red-team-lean/);
+    });
+    test('[4a5] lint: brief skill and scribe agent use only existing subcommands; no npm/npx; plugin needs nothing outside plugin/', () => {
+      const sub = (() => {
+        const r = spawnSync(process.execPath, [SERENO, 'no-such-command'], { encoding: 'utf8' });
+        return /<([a-z|-]+)>/.exec(JSON.parse(r.stdout).error)[1].split('|');
+      })();
+      assert.ok(sub.includes('brief') && sub.includes('doctor'));
+      const skill = fs.readFileSync(path.join(PLUGIN, 'skills', 'brief', 'SKILL.md'), 'utf8');
+      const scribe = fs.readFileSync(path.join(PLUGIN, 'agents', 'scribe.md'), 'utf8');
+      assert.match(skill, /^---\nname: brief\n/); assert.match(skill, /disable-model-invocation: true/);
+      assert.match(skill, /brief --branch/); assert.match(skill, /--expect-version/); assert.match(skill, /version_conflict/);
+      assert.match(scribe, /`brief` subcommand/); assert.match(scribe, /--expect-version/);
+      for (const [n, t] of [['skill', skill], ['scribe', scribe]]) {
+        assert.ok(!/\bnpm\b|\bnpx\b/.test(t), n + ' uses npm/npx');
+        for (const m of t.matchAll(/sereno\.js"? +([A-Za-z-]+)/g)) assert.ok(sub.includes(m[1]), n + ' calls unknown subcommand ' + m[1]);
+      }
+      for (const f of ['brief.js', 'doctor.js']) {
+        const src = fs.readFileSync(path.join(PLUGIN, 'bin', 'lib', f), 'utf8');
+        for (const m of src.matchAll(/require\('([^']+)'\)/g)) assert.ok(m[1].startsWith('node:') || (m[1].startsWith('./') && !m[1].startsWith('../')), f + ' requires ' + m[1]);
+      }
+    });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
