@@ -99,10 +99,13 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" context --head <head> <file> <file>
 Extract the single fenced `json` block from the red team's reply and pass it on stdin.
 If there is no such block, the outcome is `error`: send `{"outcome":"error"}`.
 
+Pass the JSON with a quoted heredoc so the command starts with `node` (an `echo` or `printf`
+pipe, a temp file, or the Write tool each cost an extra permission prompt; never use them):
+
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --stdin --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true <<'VERDICT'
-<the json block>
-VERDICT
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --stdin --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true <<'SERENO_VERDICT'
+<the single JSON object>
+SERENO_VERDICT
 ```
 
 The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.

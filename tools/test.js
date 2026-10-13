@@ -8766,6 +8766,60 @@ test('missing rate_limits degrades instead of throwing', () => {
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 
+  /* ---- Phase 4a: heredoc stdin ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const { spawnSync } = require('node:child_process');
+    const skills = fs.readdirSync(path.join(PLUGIN, 'skills')).map((n) => [n, fs.readFileSync(path.join(PLUGIN, 'skills', n, 'SKILL.md'), 'utf8')]);
+    const fenced = (t) => { const out = []; let on = false; for (const l of t.split('\n')) { if (/^\s*```/.test(l)) { on = !on; continue; } if (on) out.push(l); } return out; };
+    test('[4a-heredoc] every --stdin invocation is a quoted heredoc starting with node', () => {
+      let seen = 0;
+      for (const [n, t] of skills) {
+        const lines = fenced(t);
+        for (let i = 0; i < lines.length; i++) {
+          const l = lines[i];
+          if (!/sereno\.js/.test(l) || !/--stdin/.test(l)) continue;
+          seen++;
+          assert.ok(l.startsWith('node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js"'), n + ': ' + l);
+          const m = l.match(/<<'(SERENO_[A-Z_]+)'\s*$/);
+          assert.ok(m, n + ': no quoted heredoc: ' + l);
+          assert.ok(lines.slice(i + 1).some((x) => x === m[1]), n + ': heredoc never closed');
+        }
+        for (const l of lines) {
+          assert.ok(!/^\s*(echo|printf|cat)\b/.test(l) && !/\|\s*node\b/.test(l), n + ': pipe into node: ' + l);
+          assert.ok(!/\bWrite\b.*\.sereno\//.test(l), n + ': Write under .sereno: ' + l);
+        }
+        assert.ok(!/\b(use|call|with)\b[^.\n]*\bWrite tool\b[^.\n]*\.sereno\//i.test(t), n + ': tells model to Write under .sereno');
+      }
+      assert.ok(seen >= 2, 'found the gate and spec invocations');
+      const ship = skills.find((s) => s[0] === 'ship')[1];
+      assert.match(ship, /gate --stdin[^\n]*<<'SERENO_VERDICT'/);
+      assert.match(ship, /never use them/);
+    });
+    test('[4a-heredoc] gate and spec read a bash heredoc body', () => {
+      const probe = spawnSync('bash', ['-c', 'true'], { encoding: 'utf8' });
+      if (probe.error || probe.status !== 0) return; // no bash on this machine
+      const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hd-')));
+      try {
+        const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+        fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
+        const head = g('rev-parse', 'HEAD');
+        const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hdh-')));
+        const env = Object.assign({}, process.env, { HOME: home, USERPROFILE: home });
+        const sh = (cmd) => { const r = spawnSync('bash', ['-c', cmd], { cwd: dir, encoding: 'utf8', env }); return JSON.parse(r.stdout); };
+        const node = '"' + process.execPath.replace(/\\/g, '/') + '" "' + SERENO.replace(/\\/g, '/') + '"';
+        const sp = sh(node + " spec --task hd --builder sonnet --kind feature --reason r --stdin <<'SERENO_SPEC'\n## Goal\nchange a\nSERENO_SPEC");
+        assert.strictEqual(sp.ok, true);
+        assert.match(fs.readFileSync(path.join(dir, '.sereno', 'specs', 'hd.md'), 'utf8'), /change a/);
+        const gt = sh(node + ' gate --stdin --task hd --base ' + head + ' --head ' + head + " --branch main --tests-passed true <<'SERENO_VERDICT'\n{\"outcome\":\"pass\",\"findings\":[]}\nSERENO_VERDICT");
+        assert.strictEqual(gt.outcome, 'pass');
+        fs.rmSync(home, { recursive: true, force: true });
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+
   /* ---- Phase 4a: red-team fixes ---- */
   {
     const PLUGIN = path.join(ROOT, 'plugin');

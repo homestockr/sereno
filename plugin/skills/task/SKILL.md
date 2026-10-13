@@ -53,10 +53,12 @@ the spec: skip this step.
 ## 4. Write the spec
 
 Pass the acceptance criteria (markdown, no front matter) on stdin. Never write the spec
-file by hand; this command writes the front matter and bumps `spec_revision`.
+file by hand; this command writes the front matter and bumps `spec_revision`. Use the
+quoted heredoc below so the command starts with `node`; never `echo`/`printf` into it or
+use a temp file or the Write tool.
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|sonnet|opus> --kind <mechanical|feature|fix|refactor> --reason "<why this Builder>" --stdin <<'SPEC'
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|sonnet|opus> --kind <mechanical|feature|fix|refactor> --reason "<why this Builder>" --stdin <<'SERENO_SPEC'
 ## Goal
 ...
 ## Acceptance criteria
@@ -65,7 +67,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|s
 - ...
 ## Tests
 - ...
-SPEC
+SERENO_SPEC
 ```
 
 Add `--base-branch <from_branch>` when you just created the branch (a spec revision keeps
