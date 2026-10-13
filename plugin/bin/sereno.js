@@ -12,7 +12,7 @@
  * Nothing else is written to stdout. Node built-ins only. The only files it
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
- * Subcommands (step 1): config, run-id, gate, attempt, paths.
+ * Subcommands: config, run-id, gate, attempt, paths, test.
  */
 
 const fs = require('node:fs');
@@ -22,8 +22,9 @@ const { SerenoError, createSafeFs } = require('./lib/fsafe.js');
 const gitlib = require('./lib/git.js');
 const { loadConfig } = require('./lib/config.js');
 const rec = require('./lib/records.js');
+const testrun = require('./lib/testrun.js');
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -224,6 +225,17 @@ const COMMANDS = {
     throw new SerenoError('exists', 'could not allocate an attempt number');
   },
 
+  async test(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['base', 'head'], bool: ['json'] });
+    const { root, fsafe } = needRepo();
+    const base = gitlib.resolveCommit(root, str(a, 'base') || '');
+    const head = gitlib.resolveCommit(root, str(a, 'head') || '');
+    if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
+    if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
+    const { config, config_hash } = loadConfig(root);
+    return await testrun.runTests({ root, fsafe, config, configHash: config_hash, base, head, runId: rec.makeRunId(head) });
+  },
+
   paths(/** @type {string[]} */ argv) {
     parseArgs(argv, { value: [], bool: ['json'] });
     const top = gitlib.toplevel(process.cwd());
@@ -265,13 +277,13 @@ function finish(obj, code) {
   process.stdout.write(JSON.stringify(obj) + '\n', () => process.exit(code));
 }
 
-function main() {
+async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   try {
     if (!cmd || !Object.prototype.hasOwnProperty.call(COMMANDS, cmd)) {
       throw new SerenoError('usage', 'usage: sereno.js <' + Object.keys(COMMANDS).join('|') + '> [--json] ...');
     }
-    const result = /** @type {Record<string, (a: string[]) => object>} */ (COMMANDS)[cmd](rest);
+    const result = await /** @type {Record<string, (a: string[]) => object | Promise<object>>} */ (COMMANDS)[cmd](rest);
     finish(Object.assign({ ok: true }, result), 0);
   } catch (e) {
     if (e instanceof SerenoError) {
@@ -282,4 +294,8 @@ function main() {
   }
 }
 
+process.on('SIGINT', () => {
+  testrun.abortAll();
+  finish({ ok: false, error: 'interrupted', code: 'interrupted' }, 130);
+});
 main();

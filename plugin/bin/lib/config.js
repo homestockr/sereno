@@ -116,6 +116,11 @@ function validate(c) {
   }
   if (!isObj(c.tests)) bad('tests: must be an object');
   else if (c.tests.command !== null && !(typeof c.tests.command === 'string' && c.tests.command.trim() && c.tests.command.length <= 1000)) bad('tests.command: must be null or a non-empty string');
+  if (isObj(c.tests)) {
+    if (c.tests.parallel !== undefined && typeof c.tests.parallel !== 'boolean') bad('tests.parallel: must be true or false');
+    if (c.tests.setup !== undefined && c.tests.setup !== null && !(typeof c.tests.setup === 'string' && c.tests.setup.trim() && c.tests.setup.length <= 1000)) bad('tests.setup: must be null or a non-empty string');
+    if (c.tests.timeoutSec !== undefined && !posInt(c.tests.timeoutSec)) bad('tests.timeoutSec: must be a positive integer');
+  }
   return errs;
 }
 

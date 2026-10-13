@@ -7603,6 +7603,227 @@ test('missing rate_limits degrades instead of throwing', () => {
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 
+  /* ---- Phase 4a step 2: sereno.js test ---- */
+  {
+    const SERENO = path.join(ROOT, 'plugin', 'bin', 'sereno.js');
+    const testrun = require('../plugin/bin/lib/testrun.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a2-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    // t.js: a tiny TAP test script driven by spec.json (committed, so base and head can differ).
+    const T_JS = [
+      "const fs=require('fs');",
+      "const s=JSON.parse(fs.readFileSync('spec.json','utf8'));",
+      "const inBase=process.cwd().includes('sereno-base-');",
+      "if(s.cwdlog) fs.appendFileSync(s.cwdlog, process.cwd()+'\\n');",
+      "if(s.req) require(s.req);",
+      "if(s.sleep){ fs.writeFileSync(s.sleep+(inBase?'.b':'.h'), String(process.pid)); setInterval(()=>{},1000); }",
+      "else {",
+      "if(s.crash) throw new Error('boom');",
+      "const fails=(s.fails||[]).slice();",
+      "if(s.flaky && !inBase){ let n=0; try{n=+fs.readFileSync(s.flaky.counter,'utf8')}catch(e){} fs.writeFileSync(s.flaky.counter,String(n+1)); if(n===0) fails.push(s.flaky.name); }",
+      "const all=(s.tests||[]).concat(s.flaky?[s.flaky.name]:[]);",
+      "if(!s.quiet){ console.log('TAP version 13'); all.forEach((t,i)=>console.log((fails.includes(t)?'not ok ':'ok ')+(i+1)+' - '+t)); }",
+      "process.exit(fails.length?2:0);",
+      "}",
+    ].join('\n');
+    function mkSuite(baseSpec, headSpec, cfg) {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'task/demo');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't');
+      git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 't.js'), T_JS);
+      fs.writeFileSync(path.join(dir, 'setup.js'), "const fs=require('fs');const s=JSON.parse(fs.readFileSync('spec.json','utf8'));if(s.setuplog)fs.appendFileSync(s.setuplog,process.cwd()+'|');process.exit(s.setupFail?1:0);");
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      fs.writeFileSync(path.join(dir, 'spec.json'), JSON.stringify(baseSpec));
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      const base = git(dir, 'rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+      fs.writeFileSync(path.join(dir, 'spec.json'), JSON.stringify(headSpec));
+      git(dir, 'commit', '-q', '-am', 'head');
+      fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: Object.assign({ command: 'node t.js' }, cfg || {}) }));
+      return { dir, base, head: git(dir, 'rev-parse', 'HEAD'), home: mk() };
+    }
+    function runT(r, extra, headArg) {
+      const res = spawnSync(process.execPath, [SERENO, 'test', '--base', r.base, '--head', headArg || r.head, '--json'].concat(extra || []), {
+        cwd: r.dir, encoding: 'utf8', timeout: 60000,
+        env: Object.assign({}, process.env, { HOME: r.home, USERPROFILE: r.home }),
+      });
+      assert.strictEqual(res.stdout.trim().split('\n').length, 1, 'stdout is one line: ' + res.stdout);
+      return { status: res.status, out: JSON.parse(res.stdout), stderr: res.stderr };
+    }
+    const wtCount = (r) => git(r.dir, 'worktree', 'list').split('\n').filter(Boolean).length;
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (_e) { return false; } };
+
+    test('[4a2] test: a failure already failing at base is not counted (exit criterion 2)', () => {
+      const r = mkSuite({ tests: ['A', 'C'], fails: ['A'] }, { tests: ['A', 'C'], fails: ['A'] });
+      const { status, out } = runT(r);
+      assert.strictEqual(status, 0); assert.strictEqual(out.ok, true);
+      assert.strictEqual(out.passed, true); assert.strictEqual(out.mode, 'names');
+      assert.deepStrictEqual(out.baseFailures, ['A']); assert.deepStrictEqual(out.newFailures, []);
+      assert.deepStrictEqual(out.flaky, []); assert.strictEqual(out.diagnosis, 'none');
+      assert.strictEqual(out.baseCached, false); assert.strictEqual(out.timedOut, false);
+      assert.strictEqual(wtCount(r), 1);
+    });
+    test('[4a2] test: a newly failing test is a defect; logs are stored, stdout carries no test output', () => {
+      const r = mkSuite({ tests: ['A', 'B'], fails: ['A'] }, { tests: ['A', 'B'], fails: ['A', 'B'] });
+      const { out } = runT(r);
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'defect');
+      assert.deepStrictEqual(out.newFailures, ['B']); assert.deepStrictEqual(out.baseFailures, ['A']);
+      assert.ok(/^\.sereno\/cache\/test-rr_\d{8}T\d{6}Z_[0-9a-f]{7}\.log$/.test(out.log), out.log);
+      const log = fs.readFileSync(path.join(r.dir, out.log), 'utf8');
+      assert.ok(log.includes('not ok 2 - B') && log.includes('===== head'));
+      assert.ok(!JSON.stringify(out).includes('TAP version'));
+      assert.strictEqual(wtCount(r), 1);
+    });
+    test('[4a2] test: a flaky head failure goes to flaky[] and is not counted', () => {
+      const counter = path.join(mk(), 'count.txt');
+      const spec = { tests: ['A'], flaky: { name: 'F', counter } };
+      const r = mkSuite(spec, spec);
+      const { out } = runT(r);
+      assert.strictEqual(out.passed, true); assert.deepStrictEqual(out.flaky, ['F']);
+      assert.deepStrictEqual(out.newFailures, []); assert.strictEqual(out.diagnosis, 'none');
+      assert.strictEqual(fs.readFileSync(counter, 'utf8'), '2');
+    });
+    test('[4a2] test: exit-code mode when names are not parseable (head fails, base passes = defect)', () => {
+      const r = mkSuite({ quiet: true, tests: ['A'] }, { quiet: true, tests: ['A'], fails: ['A'] });
+      const { out } = runT(r);
+      assert.strictEqual(out.mode, 'exit-code'); assert.strictEqual(out.passed, false);
+      assert.strictEqual(out.diagnosis, 'defect'); assert.strictEqual(out.baseFailing, false);
+    });
+    test('[4a2] test: exit-code mode with both failing is unknown_baseline, never a silent pass', () => {
+      const r = mkSuite({ crash: true }, { crash: true });
+      const { out } = runT(r);
+      assert.strictEqual(out.mode, 'exit-code'); assert.strictEqual(out.passed, false);
+      assert.strictEqual(out.baseFailing, true); assert.ok(/base too/.test(out.note));
+      assert.strictEqual(out.diagnosis, 'unknown_baseline'); assert.strictEqual(wtCount(r), 1);
+    });
+    test('[4a2] test: a base that crashed (no results) while head reports failures does not excuse them', () => {
+      const r = mkSuite({ crash: true }, { tests: ['A'], fails: ['A'] });
+      const { out } = runT(r);
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'environment');
+      assert.strictEqual(out.note, 'baseline could not run'); assert.strictEqual(out.baseUsable, false);
+      assert.deepStrictEqual(out.baseFailures, []);
+      assert.ok(!fs.existsSync(path.join(r.dir, '.sereno', 'cache', 'base-' + r.base + '.json')), 'unusable baseline is not cached');
+      assert.strictEqual(wtCount(r), 1);
+    });
+    test('[4a2] test: the repo node_modules is linked into the base worktree and left intact afterwards', () => {
+      const cwdlog = path.join(mk(), 'cwd.log');
+      const spec = { tests: ['A'], req: 'fakemod', cwdlog };
+      const r = mkSuite(spec, spec);
+      const nm = path.join(r.dir, 'node_modules', 'fakemod');
+      fs.mkdirSync(nm, { recursive: true });
+      fs.writeFileSync(path.join(nm, 'index.js'), 'module.exports = 1;');
+      const { out } = runT(r);
+      assert.strictEqual(out.passed, true); assert.strictEqual(out.baseUsable, true);
+      assert.strictEqual(out.exit_codes.base, 0, 'base found the module through the link');
+      const lines = fs.readFileSync(cwdlog, 'utf8').split(/\r?\n/).filter(Boolean);
+      assert.ok(lines[0].includes('sereno-base-') && lines[0].toLowerCase() !== r.dir.toLowerCase());
+      assert.strictEqual(fs.readFileSync(path.join(nm, 'index.js'), 'utf8'), 'module.exports = 1;', 'real node_modules intact');
+      assert.strictEqual(wtCount(r), 1);
+    });
+    test('[4a2] test: tests.setup runs in the base worktree; a failing setup is an environment failure', () => {
+      const setuplog = path.join(mk(), 'setup.log');
+      const spec = { tests: ['A'], setuplog };
+      const r = mkSuite(spec, spec, { setup: 'node setup.js' });
+      assert.strictEqual(runT(r).out.passed, true);
+      const dirs = fs.readFileSync(setuplog, 'utf8').split('|').filter(Boolean);
+      assert.strictEqual(dirs.length, 1); assert.ok(dirs[0].includes('sereno-base-'));
+      const bad = mkSuite({ tests: ['A'], setupFail: true }, { tests: ['A'], fails: ['A'] }, { setup: 'node setup.js' });
+      const { out } = runT(bad);
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'environment');
+      assert.strictEqual(wtCount(bad), 1);
+    });
+    test('[4a2] test: timeout kills the process tree, reports environment, and removes the worktree', () => {
+      const pidBase = path.join(mk(), 'pid');
+      const r = mkSuite({ sleep: pidBase }, { sleep: pidBase }, { timeoutSec: 1 });
+      const { status, out } = runT(r);
+      assert.strictEqual(status, 0); assert.strictEqual(out.passed, false);
+      assert.strictEqual(out.timedOut, true); assert.strictEqual(out.diagnosis, 'environment');
+      for (const suffix of ['.b', '.h']) {
+        const pid = parseInt(fs.readFileSync(pidBase + suffix, 'utf8'), 10);
+        assert.ok(pid > 0 && !alive(pid), 'suite process ' + suffix + ' was killed');
+      }
+      assert.strictEqual(wtCount(r), 1);
+      assert.ok(!fs.existsSync(path.join(r.dir, '.sereno', 'cache', 'base-' + r.base + '.json')), 'an environment failure is not cached');
+    });
+    test('[4a2] test: a missing test command is an environment failure, not a defect', () => {
+      const r = mkSuite({ tests: ['A'] }, { tests: ['A'] }, { command: 'sereno-no-such-command-xyz' });
+      const { status, out } = runT(r);
+      assert.strictEqual(status, 0); assert.strictEqual(out.ok, true);
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'environment');
+      assert.strictEqual(wtCount(r), 1);
+    });
+    test('[4a2] test: no tests.command and no package.json test script gives no_test_command', () => {
+      const r = mkSuite({ tests: ['A'] }, { tests: ['A'] });
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'pipeline.json'), '{}');
+      const { status, out } = runT(r);
+      assert.strictEqual(out.ok, false); assert.strictEqual(out.code, 'no_test_command'); assert.notStrictEqual(status, 0);
+      assert.strictEqual(wtCount(r), 1);
+    });
+    test('[4a2] test: falls back to npm test when package.json has a test script', () => {
+      const r = mkSuite({ tests: ['A'] }, { tests: ['A'] });
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'pipeline.json'), '{}');
+      fs.writeFileSync(path.join(r.dir, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: 'node t.js' } }));
+      git(r.dir, 'add', 'package.json'); git(r.dir, 'commit', '-q', '-m', 'pkg');
+      const head = git(r.dir, 'rev-parse', 'HEAD');
+      const { out } = runT(Object.assign({}, r, { head }));
+      assert.strictEqual(out.ok, true, JSON.stringify(out)); assert.strictEqual(out.command, 'npm test');
+      assert.strictEqual(out.passed, true);
+    });
+    test('[4a2] test: base runs in its own worktree (never the working copy); cached base is reused without a new worktree', () => {
+      const cwdlog = path.join(mk(), 'cwd.log');
+      const spec = { tests: ['A'], cwdlog };
+      const r = mkSuite(spec, spec);
+      const first = runT(r).out;
+      assert.strictEqual(first.baseCached, false);
+      let lines = fs.readFileSync(cwdlog, 'utf8').split('\n').filter(Boolean);
+      assert.strictEqual(lines.length, 2);
+      assert.notStrictEqual(lines[0].toLowerCase(), r.dir.toLowerCase(), 'base suite did not run in the repo');
+      assert.ok(lines[0].includes('sereno-base-') && !lines[0].toLowerCase().startsWith(r.dir.toLowerCase()));
+      assert.strictEqual(lines[1].toLowerCase(), r.dir.toLowerCase(), 'head suite ran in the working tree');
+      const cache = path.join(r.dir, '.sereno', 'cache', 'base-' + r.base + '.json');
+      assert.ok(fs.existsSync(cache));
+      const second = runT(r).out;
+      assert.strictEqual(second.baseCached, true); assert.strictEqual(second.passed, true);
+      lines = fs.readFileSync(cwdlog, 'utf8').split('\n').filter(Boolean);
+      assert.strictEqual(lines.length, 3, 'only the head suite ran the second time');
+      assert.strictEqual(wtCount(r), 1);
+      // a different test command invalidates the cache
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: { command: 'node t.js ' } }));
+      assert.strictEqual(runT(r).out.baseCached, false);
+    });
+    test('[4a2] test: parallel runs base and head, and a dirty tracked tree or wrong --head is head_mismatch', () => {
+      const r = mkSuite({ tests: ['A'] }, { tests: ['A'] }, { parallel: true });
+      assert.strictEqual(runT(r).out.passed, true);
+      const bad = runT(r, [], r.base);
+      assert.strictEqual(bad.out.ok, false); assert.strictEqual(bad.out.code, 'head_mismatch');
+      fs.writeFileSync(path.join(r.dir, 'a.txt'), 'dirty\n');
+      const dirty = runT(r);
+      assert.strictEqual(dirty.out.code, 'head_mismatch'); assert.notStrictEqual(dirty.status, 0);
+      fs.writeFileSync(path.join(r.dir, 'untracked.txt'), 'x');
+      git(r.dir, 'checkout', '--', 'a.txt');
+      assert.strictEqual(runT(r).out.ok, true, 'untracked files do not block');
+      assert.strictEqual(wtCount(r), 1);
+    });
+    test('[4a2] test: tests.parallel and tests.timeoutSec are validated', () => {
+      const r = mkSuite({ tests: ['A'] }, { tests: ['A'] }, { parallel: 'yes', timeoutSec: 0 });
+      const { out } = runT(r);
+      assert.strictEqual(out.code, 'config_invalid'); assert.strictEqual(out.errors.length, 2);
+    });
+    test('[4a2] test: parseFailures reads TAP, FAIL, cross marks, mocha lines and ANSI-coloured output', () => {
+      const out = [
+        'TAP version 13', 'ok 1 - fine', 'not ok 2 - tap one', 'not ok 3 - skipped # SKIP later',
+        '  FAIL repo own format', 'FAIL jest/file.test.js', '✗ cross one', '✕ cross two',
+        '  1) mocha suite test', '\u001b[31mnot ok 9 - coloured\u001b[0m', 'FAILED is not a match', 'not ok 2 - tap one',
+      ].join('\n');
+      assert.deepStrictEqual(testrun.parseFailures(out), ['tap one', 'repo own format', 'jest/file.test.js', 'cross one', 'cross two', 'mocha suite test', 'coloured']);
+      assert.deepStrictEqual(testrun.parseFailures('all good\n'), []);
+    });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
