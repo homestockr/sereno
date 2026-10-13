@@ -71,7 +71,10 @@ Sources:
     working copy. It runs before the head suite by default (`tests.parallel: true` runs
     them together; repos whose suites share ports or temp files should not). Its result
     is cached per base commit, so repeated `/sereno:ship` runs on one base reuse it. The
-    worktree is removed afterwards.
+    worktree is removed afterwards. With `tests.setup` unset, the base worktree gets a link
+    to the head working tree's `node_modules`; checking out the base commit applies the
+    repo's `.gitattributes` filters with your own git config (same trust as running your
+    test command).
   - A failure that already fails at base is not counted.
   - A suspected flaky failure, meaning one that fails at head but passes at base, is
     re-run once.

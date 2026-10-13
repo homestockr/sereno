@@ -19,7 +19,7 @@ platform; other systems are not yet tested.
 
 To update, run `claude plugin update sereno@sereno` (or use `/plugin`), then
 `/reload-plugins` in any open session. The manifest pins `version`, so you move only
-when a release changes it. Auto-update is off by default for this marketplace.
+when a release changes it. Claude Code turns auto-update on by default only for Anthropic's own marketplaces, so for this one it is off unless you enable it in /plugin › Marketplaces.
 
 To turn it off or remove it:
 
@@ -148,16 +148,29 @@ Everything the plugin writes goes under `.sereno/` in your repo:
   whatever your test output prints, so keep `.sereno/cache/` out of git.
 
 It also runs the base suite in a temporary git worktree in the system temp directory,
-and removes that worktree afterwards. Git changes are limited to creating `task/<name>`, switching between branches, the
+and removes that worktree afterwards. When `tests.setup` is unset, the base worktree gets
+a link (a junction on Windows) to the head working tree's `node_modules`, so the base run
+uses your installed dependencies. Checking out the base commit applies the repo's
+`.gitattributes` filters using your own git config; that is the same trust as running
+your test command. `git worktree` calls get their own timeout, `tests.worktreeTimeoutSec`
+(default 300); both it and `tests.timeoutSec` are capped at 2147483. Git changes are limited to creating `task/<name>`, switching between branches, the
 Builder's commits on `task/<name>`, and, after your yes, the local `--no-ff` merge.
 Nothing is ever sent to a remote.
 
 Whether to commit `.sereno/` is your choice. Specs, gates and attempts make a useful
-record. A common setup is to commit them and add this line to `.gitignore`:
+record. Either commit them on purpose, or add `.sereno/` to `.gitignore`. At the least
+keep the generated parts out of git:
 
 ```
 .sereno/cache/
+.sereno/attempts/
 ```
+
+When the runner prints no result counts or plan (so completion cannot be checked), a failing head is never passed: `sereno.js test` reports `unknown_baseline` and the run goes to a decision; a head that exits 0 still passes.
+
+The clean-tree checks in `sereno.js test`, `sereno.js branch` and the build and ship
+skills ignore anything under `.sereno/`, so a tracked file there never blocks a run.
+The Builder agents are told to stage only the files they changed and never `.sereno/`.
 
 ## Privacy and trust
 

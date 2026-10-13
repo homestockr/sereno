@@ -10,6 +10,7 @@ const { SerenoError } = require('./fsafe.js');
 
 const AGENTS = ['builder', 'builder-haiku', 'builder-opus', 'scribe', 'red-team', 'red-team-lean'];
 const ON_FALLBACK = ['ask', 'auto', 'never'];
+const MAX_TIMEOUT_SEC = 2147483;
 const MAX_CONFIG_BYTES = 64 * 1024;
 const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -119,7 +120,9 @@ function validate(c) {
   if (isObj(c.tests)) {
     if (c.tests.parallel !== undefined && typeof c.tests.parallel !== 'boolean') bad('tests.parallel: must be true or false');
     if (c.tests.setup !== undefined && c.tests.setup !== null && !(typeof c.tests.setup === 'string' && c.tests.setup.trim() && c.tests.setup.length <= 1000)) bad('tests.setup: must be null or a non-empty string');
-    if (c.tests.timeoutSec !== undefined && !posInt(c.tests.timeoutSec)) bad('tests.timeoutSec: must be a positive integer');
+    // setTimeout's maximum is 2147483647 ms; a larger value would fire at once.
+    if (c.tests.timeoutSec !== undefined && !(posInt(c.tests.timeoutSec) && c.tests.timeoutSec <= MAX_TIMEOUT_SEC)) bad('tests.timeoutSec: must be a positive integer of at most ' + MAX_TIMEOUT_SEC);
+    if (c.tests.worktreeTimeoutSec !== undefined && !(posInt(c.tests.worktreeTimeoutSec) && c.tests.worktreeTimeoutSec <= MAX_TIMEOUT_SEC)) bad('tests.worktreeTimeoutSec: must be a positive integer of at most ' + MAX_TIMEOUT_SEC);
   }
   return errs;
 }

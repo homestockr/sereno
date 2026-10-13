@@ -7544,7 +7544,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       }
       const sp = run(r, gateArgs(r, ['--spec', '../outside.md']), '{}');
       assert.strictEqual(sp.status, 6); assert.strictEqual(sp.out.code, 'path_refused');
-      assert.ok(!fs.existsSync(path.join(path.dirname(r.dir), 'x')));
+      // A shared path (the temp dir's own x) may exist from another process: compare before/after, never absence.
+      assert.deepStrictEqual(fs.readdirSync(r.dir).sort(), ['.sereno', 'a.txt'].concat(fs.existsSync(path.join(r.dir, '.git')) ? ['.git'] : []).sort());
+      assert.deepStrictEqual(fs.readdirSync(r.home), []);
     });
     test('[4a1] fsafe: only paths under .sereno/ are writable', () => {
       const { createSafeFs } = require('../plugin/bin/lib/fsafe.js');
@@ -8229,7 +8231,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(/wait for an explicit yes/.test(SHIP1) && /never merge without an explicit yes/.test(SHIP1));
       assert.ok(at('wait for an explicit yes') < at('git merge --no-ff task/<task>'), 'the ask comes before the merge command');
       assert.ok(/git merge-base task\/<task> <base_branch>/.test(SHIP) && /git switch <base_branch>/.test(SHIP));
-      assert.ok(/sereno:red-team-lean/.test(SHIP) && /onFallback/.test(SHIP) && /One round only/.test(SHIP));
+      assert.ok(/roles.redTeam.fallback/.test(SHIP) && /onFallback/.test(SHIP) && /One round only/.test(SHIP));
       assert.ok(/--tests-passed true/.test(SHIP) && /--run-id <review_run_id>/.test(SHIP));
       assert.ok(/pass no `model`\s+parameter/.test(SHIP1.replace('`model` parameter', '`model` parameter')) || /pass no `model` parameter/.test(SHIP1));
       assert.ok(/SAME Builder/.test(SHIP) && /never change which Builder is used by yourself/.test(SHIP1));
@@ -8758,6 +8760,229 @@ test('missing rate_limits degrades instead of throwing', () => {
         }
       })(PLUGIN);
       assert.deepStrictEqual(bad, []);
+    });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
+  /* ---- Phase 4a: red-team fixes ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const testrun = require('../plugin/bin/lib/testrun.js');
+    const gitlib = require('../plugin/bin/lib/git.js');
+    const { loadConfig } = require('../plugin/bin/lib/config.js');
+    const { spawnSync } = require('node:child_process');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4arf-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    // t2.js: prints TAP lines for spec.tests; spec.crashAfter stops after N lines with exit 1; spec.plan prints 1..N at the end.
+    const T2 = [
+      "const fs=require('fs');const s=JSON.parse(fs.readFileSync('spec.json','utf8'));",
+      "const fails=s.fails||[];const n=s.crashAfter===undefined?s.tests.length:s.crashAfter;",
+      "console.log('TAP version 13');",
+      "s.tests.slice(0,n).forEach((t,i)=>console.log((fails.includes(t)?'not ok ':'ok ')+(i+1)+' - '+t));",
+      "if(s.crashAfter!==undefined) process.exit(1);",
+      "if(s.plan) console.log('1..'+s.tests.length);",
+      "process.exit(fails.length?2:0);",
+    ].join('\n');
+    function mkRepo(baseSpec, headSpec, extraCfg) {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'task/demo');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 't2.js'), T2);
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      fs.writeFileSync(path.join(dir, 'spec.json'), JSON.stringify(baseSpec));
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      const base = git(dir, 'rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+      fs.writeFileSync(path.join(dir, 'spec.json'), JSON.stringify(headSpec));
+      git(dir, 'commit', '-q', '-am', 'head');
+      fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: Object.assign({ command: 'node t2.js' }, extraCfg || {}) }));
+      return { dir, base, head: git(dir, 'rev-parse', 'HEAD') };
+    }
+    const runT = (r) => S(r.dir, ['test', '--base', r.base, '--head', r.head, '--json']);
+    const cacheFile = (r) => path.join(r.dir, '.sereno', 'cache', 'base-' + r.base + '.json');
+
+    test('[4a-rf1] a head that crashes after one failing test no longer passes (completion evidence)', () => {
+      const tests = ['A', 'B', 'C'];
+      const r = mkRepo({ tests, fails: ['A'] }, { tests, fails: ['A'], crashAfter: 1 });
+      const { out } = runT(r);
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'unknown_baseline');
+      assert.strictEqual(out.note, 'head suite did not complete');
+    });
+    test('[4a-rf1] the same single failing test at base and head, full run, still passes; a plan missing at head does not', () => {
+      const tests = ['A', 'B', 'C'];
+      const ok = runT(mkRepo({ tests, fails: ['A'] }, { tests, fails: ['A'] })).out;
+      assert.strictEqual(ok.passed, true); assert.strictEqual(ok.diagnosis, 'none');
+      const okPlan = runT(mkRepo({ tests, fails: ['A'], plan: true }, { tests, fails: ['A'], plan: true })).out;
+      assert.strictEqual(okPlan.passed, true);
+      const noPlan = runT(mkRepo({ tests, fails: ['A'], plan: true }, { tests, fails: ['A'], crashAfter: 3 })).out;
+      assert.strictEqual(noPlan.passed, false); assert.strictEqual(noPlan.diagnosis, 'unknown_baseline');
+    });
+    test('[4a-rf1] non-TAP runner (FAIL lines, no counts or plan): a crashing head is unknown_baseline, never passed; exit 0 still passes', () => {
+      const mkF = (crash) => {
+        const r = mkRepo({ tests: ['A'] }, { tests: ['A'] }, { command: 'node f.js' });
+        fs.writeFileSync(path.join(r.dir, 'f.js'), "console.log('FAIL known one');" + (crash ? 'process.exit(1);' : 'process.exit(0);'));
+        return r;
+      };
+      // base and head run the same f.js: FAIL known one, then exit 1
+      const r = mkF(true);
+      git(r.dir, 'add', 'f.js'); git(r.dir, 'commit', '-q', '-m', 'f');
+      const head = git(r.dir, 'rev-parse', 'HEAD');
+      // put f.js at the base too, by testing head against itself as the base
+      const out = S(r.dir, ['test', '--base', head, '--head', head, '--json']).out;
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'unknown_baseline');
+      assert.strictEqual(out.note, 'cannot confirm the head suite completed');
+      assert.deepStrictEqual(out.baseFailures, ['known one']);
+      const ok = mkF(false);
+      git(ok.dir, 'add', 'f.js'); git(ok.dir, 'commit', '-q', '-m', 'f');
+      const h2 = git(ok.dir, 'rev-parse', 'HEAD');
+      assert.strictEqual(S(ok.dir, ['test', '--base', h2, '--head', h2, '--json']).out.passed, true);
+    });
+    test('[4a-rf2] a planted failing base cache is ignored and the base recomputed', () => {
+      const tests = ['A'];
+      const r = mkRepo({ tests }, { tests, fails: ['A'] });
+      assert.strictEqual(runT(r).out.diagnosis, 'defect');
+      const planted = JSON.parse(fs.readFileSync(cacheFile(r), 'utf8'));
+      assert.strictEqual(planted.suite.exitCode, 0, 'a passing base is what gets cached');
+      planted.suite = { exitCode: 2, failures: ['A'], parsed: true, count: 1, plan: null };
+      fs.writeFileSync(cacheFile(r), JSON.stringify(planted));
+      const { out } = runT(r);
+      assert.strictEqual(out.baseCached, false, 'the planted failing cache was ignored');
+      assert.strictEqual(out.passed, false); assert.deepStrictEqual(out.newFailures, ['A']);
+    });
+    test('[4a-rf2] a failing base is never cached; a planted passing cache makes head failures count (defect)', () => {
+      const tests = ['A'];
+      const donor = mkRepo({ tests }, { tests, fails: ['A'] });
+      runT(donor);
+      const r = mkRepo({ tests, fails: ['A'] }, { tests, fails: ['A'] });
+      assert.strictEqual(runT(r).out.passed, true);
+      assert.ok(!fs.existsSync(cacheFile(r)), 'a failing base writes no cache');
+      const planted = JSON.parse(fs.readFileSync(cacheFile(donor), 'utf8'));
+      planted.sha = r.base;
+      fs.writeFileSync(cacheFile(r), JSON.stringify(planted));
+      const { out } = runT(r);
+      assert.strictEqual(out.baseCached, true);
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'defect');
+    });
+    test('[4a-rf3] gate --session: empty, unsubstituted, valid and junk values', () => {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); git(dir, 'add', 'a.txt'); git(dir, 'commit', '-q', '-m', 'init');
+      fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'specs', 'x.md'), '---\ntask_id: x\n---\nspec\n');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      const sess = (v) => {
+        const r = S(dir, ['gate', '--stdin', '--task', 'x', '--base', head, '--head', head, '--branch', 'main', '--tests-passed', 'true', '--session', v], '{"outcome":"pass","findings":[]}');
+        assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+        return JSON.parse(fs.readFileSync(path.join(dir, r.out.path), 'utf8')).session_id;
+      };
+      const uuid = '5f6c0d3e-1111-4222-8333-944455556666';
+      assert.strictEqual(sess(''), null);
+      assert.strictEqual(sess('${CLAUDE_SESSION_ID}'), null);
+      assert.strictEqual(sess(uuid), uuid);
+      assert.strictEqual(sess('a b;rm -rf'), null);
+      assert.strictEqual(sess('x'.repeat(65)), null);
+      assert.match(fs.readFileSync(path.join(PLUGIN, 'skills', 'ship', 'SKILL.md'), 'utf8'), /--session "\$\{CLAUDE_SESSION_ID\}"/);
+    });
+    test('[4a-rf4] a committed .sereno/ file that is modified does not wedge test or branch; a modified source file still does', () => {
+      const tests = ['A'];
+      const r = mkRepo({ tests }, { tests });
+      fs.mkdirSync(path.join(r.dir, '.sereno', 'attempts'), { recursive: true });
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'attempts', 'x-1.json'), '{"a":1}\n');
+      git(r.dir, 'add', '-f', '.sereno/attempts/x-1.json'); git(r.dir, 'commit', '-q', '-m', 'oops committed .sereno');
+      const head = git(r.dir, 'rev-parse', 'HEAD');
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'attempts', 'x-1.json'), '{"a":2}\n');
+      const t = S(r.dir, ['test', '--base', r.base, '--head', head, '--json']);
+      assert.strictEqual(t.out.ok, true, JSON.stringify(t.out)); assert.strictEqual(t.out.passed, true);
+      assert.strictEqual(S(r.dir, ['branch', '--task', 'again']).out.ok, true);
+      fs.writeFileSync(path.join(r.dir, 'a.txt'), 'dirty\n');
+      const t2 = S(r.dir, ['test', '--base', r.base, '--head', head, '--json']);
+      assert.strictEqual(t2.out.ok, false); assert.strictEqual(t2.out.code, 'head_mismatch');
+      assert.strictEqual(S(r.dir, ['branch', '--task', 'other']).out.code, 'dirty_tree');
+    });
+    test('[4a-rf4] builder agents forbid blanket staging and .sereno/; skills ignore .sereno/ in clean-tree checks; README advises', () => {
+      for (const n of ['builder', 'builder-haiku', 'builder-opus']) {
+        const t = fs.readFileSync(path.join(PLUGIN, 'agents', n + '.md'), 'utf8');
+        assert.match(t, /Stage only the files you changed/); assert.match(t, /Never `git add -A`/); assert.match(t, /never stage anything under `\.sereno\/`/);
+      }
+      for (const n of ['build', 'ship']) {
+        const t = fs.readFileSync(path.join(PLUGIN, 'skills', n, 'SKILL.md'), 'utf8');
+        assert.ok(t.includes("-- . ':(exclude).sereno'"), n);
+        assert.ok(!/status --porcelain --untracked-files=no`/.test(t), n + ' still has an unexcluded status check');
+      }
+      const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
+      assert.match(readme, /\.sereno\/attempts\//); assert.match(readme, /add `\.sereno\/` to `\.gitignore`/);
+    });
+    await atest('[4a-rf5] the "parsed" regex has its backslashes: plain TAP lines are recognised', async () => {
+      const d = mk();
+      fs.writeFileSync(path.join(d, 'ok.js'), "console.log('ok 1 - fine');");
+      const s = await testrun.runSuite('node ok.js', d, 30);
+      assert.strictEqual(s.exitCode, 0); assert.strictEqual(s.parsed, true);
+      assert.deepStrictEqual(testrun.parseCounts('TAP version 13\nok 1 - a\nnot ok 2 - b\n    ok 1 - nested\n1..2\n'), { count: 3, top: 2, plan: 2 });
+    });
+    await atest('[4a-rf6] worktree add/remove/prune use the longer timeout; prune runs after the temp dir is gone; a failed add leaves nothing', async () => {
+      const calls = [];
+      let wtPath = null;
+      const before = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('sereno-base-')).length;
+      gitlib.setExec((cmd, args, opts) => {
+        const i = args.indexOf('worktree');
+        const sub = args[i + 1];
+        const rec = { sub, timeout: opts.timeout };
+        if (sub === 'add') {
+          wtPath = args[args.indexOf('--detach') + 1];
+          fs.mkdirSync(wtPath, { recursive: true }); // a partial checkout left by the slow add
+          const e = new Error('ETIMEDOUT'); e.code = 'ETIMEDOUT'; throw e;
+        }
+        if (sub === 'prune') rec.tmpGone = !fs.existsSync(path.dirname(wtPath));
+        calls[calls.length] = rec;
+        return '';
+      });
+      try {
+        await assert.rejects(testrun.runAtBase(ROOT, 'a'.repeat(40), 'node -v', 5, null, 120), /worktree add failed/);
+        await assert.rejects(testrun.runAtBase(ROOT, 'a'.repeat(40), 'node -v', 5, null), /worktree add failed/);
+      } finally { gitlib.setExec(null); }
+      assert.deepStrictEqual(calls.map((c) => c.sub), ['remove', 'prune', 'remove', 'prune']);
+      assert.deepStrictEqual(calls.map((c) => c.timeout), [120000, 120000, 300000, 300000]);
+      assert.ok(calls.filter((c) => c.sub === 'prune').every((c) => c.tmpGone), 'prune ran after the temp dir was removed');
+      assert.strictEqual(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('sereno-base-')).length, before);
+    });
+    test('[4a-rf7] tests.timeoutSec and tests.worktreeTimeoutSec are capped at 2147483', () => {
+      const cfg = (tests) => { const d = mk(); fs.mkdirSync(path.join(d, '.sereno')); fs.writeFileSync(path.join(d, '.sereno', 'pipeline.json'), JSON.stringify({ tests })); return d; };
+      assert.strictEqual(loadConfig(cfg({ command: 'x', timeoutSec: 2147483, worktreeTimeoutSec: 2147483 })).config.tests.timeoutSec, 2147483);
+      for (const k of ['timeoutSec', 'worktreeTimeoutSec']) {
+        assert.throws(() => loadConfig(cfg({ command: 'x', [k]: 2147484 })), (e) => e.code === 'config_invalid');
+        assert.throws(() => loadConfig(cfg({ command: 'x', [k]: 0 })), (e) => e.code === 'config_invalid');
+      }
+    });
+    test('[4a-rf8] docs: node_modules link and .gitattributes trust are stated; auto-update wording', () => {
+      const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
+      assert.match(readme, /link \(a junction on Windows\) to the head working tree's `node_modules`/);
+      assert.match(readme, /\.gitattributes` filters using your own git config/);
+      assert.ok(readme.includes("Claude Code turns auto-update on by default only for Anthropic's own marketplaces, so for this one it is off unless you enable it in /plugin › Marketplaces."));
+      const plan = fs.readFileSync(path.join(ROOT, 'docs', 'plans', 'phase-4a-plugin.md'), 'utf8');
+      assert.match(plan, /link\s+to the head working tree's `node_modules`/); assert.match(plan, /\.gitattributes/);
+    });
+    test('[4a-rf9] ship skill takes the fallback from roles.redTeam.fallback; null means never', () => {
+      const t = fs.readFileSync(path.join(PLUGIN, 'skills', 'ship', 'SKILL.md'), 'utf8');
+      assert.ok(!/sereno:red-team-lean/.test(t), 'no hard-coded fallback agent');
+      assert.match(t, /`roles\.redTeam\.fallback`/); assert.match(t, /is `null` there is no fallback: behave as `never`/);
+    });
+    test('[4a-rf10] git.js header lists the commands it runs', () => {
+      const t = fs.readFileSync(path.join(PLUGIN, 'bin', 'lib', 'git.js'), 'utf8').split('*/')[0];
+      for (const c of ['rev-parse', 'symbolic-ref', 'status', 'ls-tree', 'show', 'worktree add']) assert.ok(t.includes(c), c);
+    });
+    test('[4a-rf11] build skill step 5 requires the current branch to be task/<task>', () => {
+      const t = fs.readFileSync(path.join(PLUGIN, 'skills', 'build', 'SKILL.md'), 'utf8');
+      assert.match(t, /git branch --show-current/); assert.match(t, /current branch\nis still `task\/<task>`/);
     });
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }

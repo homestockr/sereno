@@ -6,14 +6,20 @@
  * This is a DELIBERATE COPY of the SAFE_ARGS / safeEnv approach in the app's
  * src/gitexec.js (see that file for the threat model). The plugin must not
  * require anything outside plugin/, so the two are kept in step by hand.
- * Only local plumbing is used here: rev-parse and symbolic-ref. Every revision
- * is validated first and follows --end-of-options.
+ * Only local commands are used here: rev-parse, symbolic-ref, status, merge-base,
+ * ls-tree, show, and worktree add / remove / prune (the base-suite checkout). Every
+ * revision is validated first and follows --end-of-options.
  */
 
 const os = require('node:os');
 const { execFileSync, spawnSync } = require('node:child_process');
 
 const GIT_TIMEOUT_MS = 10000;
+
+/** Replaceable in tests (a slow or failing exec). @type {typeof execFileSync} */
+let execImpl = execFileSync;
+/** @param {typeof execFileSync | null} fn null restores the real one */
+function setExec(fn) { execImpl = fn || execFileSync; }
 
 const SAFE_ARGS = [
   '-c', 'core.fsmonitor=false',
@@ -39,13 +45,13 @@ function safeEnv(base) {
 }
 
 /**
- * @param {string} cwd @param {string[]} args
+ * @param {string} cwd @param {string[]} args @param {number} [timeoutMs]
  * @returns {string | null} trimmed stdout, or null when git fails
  */
-function git(cwd, args) {
+function git(cwd, args, timeoutMs) {
   try {
-    return String(execFileSync('git', SAFE_ARGS.concat(args), {
-      cwd, env: safeEnv(), encoding: 'utf8', timeout: GIT_TIMEOUT_MS, windowsHide: true,
+    return String(execImpl('git', SAFE_ARGS.concat(args), {
+      cwd, env: safeEnv(), encoding: 'utf8', timeout: timeoutMs || GIT_TIMEOUT_MS, windowsHide: true,
       maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
     })).trim();
   } catch (_e) { return null; }
@@ -101,4 +107,4 @@ function showBlob(cwd, commit, rel, maxBytes) {
   return { kind: 'blob', size: parseInt(m[3], 10), bytes: Buffer.from(r.stdout).subarray(0, maxBytes) };
 }
 
-module.exports = { SAFE_ARGS, safeEnv, git, showBlob, isSha, isRefName, toplevel, resolveCommit, currentBranch };
+module.exports = { setExec, SAFE_ARGS, safeEnv, git, showBlob, isSha, isRefName, toplevel, resolveCommit, currentBranch };

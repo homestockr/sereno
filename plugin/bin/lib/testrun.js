@@ -15,6 +15,8 @@ const { SerenoError } = require('./fsafe.js');
 const gitlib = require('./git.js');
 
 const DEFAULT_TIMEOUT_SEC = 900;
+const DEFAULT_WORKTREE_TIMEOUT_SEC = 300;
+const MAX_TIMEOUT_SEC = 2147483;
 const MAX_CAPTURE = 4 * 1024 * 1024; // bytes kept in memory per suite for parsing
 const MAX_LOG = 900 * 1024; // fsafe refuses files over 1 MiB; stay under it
 const MAX_NAMES = 200;
@@ -64,7 +66,21 @@ function parseFailures(output) {
 }
 
 /**
- * @typedef {{ exitCode: number | null, timedOut: boolean, startFailed: boolean, output: string, failures: string[], parsed?: boolean }} Suite
+ * TAP-style result lines: how many were printed (any indent), how many at top level,
+ * and the top-level plan (`1..N`) if one was printed.
+ * @param {string} output @returns {{ count: number, top: number, plan: number | null }}
+ */
+function parseCounts(output) {
+  let count = 0, top = 0, plan = null;
+  for (const raw of stripAnsi(output).split(/\r?\n/)) {
+    if (/^\s*(?:not ok|ok)\s+\d+/.test(raw)) { count++; if (/^(?:not ok|ok)\s/.test(raw)) top++; }
+    else { const m = /^1\.\.(\d+)\s*$/.exec(raw); if (m) plan = parseInt(m[1], 10); }
+  }
+  return { count, top, plan };
+}
+
+/**
+ * @typedef {{ exitCode: number | null, timedOut: boolean, startFailed: boolean, output: string, failures: string[], parsed?: boolean, count?: number, top?: number, plan?: number | null }} Suite
  */
 
 /**
@@ -103,10 +119,12 @@ function runSuite(command, cwd, timeoutSec) {
       const output = Buffer.concat(chunks).toString('utf8');
       const notFound = code === 127 || code === 9009
         || (code !== 0 && code !== null && output.length < 2000 && /is not recognized as an internal or external command|command not found|: not found/i.test(output));
+      const counts = parseCounts(output);
       resolve({
+        count: counts.count, top: counts.top, plan: counts.plan,
         exitCode: code, timedOut, startFailed: spawnError || (!timedOut && notFound),
         output, failures: code === 0 ? [] : parseFailures(output),
-        parsed: code !== 0 && parseFailures(output).length > 0 || /^s*(?:not ok|ok)s+d+/m.test(stripAnsi(output)),
+        parsed: code !== 0 && parseFailures(output).length > 0 || /^\s*(?:not ok|ok)\s+\d+/m.test(stripAnsi(output)),
       });
     };
     timer = setTimeout(() => {
@@ -137,6 +155,20 @@ function resolveCommand(config, root) {
   return packageTestScript(root);
 }
 
+/**
+ * Evidence that a failing head ran its whole suite: at least as many result lines as the
+ * base printed, and, when a TAP plan is printed, a plan that was reached.
+ * @param {Suite} head @param {Suite} base @returns {'complete' | 'incomplete' | 'unknown'}
+ */
+function headCompletion(head, base) {
+  // No result counts and no plan anywhere (a non-TAP runner): nothing to prove completion with.
+  if (!head.count && !base.count && head.plan == null && base.plan == null) return 'unknown';
+  if ((head.count || 0) < (base.count || 0)) return 'incomplete';
+  if (head.plan != null) return (head.top || 0) >= head.plan ? 'complete' : 'incomplete';
+  if (base.plan != null) return 'incomplete'; // the base reached a plan line; the head never printed one
+  return 'complete';
+}
+
 /** @param {string} sha */
 function cacheRel(sha) { return '.sereno/cache/base-' + sha + '.json'; }
 
@@ -149,10 +181,13 @@ function readBaseCache(root, sha, configHash, command) {
     const j = JSON.parse(fs.readFileSync(p, 'utf8'));
     if (!j || j.config_hash !== configHash || j.command !== command || j.sha !== sha || !j.suite) return null;
     const s = j.suite;
-    if (!(s.exitCode === null || Number.isInteger(s.exitCode)) || !Array.isArray(s.failures)) return null;
+    // Only a fully passing base is ever trusted: a planted "base passed" can only make head
+    // failures count (the safe direction); a planted failure list could excuse real ones.
+    if (s.exitCode !== 0 || !Array.isArray(s.failures) || s.failures.length !== 0) return null;
+    if (!Number.isInteger(s.count) || s.count < 0) return null;
     return {
-      exitCode: s.exitCode, timedOut: false, startFailed: false, output: '(cached)', parsed: s.parsed === true,
-      failures: s.failures.filter((/** @type {unknown} */ x) => typeof x === 'string').slice(0, MAX_NAMES),
+      exitCode: 0, timedOut: false, startFailed: false, output: '(cached)', parsed: s.parsed === true,
+      failures: [], count: s.count, top: s.count, plan: Number.isInteger(s.plan) ? s.plan : null,
     };
   } catch (_e) { return null; }
 }
@@ -162,7 +197,8 @@ function readBaseCache(root, sha, configHash, command) {
  * @param {string} root @param {string} sha @param {string} command @param {number} timeoutSec
  * @returns {Promise<Suite>}
  */
-async function runAtBase(root, sha, command, timeoutSec, setup) {
+async function runAtBase(root, sha, command, timeoutSec, setup, wtTimeoutSec) {
+  const wtMs = (wtTimeoutSec || DEFAULT_WORKTREE_TIMEOUT_SEC) * 1000;
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'sereno-base-'));
   const fold = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
   if (fold(tmp).startsWith(fold(root + path.sep))) {
@@ -180,19 +216,18 @@ async function runAtBase(root, sha, command, timeoutSec, setup) {
       try { fs.lstatSync(link); } catch (_e) { linked = false; }
       if (linked) { cleanups.delete(cleanup); return; } // never recurse through a link we could not remove
     }
-    if (added) {
-      gitlib.git(root, ['worktree', 'remove', '--force', wt]);
-      added = false;
-    }
-    gitlib.git(root, ['worktree', 'prune']);
+    // `added` is set before the add runs: a timed-out add can leave a partial checkout.
+    if (added) gitlib.git(root, ['worktree', 'remove', '--force', wt], wtMs);
+    added = false;
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (_e) { /* best effort */ }
+    gitlib.git(root, ['worktree', 'prune'], wtMs);
     cleanups.delete(cleanup);
   };
   cleanups.add(cleanup);
   try {
-    const out = gitlib.git(root, ['worktree', 'add', '--detach', wt, sha]);
-    if (out === null) throw new SerenoError('worktree_failed', 'git worktree add failed for the base commit');
     added = true;
+    const out = gitlib.git(root, ['worktree', 'add', '--detach', wt, sha], wtMs);
+    if (out === null) throw new SerenoError('worktree_failed', 'git worktree add failed for the base commit');
     if (typeof setup === 'string' && setup.trim()) {
       const st = await runSuite(setup, wt, timeoutSec);
       if (st.exitCode !== 0 || st.timedOut) {
@@ -219,13 +254,15 @@ async function runTests(o) {
   const { root, fsafe, config } = o;
   const command = resolveCommand(config, root);
   if (!command) throw new SerenoError('no_test_command', 'no tests.command in pipeline.json and no "test" script in package.json');
-  const timeoutSec = config.tests && Number.isInteger(config.tests.timeoutSec) && config.tests.timeoutSec > 0 ? config.tests.timeoutSec : DEFAULT_TIMEOUT_SEC;
+  const timeoutSec = config.tests && Number.isInteger(config.tests.timeoutSec) && config.tests.timeoutSec > 0 ? Math.min(config.tests.timeoutSec, MAX_TIMEOUT_SEC) : DEFAULT_TIMEOUT_SEC;
+  const wtTimeoutSec = config.tests && Number.isInteger(config.tests.worktreeTimeoutSec) && config.tests.worktreeTimeoutSec > 0 ? Math.min(config.tests.worktreeTimeoutSec, MAX_TIMEOUT_SEC) : DEFAULT_WORKTREE_TIMEOUT_SEC;
   const setup = config.tests && typeof config.tests.setup === 'string' ? config.tests.setup : null;
   const parallel = !!(config.tests && config.tests.parallel === true);
 
   const cur = gitlib.resolveCommit(root, 'HEAD');
   if (cur !== o.head) throw new SerenoError('head_mismatch', 'HEAD is not the commit given in --head');
-  const dirty = gitlib.git(root, ['status', '--porcelain', '--untracked-files=no']);
+  // .sereno/ is the plugin's own state (attempts, specs, gates): never a reason to refuse.
+  const dirty = gitlib.git(root, ['status', '--porcelain', '--untracked-files=no', '--', '.', ':(exclude).sereno']);
   if (dirty === null || dirty !== '') throw new SerenoError('head_mismatch', 'the working tree has uncommitted changes to tracked files');
 
   const cached = readBaseCache(root, o.base, o.configHash, command);
@@ -242,7 +279,7 @@ async function runTests(o) {
     baseSuite = cached;
     head = await runSuite(command, root, timeoutSec);
   } else if (parallel) {
-    [baseSuite, head] = await Promise.all([runAtBase(root, o.base, command, timeoutSec, setup), runSuite(command, root, timeoutSec)]);
+    [baseSuite, head] = await Promise.all([runAtBase(root, o.base, command, timeoutSec, setup, wtTimeoutSec), runSuite(command, root, timeoutSec)]);
   } else {
     baseSuite = await runAtBase(root, o.base, command, timeoutSec, setup);
     head = await runSuite(command, root, timeoutSec);
@@ -254,11 +291,12 @@ async function runTests(o) {
   // A baseline excuses only what it observed: it must have run, and if the head's runner
   // reports results, a failing base must have reported some too.
   const baseUsable = !baseEnv && !(baseSuite.exitCode !== 0 && !baseSuite.parsed && !!head.parsed);
-  if (!baseCached && baseUsable) {
+  const basePassed = baseSuite.exitCode === 0 && baseSuite.failures.length === 0 && !baseSuite.timedOut && !baseSuite.startFailed;
+  if (!baseCached && baseUsable && basePassed) {
     try {
       fsafe.writeJson(cacheRel(o.base), {
         sha: o.base, config_hash: o.configHash, command,
-        suite: { exitCode: baseSuite.exitCode, failures: baseSuite.failures, parsed: !!baseSuite.parsed },
+        suite: { exitCode: 0, failures: [], parsed: !!baseSuite.parsed, count: baseSuite.count || 0, plan: baseSuite.plan === undefined ? null : baseSuite.plan },
       });
     } catch (_e) { /* the cache is an optimisation */ }
   }
@@ -284,6 +322,13 @@ async function runTests(o) {
     if (mode === 'names') {
       const known = new Set(baseSuite.failures);
       const candidates = head.failures.filter((n) => !known.has(n));
+      if (!candidates.length) {
+        const c = headCompletion(head, baseSuite);
+        if (c !== 'complete') {
+          passed = false; diagnosis = 'unknown_baseline';
+          note = c === 'unknown' ? 'cannot confirm the head suite completed' : 'head suite did not complete';
+        }
+      }
       if (candidates.length) {
         const again = await runSuite(command, root, timeoutSec);
         addLog('head re-run', again);
@@ -324,4 +369,4 @@ async function runTests(o) {
   };
 }
 
-module.exports = { runTests, parseFailures, resolveCommand, abortAll, runSuite };
+module.exports = { runAtBase, parseCounts, runTests, parseFailures, resolveCommand, abortAll, runSuite };

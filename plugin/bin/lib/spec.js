@@ -115,7 +115,7 @@ function createTaskBranch(a) {
   if (!validBranchName(branch) || !gitlib.isRefName(branch)) throw new SerenoError('invalid_arg', 'not a valid branch name: ' + branch);
   const head = gitlib.resolveCommit(a.root, 'HEAD');
   if (!head) throw new SerenoError('invalid_arg', 'repository has no commits yet');
-  const dirty = gitlib.git(a.root, ['status', '--porcelain', '--untracked-files=no']);
+  const dirty = gitlib.git(a.root, ['status', '--porcelain', '--untracked-files=no', '--', '.', ':(exclude).sereno']);
   if (dirty === null) throw new SerenoError('invalid_arg', 'could not read the working tree status');
   if (dirty !== '') throw new SerenoError('dirty_tree', 'working tree has uncommitted changes; commit or stash them first');
   if (gitlib.git(a.root, ['show-ref', '--verify', '--quiet', 'refs/heads/' + branch]) !== null) {

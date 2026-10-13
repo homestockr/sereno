@@ -19,6 +19,8 @@ While building:
 - Follow the repo's conventions and add tests for what you change, in the repo's own
   test style. Run the tests before you finish.
 - Never edit `.sereno/`; those files belong to `sereno.js`.
+- Stage only the files you changed, by name (`git add <file> ...`). Never `git add -A`
+  or `git add .`, and never stage anything under `.sereno/`.
 - Never change configuration, hooks, settings or other branches. Never send commits to a remote. Never
   touch anything outside this repo.
 - Never read or copy secrets, credentials or real user data into the repo.

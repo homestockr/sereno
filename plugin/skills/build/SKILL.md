@@ -21,7 +21,7 @@ missing or `builder` is not one of those three, stop and tell the user to run
 ## 2. Get on the task branch
 
 The working tree must have no uncommitted changes to tracked files. Check with
-`git status --porcelain --untracked-files=no`; if it prints anything, stop and say so.
+`git -c core.fsmonitor=false status --porcelain --untracked-files=no -- . ':(exclude).sereno'` (changes under `.sereno/` do not count); if it prints anything, stop and say so.
 Then run `git switch task/<task>`. If the branch does not exist, stop and point to
 `/sereno:task`. Note the starting commit: `git rev-parse HEAD`, and the time (UTC,
 ISO 8601).
@@ -56,9 +56,11 @@ in the prompt and tell the Builder to fix only them.
 
 ## 5. Check the result
 
-When the Builder returns, run `git status --porcelain --untracked-files=no` and
-`git rev-parse HEAD`. It succeeded only if HEAD moved from the starting commit and the
-tree is clean. If it did not commit, or left changes behind, do not commit for it: the
+When the Builder returns, run `git -c core.fsmonitor=false status --porcelain --untracked-files=no -- . ':(exclude).sereno'`,
+`git rev-parse HEAD` and `git branch --show-current`. It succeeded only if HEAD moved
+from the starting commit, the tree is clean (ignoring `.sereno/`) and the current branch
+is still `task/<task>`. If the branch is anything else, the outcome is `error`: say so
+in the note and do not switch branches yourself. If it did not commit, or left changes behind, do not commit for it: the
 outcome is `error`.
 
 ## 6. Update the attempt

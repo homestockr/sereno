@@ -159,7 +159,11 @@ const COMMANDS = {
     const tp = str(a, 'tests-passed');
     if (tp !== undefined && tp !== 'true' && tp !== 'false') throw new SerenoError('invalid_arg', '--tests-passed must be true or false');
     const id = /^[A-Za-z0-9._:-]{1,128}$/;
-    const session = str(a, 'session'), agent = str(a, 'agent');
+    const agent = str(a, 'agent');
+    // The skill passes "${CLAUDE_SESSION_ID}"; empty or unsubstituted means unknown, and a
+    // value that is not a plain id is dropped rather than stored.
+    const sessRaw = str(a, 'session');
+    const session = sessRaw !== undefined && !sessRaw.includes('${') && /^[A-Za-z0-9-]{8,64}$/.test(sessRaw) ? sessRaw : undefined;
     const agentName = str(a, 'agent-name');
     // --model wins; otherwise the model: front matter of plugin/agents/<agent-name>.md.
     const model = str(a, 'model') !== undefined ? str(a, 'model') : (agentName !== undefined ? agentModel(agentName) : undefined);
