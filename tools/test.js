@@ -7527,6 +7527,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(a.attempt, 8); assert.strictEqual(a.spec_revision, 1); assert.strictEqual(a.fixes, 'earlier');
       assert.strictEqual(a.started_at, '2026-10-13T10:00:00.000Z'); assert.strictEqual(a.ended_at, null);
       assert.match(a.config_hash, /^sha256:[0-9a-f]{64}$/);
+      git(r.dir, 'checkout', '-q', '-b', 'task/other'); // --task must match the task/<x> branch (round 4)
       const other = run(r, ['attempt', '--task', 'other', '--builder', 'gpt']);
       assert.strictEqual(other.out.attempt, 1); assert.strictEqual(readJson(r, other.out.path).builder_requested, 'unknown');
     });
@@ -7625,7 +7626,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       "const fails=(s.fails||[]).slice();",
       "if(s.flaky && !inBase){ let n=0; try{n=+fs.readFileSync(s.flaky.counter,'utf8')}catch(e){} fs.writeFileSync(s.flaky.counter,String(n+1)); if(n===0) fails.push(s.flaky.name); }",
       "const all=(s.tests||[]).concat(s.flaky?[s.flaky.name]:[]);",
-      "if(!s.quiet){ console.log('TAP version 13'); all.forEach((t,i)=>console.log((fails.includes(t)?'not ok ':'ok ')+(i+1)+' - '+t)); }",
+      "if(!s.quiet){ console.log('TAP version 13'); all.forEach((t,i)=>console.log((fails.includes(t)?'not ok ':'ok ')+(i+1)+' - '+t)); if(s.plan) console.log('1..'+all.length); }",
       "process.exit(fails.length?2:0);",
       "}",
     ].join('\n');
@@ -7659,7 +7660,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (_e) { return false; } };
 
     test('[4a2] test: a failure already failing at base is not counted (exit criterion 2)', () => {
-      const r = mkSuite({ tests: ['A', 'C'], fails: ['A'] }, { tests: ['A', 'C'], fails: ['A'] });
+      const r = mkSuite({ tests: ['A', 'C'], fails: ['A'], plan: true }, { tests: ['A', 'C'], fails: ['A'], plan: true });
       const { status, out } = runT(r);
       assert.strictEqual(status, 0); assert.strictEqual(out.ok, true);
       assert.strictEqual(out.passed, true); assert.strictEqual(out.mode, 'names');
@@ -8608,6 +8609,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       "if(s.cwdlog) fs.appendFileSync(s.cwdlog, process.cwd()+'\\n');",
       "console.log('TAP version 13');",
       "s.tests.forEach((t,i)=>console.log(((s.fails||[]).includes(t)?'not ok ':'ok ')+(i+1)+' - '+t));",
+      "if(s.plan) console.log('1..'+s.tests.length);",
       "process.exit((s.fails||[]).length?2:0);",
     ].join('\n');
     /** repo on branch main with a base commit, optionally a head commit with another suite spec. */
@@ -8657,7 +8659,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     test('[plugin exit 2] a test failing at base is not a defect, and the base suite ran in its own worktree', () => {
       const cwdlog = path.join(mk(), 'cwd.log');
-      const spec = { tests: ['A', 'B'], fails: ['A'], cwdlog };
+      const spec = { tests: ['A', 'B'], fails: ['A'], cwdlog, plan: true };
       const r = mkRepo(spec, spec);
       const t = S(r.dir, ['test', '--base', r.base, '--head', r.head, '--json']);
       assert.strictEqual(t.out.ok, true); assert.strictEqual(t.out.passed, true);
@@ -8820,8 +8822,11 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('[4a-rf1] the same single failing test at base and head, full run, still passes; a plan missing at head does not', () => {
       const tests = ['A', 'B', 'C'];
+      // Round 4 (intended behaviour change): with no plan and no TAP summary, a matching result count
+      // is not proof of completion, so the same-failure plan-less run now goes to a decision.
       const ok = runT(mkRepo({ tests, fails: ['A'] }, { tests, fails: ['A'] })).out;
-      assert.strictEqual(ok.passed, true); assert.strictEqual(ok.diagnosis, 'none');
+      assert.strictEqual(ok.passed, false); assert.strictEqual(ok.diagnosis, 'unknown_baseline');
+      assert.strictEqual(ok.note, 'cannot confirm the head suite completed');
       const okPlan = runT(mkRepo({ tests, fails: ['A'], plan: true }, { tests, fails: ['A'], plan: true })).out;
       assert.strictEqual(okPlan.passed, true);
       const noPlan = runT(mkRepo({ tests, fails: ['A'], plan: true }, { tests, fails: ['A'], crashAfter: 3 })).out;
@@ -8863,7 +8868,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const tests = ['A'];
       const donor = mkRepo({ tests }, { tests, fails: ['A'] });
       runT(donor);
-      const r = mkRepo({ tests, fails: ['A'] }, { tests, fails: ['A'] });
+      const r = mkRepo({ tests, fails: ['A'], plan: true }, { tests, fails: ['A'], plan: true });
       assert.strictEqual(runT(r).out.passed, true);
       assert.ok(!fs.existsSync(cacheFile(r)), 'a failing base writes no cache');
       const planted = JSON.parse(fs.readFileSync(cacheFile(donor), 'utf8'));
@@ -9212,6 +9217,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const bad = S(r.dir, ['attempt', '--task', 'demo', '--builder', 'sonnet', '--kind', 'fix', '--outcome', 'running']);
       assert.strictEqual(bad.out.code, 'spec_required'); assert.notStrictEqual(bad.status, 0);
       assert.strictEqual(S(r.dir, ['attempt', '--task', 'demo', '--builder', 'sonnet', '--kind', 'fix', '--outcome', 'running', '--spec', '.sereno/specs/demo.md']).out.attempt, 2);
+      git(r.dir, 'checkout', '-q', '-b', 'task/other');
       assert.strictEqual(S(r.dir, ['attempt', '--task', 'other', '--builder', 'sonnet', '--kind', 'fix', '--outcome', 'running']).out.ok, true, 'another task is unaffected');
     });
     test('[4a-r3-3] on a task branch with attempt records, test and gate without --task are refused (task_required)', () => {
@@ -9263,6 +9269,54 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[4a-r3-6] README states the deleted-test and chained-TAP outcomes', () => {
       const t = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
       assert.match(t, /delete tests while a base failure persists/); assert.match(t, /chains two TAP producers/);
+    });
+    /* ---- Phase 4a: red-team round 4 ---- */
+    test('[4a-r4-1] plan-less runner: base fails A, head prints the same three lines then crashes: not passed', () => {
+      const tests = ['A', 'B', 'C'];
+      const { out } = runT(mkRepo({ tests, fails: ['A'] }, { tests, fails: ['A'], crashAfter: 3 }));
+      assert.strictEqual(out.passed, false); assert.strictEqual(out.diagnosis, 'unknown_baseline');
+      assert.strictEqual(out.note, 'cannot confirm the head suite completed');
+    });
+    test('[4a-r4-1] plan-less runner with a consistent TAP summary on a complete head passes (excused); an inconsistent summary does not', () => {
+      const mkS = (n) => [
+        "console.log('not ok 1 - A\\nok 2 - B\\nok 3 - C\\n# tests " + n + "\\n# pass 2\\n# fail 1');process.exit(2);",
+      ].join('\n');
+      const good = mkRepo({ tests: ['A'] }, { tests: ['A'] }, { command: 'node sm.js' }, { 'sm.js': mkS(3) });
+      const o = runT(good).out;
+      assert.strictEqual(o.passed, true, JSON.stringify(o)); assert.strictEqual(o.diagnosis, 'none'); assert.deepStrictEqual(o.baseFailures, ['A']);
+      const bad = runT(mkRepo({ tests: ['A'] }, { tests: ['A'] }, { command: 'node sm.js' }, { 'sm.js': mkS(5) })).out;
+      assert.strictEqual(bad.passed, false); assert.strictEqual(bad.diagnosis, 'unknown_baseline');
+    });
+    test('[4a-r4-2] --task must match the task/<x> branch for test, gate and attempt (branch_mismatch)', () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] });
+      const t = S(r.dir, ['test', '--task', 'other', '--base', r.base, '--head', r.head]);
+      assert.strictEqual(t.out.code, 'branch_mismatch'); assert.notStrictEqual(t.status, 0);
+      const g = S(r.dir, ['gate', '--stdin', '--task', 'other', '--base', r.base, '--head', r.head, '--tests-passed', 'true'], '{"outcome":"pass"}');
+      assert.strictEqual(g.out.code, 'branch_mismatch');
+      const a = S(r.dir, ['attempt', '--task', 'other', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'built']);
+      assert.strictEqual(a.out.code, 'branch_mismatch');
+      assert.strictEqual(S(r.dir, ['attempt', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'built']).out.ok, true);
+    });
+    test('[4a-r4-3] 201 base failures plus one new head failure: the capped run is unparsed, not truncated and excused', () => {
+      const CAP = [
+        "const base=process.cwd().includes('sereno-base-');const n=base?201:202;",
+        "for(let i=1;i<=n;i++)console.log('not ok '+i+' - f'+i);process.exit(1);",
+      ].join('\n');
+      const { out } = runT(mkRepo({ tests: ['A'] }, { tests: ['A'] }, { command: 'node cap.js' }, { 'cap.js': CAP }));
+      assert.strictEqual(out.passed, false, JSON.stringify(out)); assert.strictEqual(out.mode, 'exit-code');
+      assert.strictEqual(out.diagnosis, 'unknown_baseline');
+    });
+    test('[4a-r4-4] a silent exit-0 re-run after a failing head is not a flaky pass', () => {
+      const SIL = [
+        "const fs=require('fs');",
+        "if(process.cwd().includes('sereno-base-')){console.log('all fine');process.exit(0);}",
+        COUNTER,
+        "if(n===0){console.log('not ok 1 - A');process.exit(1);}",
+        "console.log('all fine');",
+      ].join('\n');
+      const { out } = runT(mkRepo({ tests: ['A'] }, { tests: ['A'] }, { command: 'node sil.js' }, { 'sil.js': SIL }));
+      assert.strictEqual(out.passed, false, JSON.stringify(out)); assert.strictEqual(out.diagnosis, 'unknown_baseline');
+      assert.deepStrictEqual(out.flaky, []);
     });
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }

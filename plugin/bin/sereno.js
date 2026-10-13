@@ -181,6 +181,17 @@ function requireTaskIfRecorded(root, fsafe, branchArg) {
   if (fsafe.listDir('.sereno/attempts').some((f) => re.test(f))) throw new SerenoError('task_required', 'this branch has attempt records for task ' + t + '; pass --task ' + t);
 }
 
+/**
+ * On a task/<x> branch, --task must be <x>.
+ * @param {string} root @param {string | undefined} task @param {string | undefined} branchArg
+ */
+function checkTaskBranch(root, task, branchArg) {
+  if (task === undefined) return;
+  const branch = branchArg || gitlib.currentBranch(root);
+  const m = branch && /^task\/(.+)$/.exec(branch);
+  if (m && m[1] !== task) throw new SerenoError('branch_mismatch', 'this branch is task/' + m[1] + '; --task must be ' + m[1] + ', not ' + task);
+}
+
 const COMMANDS = {
   config(/** @type {string[]} */ argv) {
     parseArgs(argv, { value: [], bool: ['json'] });
@@ -205,6 +216,7 @@ const COMMANDS = {
     const { root, fsafe } = needRepo();
     if (str(a, 'task') === undefined) requireTaskIfRecorded(root, fsafe, str(a, 'branch'));
     const task = rec.checkTask(str(a, 'task'));
+    checkTaskBranch(root, task, str(a, 'branch'));
     const base = gitlib.resolveCommit(root, str(a, 'base') || '');
     const head = gitlib.resolveCommit(root, str(a, 'head') || '');
     if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
@@ -265,6 +277,7 @@ const COMMANDS = {
     });
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
+    checkTaskBranch(root, task, undefined);
     if (a.update !== undefined) return updateAttempt(root, fsafe, task, a);
     const { config_hash } = loadConfig(root);
     const fixes = str(a, 'fixes');
@@ -324,6 +337,7 @@ const COMMANDS = {
     const { root, fsafe } = needRepo();
     if (str(a, 'task') !== undefined) {
       const t = rec.checkTask(str(a, 'task'));
+      checkTaskBranch(root, t, undefined);
       checkSpecPin(root, fsafe, t, str(a, 'spec') || '.sereno/specs/' + t + '.md');
     } else requireTaskIfRecorded(root, fsafe, undefined);
     testrun.sweepStale(root);

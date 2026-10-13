@@ -49,9 +49,16 @@ function stripAnsi(s) { return s.replace(/\u001b\[[0-9;]*[A-Za-z]/g, ''); }
  * Failing test names from common runner output.
  * @param {string} output @returns {string[]}
  */
-function parseFailures(output) {
+function parseFailures(output) { return parseFailuresInfo(output).names; }
+
+/**
+ * Like parseFailures, plus whether the MAX_NAMES cap was hit (the list is then incomplete).
+ * @param {string} output @returns {{ names: string[], capped: boolean }}
+ */
+function parseFailuresInfo(output) {
   /** @type {Set<string>} */
   const seen = new Set();
+  let capped = false;
   for (const raw of stripAnsi(output).split(/\r?\n/)) {
     let name = null;
     let m = /^\s*not ok\s+\d+\s*-?\s*(.*)$/.exec(raw);
@@ -61,9 +68,9 @@ function parseFailures(output) {
     if (name === null) continue;
     name = name.replace(/\s+/g, ' ').trim().replace(/\s*\(\d+(?:\.\d+)?\s*m?s\)$/, '').slice(0, 200);
     if (/^failing tests?\b.*:$/i.test(name)) continue; // a summary header, not a test
-    if (name && seen.size < MAX_NAMES) seen.add(name);
+    if (name && !seen.has(name)) { if (seen.size < MAX_NAMES) seen.add(name); else capped = true; }
   }
-  return Array.from(seen);
+  return { names: Array.from(seen), capped };
 }
 
 /**
@@ -78,6 +85,23 @@ function parseCounts(output) {
     else { const m = /^1\.\.(\d+)\s*$/.exec(raw); if (m) plan = parseInt(m[1], 10); }
   }
   return { count, top, plan };
+}
+
+/**
+ * The TAP summary footer (`# tests N`, `# pass P`, `# fail F`; node:test and tape print it) and the
+ * number of `not ok` result lines seen at any indent.
+ * @param {string} output @returns {{ nok: number, summary: { tests: number, pass: number | null, fail: number | null } | null }}
+ */
+function parseSummary(output) {
+  let nok = 0;
+  /** @type {{ tests: number | null, pass: number | null, fail: number | null }} */
+  const sm = { tests: null, pass: null, fail: null };
+  for (const raw of stripAnsi(output).split(/\r?\n/)) {
+    if (/^\s*not ok\s+\d+/.test(raw)) { nok++; continue; }
+    const t = /^(?:#|ℹ)\s*(tests|pass|fail)\s+(\d+)\s*$/.exec(raw);
+    if (t) sm[/** @type {'tests'|'pass'|'fail'} */ (t[1])] = parseInt(t[2], 10);
+  }
+  return { nok, summary: sm.tests === null ? null : { tests: sm.tests, pass: sm.pass, fail: sm.fail } };
 }
 
 /**
@@ -106,7 +130,7 @@ function tapValid(output) {
 }
 
 /**
- * @typedef {{ exitCode: number | null, timedOut: boolean, startFailed: boolean, output: string, failures: string[], parsed?: boolean, tapValid?: boolean, count?: number, top?: number, plan?: number | null }} Suite
+ * @typedef {{ exitCode: number | null, timedOut: boolean, startFailed: boolean, output: string, failures: string[], parsed?: boolean, tapValid?: boolean, count?: number, top?: number, plan?: number | null, nok?: number, summary?: { tests: number, pass: number | null, fail: number | null } | null, capped?: boolean }} Suite
  */
 
 /**
@@ -145,12 +169,14 @@ function runSuite(command, cwd, timeoutSec) {
       const output = Buffer.concat(chunks).toString('utf8');
       const notFound = code === 127 || code === 9009
         || (code !== 0 && code !== null && output.length < 2000 && /is not recognized as an internal or external command|command not found|: not found/i.test(output));
-      const counts = parseCounts(output);
+      const counts = parseCounts(output), sum = parseSummary(output);
+      const info = code === 0 ? { names: /** @type {string[]} */ ([]), capped: false } : parseFailuresInfo(output);
       resolve({
-        count: counts.count, top: counts.top, plan: counts.plan, tapValid: tapValid(output),
+        count: counts.count, top: counts.top, plan: counts.plan, nok: sum.nok, summary: sum.summary, tapValid: tapValid(output),
         exitCode: code, timedOut, startFailed: spawnError || (!timedOut && notFound),
-        output, failures: code === 0 ? [] : parseFailures(output),
-        parsed: code !== 0 && parseFailures(output).length > 0 || /^\s*(?:not ok|ok)\s+\d+/m.test(stripAnsi(output)),
+        // A run that hit the name cap is unparsed: no name-based excuse, exit-code rules apply.
+        output, failures: info.capped ? [] : info.names, capped: info.capped,
+        parsed: code !== 0 && info.names.length > 0 || /^\s*(?:not ok|ok)\s+\d+/m.test(stripAnsi(output)),
       });
     };
     timer = setTimeout(() => {
@@ -193,7 +219,11 @@ function headCompletion(head, base) {
   if ((head.count || 0) < (base.count || 0)) return 'incomplete';
   if (head.plan != null) return (head.top || 0) >= head.plan ? 'complete' : 'incomplete';
   if (base.plan != null) return 'incomplete'; // the base reached a plan line; the head never printed one
-  return 'complete';
+  // Neither run printed a plan: a result count that merely matches the base proves nothing. Only a
+  // TAP summary (node:test, tape) that agrees with the result lines seen shows the run finished.
+  const sm = head.summary;
+  if (sm && sm.tests === (head.count || 0) && (sm.fail === null || sm.fail === (head.nok || 0)) && (sm.pass === null || sm.pass + (sm.fail || 0) <= sm.tests)) return 'complete';
+  return 'unknown';
 }
 
 /** @param {string} sha */
@@ -409,7 +439,8 @@ async function runTests(o) {
         if (again.timedOut || again.startFailed) {
           newFailures = firstNew;
         } else if (again.exitCode === 0) {
-          if (headCompletion(again, baseSuite) === 'incomplete') {
+          // A silent or shorter exit-0 re-run is never proof of a flaky pass.
+          if (headCompletion(again, baseSuite) === 'incomplete' || (again.count || 0) < Math.max(baseSuite.count || 0, head.count || 0)) {
             passed = false; diagnosis = 'unknown_baseline'; note = 'head suite did not complete';
           } else {
             flaky = firstNew;
