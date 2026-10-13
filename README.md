@@ -293,6 +293,22 @@ GitHub owner and name from `origin`.
 **Review in terminal** is in the console's attention panel. It raises the waiting session's
 terminal, as the widget's button does. It is not available under `npm run serve`.
 
+## Use the pipeline without the app
+
+The pipeline is also a Claude Code plugin, so it runs without this app. It gives each
+task a gated flow: a spec, a Builder on its own branch, a red-team review with a verdict,
+tests run against the base commit, and a merge only after you say yes. Each role has its
+own model. Install it inside Claude Code:
+
+```
+/plugin marketplace add homestockr/sereno
+/plugin install sereno@sereno
+```
+
+The plugin writes gate and attempt files under `.sereno/`. The app's Pipeline view,
+planned for the next phase, will read them. See [plugin/README.md](plugin/README.md) for
+the commands, presets and recovery rules.
+
 ## Sizing
 
 The widget scales for the display you actually have.

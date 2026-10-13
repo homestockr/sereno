@@ -8493,6 +8493,180 @@ test('missing rate_limits degrades instead of throwing', () => {
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 
+  /* ---- [plugin exit] ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-pexit-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const T_JS = [
+      "const fs=require('fs');const s=JSON.parse(fs.readFileSync('spec.json','utf8'));",
+      "if(s.cwdlog) fs.appendFileSync(s.cwdlog, process.cwd()+'\\n');",
+      "console.log('TAP version 13');",
+      "s.tests.forEach((t,i)=>console.log(((s.fails||[]).includes(t)?'not ok ':'ok ')+(i+1)+' - '+t));",
+      "process.exit((s.fails||[]).length?2:0);",
+    ].join('\n');
+    /** repo on branch main with a base commit, optionally a head commit with another suite spec. */
+    function mkRepo(baseSpec, headSpec, cmd) {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 't.js'), T_JS);
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      fs.writeFileSync(path.join(dir, 'spec.json'), JSON.stringify(baseSpec || { tests: ['A'] }));
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      const base = git(dir, 'rev-parse', 'HEAD');
+      if (headSpec) {
+        fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+        fs.writeFileSync(path.join(dir, 'spec.json'), JSON.stringify(headSpec));
+        git(dir, 'commit', '-q', '-am', 'head');
+      }
+      fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: { command: cmd || 'node t.js' } }));
+      return { dir, base, head: git(dir, 'rev-parse', 'HEAD') };
+    }
+    const attempt = (dir, args) => S(dir, ['attempt', '--task', 'demo', ...args]);
+    const recovery = (dir) => S(dir, ['recovery', '--task', 'demo']).out;
+    const readJ = (dir, rel) => JSON.parse(fs.readFileSync(path.join(dir, rel), 'utf8'));
+
+    test('[plugin exit 1] both manifests are valid (claude plugin validate, else a JSON-shape check)', () => {
+      const has = spawnSync('claude', ['--version'], { shell: true, timeout: 30000 }).status === 0;
+      if (has) {
+        console.log('  [plugin exit 1] path: claude plugin validate');
+        for (const target of ['plugin', '.']) {
+          const r = spawnSync('claude', ['plugin', 'validate', target], { cwd: ROOT, shell: true, timeout: 60000, encoding: 'utf8' });
+          assert.strictEqual(r.status, 0, target + ': ' + (r.stdout || '') + (r.stderr || ''));
+        }
+        return;
+      }
+      console.log('  [plugin exit 1] path: JSON-shape check (claude not on PATH)');
+      const pj = readJ(ROOT, 'plugin/.claude-plugin/plugin.json'), mj = readJ(ROOT, '.claude-plugin/marketplace.json');
+      for (const k of ['name', 'version', 'description']) assert.ok(typeof pj[k] === 'string' && pj[k], 'plugin.json ' + k);
+      assert.match(pj.name, /^[a-z0-9]+(-[a-z0-9]+)*$/); assert.match(pj.version, /^\d+\.\d+\.\d+/);
+      assert.ok(typeof mj.name === 'string' && mj.name && mj.owner && typeof mj.owner.name === 'string');
+      assert.ok(Array.isArray(mj.plugins) && mj.plugins.length === 1);
+      const e = mj.plugins[0];
+      assert.strictEqual(e.name, pj.name); assert.strictEqual(e.version, pj.version);
+      assert.ok(typeof e.source === 'string' && e.source.startsWith('./'));
+      assert.ok(fs.existsSync(path.join(ROOT, e.source, '.claude-plugin', 'plugin.json')), 'source resolves');
+    });
+
+    test('[plugin exit 2] a test failing at base is not a defect, and the base suite ran in its own worktree', () => {
+      const cwdlog = path.join(mk(), 'cwd.log');
+      const spec = { tests: ['A', 'B'], fails: ['A'], cwdlog };
+      const r = mkRepo(spec, spec);
+      const t = S(r.dir, ['test', '--base', r.base, '--head', r.head, '--json']);
+      assert.strictEqual(t.out.ok, true); assert.strictEqual(t.out.passed, true);
+      assert.deepStrictEqual(t.out.baseFailures, ['A']); assert.deepStrictEqual(t.out.newFailures, []);
+      assert.strictEqual(t.out.diagnosis, 'none');
+      const lines = fs.readFileSync(cwdlog, 'utf8').split('\n').filter(Boolean);
+      assert.strictEqual(lines.length, 2);
+      assert.ok(lines[0].includes('sereno-base-'), 'base cwd is a base worktree');
+      assert.notStrictEqual(lines[0].toLowerCase(), r.dir.toLowerCase());
+      assert.strictEqual(lines[1].toLowerCase(), r.dir.toLowerCase());
+      assert.strictEqual(git(r.dir, 'worktree', 'list').split('\n').filter(Boolean).length, 1, 'worktree removed');
+    });
+
+    test('[plugin exit 3] an environment failure retries without using the repair (CLI sequence as /sereno:ship)', () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] }, 'sereno-no-such-command-xyz');
+      const t = S(r.dir, ['test', '--base', r.base, '--head', r.head, '--json']);
+      assert.strictEqual(t.out.passed, false); assert.strictEqual(t.out.diagnosis, 'environment');
+      assert.strictEqual(attempt(r.dir, ['--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running']).out.attempt, 1);
+      assert.strictEqual(attempt(r.dir, ['--update', '1', '--outcome', 'error', '--diagnosis', t.out.diagnosis, '--ended-at', 'now']).out.ok, true);
+      assert.strictEqual(readJ(r.dir, '.sereno/attempts/demo-1.json').diagnosis, 'environment');
+      let rec = recovery(r.dir);
+      assert.deepStrictEqual([rec.next, rec.repairsUsed, rec.infraRetriesUsed], ['retry', 0, 0]);
+      attempt(r.dir, ['--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running']);
+      attempt(r.dir, ['--update', '2', '--outcome', 'error', '--diagnosis', 'environment', '--ended-at', 'now']);
+      rec = recovery(r.dir);
+      assert.deepStrictEqual([rec.next, rec.repairsUsed, rec.infraRetriesUsed], ['retry', 0, 1]);
+      attempt(r.dir, ['--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running']);
+      attempt(r.dir, ['--update', '3', '--outcome', 'error', '--diagnosis', 'environment', '--ended-at', 'now']);
+      rec = recovery(r.dir);
+      assert.deepStrictEqual([rec.next, rec.repairsUsed, rec.infraRetriesUsed], ['decide', 0, 2], 'infraRetries used up');
+    });
+
+    test('[plugin exit 4] a second defect goes to decide and no third attempt is suggested', () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'], fails: ['A'] });
+      const t = S(r.dir, ['test', '--base', r.base, '--head', r.head, '--json']);
+      assert.strictEqual(t.out.passed, false); assert.deepStrictEqual(t.out.newFailures, ['A']);
+      const defect = (n) => {
+        assert.strictEqual(attempt(r.dir, ['--builder', 'sonnet', '--kind', n === 1 ? 'feature' : 'repair', '--outcome', 'running']).out.attempt, n);
+        assert.strictEqual(attempt(r.dir, ['--update', String(n), '--outcome', 'block', '--diagnosis', 'defect', '--ended-at', 'now']).out.ok, true);
+        return recovery(r.dir);
+      };
+      let rec = defect(1);
+      assert.deepStrictEqual([rec.next, rec.repairsUsed], ['repair', 0]);
+      rec = defect(2);
+      assert.deepStrictEqual([rec.next, rec.repairsUsed], ['decide', 1]);
+      rec = defect(3);
+      assert.strictEqual(rec.next, 'decide');
+    });
+
+    test('[plugin exit 5] gate and attempt files match the spec fields exactly; unknown enums are "unknown"; config_hash is stable', () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] });
+      fs.mkdirSync(path.join(r.dir, '.sereno', 'specs'), { recursive: true }); fs.writeFileSync(path.join(r.dir, '.sereno', 'specs', 'demo.md'), '# spec\n');
+      const g = S(r.dir, ['gate', '--stdin', '--task', 'demo', '--base', r.base, '--head', r.head, '--session', 's-1', '--agent', 'a_1', '--model', 'claude-opus-5-5', '--tests-passed', 'true'],
+        JSON.stringify({ outcome: 'maybe', findings: [{ severity: 'catastrophic', kind: 7, file: 'a.txt', line: 2, summary: 's', extra: 1 }], context_requests: [], evil: 1 }));
+      assert.strictEqual(g.out.ok, true, JSON.stringify(g.out));
+      const gate = readJ(r.dir, g.out.path);
+      assert.deepStrictEqual(Object.keys(gate), ['review_run_id', 'task_id', 'spec', 'spec_hash', 'branch', 'base_commit', 'head_commit', 'session_id', 'agent_id', 'model', 'outcome', 'tests_passed', 'findings', 'context_requests', 'reviewed_at', 'config_hash']);
+      assert.strictEqual(gate.outcome, 'unknown');
+      assert.deepStrictEqual(Object.keys(gate.findings[0]), ['severity', 'kind', 'file', 'line', 'summary']);
+      assert.strictEqual(gate.findings[0].severity, 'unknown'); assert.strictEqual(gate.findings[0].kind, 'unknown');
+      const a = attempt(r.dir, ['--builder', 'gpt', '--kind', 'telepathy', '--diagnosis', 'vibes', '--outcome', 'sideways']);
+      assert.strictEqual(a.out.ok, true, JSON.stringify(a.out));
+      const att = readJ(r.dir, a.out.path);
+      assert.deepStrictEqual(Object.keys(att), ['project_id', 'task_id', 'spec_revision', 'attempt', 'builder_requested', 'agent_id', 'config_hash', 'kind', 'fixes', 'diagnosis', 'outcome', 'review_run_id', 'started_at', 'ended_at']);
+      for (const k of ['builder_requested', 'kind', 'diagnosis', 'outcome']) assert.strictEqual(att[k], 'unknown', k);
+      const h = (obj) => { const x = mkRepo(); fs.writeFileSync(path.join(x.dir, '.sereno', 'pipeline.json'), JSON.stringify(obj)); return S(x.dir, ['config']).out.config_hash; };
+      assert.strictEqual(h({ preset: 'lean', recovery: { repairs: 1, infraRetries: 3 } }), h({ recovery: { infraRetries: 3, repairs: 1 }, preset: 'lean' }));
+      assert.notStrictEqual(h({ preset: 'lean' }), h({ preset: 'default' }));
+    });
+
+    test('[plugin exit 6] a full simulated ship writes only under .sereno/ (plus the Builder commit); plugin/ never pushes or touches a remote', () => {
+      const r = mkRepo({ tests: ['A'] });
+      const br = S(r.dir, ['branch', '--task', 'demo']);
+      assert.strictEqual(br.out.ok, true, JSON.stringify(br.out));
+      assert.strictEqual(S(r.dir, ['spec', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', br.out.from_branch, '--stdin'], '## Goal\nx\n').out.ok, true);
+      attempt(r.dir, ['--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running']);
+      fs.writeFileSync(path.join(r.dir, 'a.txt'), 'two\n'); git(r.dir, 'commit', '-q', '-am', 'builder work');
+      const head = git(r.dir, 'rev-parse', 'HEAD');
+      const t = S(r.dir, ['test', '--base', r.base, '--head', head, '--json']);
+      assert.strictEqual(t.out.passed, true);
+      attempt(r.dir, ['--update', '1', '--outcome', 'built', '--ended-at', 'now']);
+      const g = S(r.dir, ['gate', '--stdin', '--task', 'demo', '--base', r.base, '--head', head, '--session', 's', '--agent', 'a', '--model', 'm', '--tests-passed', 'true'], JSON.stringify({ outcome: 'pass', findings: [] }));
+      assert.strictEqual(g.out.ok, true, JSON.stringify(g.out));
+      attempt(r.dir, ['--update', '1', '--outcome', 'pass', '--diagnosis', 'none', '--review-run-id', g.out.review_run_id, '--ended-at', 'now']);
+      assert.strictEqual(recovery(r.dir).next, 'merge');
+      const lines = git(r.dir, 'status', '--porcelain', '--untracked-files=all').split('\n').filter(Boolean);
+      assert.ok(lines.length > 0);
+      for (const l of lines) assert.ok(/^\?\? "?\.sereno\//.test(l), 'outside .sereno/: ' + l);
+      assert.strictEqual(git(r.dir, 'remote'), '', 'no remote configured or added');
+      const bad = [];
+      const RX = [/\bgit\b[^\n]*\b(push|fetch|pull|ls-remote)\b/i, /\bgit\b[^\n]*\bremote\s+(add|set-url)\b/i, /['"`](push|fetch|pull|ls-remote)['"`]/, /['"`]remote['"`]\s*,\s*['"`]add['"`]/];
+      (function walk(d) {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          const p = path.join(d, e.name);
+          if (e.isDirectory()) { walk(p); continue; }
+          let txt = fs.readFileSync(p, 'utf8');
+          // prose saying the plugin never does it is fine; an invocation is not
+          if (/\.md$/i.test(p)) txt = txt.replace(/\b(never|not|nothing|no|without)\b[^.]*\./gi, '');
+          if (RX.some((x) => x.test(txt))) bad[bad.length] = path.relative(ROOT, p);
+        }
+      })(PLUGIN);
+      assert.deepStrictEqual(bad, []);
+    });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
