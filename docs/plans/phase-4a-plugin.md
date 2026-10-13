@@ -217,3 +217,24 @@ The app's Pipeline tab, role spend, pipeline alerts, reading attempts into the l
 the app offering to install the plugin, retiring the app's `/brief` (all 4b). Also: a
 learned router, automatic Builder changes, per-invocation model switching, pushing, and
 CI integration.
+
+## Exit 7 log (architect, 2026-10-13)
+
+Run with `claude -p --plugin-dir plugin` (Claude Code 2.1.296) in throwaway repos (a tiny
+Node calculator with a TAP test), one per preset:
+
+| Preset | Task | Builder | Red team | Tests | Gate | Merge |
+|---|---|---|---|---|---|---|
+| default | multiply | builder-haiku | red-team (Fable) | pass, base clean | pass, 0 findings | after "yes" |
+| lean | divide (throws on /0) | builder-haiku | red-team-lean (Opus) | pass, base clean | pass, 1 low finding | after "yes" |
+
+Both merged `--no-ff` locally after an explicit yes; nothing contacted a remote. Headless
+runs can't answer permission prompts, so the merge and brief calls needed `--allowedTools`
+for git/node; interactive sessions prompt as usual.
+
+Found and fixed before release:
+- The scribe was given a wrong path to `sereno.js` once (agents can't expand
+  `${CLAUDE_PLUGIN_ROOT}`), so the post-merge brief failed on the default run.
+- The scribe's Next line once went beyond the spec.
+- Attempt records left `agent_id` and `project_id` empty; the default run's gate left
+  `model` and `session_id` empty.
