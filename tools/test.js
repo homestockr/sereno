@@ -7324,6 +7324,49 @@ test('missing rate_limits degrades instead of throwing', () => {
     }
   }
 
+
+  /* ---- Phase 4a step 0: plugin manifests ---- */
+  {
+    const pj = JSON.parse(fs.readFileSync(path.join(ROOT, 'plugin', '.claude-plugin', 'plugin.json'), 'utf8'));
+    const mj = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
+    const entry = (mj.plugins || [])[0] || {};
+
+    test('plugin manifest: name is sereno, kebab-case, version set', () => {
+      assert.strictEqual(pj.name, 'sereno');
+      assert.match(pj.name, /^[a-z0-9]+(-[a-z0-9]+)*$/);
+      assert.match(pj.version, /^\d+\.\d+\.\d+$/);
+    });
+    test('marketplace: required fields and entry matches the plugin manifest', () => {
+      assert.strictEqual(mj.name, 'sereno');
+      assert.ok(mj.owner && mj.owner.name);
+      assert.strictEqual(mj.plugins.length, 1);
+      assert.strictEqual(entry.name, pj.name);
+      assert.strictEqual(entry.version, pj.version);
+    });
+    test('marketplace source ./plugin resolves to a dir with .claude-plugin/plugin.json', () => {
+      assert.strictEqual(entry.source, './plugin');
+      assert.ok(fs.existsSync(path.join(ROOT, entry.source, '.claude-plugin', 'plugin.json')));
+    });
+    test('plugin/ has no package.json (no dependencies, no install step)', () => {
+      assert.ok(!fs.existsSync(path.join(ROOT, 'plugin', 'package.json')));
+    });
+    test('Electron build files do not include plugin/ or .claude-plugin/', () => {
+      const files = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files;
+      for (const f of files) {
+        assert.ok(!/^!?\.?\/?(plugin|\.claude-plugin)(\/|$)/.test(f) || f.startsWith('!'), 'packages ' + f);
+        assert.ok(!/^\*\*/.test(f), 'broad glob ' + f);
+      }
+    });
+    const hasClaude = spawnSync('claude', ['--version'], { shell: true, timeout: 30000 }).status === 0;
+    for (const target of ['plugin', '.']) {
+      if (!hasClaude) { console.log('  skip claude plugin validate ' + target + ' (claude not on PATH)'); continue; }
+      test('claude plugin validate ' + target + ' passes', () => {
+        const r = spawnSync('claude', ['plugin', 'validate', target], { cwd: ROOT, shell: true, timeout: 30000, encoding: 'utf8' });
+        assert.strictEqual(r.status, 0, (r.stdout || '') + (r.stderr || ''));
+      });
+    }
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
