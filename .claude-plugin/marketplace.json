@@ -1,0 +1,15 @@
+{
+  "name": "sereno",
+  "owner": { "name": "Roberto Rosado" },
+  "metadata": { "description": "Sereno: observability and a gated pipeline for Claude Code." },
+  "plugins": [
+    {
+      "name": "sereno",
+      "source": "./plugin",
+      "description": "Gated build, review and ship pipeline for Claude Code with per-role models.",
+      "version": "0.1.0",
+      "category": "development",
+      "tags": ["pipeline", "review", "gates"]
+    }
+  ]
+}
