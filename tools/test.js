@@ -7474,10 +7474,13 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('[4a1] gate: unknown enums become "unknown"; --file works and unwraps a fenced block', () => {
       const r = mkRepo();
-      const vf = path.join(mk(), 'v.json');
-      fs.writeFileSync(vf, '```json\n' + JSON.stringify({ outcome: 'maybe', findings: [{ severity: 'catastrophic', kind: 7, file: 'a.txt', line: 'x', summary: 's' }] }) + '\n```');
-      const { out } = run(r, gateArgs(r).filter((x) => x !== '--stdin').concat(['--file', vf]));
+      const RID = 'rr_20260101T000000Z_abc1234';
+      fs.mkdirSync(path.join(r.dir, '.sereno', 'cache'), { recursive: true });
+      const vf = '.sereno/cache/verdict-' + RID + '.json';
+      fs.writeFileSync(path.join(r.dir, vf), '```json\n' + JSON.stringify({ outcome: 'maybe', findings: [{ severity: 'catastrophic', kind: 7, file: 'a.txt', line: 'x', summary: 's' }] }) + '\n```');
+      const { out } = run(r, gateArgs(r).filter((x) => x !== '--stdin').concat(['--file', vf, '--run-id', RID]));
       assert.strictEqual(out.ok, true, JSON.stringify(out));
+      assert.ok(!fs.existsSync(path.join(r.dir, vf)));
       const gate = readJson(r, out.path);
       assert.strictEqual(gate.outcome, 'unknown'); assert.strictEqual(gate.findings[0].severity, 'unknown');
       assert.strictEqual(gate.findings[0].kind, 'unknown'); assert.strictEqual(gate.findings[0].line, null);
@@ -7925,7 +7928,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const a of ['sereno:builder', 'sereno:builder-haiku', 'sereno:builder-opus']) assert.ok(build.includes('`' + a + '`'));
       assert.ok(/attempt --task/.test(build) && /--outcome running/.test(build) && /--outcome <built\|error>/.test(build));
       const task = front(path.join(PLUGIN, 'skills', 'task', 'SKILL.md')).body;
-      assert.ok(/spec --task/.test(task) && /branch --task/.test(task) && /--stdin/.test(task) && /authentication/.test(task));
+      assert.ok(/spec --task/.test(task) && /branch --task/.test(task) && /--body-file/.test(task) && /authentication/.test(task));
     });
     test('[4a3] plugin: no git push anywhere under plugin/', () => {
       const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
@@ -8224,7 +8227,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const m of SHIP.matchAll(/sereno\.js" ([a-z-]+)/g)) if (!order.includes(m[1])) order[order.length] = m[1];
       assert.deepStrictEqual(order, ['clean', 'config', 'test', 'attempt', 'run-id', 'context', 'gate', 'brief', 'recovery']);
       const at = (s) => SHIP.indexOf(s);
-      const seq = ['bin/sereno.js" test --task', 'bin/sereno.js" run-id --head', 'bin/sereno.js" context --head', 'bin/sereno.js" gate --stdin', '--review-run-id <review_run_id> --diagnosis', 'bin/sereno.js" recovery --task', '## 6. Merge prompt'];
+      const seq = ['bin/sereno.js" test --task', 'bin/sereno.js" run-id --head', 'bin/sereno.js" context --head', 'bin/sereno.js" gate --file', '--review-run-id <review_run_id> --diagnosis', 'bin/sereno.js" recovery --task', '## 6. Merge prompt'];
       for (let i = 1; i < seq.length; i++) assert.ok(at(seq[i - 1]) >= 0 && at(seq[i]) > at(seq[i - 1]), seq[i] + ' after ' + seq[i - 1]);
       assert.ok(SHIP.includes('Review needs a decision'));
       for (const s of ['clarify the spec', 'stronger Builder', 'stop']) assert.ok(SHIP.includes(s), s);
@@ -8773,29 +8776,23 @@ test('missing rate_limits degrades instead of throwing', () => {
     const { spawnSync } = require('node:child_process');
     const skills = fs.readdirSync(path.join(PLUGIN, 'skills')).map((n) => [n, fs.readFileSync(path.join(PLUGIN, 'skills', n, 'SKILL.md'), 'utf8')]);
     const fenced = (t) => { const out = []; let on = false; for (const l of t.split('\n')) { if (/^\s*```/.test(l)) { on = !on; continue; } if (on) out.push(l); } return out; };
-    test('[4a-heredoc] every --stdin invocation is a quoted heredoc starting with node', () => {
-      let seen = 0;
+    test('[4a-heredoc] skills pass no JSON via stdin, heredoc or echo; use cache files', () => {
       for (const [n, t] of skills) {
-        const lines = fenced(t);
-        for (let i = 0; i < lines.length; i++) {
-          const l = lines[i];
-          if (!/sereno\.js/.test(l) || !/--stdin/.test(l)) continue;
-          seen++;
-          assert.ok(l.startsWith('node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js"'), n + ': ' + l);
-          const m = l.match(/<<'(SERENO_[A-Z_]+)'\s*$/);
-          assert.ok(m, n + ': no quoted heredoc: ' + l);
-          assert.ok(lines.slice(i + 1).some((x) => x === m[1]), n + ': heredoc never closed');
-        }
-        for (const l of lines) {
+        for (const l of fenced(t)) {
+          assert.ok(!/--stdin/.test(l) && !/<</.test(l), n + ': stdin/heredoc in a command: ' + l);
           assert.ok(!/^\s*(echo|printf|cat)\b/.test(l) && !/\|\s*node\b/.test(l), n + ': pipe into node: ' + l);
-          assert.ok(!/\bWrite\b.*\.sereno\//.test(l), n + ': Write under .sereno: ' + l);
+          assert.ok(!l.includes('{"'), n + ': {" inside a command block: ' + l);
         }
-        assert.ok(!/\b(use|call|with)\b[^.\n]*\bWrite tool\b[^.\n]*\.sereno\//i.test(t), n + ': tells model to Write under .sereno');
+        assert.ok(!/--stdin/.test(t), n + ': mentions --stdin');
+        const fm = /^allowed-tools:(.*)$/m.exec(t)[1];
+        if (n !== 'ship' && n !== 'task') assert.ok(!/Write|Edit/.test(fm), n + ': unexpected write grant');
       }
-      assert.ok(seen >= 2, 'found the gate and spec invocations');
-      const ship = skills.find((s) => s[0] === 'ship')[1];
-      assert.match(ship, /gate --stdin[^\n]*<<'SERENO_VERDICT'/);
-      assert.match(ship, /never use them/);
+      const ship = skills.find((x) => x[0] === 'ship')[1];
+      const task = skills.find((x) => x[0] === 'task')[1];
+      assert.match(ship, /gate --file \.sereno\/cache\/verdict-<review_run_id>\.json /);
+      assert.match(task, /spec --task <name>[^\n]*--body-file \.sereno\/cache\/spec-<name>\.md/);
+      assert.match(ship, /^allowed-tools:.*Edit\(\.sereno\/cache\/verdict-\*\.json\)/m);
+      assert.match(task, /^allowed-tools:.*Edit\(\.sereno\/cache\/spec-\*\.md\)/m);
     });
     test('[4a-heredoc] gate and spec read a bash heredoc body', () => {
       const probe = spawnSync('bash', ['-c', 'true'], { encoding: 'utf8' });
@@ -8817,6 +8814,108 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(gt.outcome, 'pass');
         fs.rmSync(home, { recursive: true, force: true });
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+
+  /* ---- Phase 4a: cache-file handoff ---- */
+  {
+    const SERENO = path.join(ROOT, 'plugin', 'bin', 'sereno.js');
+    const { spawnSync } = require('node:child_process');
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4cf-')));
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4cfh-')));
+    const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
+    const head = g('rev-parse', 'HEAD');
+    const env = Object.assign({}, process.env, { HOME: home, USERPROFILE: home });
+    const run = (...a) => { const r = spawnSync(process.execPath, [SERENO, ...a], { cwd: dir, encoding: 'utf8', env }); return JSON.parse(r.stdout); };
+    const cache = path.join(dir, '.sereno', 'cache');
+    fs.mkdirSync(cache, { recursive: true });
+    const PASS = JSON.stringify({ outcome: 'pass', findings: [] });
+    const put = (name, data) => { fs.writeFileSync(path.join(cache, name), data); return '.sereno/cache/' + name; };
+    const gateArgs = (file, id) => ['gate', '--file', file, '--task', 'cf', '--base', head, '--head', head, '--branch', 'main', '--run-id', id, '--tests-passed', 'true'];
+    const specBase = ['--task', 'cf', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r'];
+    test('[4a-cachefile] spec --body-file writes the spec and deletes the file', () => {
+      const f = put('spec-cf.md', '## Goal\nchange a\n');
+      const r = run('spec', ...specBase, '--body-file', f);
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      assert.match(fs.readFileSync(path.join(dir, '.sereno', 'specs', 'cf.md'), 'utf8'), /change a/);
+      assert.ok(!fs.existsSync(path.join(dir, f)));
+    });
+    test('[4a-cachefile] gate --file writes the gate and deletes the file', () => {
+      const f = put('verdict-rr_20260101T000000Z_abc1234.json', PASS);
+      const r = run(...gateArgs(f, 'rr_20260101T000000Z_abc1234'));
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      assert.strictEqual(r.outcome, 'pass');
+      assert.ok(!fs.existsSync(path.join(dir, f)));
+      assert.ok(fs.existsSync(path.join(dir, '.sereno', 'gates', 'rr_20260101T000000Z_abc1234.json')));
+    });
+    test('[4a-cachefile] gate --file refuses wrong dir, wrong name, mismatched id, absolute, oversize', () => {
+      fs.mkdirSync(path.join(dir, 'other'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'other', 'verdict-rr_x1.json'), PASS);
+      fs.mkdirSync(path.join(dir, '.sereno', 'gates'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'gates', 'verdict-rr_x1.json'), PASS);
+      const notes = put('notes.json', PASS);
+      const other = put('verdict-rr_other.json', PASS);
+      const big = put('verdict-rr_big.json', JSON.stringify({ outcome: 'pass', findings: [], pad: 'x'.repeat(65 * 1024) }));
+      const cases = [
+        ['other/verdict-rr_x1.json', 'rr_20260101T000000Z_abc1239'], ['.sereno/gates/verdict-rr_x1.json', 'rr_20260101T000000Z_abc1239'], [notes, 'rr_20260101T000000Z_abc1239'],
+        [other, 'rr_20260101T000000Z_abc1239'], [big, 'rr_20260101T000000Z_abc1236'], [path.join(cache, 'verdict-rr_other.json'), 'rr_20260101T000000Z_abc1235'],
+        ['.sereno/cache/../cache/verdict-rr_other.json', 'rr_20260101T000000Z_abc1235'],
+      ];
+      for (const [f, id] of cases) {
+        const r = run(...gateArgs(f, id));
+        assert.strictEqual(r.ok, false, f);
+        assert.strictEqual(r.code, 'path_refused', f + ' -> ' + JSON.stringify(r));
+      }
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno', 'gates', 'rr_big.json')));
+      assert.ok(fs.existsSync(path.join(dir, other)), 'refused file is left alone');
+    });
+    test('[4a-cachefile] gate --file refuses a symlinked verdict and a junctioned cache dir', () => {
+      const real = path.join(dir, 'realverdict.json');
+      fs.writeFileSync(real, PASS);
+      const link = path.join(cache, 'verdict-rr_link.json');
+      let made = false;
+      try { fs.symlinkSync(real, link, 'file'); made = true; } catch (_e) { /* no symlink privilege */ }
+      if (made) {
+        const r = run(...gateArgs('.sereno/cache/verdict-rr_link.json', 'rr_20260101T000000Z_abc1237'));
+        assert.strictEqual(r.code, 'path_refused');
+        assert.ok(fs.existsSync(real));
+      }
+      const alt = path.join(dir, 'altcache');
+      fs.mkdirSync(alt, { recursive: true });
+      fs.writeFileSync(path.join(alt, 'verdict-rr_dir.json'), PASS);
+      const saved = path.join(dir, '.sereno', 'cache-real');
+      fs.renameSync(cache, saved);
+      try {
+        let linked = false;
+        try { fs.symlinkSync(alt, cache, 'junction'); linked = true; } catch (_e) { /* skip */ }
+        if (linked) {
+          const r = run(...gateArgs('.sereno/cache/verdict-rr_dir.json', 'rr_20260101T000000Z_abc1238'));
+          assert.strictEqual(r.code, 'path_refused');
+          fs.rmSync(cache, { recursive: true, force: true });
+        }
+      } finally {
+        try { fs.rmSync(cache, { recursive: true, force: true }); } catch (_e) { /* best effort */ }
+        fs.renameSync(saved, cache);
+      }
+    });
+    test('[4a-cachefile] spec --body-file refuses wrong dir, name, task mismatch, oversize; needs one source', () => {
+      fs.writeFileSync(path.join(dir, 'spec-cf.md'), '## Goal\nx\n');
+      const notes = put('notes.md', '## Goal\nx\n');
+      const other = put('spec-zz.md', '## Goal\nx\n');
+      const bad = put('spec-a b.md', '## Goal\nx\n');
+      const big = put('spec-cf.md', '## Goal\n' + 'x'.repeat(65 * 1024));
+      for (const f of ['spec-cf.md', '.sereno/specs/spec-cf.md', notes, other, bad, big, '../spec-cf.md']) {
+        const r = run('spec', ...specBase, '--body-file', f);
+        assert.strictEqual(r.code, 'path_refused', f + ' -> ' + JSON.stringify(r));
+      }
+      assert.strictEqual(run('spec', ...specBase).code, 'usage');
+      assert.strictEqual(run('spec', ...specBase, '--body-file', big, '--stdin').code, 'usage');
+    });
+    test('[4a-cachefile] cleanup', () => {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true });
     });
   }
 
@@ -9301,7 +9400,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const t = fs.readFileSync(path.join(PLUGIN, 'skills', 'ship', 'SKILL.md'), 'utf8');
       assert.ok(!/exactly as `\/sereno:build` does/.test(t));
       assert.match(t, /attempt --task <task> --spec-revision[^\n]*--spec \.sereno\/specs\/<task>\.md/);
-      assert.match(t, /sereno\.js" test --task <task> --base/); assert.match(t, /sereno\.js" gate --stdin --task <task>/);
+      assert.match(t, /sereno\.js" test --task <task> --base/); assert.match(t, /sereno\.js" gate --file [^ ]+ --task <task>/);
       assert.match(t, /`run_in_background: true`/); assert.match(t, /completion notice/);
       assert.ok(!/timeoutSec` lower/.test(t), 'the "lower timeoutSec in .sereno/pipeline.json" advice is gone');
       assert.match(t, /~\/\.sereno\/pipeline\.json/);

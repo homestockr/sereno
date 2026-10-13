@@ -3,7 +3,7 @@ name: task
 description: Write a task spec and create its task branch. Use to start a piece of work for the Sereno pipeline.
 argument-hint: <name> [one-line goal]
 disable-model-invocation: true
-allowed-tools: Bash, Read, Grep, Glob
+allowed-tools: Bash, Read, Grep, Glob, Edit(.sereno/cache/spec-*.md)
 ---
 
 ## How to run commands
@@ -56,13 +56,15 @@ the spec: skip this step.
 
 ## 4. Write the spec
 
-Pass the acceptance criteria (markdown, no front matter) on stdin. Never write the spec
-file by hand; this command writes the front matter and bumps `spec_revision`. Use the
-quoted heredoc below so the command starts with `node`; never `echo`/`printf` into it or
-use a temp file or the Write tool.
+Write the acceptance criteria (markdown, no front matter) with the Write tool to
+`.sereno/cache/spec-<name>.md`. This is the only path you write to; never write the spec
+file under `.sereno/specs/` by hand, and never pipe or heredoc the text into a command. The
+command below reads that file, deletes it, and writes the real spec with its front matter
+and a bumped `spec_revision`.
+
+The file content is:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|sonnet|opus> --kind <mechanical|feature|fix|refactor> --reason "<why this Builder>" --stdin <<'SERENO_SPEC'
 ## Goal
 ...
 ## Acceptance criteria
@@ -71,7 +73,12 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|s
 - ...
 ## Tests
 - ...
-SERENO_SPEC
+```
+
+Then run:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|sonnet|opus> --kind <mechanical|feature|fix|refactor> --reason "<why this Builder>" --body-file .sereno/cache/spec-<name>.md
 ```
 
 Add `--base-branch <from_branch>` when you just created the branch (a spec revision keeps

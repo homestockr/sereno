@@ -112,6 +112,21 @@ function readCapped(file) {
   return fs.readFileSync(file);
 }
 
+const CACHE_FILE_MAX = 64 * 1024;
+
+/**
+ * Resolve a --file/--body-file argument to a cache-file rel path, or refuse. Only
+ * .sereno/cache/<name> where name matches the pattern.
+ * @param {string} arg @param {RegExp} nameRe @returns {{ rel: string, m: RegExpExecArray }}
+ */
+function cacheFileArg(arg, nameRe) {
+  const segs = String(arg).split(/[\\/]/);
+  if (segs.length !== 3 || segs[0] !== '.sereno' || segs[1] !== 'cache') throw new SerenoError('path_refused', 'only .sereno/cache/ files are accepted');
+  const m = nameRe.exec(segs[2]);
+  if (!m) throw new SerenoError('path_refused', 'file name not accepted');
+  return { rel: segs.join('/'), m };
+}
+
 /** @param {string} root @param {string} specArg @returns {{ rel: string, hash: string }} */
 function readSpec(root, specArg) {
   const rel = rec.repoRelative(specArg);
@@ -243,7 +258,16 @@ const COMMANDS = {
     const runId = str(a, 'run-id') || rec.makeRunId(head);
     if (!rec.RUN_ID.test(runId)) throw new SerenoError('invalid_arg', '--run-id has an invalid format');
 
-    const text = a.stdin ? readStdin() : readCapped(/** @type {string} */ (a.file)).toString('utf8');
+    /** @type {string | null} */
+    let cacheRel = null;
+    let text;
+    if (a.stdin) text = readStdin();
+    else {
+      const cf = cacheFileArg(/** @type {string} */ (a.file), /^verdict-(rr_[A-Za-z0-9_]+)\.json$/);
+      if (cf.m[1] !== runId) throw new SerenoError('path_refused', 'verdict file does not match --run-id');
+      cacheRel = cf.rel;
+      text = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
+    }
     const v = rec.sanitizeVerdict(parseVerdict(text));
     const { config_hash } = loadConfig(root);
 
@@ -267,6 +291,7 @@ const COMMANDS = {
     };
     const rel = '.sereno/gates/' + runId + '.json';
     fsafe.writeJson(rel, gate);
+    if (cacheRel) fsafe.removeFile(cacheRel);
     return { path: rel, review_run_id: runId, outcome: gate.outcome, findings: gate.findings.length, tests_passed: gate.tests_passed };
   },
 
@@ -350,11 +375,23 @@ const COMMANDS = {
   },
 
   spec(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes', 'base-branch'], bool: ['json', 'stdin'] });
-    if (!a.stdin) throw new SerenoError('usage', 'the acceptance criteria come on stdin: pass --stdin');
+    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes', 'base-branch', 'body-file'], bool: ['json', 'stdin'] });
+    if (!!a['body-file'] === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --body-file or --stdin');
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
-    return speclib.writeSpec({ root, fsafe, task, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), body: readStdin() });
+    /** @type {string} */
+    let body;
+    let cacheRel = null;
+    if (a.stdin) body = readStdin();
+    else {
+      const cf = cacheFileArg(/** @type {string} */ (a['body-file']), /^spec-([A-Za-z0-9._-]+)\.md$/);
+      if (cf.m[1] !== task) throw new SerenoError('path_refused', 'spec file does not match --task');
+      cacheRel = cf.rel;
+      body = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
+    }
+    const out = speclib.writeSpec({ root, fsafe, task, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), body });
+    if (cacheRel) fsafe.removeFile(cacheRel);
+    return out;
   },
 
   branch(/** @type {string[]} */ argv) {

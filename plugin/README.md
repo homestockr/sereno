@@ -147,7 +147,9 @@ Everything the plugin writes goes under `.sereno/` in your repo:
 - `attempts/<task>-<n>.json`: one record per Builder run.
 - `briefs/<branch>.md`: the branch brief.
 - `cache/`: the base test result for each base commit, and the test logs. The logs hold
-  whatever your test output prints, so keep `.sereno/cache/` out of git.
+  whatever your test output prints, so keep `.sereno/cache/` out of git. It also holds two
+  transient hand-off files, `verdict-<review_run_id>.json` and `spec-<task>.md`, which
+  `/sereno:ship` and `/sereno:task` write and the plugin deletes as soon as it has used them.
 
 It also runs the base suite in a temporary git worktree in the system temp directory,
 and removes that worktree afterwards. When `tests.setup` is unset, the base worktree gets

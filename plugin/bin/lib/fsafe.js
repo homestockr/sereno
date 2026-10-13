@@ -104,7 +104,39 @@ function createSafeFs(repoRoot) {
     return dir ? fs.readdirSync(dir) : [];
   }
 
-  return { root: realRoot, writeFile, writeJson, listDir };
+  /**
+   * Read a regular file under .sereno/ through the same chain checks (no symlinks or
+   * junctions anywhere on the path), refusing anything over maxBytes.
+   * @param {string} rel @param {number} maxBytes @returns {Buffer}
+   */
+  function readFile(rel, maxBytes) {
+    const segs = segmentsOf(rel);
+    const dir = checkDir(segs.slice(0, -1), false);
+    if (!dir) throw new SerenoError('not_found', 'file not found: ' + rel);
+    const target = path.join(dir, segs[segs.length - 1]);
+    let st = null;
+    try { st = fs.lstatSync(target); } catch (_e) { st = null; }
+    if (!st) throw new SerenoError('not_found', 'file not found: ' + rel);
+    if (st.isSymbolicLink() || !st.isFile()) throw refuse('target is not a regular file');
+    if (st.size > maxBytes) throw refuse('file larger than ' + maxBytes + ' bytes');
+    if (fold(fs.realpathSync.native(target)) !== fold(target)) throw refuse('target resolves outside the expected location');
+    return fs.readFileSync(target);
+  }
+
+  /** Delete a regular file under .sereno/; a missing file is fine. @param {string} rel */
+  function removeFile(rel) {
+    const segs = segmentsOf(rel);
+    const dir = checkDir(segs.slice(0, -1), false);
+    if (!dir) return;
+    const target = path.join(dir, segs[segs.length - 1]);
+    let st = null;
+    try { st = fs.lstatSync(target); } catch (_e) { st = null; }
+    if (!st) return;
+    if (st.isSymbolicLink() || !st.isFile()) throw refuse('target is not a regular file');
+    fs.unlinkSync(target);
+  }
+
+  return { root: realRoot, writeFile, writeJson, listDir, readFile, removeFile };
 }
 
 module.exports = { createSafeFs, SerenoError, MAX_BYTES };
