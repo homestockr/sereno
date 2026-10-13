@@ -64,10 +64,10 @@ outcome is `error`.
 ## 6. Update the attempt
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --update <attempt> --outcome <built|error> --diagnosis <none|environment> --ended-at now
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --update <attempt> --outcome <built|error> --diagnosis <none|environment> --agent-id <Builder agent id from the Agent tool result> --ended-at now
 ```
 
-Use `--outcome built` when the Builder committed (it now waits for review; `/sereno:ship`
+Omit `--agent-id` if the Agent tool result gave none. Use `--outcome built` when the Builder committed (it now waits for review; `/sereno:ship`
 records the final outcome). Use `--outcome error` when it did not commit or the run
 failed. For `error`, use `--diagnosis environment` if the cause was the environment (a
 StopFailure, an API or rate-limit error, a missing tool or key), and `--diagnosis none`

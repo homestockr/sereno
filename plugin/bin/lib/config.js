@@ -124,6 +124,25 @@ function validate(c) {
   return errs;
 }
 
+/**
+ * Keys that are accepted and validated but change nothing in 4a (agent files fix the model
+ * and turn cap; no script enforces a budget). Listed only when they differ from the default.
+ * @param {any} c effective config @returns {string[]}
+ */
+function inertKeys(c) {
+  /** @type {string[]} */
+  const out = [];
+  const opts = c && c.roles && c.roles.builder && isObj(c.roles.builder.options) ? c.roles.builder.options : {};
+  const def = defaultPreset().roles.builder.options;
+  for (const k of Object.keys(opts)) {
+    const o = opts[k], d = /** @type {any} */ (def)[k];
+    if (!isObj(o) || !d) continue;
+    for (const f of ['model', 'maxTurns']) if (o[f] !== d[f]) out[out.length] = 'roles.builder.options.' + k + '.' + f;
+  }
+  if (c && c.recovery && c.recovery.taskBudgetUsd !== null && c.recovery.taskBudgetUsd !== undefined) out[out.length] = 'recovery.taskBudgetUsd';
+  return out;
+}
+
 /** @param {unknown} v @returns {any} */
 function canonical(v) {
   if (Array.isArray(v)) return v.map(canonical);
@@ -175,4 +194,4 @@ function loadConfig(repoRoot) {
   return { config: effective, config_hash: configHash(effective), source };
 }
 
-module.exports = { loadConfig, validate, configHash, canonical, PRESETS, AGENTS };
+module.exports = { inertKeys, loadConfig, validate, configHash, canonical, PRESETS, AGENTS };

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { SerenoError, createSafeFs } = require('./fsafe.js');
 const gitlib = require('./git.js');
-const { loadConfig } = require('./config.js');
+const { loadConfig, inertKeys } = require('./config.js');
 const { resolveCommand } = require('./testrun.js');
 
 const AGENTS_DIR = path.join(__dirname, '..', '..', 'agents');
@@ -44,7 +44,8 @@ function runDoctor(cwd) {
   check('pipeline.json', () => {
     try {
       loaded = loadConfig(root);
-      return { ok: true, detail: (loaded.source === 'builtin' ? 'defaults' : loaded.source.replace(/\\/g, '/')) + ', config_hash ' + loaded.config_hash };
+      const inert = inertKeys(loaded.config);
+      return { ok: true, detail: (loaded.source === 'builtin' ? 'defaults' : loaded.source.replace(/\\/g, '/')) + ', config_hash ' + loaded.config_hash + (inert.length ? '; note, no effect yet: ' + inert.join(', ') : '') };
     } catch (e) {
       if (e instanceof SerenoError) {
         const errs = Array.isArray(e.extra.errors) ? ': ' + e.extra.errors.join('; ') : '';

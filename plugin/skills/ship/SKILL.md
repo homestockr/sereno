@@ -91,12 +91,12 @@ Extract the single fenced `json` block from the red team's reply and pass it on 
 If there is no such block, the outcome is `error`: send `{"outcome":"error"}`.
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --stdin --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --agent <agent id if known> --model <model id of the agent that ran> --tests-passed true <<'VERDICT'
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --stdin --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session ${CLAUDE_SESSION_ID} --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true <<'VERDICT'
 <the json block>
 VERDICT
 ```
 
-Omit `--agent` when you do not know it. The result has `outcome`, `findings` and `path`.
+The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.
 
 ## 4. Record the outcome
 
@@ -114,8 +114,15 @@ non-low finding has a kind of `defect`, `bug`, `security`, `privacy`, `test`,
 ## 5. Recovery
 
 Ask `sereno:scribe` to refresh the brief for this branch (after every gate run and every
-Builder failure). Tell it the plugin root (`${CLAUDE_PLUGIN_ROOT}`) and to pass the version it read as
-`--expect-version`, as `/sereno:brief` does. Then ask the rules what is next:
+Builder failure). Agents cannot expand `${CLAUDE_PLUGIN_ROOT}`, so give the scribe the
+literal command line in its prompt, with only the angle-bracket values left for it to fill,
+and tell it to run that command verbatim and never construct a path itself:
+
+```
+Run exactly: node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" brief --branch <branch> --now "<now>" --next "<next>" --blocked "<blocked>" --expect-version <version it read from the existing brief, 0 if none>
+```
+
+Then ask the rules what is next:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" recovery --task <task>
@@ -156,4 +163,4 @@ git merge --no-ff task/<task>
 
 If the merge reports conflicts, run `git merge --abort`, tell the user, and stop. Never
 add a remote step. After the merge, ask `sereno:scribe` to refresh the brief for
-`<base_branch>`, and report the merge commit in one line.
+`<base_branch>`, giving it the same literal command line as in step 5 with `--branch <base_branch>`, and report the merge commit in one line.

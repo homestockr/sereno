@@ -98,8 +98,8 @@ invalid file stops the pipeline and lists the errors.
 | `preset` | `"default"` | `"default"` or `"lean"`. |
 | `roles.builder.default` | `"sonnet"` | Default Builder option: `haiku`, `sonnet` or `opus`. |
 | `roles.builder.options.<name>.agent` | per option | Agent name; must be a plugin agent. Validated and recorded. |
-| `roles.builder.options.<name>.model` | per option | Model id. Validated and recorded. The agent file's model is the one that runs. |
-| `roles.builder.options.<name>.maxTurns` | per option | Positive integer. Validated and recorded. The agent file's cap is the one that runs. |
+| `roles.builder.options.<name>.model` | per option | Model id. Validated and recorded. The agent file's model is the one that runs. Listed under `inert` by `config` and noted by `doctor`. |
+| `roles.builder.options.<name>.maxTurns` | per option | Positive integer. Validated and recorded. The agent file's cap is the one that runs. Listed under `inert`. |
 | `roles.scribe.agent` | `"scribe"` | Agent that writes briefs and commit text. |
 | `roles.redTeam.agent` | `"red-team"` | Red team agent for `/sereno:ship`. |
 | `roles.redTeam.fallback` | `"red-team-lean"` | Used when the red team's model is unavailable. `null` for none. |
@@ -108,7 +108,7 @@ invalid file stops the pipeline and lists the errors.
 | `roles.redTeam.enabled` | `true` | `false` switches the review off. The gate is then `skipped`. |
 | `recovery.repairs` | `1` | Repairs allowed for a defect. |
 | `recovery.infraRetries` | `2` | Retries allowed for an environment failure. |
-| `recovery.taskBudgetUsd` | `null` | Validated (null or a positive number). No plugin script enforces it yet. |
+| `recovery.taskBudgetUsd` | `null` | Validated (null or a positive number). No plugin script enforces it yet. Listed under `inert` when set. |
 | `tests.command` | `null` | Test command. `null` uses `npm test` when `package.json` has a `test` script. Otherwise `/sereno:ship` asks. |
 | `tests.setup` | `null` | Command run in the temporary base worktree before the base suite. |
 | `tests.parallel` | `false` | `true` runs base and head together. Leave it `false` if the suites share ports or temp files. |

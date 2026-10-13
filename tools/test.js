@@ -8219,7 +8219,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(fmm && /^name: ship$/m.test(fmm[1]) && /^disable-model-invocation: true$/m.test(fmm[1]) && /^argument-hint:/m.test(fmm[1]));
       const order = [];
       for (const m of SHIP.matchAll(/sereno\.js" ([a-z-]+)/g)) if (!order.includes(m[1])) order[order.length] = m[1];
-      assert.deepStrictEqual(order, ['config', 'test', 'attempt', 'run-id', 'context', 'gate', 'recovery']);
+      assert.deepStrictEqual(order, ['config', 'test', 'attempt', 'run-id', 'context', 'gate', 'brief', 'recovery']);
       const at = (s) => SHIP.indexOf(s);
       const seq = ['bin/sereno.js" test --base', 'bin/sereno.js" run-id --head', 'bin/sereno.js" context --head', 'bin/sereno.js" gate --stdin', '--review-run-id <review_run_id> --diagnosis', 'bin/sereno.js" recovery --task', '## 6. Merge prompt'];
       for (let i = 1; i < seq.length; i++) assert.ok(at(seq[i - 1]) >= 0 && at(seq[i]) > at(seq[i - 1]), seq[i] + ' after ' + seq[i - 1]);
@@ -8489,6 +8489,101 @@ test('missing rate_limits degrades instead of throwing', () => {
         const src = fs.readFileSync(path.join(PLUGIN, 'bin', 'lib', f), 'utf8');
         for (const m of src.matchAll(/require\('([^']+)'\)/g)) assert.ok(m[1].startsWith('node:') || (m[1].startsWith('./') && !m[1].startsWith('../')), f + ' requires ' + m[1]);
       }
+    });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
+  /* ---- Phase 4a: e2e fixes ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const { spawnSync } = require('node:child_process');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4ae-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const initRepo = () => {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', 'a.txt'); git(dir, 'commit', '-q', '-m', 'init');
+      return dir;
+    };
+    const readAll = (dir) => fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f), 'utf8'));
+
+    test('[4a-e2e] skills delegate with the literal substituted command; agents hard-code no path', () => {
+      for (const sk of ['ship', 'build', 'task', 'brief']) {
+        const t = fs.readFileSync(path.join(PLUGIN, 'skills', sk, 'SKILL.md'), 'utf8');
+        for (const m of t.matchAll(/.*sereno\.js.*/g)) assert.ok(m[0].includes('node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js"'), sk + ': ' + m[0]);
+      }
+      const ship = fs.readFileSync(path.join(PLUGIN, 'skills', 'ship', 'SKILL.md'), 'utf8');
+      assert.match(ship, /Run exactly: node "\$\{CLAUDE_PLUGIN_ROOT\}\/bin\/sereno\.js" brief /);
+      assert.match(ship, /verbatim and never construct a path/);
+      for (const t of readAll(path.join(PLUGIN, 'agents'))) {
+        assert.ok(!/plugin\//.test(t) && !/bin\/sereno\.js/.test(t), 'agent file hard-codes a path');
+      }
+    });
+    test('[4a-e2e] scribe.md carries the Now/Next/Blocked rules', () => {
+      const t = fs.readFileSync(path.join(PLUGIN, 'agents', 'scribe.md'), 'utf8');
+      assert.match(t, /do not\s+guess paths/i);
+      assert.match(t, /facts from the spec, `git log`,\s+the\s+gate and the attempts/);
+      assert.match(t, /never new\s+scope/);
+      assert.match(t, /Next: None planned/);
+    });
+    test('[4a-e2e] gate: model comes from the agent definition; --model wins; session recorded', () => {
+      const dir = initRepo();
+      fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'specs', 'x.md'), '---\ntask_id: x\n---\nspec\n');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      const g = (extra) => S(dir, ['gate', '--stdin', '--task', 'x', '--base', head, '--head', head, '--branch', 'main', '--tests-passed', 'true'].concat(extra), '{"outcome":"pass","findings":[]}');
+      const read = (r) => JSON.parse(fs.readFileSync(path.join(dir, r.out.path), 'utf8'));
+      const fm = (n) => /^model:\s*(\S+)/m.exec(fs.readFileSync(path.join(PLUGIN, 'agents', n + '.md'), 'utf8'))[1];
+      let r = g(['--agent-name', 'red-team-lean', '--session', '5f6c0d3e-1111-4222-8333-944455556666']);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+      assert.strictEqual(read(r).model, fm('red-team-lean'));
+      assert.strictEqual(read(r).session_id, '5f6c0d3e-1111-4222-8333-944455556666');
+      r = g(['--agent-name', 'red-team']);
+      assert.strictEqual(read(r).model, fm('red-team'));
+      r = g(['--agent-name', 'red-team', '--model', 'custom-model']);
+      assert.strictEqual(read(r).model, 'custom-model');
+      assert.strictEqual(g(['--agent-name', '../x']).out.ok, false);
+      assert.strictEqual(read(g([])).model, null);
+    });
+    test('[4a-e2e] attempt: --agent-id on update; project_id is the app id', () => {
+      const dir = initRepo();
+      let r = S(dir, ['attempt', '--task', 't1', '--builder', 'sonnet', '--kind', 'feature', '--diagnosis', 'none', '--outcome', 'running', '--started-at', 'now']);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+      const file = path.join(dir, r.out.path);
+      assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).project_id, require('../src/projects.js').projectId(dir));
+      r = S(dir, ['attempt', '--task', 't1', '--update', '1', '--outcome', 'built', '--agent-id', 'a1b2c3d4e5']);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+      assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).agent_id, 'a1b2c3d4e5');
+      assert.strictEqual(S(dir, ['attempt', '--task', 't1', '--update', '1', '--agent-id', 'bad id!']).out.ok, false);
+    });
+    test('[4a-e2e] projectid: plugin copy matches the app, drive-letter case included', () => {
+      const a = require('../src/projects.js'), p = require('../plugin/bin/lib/projectid.js');
+      for (const x of [ROOT, os.tmpdir(), 'C:\\Users\\Me\\Repo', 'c:/users/me/repo/', 'D:\\x\\', '/usr/local/proj/']) assert.strictEqual(p.projectId(x), a.projectId(x), x);
+      assert.strictEqual(p.projectId('C:\\Users\\Me\\Repo'), p.projectId('c:/users/me/REPO'));
+    });
+    test('[4a-e2e] config lists inert keys; doctor notes them without failing', () => {
+      const dir = initRepo();
+      fs.writeFileSync(path.join(dir, 'package.json'), '{"scripts":{"test":"node -e 0"}}');
+      let r = S(dir, ['config']);
+      assert.deepStrictEqual(r.out.inert, []);
+      fs.mkdirSync(path.join(dir, '.sereno'));
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { builder: { options: { opus: { model: 'claude-x', maxTurns: 7 } } } }, recovery: { taskBudgetUsd: 5 } }));
+      r = S(dir, ['config']);
+      assert.deepStrictEqual(r.out.inert.slice().sort(), ['recovery.taskBudgetUsd', 'roles.builder.options.opus.maxTurns', 'roles.builder.options.opus.model']);
+      r = S(dir, ['doctor']);
+      const c = r.out.checks.find((x) => x.name === 'pipeline.json');
+      assert.strictEqual(c.ok, true); assert.match(c.detail, /note, no effect yet:.*taskBudgetUsd/);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out.checks));
     });
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }

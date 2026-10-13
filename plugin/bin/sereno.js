@@ -20,7 +20,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { SerenoError, createSafeFs } = require('./lib/fsafe.js');
 const gitlib = require('./lib/git.js');
-const { loadConfig } = require('./lib/config.js');
+const { loadConfig, inertKeys } = require('./lib/config.js');
 const rec = require('./lib/records.js');
 const testrun = require('./lib/testrun.js');
 const speclib = require('./lib/spec.js');
@@ -28,6 +28,19 @@ const contextlib = require('./lib/context.js');
 const recovery = require('./lib/recovery.js');
 const briefLib = require('./lib/brief.js');
 const doctorLib = require('./lib/doctor.js');
+const { projectId } = require('./lib/projectid.js');
+
+const AGENTS_DIR = path.join(__dirname, '..', 'agents');
+
+/** The model: id from an agent definition's front matter, or null. @param {string} name */
+function agentModel(name) {
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new SerenoError('invalid_arg', '--agent-name has an invalid format');
+  let text;
+  try { text = fs.readFileSync(path.join(AGENTS_DIR, name + '.md'), 'utf8'); } catch (_e) { throw new SerenoError('invalid_arg', 'no such plugin agent: ' + name); }
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  const m = fm && /^model:\s*(\S+)\s*$/m.exec(fm[1]);
+  return m ? m[1] : null;
+}
 
 const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
@@ -116,7 +129,7 @@ const COMMANDS = {
     parseArgs(argv, { value: [], bool: ['json'] });
     const top = gitlib.toplevel(process.cwd());
     const { config, config_hash, source } = loadConfig(top ? fs.realpathSync.native(path.resolve(top)) : null);
-    return { config, config_hash, source };
+    return { config, config_hash, source, inert: inertKeys(config) };
   },
 
   'run-id'(/** @type {string[]} */ argv) {
@@ -128,7 +141,7 @@ const COMMANDS = {
 
   gate(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['file', 'task', 'spec', 'base', 'head', 'branch', 'session', 'agent', 'model', 'tests-passed', 'run-id'],
+      value: ['file', 'task', 'spec', 'base', 'head', 'branch', 'session', 'agent', 'agent-name', 'model', 'tests-passed', 'run-id'],
       bool: ['json', 'stdin'],
     });
     if (!!a.file === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --file or --stdin');
@@ -146,7 +159,10 @@ const COMMANDS = {
     const tp = str(a, 'tests-passed');
     if (tp !== undefined && tp !== 'true' && tp !== 'false') throw new SerenoError('invalid_arg', '--tests-passed must be true or false');
     const id = /^[A-Za-z0-9._:-]{1,128}$/;
-    const session = str(a, 'session'), agent = str(a, 'agent'), model = str(a, 'model');
+    const session = str(a, 'session'), agent = str(a, 'agent');
+    const agentName = str(a, 'agent-name');
+    // --model wins; otherwise the model: front matter of plugin/agents/<agent-name>.md.
+    const model = str(a, 'model') !== undefined ? str(a, 'model') : (agentName !== undefined ? agentModel(agentName) : undefined);
     const runId = str(a, 'run-id') || rec.makeRunId(head);
     if (!rec.RUN_ID.test(runId)) throw new SerenoError('invalid_arg', '--run-id has an invalid format');
 
@@ -164,7 +180,7 @@ const COMMANDS = {
       head_commit: head,
       session_id: session === undefined ? null : matchId(session, '--session', id),
       agent_id: agent === undefined ? null : matchId(agent, '--agent', id),
-      model: model === undefined ? null : matchId(model, '--model', id),
+      model: model === undefined || model === null ? null : matchId(model, '--model', id),
       outcome: v.outcome,
       tests_passed: tp === 'true',
       findings: v.findings,
@@ -179,7 +195,7 @@ const COMMANDS = {
 
   attempt(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update'],
+      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id'],
       bool: ['json'],
     });
     const task = rec.checkTask(str(a, 'task'));
@@ -191,7 +207,7 @@ const COMMANDS = {
     if (rr !== undefined && !rec.RUN_ID.test(rr)) throw new SerenoError('invalid_arg', '--review-run-id has an invalid format');
     const revArg = str(a, 'spec-revision');
     if (revArg !== undefined && !/^[1-9]\d{0,5}$/.test(revArg)) throw new SerenoError('invalid_arg', '--spec-revision must be a positive integer');
-    const agent = str(a, 'agent');
+    const agent = str(a, 'agent') !== undefined ? str(a, 'agent') : str(a, 'agent-id');
     if (agent !== undefined) matchId(agent, '--agent', /^[A-Za-z0-9._:-]{1,128}$/);
 
     const re = new RegExp('^' + task.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&') + '-(\\d+)\\.json$');
@@ -202,7 +218,8 @@ const COMMANDS = {
       if (m) n = Math.max(n, parseInt(m[1], 10) + 1);
     }
     const record = {
-      project_id: flagText(str(a, 'project'), 128),
+      // Same id the app derives for this repo (sha1 of the normalised root, 12 hex); --project overrides.
+      project_id: flagText(str(a, 'project'), 128) || projectId(root),
       task_id: task,
       spec_revision: revArg === undefined ? 1 : parseInt(revArg, 10),
       attempt: 0,
@@ -353,6 +370,8 @@ function updateAttempt(root, fsafe, task, a) {
     if (!rec.RUN_ID.test(rr)) throw new SerenoError('invalid_arg', '--review-run-id has an invalid format');
     record.review_run_id = rr;
   }
+  const agentId = str(a, 'agent-id');
+  if (agentId !== undefined) record.agent_id = matchId(agentId, '--agent-id', /^[A-Za-z0-9._:-]{1,128}$/);
   if (ended !== undefined) record.ended_at = isoOrNull(ended, '--ended-at');
   fsafe.writeJson(rel, record);
   return { path: rel, attempt: parseInt(nArg, 10), task_id: task, outcome: record.outcome, diagnosis: record.diagnosis };
