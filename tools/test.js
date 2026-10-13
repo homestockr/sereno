@@ -7824,6 +7824,174 @@ test('missing rate_limits degrades instead of throwing', () => {
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 
+  /* ---- Phase 4a step 3: agents and skills ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const { spawnSync } = require('node:child_process');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a3-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const runS = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8' });
+      return { status: r.status, out: JSON.parse(r.stdout), stderr: r.stderr };
+    };
+    // Minimal front matter reader: key: value lines between the first two --- fences.
+    const front = (file) => {
+      const text = fs.readFileSync(file, 'utf8');
+      const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(text);
+      assert.ok(m, file + ' has front matter');
+      const fm = {};
+      for (const line of m[1].split(/\r?\n/)) { const k = /^([A-Za-z_-]+):\s*(.*)$/.exec(line); assert.ok(k, 'front matter line: ' + line); fm[k[1]] = k[2].trim(); }
+      return { fm, body: text.slice(m[0].length) };
+    };
+    const agentFiles = fs.readdirSync(path.join(PLUGIN, 'agents')).filter((f) => f.endsWith('.md'));
+    const skillDirs = fs.readdirSync(path.join(PLUGIN, 'skills'));
+    const AGENT_SPEC = {
+      'builder': { model: 'claude-sonnet-5-5', maxTurns: '80' },
+      'builder-haiku': { model: 'claude-haiku-4-5-20251001', maxTurns: '40' },
+      'builder-opus': { model: 'claude-opus-5-5', maxTurns: '120' },
+      'red-team': { model: 'claude-fable-5-1' },
+      'red-team-lean': { model: 'claude-opus-5-5' },
+      'scribe': { model: 'claude-haiku-4-5-20251001' },
+    };
+    const IGNORED_KEYS = ['permissionMode', 'hooks', 'mcpServers'];
+    const list = (v) => (v || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const subcommands = (() => {
+      const r = spawnSync(process.execPath, [SERENO, 'no-such-command'], { encoding: 'utf8' });
+      const m = /<([a-z|-]+)>/.exec(JSON.parse(r.stdout).error);
+      assert.ok(m); return m[1].split('|');
+    })();
+
+    test('[4a3] agents: exactly the six expected, with the fixed models and turn caps', () => {
+      assert.deepStrictEqual(agentFiles.map((f) => f.replace(/\.md$/, '')).sort(), Object.keys(AGENT_SPEC).sort());
+      for (const f of agentFiles) {
+        const name = f.replace(/\.md$/, '');
+        const { fm, body } = front(path.join(PLUGIN, 'agents', f));
+        assert.strictEqual(fm.name, name);
+        assert.ok(fm.description && fm.description.length > 20, name + ' description');
+        assert.strictEqual(fm.model, AGENT_SPEC[name].model, name + ' model');
+        if (AGENT_SPEC[name].maxTurns) assert.strictEqual(fm.maxTurns, AGENT_SPEC[name].maxTurns, name + ' maxTurns');
+        else assert.ok(/^[1-9]\d*$/.test(fm.maxTurns), name + ' has a maxTurns');
+        for (const k of IGNORED_KEYS) assert.ok(!(k in fm), name + ' must not set ' + k + ' (plugin agents ignore it)');
+        assert.ok(body.trim().length > 200, name + ' has a real prompt');
+      }
+    });
+    test('[4a3] agents: red teams are read-only; builders never edit .sereno or send commits out', () => {
+      for (const name of ['red-team', 'red-team-lean']) {
+        const { fm, body } = front(path.join(PLUGIN, 'agents', name + '.md'));
+        assert.deepStrictEqual(list(fm.tools), ['Read', 'Grep', 'Glob', 'Bash']);
+        for (const t of ['Write', 'Edit', 'NotebookEdit']) assert.ok(list(fm.disallowedTools).includes(t), name + ' disallows ' + t);
+        assert.ok(!list(fm.tools).some((t) => /^(Write|Edit|NotebookEdit)/.test(t)));
+        for (const key of ['"outcome"', 'needs_context', 'context_requests', '```json', 'Insufficient context is never a pass']) assert.ok(body.includes(key), name + ' mentions ' + key);
+      }
+      for (const name of ['builder', 'builder-haiku', 'builder-opus']) {
+        const { body } = front(path.join(PLUGIN, 'agents', name + '.md'));
+        assert.ok(/Never edit `\.sereno\/`/.test(body) && /remote/.test(body) && /\.sereno\/specs\/<task>\.md/.test(body), name);
+        assert.ok(/findings/.test(body), name + ' handles repair findings');
+      }
+      const scribe = front(path.join(PLUGIN, 'agents', 'scribe.md'));
+      assert.ok(scribe.body.includes('sereno.js') && scribe.body.includes('`brief`'));
+    });
+    test('[4a3] skills: name matches dir, description present, task and build are user-only', () => {
+      assert.ok(skillDirs.includes('task') && skillDirs.includes('build'));
+      for (const d of skillDirs) {
+        const { fm } = front(path.join(PLUGIN, 'skills', d, 'SKILL.md'));
+        assert.strictEqual(fm.name, d);
+        assert.ok(fm.description && fm.description.length > 10, d + ' description');
+        if (d === 'task' || d === 'build') assert.strictEqual(fm['disable-model-invocation'], 'true', d);
+        assert.ok('argument-hint' in fm, d + ' argument-hint');
+      }
+    });
+    test('[4a3] skills: reference only existing agents and sereno.js subcommands; no npm, npx or shell plugin-root variable', () => {
+      const agents = new Set(agentFiles.map((f) => f.replace(/\.md$/, '')));
+      for (const d of skillDirs) {
+        const { body } = front(path.join(PLUGIN, 'skills', d, 'SKILL.md'));
+        for (const m of body.matchAll(/`sereno:([a-z][a-z-]*)`/g)) assert.ok(agents.has(m[1]), d + ' references unknown agent sereno:' + m[1]);
+        for (const m of body.matchAll(/\/sereno:([a-z][a-z-]*)/g)) assert.ok(skillDirs.includes(m[1]) || ['ship', 'brief'].includes(m[1]), d + ' references unknown skill /sereno:' + m[1]);
+        const calls = [...body.matchAll(/sereno\.js"? +([A-Za-z-]+)/g)].map((m) => m[1]);
+        assert.ok(calls.length > 0, d + ' calls sereno.js');
+        for (const c of calls) assert.ok(subcommands.includes(c), d + ' calls unknown subcommand ' + c);
+        for (const m of body.matchAll(/^.*sereno\.js.*$/gm)) assert.ok(m[0].includes('node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js"'), d + ': ' + m[0]);
+        assert.ok(!/\bnpm\b|\bnpx\b/.test(body), d + ' uses npm/npx');
+        assert.ok(!/\$CLAUDE_PLUGIN_ROOT|\$env:CLAUDE_PLUGIN_ROOT|%CLAUDE_PLUGIN_ROOT%/.test(body.replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, '')), d + ' uses a shell plugin-root variable');
+        assert.ok(!/--model\b/.test(body), d + ' must not pass a model');
+      }
+      const build = front(path.join(PLUGIN, 'skills', 'build', 'SKILL.md')).body;
+      for (const a of ['sereno:builder', 'sereno:builder-haiku', 'sereno:builder-opus']) assert.ok(build.includes('`' + a + '`'));
+      assert.ok(/attempt --task/.test(build) && /--outcome <running\|error>/.test(build));
+      const task = front(path.join(PLUGIN, 'skills', 'task', 'SKILL.md')).body;
+      assert.ok(/spec --task/.test(task) && /branch --task/.test(task) && /--stdin/.test(task) && /authentication/.test(task));
+    });
+    test('[4a3] plugin: no git push anywhere under plugin/', () => {
+      const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
+      for (const f of walk(PLUGIN)) {
+        if (!/\.(md|js|json)$/.test(f)) continue;
+        assert.ok(!/\bgit\b[^\n]{0,40}\bpush\b|'push'/.test(fs.readFileSync(f, 'utf8')), f + ' mentions git push');
+      }
+    });
+    test('[4a3] spec + branch round trip: revision bump, hash, branch created, dirty and bad names refused', () => {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      const body = '## Goal\nDo the thing.\n\n## Acceptance criteria\n- it works\n';
+      const spec = (task, extra, input) => runS(dir, ['spec', '--task', task, '--builder', 'sonnet', '--kind', 'feature', '--reason', 'ordinary feature work', '--stdin', ...(extra || [])], input === undefined ? body : input);
+
+      const first = spec('demo');
+      assert.strictEqual(first.status, 0); assert.strictEqual(first.out.ok, true);
+      assert.strictEqual(first.out.path, '.sereno/specs/demo.md'); assert.strictEqual(first.out.spec_revision, 1);
+      const file = path.join(dir, '.sereno', 'specs', 'demo.md');
+      assert.strictEqual(first.out.spec_hash, 'sha256:' + require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex'));
+      const { fm, body: written } = front(file);
+      assert.strictEqual(fm.task, '"demo"'); assert.strictEqual(fm.builder, 'sonnet'); assert.strictEqual(fm.kind, 'feature');
+      assert.strictEqual(fm.reason, '"ordinary feature work"'); assert.strictEqual(fm.fixes, 'null'); assert.strictEqual(fm.spec_revision, '1');
+      assert.ok(!isNaN(Date.parse(JSON.parse(fm.created_at))));
+      assert.strictEqual(written, body);
+
+      const second = spec('demo', ['--fixes', 'earlier'], body + '- more\n');
+      assert.strictEqual(second.out.spec_revision, 2); assert.notStrictEqual(second.out.spec_hash, first.out.spec_hash);
+      assert.strictEqual(front(file).fm.fixes, '"earlier"');
+      // Free text cannot break the front matter.
+      const inj = runS(dir, ['spec', '--task', 'inj', '--builder', 'haiku', '--kind', 'fix', '--reason', 'x\n---\nbuilder: opus', '--stdin'], body);
+      assert.strictEqual(inj.out.ok, true);
+      assert.strictEqual(front(path.join(dir, '.sereno', 'specs', 'inj.md')).fm.builder, 'haiku');
+
+      // Validation.
+      assert.strictEqual(runS(dir, ['spec', '--task', 'v', '--builder', 'gpt', '--kind', 'fix', '--reason', 'r', '--stdin'], body).out.code, 'invalid_arg');
+      assert.strictEqual(runS(dir, ['spec', '--task', 'v', '--builder', 'haiku', '--kind', 'oops', '--reason', 'r', '--stdin'], body).out.code, 'invalid_arg');
+      assert.strictEqual(runS(dir, ['spec', '--task', 'v', '--builder', 'haiku', '--kind', 'fix', '--stdin'], body).out.code, 'invalid_arg');
+      assert.strictEqual(spec('v', [], '  \n').out.code, 'invalid_arg');
+      assert.strictEqual(runS(dir, ['spec', '--task', 'v', '--builder', 'haiku', '--kind', 'fix', '--reason', 'r'], body).out.code, 'usage');
+      assert.strictEqual(spec('../evil').out.ok, false);
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno', 'specs', 'v.md')));
+
+      // Branch: created at HEAD without switching; untracked .sereno files do not count as dirty.
+      const head = git(dir, 'rev-parse', 'HEAD');
+      const br = runS(dir, ['branch', '--task', 'demo']);
+      assert.strictEqual(br.status, 0, JSON.stringify(br.out));
+      assert.strictEqual(br.out.branch, 'task/demo'); assert.strictEqual(br.out.base_commit, head);
+      assert.strictEqual(git(dir, 'rev-parse', 'task/demo'), head); assert.strictEqual(git(dir, 'branch', '--show-current'), 'main');
+      const again = runS(dir, ['branch', '--task', 'demo']);
+      assert.strictEqual(again.out.code, 'exists'); assert.notStrictEqual(again.status, 0);
+      for (const bad of ['..', 'a/b', '-x', 'x.lock', 'a..b', '.hid', 'sp ace', 'a:b', 'x.']) {
+        const r = runS(dir, ['branch', '--task', bad]);
+        assert.strictEqual(r.out.ok, false, 'refused ' + bad); assert.notStrictEqual(r.status, 0);
+      }
+      assert.strictEqual(git(dir, 'branch', '--list', 'task/*').split('\n').length, 1);
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'dirty\n');
+      const dirty = runS(dir, ['branch', '--task', 'other']);
+      assert.strictEqual(dirty.out.code, 'dirty_tree'); assert.notStrictEqual(dirty.status, 0);
+      assert.strictEqual(git(dir, 'branch', '--list', 'task/other'), '');
+      assert.strictEqual(runS(dir, ['branch']).out.ok, false);
+    });
+    test('[4a3] spec.validBranchName agrees with the app copy', () => {
+      const mine = require('../plugin/bin/lib/spec.js').validBranchName, app = require('../src/briefs.js').validBranchName;
+      for (const n of ['task/a', 'feat/x-1', '', '-a', 'a b', 'a..b', 'a.lock', 'a/.b', '@', 'a@{1}', 'a​b', 'a‮b', 'a‍b', 'x/', 'a\\b', 'a~1']) assert.strictEqual(mine(n), app(n), JSON.stringify(n));
+    });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

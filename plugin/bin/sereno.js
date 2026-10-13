@@ -12,7 +12,7 @@
  * Nothing else is written to stdout. Node built-ins only. The only files it
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
- * Subcommands: config, run-id, gate, attempt, paths, test.
+ * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch.
  */
 
 const fs = require('node:fs');
@@ -23,8 +23,9 @@ const gitlib = require('./lib/git.js');
 const { loadConfig } = require('./lib/config.js');
 const rec = require('./lib/records.js');
 const testrun = require('./lib/testrun.js');
+const speclib = require('./lib/spec.js');
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -234,6 +235,21 @@ const COMMANDS = {
     if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
     const { config, config_hash } = loadConfig(root);
     return await testrun.runTests({ root, fsafe, config, configHash: config_hash, base, head, runId: rec.makeRunId(head) });
+  },
+
+  spec(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes'], bool: ['json', 'stdin'] });
+    if (!a.stdin) throw new SerenoError('usage', 'the acceptance criteria come on stdin: pass --stdin');
+    const task = rec.checkTask(str(a, 'task'));
+    const { root, fsafe } = needRepo();
+    return speclib.writeSpec({ root, fsafe, task, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), body: readStdin() });
+  },
+
+  branch(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root } = needRepo();
+    return speclib.createTaskBranch({ root, task });
   },
 
   paths(/** @type {string[]} */ argv) {

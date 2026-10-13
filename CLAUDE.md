@@ -38,7 +38,7 @@ Agents live in `.claude/agents/`; change a role's model there.
 
 ```sh
 npm install
-npm test            # GUI-free suite (435 tests); CI runs it on every push/PR
+npm test            # GUI-free suite (442 tests); CI runs it on every push/PR
 npm start           # the widget
 npm run serve       # collector only, http://127.0.0.1:8787/
 npm run wire        # install hooks + statusline (merges, backs up first)
