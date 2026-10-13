@@ -169,10 +169,10 @@ function checkSpecPin(root, fsafe, task, specArg) {
 /**
  * Without --task, refuse when the current branch is task/<name> and the repo has attempt
  * records for that task: the spec pin must not be skippable by leaving the flag out.
- * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string | undefined} branchArg
+ * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe
  */
-function requireTaskIfRecorded(root, fsafe, branchArg) {
-  const branch = branchArg || gitlib.currentBranch(root);
+function requireTaskIfRecorded(root, fsafe) {
+  const branch = gitlib.currentBranch(root);
   const m = branch && /^task\/(.+)$/.exec(branch);
   if (!m) return;
   let t;
@@ -183,11 +183,11 @@ function requireTaskIfRecorded(root, fsafe, branchArg) {
 
 /**
  * On a task/<x> branch, --task must be <x>.
- * @param {string} root @param {string | undefined} task @param {string | undefined} branchArg
+ * @param {string} root @param {string | undefined} task
  */
-function checkTaskBranch(root, task, branchArg) {
+function checkTaskBranch(root, task) {
   if (task === undefined) return;
-  const branch = branchArg || gitlib.currentBranch(root);
+  const branch = gitlib.currentBranch(root); // the checked-out branch, whatever --branch says
   const m = branch && /^task\/(.+)$/.exec(branch);
   if (m && m[1] !== task) throw new SerenoError('branch_mismatch', 'this branch is task/' + m[1] + '; --task must be ' + m[1] + ', not ' + task);
 }
@@ -214,9 +214,9 @@ const COMMANDS = {
     });
     if (!!a.file === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --file or --stdin');
     const { root, fsafe } = needRepo();
-    if (str(a, 'task') === undefined) requireTaskIfRecorded(root, fsafe, str(a, 'branch'));
+    if (str(a, 'task') === undefined) requireTaskIfRecorded(root, fsafe);
     const task = rec.checkTask(str(a, 'task'));
-    checkTaskBranch(root, task, str(a, 'branch'));
+    checkTaskBranch(root, task);
     const base = gitlib.resolveCommit(root, str(a, 'base') || '');
     const head = gitlib.resolveCommit(root, str(a, 'head') || '');
     if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
@@ -277,7 +277,7 @@ const COMMANDS = {
     });
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
-    checkTaskBranch(root, task, undefined);
+    checkTaskBranch(root, task);
     if (a.update !== undefined) return updateAttempt(root, fsafe, task, a);
     const { config_hash } = loadConfig(root);
     const fixes = str(a, 'fixes');
@@ -337,9 +337,9 @@ const COMMANDS = {
     const { root, fsafe } = needRepo();
     if (str(a, 'task') !== undefined) {
       const t = rec.checkTask(str(a, 'task'));
-      checkTaskBranch(root, t, undefined);
+      checkTaskBranch(root, t);
       checkSpecPin(root, fsafe, t, str(a, 'spec') || '.sereno/specs/' + t + '.md');
-    } else requireTaskIfRecorded(root, fsafe, undefined);
+    } else requireTaskIfRecorded(root, fsafe);
     testrun.sweepStale(root);
     const base = gitlib.resolveCommit(root, str(a, 'base') || '');
     const head = gitlib.resolveCommit(root, str(a, 'head') || '');

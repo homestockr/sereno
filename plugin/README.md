@@ -166,7 +166,7 @@ keep the generated parts out of git:
 .sereno/attempts/
 ```
 
-A failing head is passed only when it provably completed: it printed a TAP plan (`1..N`) that was reached, or a TAP summary (`# tests N`, plus `# pass`/`# fail` when printed) that matches the result lines seen, as `node --test --test-reporter=tap` and tape do. Without either (no plan or summary, or a non-TAP runner), `sereno.js test` reports `unknown_baseline` ("cannot confirm the head suite completed") and the run goes to a decision; a head that exits 0 still passes. A head re-run that exits 0 only excuses flaky failures if it printed at least as many results as the first run and the base.
+A failing head is passed only when it provably completed: it printed a TAP plan (`1..N`) that was reached, or a TAP summary (`# tests N`, plus `# pass`/`# fail` when printed) that matches the result lines seen, as `node --test --test-reporter=tap` and tape do. Without either (no plan or summary, or a non-TAP runner), `sereno.js test` reports `unknown_baseline` ("cannot confirm the head suite completed") and the run goes to a decision; a head that exits 0 still passes. On every path (named failures or exit-code mode), a head re-run that exits 0 only excuses flaky failures if it printed at least as many results as the first run and the base.
 
 The clean-tree check (`sereno.js clean`, also used inside `sereno.js test` and `branch`, and by the build and ship
 skills) runs at the repo root and ignores only the generated dirs `.sereno/attempts`, `gates`, `briefs` and `cache`. A change to a

@@ -9318,6 +9318,49 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(out.passed, false, JSON.stringify(out)); assert.strictEqual(out.diagnosis, 'unknown_baseline');
       assert.deepStrictEqual(out.flaky, []);
     });
+    /* ---- Phase 4a: final fixes ---- */
+    const mkEx = (headFirst, rerun) => [
+      "const fs=require('fs');",
+      "if(process.cwd().includes('sereno-base-')){console.log('ok 1 - A\\nok 2 - B\\nok 3 - C\\n1..3');process.exit(0);}",
+      COUNTER,
+      "if(n===0){" + headFirst + "}",
+      rerun,
+    ].join('\n');
+    test('[4a-final-1] exit-code mode: capped head (201 not ok), silent exit-0 re-run is not a flaky pass', () => {
+      const SC = mkEx("for(let i=1;i<=201;i++)console.log('not ok '+i+' - f'+i);process.exit(1);", "console.log('quiet');");
+      const { out } = runT(mkRepo({ tests: ['A'] }, { tests: ['A'] }, { command: 'node ex.js' }, { 'ex.js': SC }));
+      assert.strictEqual(out.mode, 'exit-code'); assert.strictEqual(out.passed, false, JSON.stringify(out));
+      assert.strictEqual(out.diagnosis, 'unknown_baseline'); assert.deepStrictEqual(out.flaky, []);
+      assert.strictEqual(out.note, 'cannot confirm the re-run completed');
+    });
+    test('[4a-final-1] exit-code mode: stack trace head, silent exit-0 re-run is not a flaky pass', () => {
+      const SC = mkEx("console.log('ok 1 - A');console.error('Error: boom\\n    at x (y.js:1:1)');process.exit(1);", "console.log('quiet');");
+      const { out } = runT(mkRepo({ tests: ['A'] }, { tests: ['A'] }, { command: 'node ex.js' }, { 'ex.js': SC }));
+      assert.strictEqual(out.mode, 'exit-code'); assert.strictEqual(out.passed, false, JSON.stringify(out));
+      assert.strictEqual(out.diagnosis, 'unknown_baseline'); assert.deepStrictEqual(out.flaky, []);
+    });
+    test('[4a-final-1] exit-code mode: a genuine full exit-0 re-run is still a flaky pass', () => {
+      const SC = mkEx("console.log('ok 1 - A');console.error('Error: boom\\n    at x (y.js:1:1)');process.exit(1);", "console.log('ok 1 - A\\nok 2 - B\\nok 3 - C\\n1..3');");
+      const { out } = runT(mkRepo({ tests: ['A'] }, { tests: ['A'] }, { command: 'node ex.js' }, { 'ex.js': SC }));
+      assert.strictEqual(out.passed, true, JSON.stringify(out)); assert.deepStrictEqual(out.flaky, ['(whole suite)']);
+    });
+    test('[4a-final-2] parseSummary: footer before results, or two footers, is unknown; footer after the last result counts', () => {
+      assert.strictEqual(testrun.parseSummary('# tests 2\n# pass 2\n# fail 0\nok 1 - A\nok 2 - B\n').summary, null);
+      assert.strictEqual(testrun.parseSummary('ok 1 - A\nok 2 - B\n# tests 2\n# pass 2\n# fail 0\n# tests 2\n').summary, null);
+      assert.deepStrictEqual(testrun.parseSummary('ok 1 - A\nok 2 - B\n# tests 2\n# pass 2\n# fail 0\n').summary, { tests: 2, pass: 2, fail: 0 });
+    });
+    test('[4a-final-3] gate --task y --branch main on task/x is branch_mismatch', () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] });
+      git(r.dir, 'branch', '-m', 'task/x');
+      const g = S(r.dir, ['gate', '--stdin', '--task', 'y', '--branch', 'main', '--base', r.base, '--head', r.head, '--tests-passed', 'true'], '{"outcome":"pass"}');
+      assert.strictEqual(g.out.code, 'branch_mismatch'); assert.strictEqual(g.status, 16);
+    });
+    test('[4a-final-4] on task/demo with attempt records, gate --branch main without --task is task_required', () => {
+      const r = mkRepo({ tests: ['A'] }, { tests: ['A'] });
+      assert.strictEqual(S(r.dir, ['attempt', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'built']).out.ok, true);
+      const g = S(r.dir, ['gate', '--stdin', '--branch', 'main', '--base', r.base, '--head', r.head, '--tests-passed', 'true'], '{"outcome":"pass"}');
+      assert.strictEqual(g.out.code, 'task_required'); assert.strictEqual(g.status, 19);
+    });
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 

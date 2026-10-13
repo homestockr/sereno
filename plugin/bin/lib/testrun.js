@@ -93,15 +93,21 @@ function parseCounts(output) {
  * @param {string} output @returns {{ nok: number, summary: { tests: number, pass: number | null, fail: number | null } | null }}
  */
 function parseSummary(output) {
-  let nok = 0;
+  let nok = 0, lastResult = -1, firstFooter = Infinity;
+  /** @type {Record<string, number>} */
+  const seen = { tests: 0, pass: 0, fail: 0 };
   /** @type {{ tests: number | null, pass: number | null, fail: number | null }} */
   const sm = { tests: null, pass: null, fail: null };
-  for (const raw of stripAnsi(output).split(/\r?\n/)) {
-    if (/^\s*not ok\s+\d+/.test(raw)) { nok++; continue; }
+  const lines = stripAnsi(output).split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (/^\s*(?:not ok|ok)\s+\d+/.test(raw)) { lastResult = i; if (/^\s*not ok/.test(raw)) nok++; continue; }
     const t = /^(?:#|ℹ)\s*(tests|pass|fail)\s+(\d+)\s*$/.exec(raw);
-    if (t) sm[/** @type {'tests'|'pass'|'fail'} */ (t[1])] = parseInt(t[2], 10);
+    if (t) { sm[/** @type {'tests'|'pass'|'fail'} */ (t[1])] = parseInt(t[2], 10); seen[t[1]]++; if (i < firstFooter) firstFooter = i; }
   }
-  return { nok, summary: sm.tests === null ? null : { tests: sm.tests, pass: sm.pass, fail: sm.fail } };
+  // The footer counts only when it follows the last result line and appears exactly once.
+  const good = sm.tests !== null && seen.tests === 1 && seen.pass <= 1 && seen.fail <= 1 && firstFooter > lastResult;
+  return { nok, summary: good ? { tests: /** @type {number} */ (sm.tests), pass: sm.pass, fail: sm.fail } : null };
 }
 
 /**
@@ -456,8 +462,12 @@ async function runTests(o) {
     } else if (!baseFailed) {
       const again = await runSuite(command, root, timeoutSec);
       addLog('head re-run', again);
-      if (again.exitCode === 0) flaky = ['(whole suite)'];
-      else { passed = false; diagnosis = 'defect'; note = 'exit-code mode: failing test names were not recognised; head fails and base passes'; }
+      if (again.exitCode === 0) {
+        // Same rule as names mode: a silent or shorter exit-0 re-run is never proof of a flaky pass.
+        if (headCompletion(again, baseSuite) === 'incomplete' || (again.count || 0) < Math.max(baseSuite.count || 0, head.count || 0)) {
+          passed = false; diagnosis = 'unknown_baseline'; note = 'cannot confirm the re-run completed';
+        } else flaky = ['(whole suite)'];
+      } else { passed = false; diagnosis = 'defect'; note = 'exit-code mode: failing test names were not recognised; head fails and base passes'; }
     } else {
       baseFailing = true; passed = false; diagnosis = 'unknown_baseline';
       note = 'exit-code mode: the suite fails at base too, so the baseline says nothing about this failure; needs a decision';
@@ -482,4 +492,4 @@ async function runTests(o) {
   };
 }
 
-module.exports = { sweepStale, tapValid, runAtBase, parseCounts, runTests, parseFailures, resolveCommand, abortAll, runSuite };
+module.exports = { sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };
