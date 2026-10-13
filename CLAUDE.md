@@ -95,8 +95,8 @@ Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
 3. **Projects + briefs (shipped `2.0.0-alpha.3`).** Plan: `docs/plans/phase-3-projects-briefs.md`.
 4. **Pipeline (in progress), in two releases.** Decided 2026-10-13: a standalone Claude
    Code plugin owns everything that acts; the app only observes the files it writes.
-   - 4a, the plugin (`plugin/`, marketplace at the repo root): plan
-     `docs/plans/phase-4a-plugin.md`, branch `feat/plugin-pipeline`.
+   - 4a, the plugin (`plugin/`, marketplace at the repo root), shipped in `2.0.0-alpha.4` as
+     plugin `0.1.0`: plan `docs/plans/phase-4a-plugin.md`.
    - 4b, the app side: Pipeline tab, role spend, pipeline alerts, offer the plugin.
 
 ### Phase 1 notes
