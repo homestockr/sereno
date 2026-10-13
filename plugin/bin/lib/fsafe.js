@@ -115,12 +115,29 @@ function createSafeFs(repoRoot) {
     if (!dir) throw new SerenoError('not_found', 'file not found: ' + rel);
     const target = path.join(dir, segs[segs.length - 1]);
     let st = null;
-    try { st = fs.lstatSync(target); } catch (_e) { st = null; }
+    try { st = fs.lstatSync(target, { bigint: true }); } catch (_e) { st = null; }
     if (!st) throw new SerenoError('not_found', 'file not found: ' + rel);
     if (st.isSymbolicLink() || !st.isFile()) throw refuse('target is not a regular file');
-    if (st.size > maxBytes) throw refuse('file larger than ' + maxBytes + ' bytes');
+    if (st.nlink > 1n) throw refuse('target has more than one hard link');
+    if (st.size > BigInt(maxBytes)) throw refuse('file larger than ' + maxBytes + ' bytes');
     if (fold(fs.realpathSync.native(target)) !== fold(target)) throw refuse('target resolves outside the expected location');
-    return fs.readFileSync(target);
+    const fd = fs.openSync(target, 'r');
+    try {
+      // The path may have been swapped between lstat and open: the open handle must be the same file.
+      const fst = fs.fstatSync(fd, { bigint: true });
+      if (!fst.isFile() || fst.nlink !== 1n || fst.dev !== st.dev || fst.ino !== st.ino) throw refuse('target changed while reading');
+      const buf = Buffer.alloc(maxBytes + 1);
+      let n = 0;
+      for (;;) {
+        const got = fs.readSync(fd, buf, n, buf.length - n, null);
+        if (!got) break;
+        n += got;
+        if (n > maxBytes) throw refuse('file larger than ' + maxBytes + ' bytes');
+      }
+      return Buffer.from(buf.subarray(0, n));
+    } finally {
+      try { fs.closeSync(fd); } catch (_e) { /* already closed */ }
+    }
   }
 
   /** Delete a regular file under .sereno/; a missing file is fine. @param {string} rel */
@@ -133,6 +150,7 @@ function createSafeFs(repoRoot) {
     try { st = fs.lstatSync(target); } catch (_e) { st = null; }
     if (!st) return;
     if (st.isSymbolicLink() || !st.isFile()) throw refuse('target is not a regular file');
+    if (st.nlink > 1) throw refuse('target has more than one hard link');
     fs.unlinkSync(target);
   }
 

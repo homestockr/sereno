@@ -257,6 +257,7 @@ const COMMANDS = {
     const model = str(a, 'model') !== undefined ? str(a, 'model') : (agentName !== undefined ? agentModel(agentName) : undefined);
     const runId = str(a, 'run-id') || rec.makeRunId(head);
     if (!rec.RUN_ID.test(runId)) throw new SerenoError('invalid_arg', '--run-id has an invalid format');
+    if (!runId.endsWith('_' + head.slice(0, 7).toLowerCase())) throw new SerenoError('invalid_arg', '--run-id must end with _ and the first 7 hex of --head');
 
     /** @type {string | null} */
     let cacheRel = null;
@@ -457,6 +458,7 @@ const COMMANDS = {
     return {
       repo_root: root,
       sereno_dir: root && path.join(root, '.sereno'),
+      cacheDir: root && path.join(root, '.sereno', 'cache').split(path.sep).join('/'),
       layout: {
         pipeline: '.sereno/pipeline.json',
         specs: '.sereno/specs/<task>.md',

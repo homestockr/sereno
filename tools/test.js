@@ -7474,7 +7474,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('[4a1] gate: unknown enums become "unknown"; --file works and unwraps a fenced block', () => {
       const r = mkRepo();
-      const RID = 'rr_20260101T000000Z_abc1234';
+      const RID = 'rr_20260101T000000Z_' + r.head.slice(0, 7);
       fs.mkdirSync(path.join(r.dir, '.sereno', 'cache'), { recursive: true });
       const vf = '.sereno/cache/verdict-' + RID + '.json';
       fs.writeFileSync(path.join(r.dir, vf), '```json\n' + JSON.stringify({ outcome: 'maybe', findings: [{ severity: 'catastrophic', kind: 7, file: 'a.txt', line: 'x', summary: 's' }] }) + '\n```');
@@ -8225,7 +8225,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(fmm && /^name: ship$/m.test(fmm[1]) && /^disable-model-invocation: true$/m.test(fmm[1]) && /^argument-hint:/m.test(fmm[1]));
       const order = [];
       for (const m of SHIP.matchAll(/sereno\.js" ([a-z-]+)/g)) if (!order.includes(m[1])) order[order.length] = m[1];
-      assert.deepStrictEqual(order, ['clean', 'config', 'test', 'attempt', 'run-id', 'context', 'gate', 'brief', 'recovery']);
+      assert.deepStrictEqual(order, ['clean', 'config', 'test', 'attempt', 'run-id', 'context', 'paths', 'gate', 'brief', 'recovery']);
       const at = (s) => SHIP.indexOf(s);
       const seq = ['bin/sereno.js" test --task', 'bin/sereno.js" run-id --head', 'bin/sereno.js" context --head', 'bin/sereno.js" gate --file', '--review-run-id <review_run_id> --diagnosis', 'bin/sereno.js" recovery --task', '## 6. Merge prompt'];
       for (let i = 1; i < seq.length; i++) assert.ok(at(seq[i - 1]) >= 0 && at(seq[i]) > at(seq[i - 1]), seq[i] + ' after ' + seq[i - 1]);
@@ -8792,7 +8792,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(ship, /gate --file \.sereno\/cache\/verdict-<review_run_id>\.json /);
       assert.match(task, /spec --task <name>[^\n]*--body-file \.sereno\/cache\/spec-<name>\.md/);
       assert.match(ship, /^allowed-tools:.*Edit\(\.sereno\/cache\/verdict-\*\.json\)/m);
+      assert.match(ship, /<cacheDir>\/verdict-<review_run_id>\.json/); assert.match(ship, /sereno\.js" paths/);
       assert.match(task, /^allowed-tools:.*Edit\(\.sereno\/cache\/spec-\*\.md\)/m);
+      assert.match(task, /<cacheDir>\/spec-<name>\.md/); assert.match(task, /sereno\.js" paths/);
     });
     test('[4a-heredoc] gate and spec read a bash heredoc body', () => {
       const probe = spawnSync('bash', ['-c', 'true'], { encoding: 'utf8' });
@@ -8831,6 +8833,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const run = (...a) => { const r = spawnSync(process.execPath, [SERENO, ...a], { cwd: dir, encoding: 'utf8', env }); return JSON.parse(r.stdout); };
     const cache = path.join(dir, '.sereno', 'cache');
     fs.mkdirSync(cache, { recursive: true });
+    const h7 = head.slice(0, 7);
     const PASS = JSON.stringify({ outcome: 'pass', findings: [] });
     const put = (name, data) => { fs.writeFileSync(path.join(cache, name), data); return '.sereno/cache/' + name; };
     const gateArgs = (file, id) => ['gate', '--file', file, '--task', 'cf', '--base', head, '--head', head, '--branch', 'main', '--run-id', id, '--tests-passed', 'true'];
@@ -8843,12 +8846,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!fs.existsSync(path.join(dir, f)));
     });
     test('[4a-cachefile] gate --file writes the gate and deletes the file', () => {
-      const f = put('verdict-rr_20260101T000000Z_abc1234.json', PASS);
-      const r = run(...gateArgs(f, 'rr_20260101T000000Z_abc1234'));
+      const f = put('verdict-rr_20260101T000000Z_' + h7 + '.json', PASS);
+      const r = run(...gateArgs(f, 'rr_20260101T000000Z_' + h7));
       assert.strictEqual(r.ok, true, JSON.stringify(r));
       assert.strictEqual(r.outcome, 'pass');
       assert.ok(!fs.existsSync(path.join(dir, f)));
-      assert.ok(fs.existsSync(path.join(dir, '.sereno', 'gates', 'rr_20260101T000000Z_abc1234.json')));
+      assert.ok(fs.existsSync(path.join(dir, '.sereno', 'gates', 'rr_20260101T000000Z_' + h7 + '.json')));
     });
     test('[4a-cachefile] gate --file refuses wrong dir, wrong name, mismatched id, absolute, oversize', () => {
       fs.mkdirSync(path.join(dir, 'other'), { recursive: true });
@@ -8859,9 +8862,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       const other = put('verdict-rr_other.json', PASS);
       const big = put('verdict-rr_big.json', JSON.stringify({ outcome: 'pass', findings: [], pad: 'x'.repeat(65 * 1024) }));
       const cases = [
-        ['other/verdict-rr_x1.json', 'rr_20260101T000000Z_abc1239'], ['.sereno/gates/verdict-rr_x1.json', 'rr_20260101T000000Z_abc1239'], [notes, 'rr_20260101T000000Z_abc1239'],
-        [other, 'rr_20260101T000000Z_abc1239'], [big, 'rr_20260101T000000Z_abc1236'], [path.join(cache, 'verdict-rr_other.json'), 'rr_20260101T000000Z_abc1235'],
-        ['.sereno/cache/../cache/verdict-rr_other.json', 'rr_20260101T000000Z_abc1235'],
+        ['other/verdict-rr_x1.json', 'rr_20260101T000000Z_' + h7], ['.sereno/gates/verdict-rr_x1.json', 'rr_20260101T000000Z_' + h7], [notes, 'rr_20260101T000000Z_' + h7],
+        [other, 'rr_20260101T000000Z_' + h7], [big, 'rr_20260101T000000Z_' + h7], [path.join(cache, 'verdict-rr_other.json'), 'rr_20260101T000000Z_' + h7],
+        ['.sereno/cache/../cache/verdict-rr_other.json', 'rr_20260101T000000Z_' + h7],
       ];
       for (const [f, id] of cases) {
         const r = run(...gateArgs(f, id));
@@ -8878,7 +8881,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       let made = false;
       try { fs.symlinkSync(real, link, 'file'); made = true; } catch (_e) { /* no symlink privilege */ }
       if (made) {
-        const r = run(...gateArgs('.sereno/cache/verdict-rr_link.json', 'rr_20260101T000000Z_abc1237'));
+        const r = run(...gateArgs('.sereno/cache/verdict-rr_link.json', 'rr_20260101T000000Z_' + h7));
         assert.strictEqual(r.code, 'path_refused');
         assert.ok(fs.existsSync(real));
       }
@@ -8891,7 +8894,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         let linked = false;
         try { fs.symlinkSync(alt, cache, 'junction'); linked = true; } catch (_e) { /* skip */ }
         if (linked) {
-          const r = run(...gateArgs('.sereno/cache/verdict-rr_dir.json', 'rr_20260101T000000Z_abc1238'));
+          const r = run(...gateArgs('.sereno/cache/verdict-rr_dir.json', 'rr_20260101T000000Z_' + h7));
           assert.strictEqual(r.code, 'path_refused');
           fs.rmSync(cache, { recursive: true, force: true });
         }
@@ -9531,6 +9534,67 @@ test('missing rate_limits degrades instead of throwing', () => {
         });
       }
     }
+  }
+
+  /* ---- Phase 4a: handoff hardening ---- */
+  {
+    const { createSafeFs } = require('../plugin/bin/lib/fsafe.js');
+    const SERENO = path.join(ROOT, 'plugin', 'bin', 'sereno.js');
+    const { spawnSync } = require('node:child_process');
+    const mk = () => {
+      const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hh-')));
+      fs.mkdirSync(path.join(d, '.sereno', 'cache'), { recursive: true });
+      return d;
+    };
+    test('[4a-harden] readFile and removeFile refuse a hard-linked file; both files untouched', () => {
+      const d = mk(); const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4ho-')));
+      const victim = path.join(outside, 'victim.txt');
+      fs.writeFileSync(victim, 'secret');
+      const inside = path.join(d, '.sereno', 'cache', 'verdict-rr_h.json');
+      try { fs.linkSync(victim, inside); } catch (_e) { return; } // OS refuses hard links
+      const f = createSafeFs(d);
+      for (const op of [() => f.readFile('.sereno/cache/verdict-rr_h.json', 1000), () => f.removeFile('.sereno/cache/verdict-rr_h.json')]) {
+        assert.throws(op, (e) => e.code === 'path_refused');
+      }
+      assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'secret');
+      assert.strictEqual(fs.readFileSync(inside, 'utf8'), 'secret');
+      for (const x of [d, outside]) fs.rmSync(x, { recursive: true, force: true });
+    });
+    test('[4a-harden] readFile reads normally from the fd, enforces the cap, and refuses a swapped target', () => {
+      const d = mk();
+      fs.writeFileSync(path.join(d, '.sereno', 'cache', 'a.json'), 'hello');
+      const f = createSafeFs(d);
+      assert.strictEqual(f.readFile('.sereno/cache/a.json', 1000).toString('utf8'), 'hello');
+      assert.throws(() => f.readFile('.sereno/cache/a.json', 3), (e) => e.code === 'path_refused');
+      // Simulate a swap between lstat and open: fstat reports a different inode than lstat did.
+      const real = fs.fstatSync;
+      fs.fstatSync = (fd, o) => { const s = real(fd, o); return Object.assign(Object.create(Object.getPrototypeOf(s)), s, { ino: s.ino + 1n }); };
+      try { assert.throws(() => f.readFile('.sereno/cache/a.json', 1000), (e) => e.code === 'path_refused'); }
+      finally { fs.fstatSync = real; }
+      assert.strictEqual(f.readFile('.sereno/cache/a.json', 1000).toString('utf8'), 'hello');
+      fs.rmSync(d, { recursive: true, force: true });
+    });
+    test('[4a-harden] gate requires --run-id to end with _<first 7 hex of --head>; paths gives cacheDir', () => {
+      const d = mk();
+      const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hhh-')));
+      const g = (...a) => execFileSync('git', a, { cwd: d, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(d, 'a.txt'), 'x\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
+      const head = g('rev-parse', 'HEAD');
+      const env = Object.assign({}, process.env, { HOME: home, USERPROFILE: home });
+      const run = (...a) => JSON.parse(spawnSync(process.execPath, [SERENO, ...a], { cwd: d, encoding: 'utf8', env }).stdout);
+      const wrongHex = head.slice(0, 7) === '0000000' ? '1111111' : '0000000';
+      const args = (id) => ['gate', '--stdin', '--task', 'hh', '--base', head, '--head', head, '--branch', 'main', '--run-id', id, '--tests-passed', 'true'];
+      const bad = spawnSync(process.execPath, [SERENO, ...args('rr_20260101T000000Z_' + wrongHex)], { cwd: d, encoding: 'utf8', env, input: '{"outcome":"pass"}' });
+      const badOut = JSON.parse(bad.stdout);
+      assert.strictEqual(badOut.code, 'invalid_arg', bad.stdout);
+      const upper = spawnSync(process.execPath, [SERENO, ...args('rr_20260101T000000Z_' + head.slice(0, 7).toUpperCase())], { cwd: d, encoding: 'utf8', env, input: '{"outcome":"pass"}' });
+      assert.strictEqual(JSON.parse(upper.stdout).code, 'invalid_arg', 'RUN_ID format is lowercase hex');
+      const p = run('paths');
+      assert.strictEqual(p.cacheDir, path.join(d, '.sereno', 'cache').split(path.sep).join('/'));
+      assert.ok(!p.cacheDir.includes(String.fromCharCode(92)));
+      for (const x of [d, home]) fs.rmSync(x, { recursive: true, force: true });
+    });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

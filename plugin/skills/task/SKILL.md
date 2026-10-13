@@ -56,8 +56,9 @@ the spec: skip this step.
 
 ## 4. Write the spec
 
+First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (an absolute path at the repo root; your working directory may be a subdirectory).
 Write the acceptance criteria (markdown, no front matter) with the Write tool to
-`.sereno/cache/spec-<name>.md`. This is the only path you write to; never write the spec
+`<cacheDir>/spec-<name>.md`. This is the only path you write to; never write the spec
 file under `.sereno/specs/` by hand, and never pipe or heredoc the text into a command. The
 command below reads that file, deletes it, and writes the real spec with its front matter
 and a bumped `spec_revision`.

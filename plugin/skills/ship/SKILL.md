@@ -103,10 +103,11 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" context --head <head> <file> <file>
 Extract the single fenced `json` block from the red team's reply. If there is no such block,
 the verdict is the single object `{"outcome":"error"}`.
 
+First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (an absolute path at the repo root; your working directory may be a subdirectory).
 Write exactly that one JSON object, nothing else, with the Write tool to
-`.sereno/cache/verdict-<review_run_id>.json`. This is the only path you write to; never put
+`<cacheDir>/verdict-<review_run_id>.json`. This is the only path you write to; never put
 JSON (or any `{"`) on a Bash command line, and never use heredocs, `echo` or pipes for it. Then
-run the gate, which reads that file and deletes it:
+run the gate (its `--file` stays the repo-relative `.sereno/cache/...` path; it resolves it from the repo root), which reads that file and deletes it:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file .sereno/cache/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true
