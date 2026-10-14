@@ -4,7 +4,7 @@ A gated build, review and ship pipeline for Claude Code, with a model per role. 
 architect is your main session. A Builder (Haiku, Sonnet or Opus, chosen per task)
 implements one task on its own branch and commits. A red team reviews the diff against
 the spec and returns a verdict. `/sereno:ship` runs the tests against the base commit,
-writes a gate file, repairs once for a defect, and asks you before it merges anything.
+writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
 can observe the files it writes. Version 0.1.0, in development. Windows is the first
@@ -53,8 +53,13 @@ recorded in `.sereno/attempts/`. It never sends commits to a remote.
 **`/sereno:ship <name>`** runs the tests at the base commit and at the head. It sends
 the diff and spec to the red team, writes the verdict to `.sereno/gates/`, and applies
 the recovery rules below. When tests pass and the gate passes (or the red team is
-switched off), it shows a summary and asks whether to merge `task/<name>` into the base
-branch with `--no-ff`. It merges only on a yes.
+switched off), it shows a summary and tells you to run `/sereno:merge <name>`. Ship never merges.
+
+**`/sereno:merge <name>`** only you can start it, and typing it is the yes. It runs the recovery
+rules again and merges only when the next step is `merge`: the latest attempt passed (or the
+gate is off), the gate passed for the current tip of `task/<name>`, and the spec is unchanged.
+It then runs a local `git merge --no-ff task/<name>` into the base branch and refreshes the
+base branch brief. On conflicts it aborts the merge. It never touches a remote.
 
 **`/sereno:brief`** writes the branch brief at `.sereno/briefs/<branch>.md`: three lines,
 Now, Next and Blocked. It uses a version check, so a brief written by the app's `/brief`
@@ -64,7 +69,8 @@ or by this command is read the same way. Run it whenever you want the brief refr
 
 | Role | Agent | Model | Turn cap |
 |------|-------|-------|----------|
-| Architect | main session (no agent) | your session's model | n/a |
+| Architect, your session | main session (no agent) | your session's model | n/a |
+| Orchestration (`task`, `build`, `ship`, `merge`, `brief`) | skills | claude-sonnet-5-5 | n/a |
 | Builder, default | `sereno:builder` | claude-sonnet-5-5 | 80 |
 | Builder, mechanical | `sereno:builder-haiku` | claude-haiku-4-5-20251001 | 40 |
 | Builder, substantial | `sereno:builder-opus` | claude-opus-5-5 | 120 |
@@ -72,7 +78,7 @@ or by this command is read the same way. Run it whenever you want the brief refr
 | Red team, `lean` preset (and fallback) | `sereno:red-team-lean` | claude-opus-5-5 | 60 |
 | Scribe (briefs, commit text) | `sereno:scribe` | claude-haiku-4-5-20251001 | 20 |
 
-The model and turn cap are fixed in each agent file. Config cannot change them. The
+The model and turn cap are fixed in each agent file, and the orchestration model in each skill's front matter (`model: sonnet`, which applies to that turn only; your session model resumes on the next prompt). Config cannot change them. The
 spec chooses the Builder per task, and that choice is never changed automatically.
 
 ## Presets and pipeline.json
@@ -136,6 +142,9 @@ A minimal example:
   or turn-cap stop, or too many blocks in a row): the run stops and puts one decision to
   you, "Review needs a decision". The choices are: clarify the spec, use a stronger
   Builder, or stop. Builders are never changed automatically.
+- **Merge** happens only after you run `/sereno:merge`. `recovery` returns `merge` only if the gate
+  reviewed the current tip of `task/<name>` (otherwise `review`, reason `head_moved`) and the spec
+  is unchanged (otherwise `decide`, reason `spec_changed`).
 
 ## What it writes
 
@@ -158,7 +167,7 @@ uses your installed dependencies. Checking out the base commit applies the repo'
 `.gitattributes` filters using your own git config; that is the same trust as running
 your test command. `git worktree` calls get their own timeout, `tests.worktreeTimeoutSec`
 (default 300); both it and `tests.timeoutSec` are capped at 2147483. Git changes are limited to creating `task/<name>`, switching between branches, the
-Builder's commits on `task/<name>`, and, after your yes, the local `--no-ff` merge.
+Builder's commits on `task/<name>`, and, when you run `/sereno:merge`, the local `--no-ff` merge.
 Nothing is ever sent to a remote.
 
 Whether to commit `.sereno/` is your choice. Specs, gates and attempts make a useful

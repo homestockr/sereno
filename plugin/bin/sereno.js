@@ -442,7 +442,12 @@ const COMMANDS = {
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
     const { config } = loadConfig(root);
-    return recovery.decide({ root, task, config, listAttempts: () => fsafe.listDir('.sereno/attempts') });
+    return recovery.decide({
+      root, task, config,
+      listAttempts: () => fsafe.listDir('.sereno/attempts'),
+      currentHead: () => gitlib.resolveCommit(root, 'refs/heads/task/' + task),
+      currentSpecHash: () => { try { return readSpec(root, '.sereno/specs/' + task + '.md').hash; } catch (_e) { return null; } },
+    });
   },
 
   brief(/** @type {string[]} */ argv) {

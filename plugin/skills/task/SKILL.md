@@ -3,6 +3,7 @@ name: task
 description: Write a task spec and create its task branch. Use to start a piece of work for the Sereno pipeline.
 argument-hint: <name> [one-line goal]
 disable-model-invocation: true
+model: sonnet
 allowed-tools: Bash, Read, Grep, Glob, Edit(.sereno/cache/spec-*.md)
 ---
 

@@ -3,6 +3,7 @@ name: build
 description: Run the spec's Builder on the task branch and record the attempt. Use after /sereno:task.
 argument-hint: <task>
 disable-model-invocation: true
+model: sonnet
 allowed-tools: Bash, Read, Agent
 ---
 

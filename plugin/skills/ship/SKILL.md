@@ -1,8 +1,9 @@
 ---
 name: ship
-description: Test, review and gate a built task branch, repair once if needed, then ask before merging it locally. Use after /sereno:build.
+description: Test, review and gate a built task branch, repair once if needed, then hand off to /sereno:merge. Use after /sereno:build.
 argument-hint: <task>
 disable-model-invocation: true
+model: sonnet
 allowed-tools: Bash, Read, Agent, Edit(.sereno/cache/verdict-*.json)
 ---
 
@@ -11,13 +12,13 @@ allowed-tools: Bash, Read, Agent, Edit(.sereno/cache/verdict-*.json)
 Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
 
 You are the architect. You run the checks, relay the red team's verdict into the gate
-file, follow the recovery rules, and ask the user before anything merges. You do not
+file, follow the recovery rules, and hand off to the user for the merge. You do not
 write feature code and you do not review the diff yourself.
 
 Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, ask for it.
 
 Rules that hold throughout: never run anything against a remote, never change which
-Builder is used by yourself, and never merge without an explicit yes from the user.
+Builder is used by yourself, and never merge: merging is `/sereno:merge`, which only the user can start.
 Every script result is one JSON object; if `ok` is false, show the `error` and stop.
 
 ## 0. Preconditions
@@ -154,7 +155,9 @@ The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `n
   summary) and tell it to fix only those; for `retry` after a test failure, give it the
   failing test names. Then go back to step 1 with the new head. A repair never changes
   the Builder, and `retry` does not use the repair.
-- **`review`**: the attempt is built and not yet reviewed. Go to step 1.
+- **`review`**: the attempt is built and not yet reviewed. Go to step 1. If the `reason` starts
+  with `head_moved`, the attempt is already final and the branch changed after its review: stop,
+  say so, and tell the user to run `/sereno:build <task>` for a new attempt.
 - **`decide`**: stop. Present exactly one decision, titled "Review needs a decision",
   with the `reason` and the findings or failure in one line each, and these choices:
   clarify the spec (run `/sereno:task` to revise it), use a stronger Builder (revise the
@@ -169,16 +172,4 @@ The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `n
 
 Show a short summary: tests (passed, any failures that already fail at the base), gate
 outcome (or "skipped, the red team is switched off"), the number of findings, the
-attempt count and the head commit. Then ask the user whether to merge `task/<task>` into
-`<base_branch>`, and wait for an explicit yes. Anything else means do not merge.
-
-Only after a yes, with a clean tracked tree (the same clean check as step 0):
-
-```
-git switch <base_branch>
-git merge --no-ff task/<task>
-```
-
-If the merge reports conflicts, run `git merge --abort`, tell the user, and stop. Never
-add a remote step. After the merge, ask `sereno:scribe` to refresh the brief for
-`<base_branch>`, giving it the same literal command line as in step 5 with `--branch <base_branch>`, and report the merge commit in one line.
+attempt count and the head commit. Then say: "Ready. Run `/sereno:merge <task>` to merge `task/<task>` into `<base_branch>`." You never merge; only the user starting `/sereno:merge` does.

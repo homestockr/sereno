@@ -41,7 +41,7 @@ function gateHasDefect(gate) {
 }
 
 /**
- * @param {{ root: string, task: string, config: any, listAttempts: () => string[] }} a
+ * @param {{ root: string, task: string, config: any, listAttempts: () => string[], currentHead?: () => string | null, currentSpecHash?: () => string | null }} a
  */
 function decide(a) {
   const escaped = a.task.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
@@ -79,18 +79,40 @@ function decide(a) {
   const out = (next, reason) => ({ next, reason, attempt: last.n, repairsUsed, infraRetriesUsed, gate_enabled: !!red.enabled });
   const o = last.rec.outcome;
 
+  /**
+   * Before any `merge`: the reviewed commit must still be the branch tip, and the spec
+   * must be the one that was reviewed. Skipped only when the caller gives no lookups.
+   * @param {string | null | undefined} gateHead the commit the record reviewed, if any record carries it
+   * @param {unknown} specHash the spec hash the record pinned, if any
+   */
+  const mergeGuard = (gateHead, specHash) => {
+    if (typeof a.currentHead === 'function' && gateHead !== undefined) {
+      const tip = a.currentHead();
+      if (!tip || gateHead !== tip) return out('review', 'head_moved: the branch tip is not the commit the gate reviewed');
+    }
+    if (typeof a.currentSpecHash === 'function' && specHash !== undefined) {
+      const now = a.currentSpecHash();
+      if (!now || specHash !== now) return out('decide', 'spec_changed: the spec is not the one that was reviewed');
+    }
+    return null;
+  };
+
   if (o === 'built') return out('review', 'the latest attempt is built and not yet reviewed');
   if (o === 'running') return out('decide', 'the latest attempt never finished');
   if (o === 'stopped') return out('done', 'the task was stopped');
   if (o === 'needs_context') return out('decide', 'the review needs context, or the test baseline is unusable');
   if (o === 'skipped') {
-    return red.enabled
-      ? out('decide', 'attempt is marked skipped but the red team is enabled')
-      : out('merge', 'tests passed and the gate is switched off in the config');
+    if (red.enabled) return out('decide', 'attempt is marked skipped but the red team is enabled');
+    // No record carries a reviewed head when the gate is off; only the spec pin (newest attempt that has one) can be checked.
+    let pin;
+    for (let i = attempts.length - 1; i >= 0; i--) if (typeof attempts[i].rec.spec_hash === 'string') { pin = attempts[i].rec.spec_hash; break; }
+    return mergeGuard(undefined, pin) || out('merge', 'tests passed and the gate is switched off in the config');
   }
   if (o === 'pass') {
     const g = last.gate;
-    if (g && g.outcome === 'pass' && g.tests_passed === true) return out('merge', 'tests passed and the gate passed');
+    if (g && g.outcome === 'pass' && g.tests_passed === true) {
+      return mergeGuard(String(g.head_commit), String(g.spec_hash)) || out('merge', 'tests passed and the gate passed');
+    }
     return out('decide', 'attempt says pass but the gate record is missing or does not confirm it');
   }
   if (o === 'error') {
