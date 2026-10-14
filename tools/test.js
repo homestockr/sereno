@@ -8789,8 +8789,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       }
       const ship = skills.find((x) => x[0] === 'ship')[1];
       const task = skills.find((x) => x[0] === 'task')[1];
-      assert.match(ship, /gate --file \.sereno\/cache\/verdict-<review_run_id>\.json /);
-      assert.match(task, /spec --task <name>[^\n]*--body-file \.sereno\/cache\/spec-<name>\.md/);
+      assert.match(ship, /gate --file <cacheDir>\/verdict-<review_run_id>\.json /);
+      assert.match(task, /spec --task <name>[^\n]*--body-file <cacheDir>\/spec-<name>\.md/);
       assert.match(ship, /^allowed-tools:.*Edit\(\.sereno\/cache\/verdict-\*\.json\)/m);
       assert.match(ship, /<cacheDir>\/verdict-<review_run_id>\.json/); assert.match(ship, /sereno\.js" paths/);
       assert.match(task, /^allowed-tools:.*Edit\(\.sereno\/cache\/spec-\*\.md\)/m);
@@ -9594,6 +9594,133 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(p.cacheDir, path.join(d, '.sereno', 'cache').split(path.sep).join('/'));
       assert.ok(!p.cacheDir.includes(String.fromCharCode(92)));
       for (const x of [d, home]) fs.rmSync(x, { recursive: true, force: true });
+    });
+    test('[4a-relcache] paths gives an absolute cacheDir spelled from cwd; gate/spec accept it and tricky paths are handled', () => {
+      const d = mk();
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4rc-')));
+      const g = (...a) => execFileSync('git', a, { cwd: d, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(d, 'a.txt'), 'x\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
+      const head = g('rev-parse', 'HEAD'); const h7 = head.slice(0, 7);
+      const env = Object.assign({}, process.env, { HOME: home, USERPROFILE: home });
+      const run = (cwd, ...a) => JSON.parse(spawnSync(process.execPath, [SERENO, ...a], { cwd, encoding: 'utf8', env }).stdout);
+      const fwd = (x) => x.split(path.sep).join('/');
+      const cache = path.join(d, '.sereno', 'cache'); fs.mkdirSync(cache, { recursive: true });
+      const sub = path.join(d, 'pkg', 'deep'); fs.mkdirSync(sub, { recursive: true });
+      const want = fwd(cache);
+      assert.strictEqual(run(d, 'paths').cacheDir, want);
+      assert.strictEqual(run(sub, 'paths').cacheDir, want);
+      assert.strictEqual(run(cache, 'paths').cacheDir, want, 'cwd == cache dir gives the dir itself, not empty');
+      assert.strictEqual(run(path.join(d, '.sereno'), 'paths').cacheDir, want);
+      // cwd spelled with different case than git's toplevel (Windows only): prefix keeps cwd's spelling
+      let cwds = [sub];
+      if (process.platform === 'win32') {
+        const flip = (x) => x.replace(/sereno-p4hh/i, (m) => m === m.toLowerCase() ? m.toUpperCase() : m.toLowerCase());
+        const alt = flip(sub); assert.notStrictEqual(alt, sub); cwds = [sub, alt];
+        assert.strictEqual(run(alt, 'paths').cacheDir, fwd(flip(cache)));
+        assert.notStrictEqual(fwd(flip(cache)), want);
+      }
+      let n = 0;
+      const putSpec = (task) => fs.writeFileSync(path.join(cache, 'spec-' + task + '.md'), '## Goal\nchange a\n');
+      const specArgs = (task, f) => ['spec', '--task', task, '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', f];
+      for (const cwd of cwds) {
+        const p = run(cwd, 'paths');
+        assert.ok(path.isAbsolute(p.cacheDir));
+        const task = 'rc' + (n++);
+        putSpec(task);
+        const sp = run(cwd, ...specArgs(task, p.cacheDir + '/spec-' + task + '.md'));
+        assert.strictEqual(sp.ok, true, JSON.stringify(sp));
+        assert.ok(!fs.existsSync(path.join(cache, 'spec-' + task + '.md')));
+        const id = 'rr_2026010' + n + 'T000000Z_' + h7;
+        fs.writeFileSync(path.join(cache, 'verdict-' + id + '.json'), '{"outcome":"pass","findings":[]}');
+        const gt = run(cwd, 'gate', '--file', p.cacheDir + '/verdict-' + id + '.json', '--task', task, '--base', head, '--head', head, '--branch', 'main', '--run-id', id, '--tests-passed', 'true');
+        assert.strictEqual(gt.ok, true, JSON.stringify(gt));
+      }
+      // an absolute arg inside the cache is accepted (native separators too)
+      putSpec('rcabs');
+      assert.strictEqual(run(sub, ...specArgs('rcabs', path.join(cache, 'spec-rcabs.md'))).ok, true);
+      // refused: outside the cache, other drive, \\?\ namespace form
+      fs.writeFileSync(path.join(sub, 'spec-zz.md'), 'x');
+      const refused = [['spec-zz.md'], [path.join(sub, 'spec-zz.md')]];
+      if (process.platform === 'win32') {
+        const drive = path.parse(d).root[0].toUpperCase();
+        const other = 'ABDEFGHIJKLMNOPQRSTUVWXYZ'.split('').find((c) => c !== drive && c !== 'C') || 'Z';
+        refused.push([other + ':\\.sereno\\cache\\spec-zz.md']);
+        refused.push(['\\\\?\\' + path.join(cache, 'spec-zz.md')]);
+      }
+      for (const [f] of refused) {
+        putSpec('zz');
+        const r = run(sub, ...specArgs('zz', f));
+        assert.strictEqual(r.code, 'path_refused', f + ' -> ' + JSON.stringify(r));
+        assert.ok(fs.existsSync(path.join(cache, 'spec-zz.md')), 'refused file is left alone');
+      }
+      // .SERENO/cache/... is accepted where the filesystem treats it as the real dir (Windows)
+      if (process.platform === 'win32') {
+        putSpec('rcup');
+        const r = run(d, ...specArgs('rcup', '.SERENO/cache/spec-rcup.md'));
+        assert.strictEqual(r.ok, true, JSON.stringify(r));
+      }
+      for (const x of [d, home]) fs.rmSync(x, { recursive: true, force: true });
+    });
+    test('[4a-aliascwd] cwd via junction / subdir of junction / 8.3 short path: paths + spec/gate round trip; junctioned cache refused', () => {
+      if (process.platform !== 'win32') return;
+      const d = mk();
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4ac-')));
+      const lnkParent = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4acl-')));
+      const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4aco-')));
+      const g = (...a) => execFileSync('git', a, { cwd: d, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(d, 'a.txt'), 'x\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
+      const head = g('rev-parse', 'HEAD'); const h7 = head.slice(0, 7);
+      const env = Object.assign({}, process.env, { HOME: home, USERPROFILE: home });
+      const run = (cwd, ...a) => JSON.parse(spawnSync(process.execPath, [SERENO, ...a], { cwd, encoding: 'utf8', env }).stdout);
+      const cache = path.join(d, '.sereno', 'cache'); fs.mkdirSync(cache, { recursive: true });
+      fs.mkdirSync(path.join(d, 'pkg', 'deep'), { recursive: true });
+      const link = path.join(lnkParent, 'lnk');
+      let n = 0;
+      const roundTrip = (cwd, label) => {
+        const p = run(cwd, 'paths');
+        const want = path.resolve(cwd).split(path.sep).join('/');
+        assert.ok(p.cacheDir.toLowerCase().startsWith(want.toLowerCase().replace(/\/(pkg\/deep)$/i, '')), label + ': cacheDir keeps the alias spelling: ' + p.cacheDir);
+        const task = 'ac' + (n++);
+        fs.writeFileSync(path.join(cache, 'spec-' + task + '.md'), '## Goal\nchange a\n');
+        const sp = run(cwd, 'spec', '--task', task, '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', p.cacheDir + '/spec-' + task + '.md');
+        assert.strictEqual(sp.ok, true, label + ' spec: ' + JSON.stringify(sp));
+        const id = 'rr_2026010' + n + 'T000000Z_' + h7;
+        fs.writeFileSync(path.join(cache, 'verdict-' + id + '.json'), '{"outcome":"pass","findings":[]}');
+        const gt = run(cwd, 'gate', '--file', p.cacheDir + '/verdict-' + id + '.json', '--task', task, '--base', head, '--head', head, '--branch', 'main', '--run-id', id, '--tests-passed', 'true');
+        assert.strictEqual(gt.ok, true, label + ' gate: ' + JSON.stringify(gt));
+      };
+      let linked = false;
+      try { fs.symlinkSync(d, link, 'junction'); linked = true; } catch (_e) { console.log('    (junction unavailable; skipping a/b)'); }
+      try {
+        if (linked) {
+          roundTrip(link, 'junction');
+          roundTrip(path.join(link, 'pkg', 'deep'), 'junction subdir');
+        }
+        // (c) 8.3 short form of the repo root
+        let short = d;
+        try { short = execFileSync('cmd', ['/d', '/c', 'for %I in ("' + d + '") do @echo %~sI'], { encoding: 'utf8', windowsVerbatimArguments: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch (_e) { /* none */ }
+        if (short && short.toLowerCase() !== d.toLowerCase() && fs.existsSync(short)) roundTrip(short, '8.3');
+        else console.log('    (8.3 short names unavailable; skipping c)');
+        // .sereno/cache as a junction pointing outside the repo is refused
+        fs.writeFileSync(path.join(outside, 'spec-ac9.md'), '## Goal\nx\n');
+        const saved = path.join(d, '.sereno', 'cache-real');
+        fs.renameSync(cache, saved);
+        let cj = false;
+        try { fs.symlinkSync(outside, cache, 'junction'); cj = true; } catch (_e) { /* skip */ }
+        try {
+          if (cj) {
+            const r = run(d, 'spec', '--task', 'ac9', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', cache.split(path.sep).join('/') + '/spec-ac9.md');
+            assert.strictEqual(r.ok, false, JSON.stringify(r));
+            assert.strictEqual(r.code, 'path_refused', JSON.stringify(r));
+            assert.ok(fs.existsSync(path.join(outside, 'spec-ac9.md')), 'outside file untouched');
+          }
+        } finally { if (cj) fs.rmdirSync(cache); fs.renameSync(saved, cache); }
+      } finally {
+        if (linked) fs.rmdirSync(link);
+        for (const x of [d, home, lnkParent, outside]) fs.rmSync(x, { recursive: true, force: true });
+      }
     });
   }
 

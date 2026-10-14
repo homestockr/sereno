@@ -56,7 +56,7 @@ the spec: skip this step.
 
 ## 4. Write the spec
 
-First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (an absolute path at the repo root; your working directory may be a subdirectory).
+First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (an absolute path spelled like your working directory). Use it exactly as given, for both Write and the file argument below: never rebuild it from `repo_root`, and never change its letter case.
 Write the acceptance criteria (markdown, no front matter) with the Write tool to
 `<cacheDir>/spec-<name>.md`. This is the only path you write to; never write the spec
 file under `.sereno/specs/` by hand, and never pipe or heredoc the text into a command. The
@@ -79,7 +79,7 @@ The file content is:
 Then run:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|sonnet|opus> --kind <mechanical|feature|fix|refactor> --reason "<why this Builder>" --body-file .sereno/cache/spec-<name>.md
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|sonnet|opus> --kind <mechanical|feature|fix|refactor> --reason "<why this Builder>" --body-file <cacheDir>/spec-<name>.md
 ```
 
 Add `--base-branch <from_branch>` when you just created the branch (a spec revision keeps

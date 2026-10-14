@@ -115,16 +115,26 @@ function readCapped(file) {
 const CACHE_FILE_MAX = 64 * 1024;
 
 /**
- * Resolve a --file/--body-file argument to a cache-file rel path, or refuse. Only
- * .sereno/cache/<name> where name matches the pattern.
- * @param {string} arg @param {RegExp} nameRe @returns {{ rel: string, m: RegExpExecArray }}
+ * Resolve a --file/--body-file argument to a cache-file rel path (relative to the repo
+ * root), or refuse. The argument is resolved against the process cwd (the same base
+ * `paths` uses for cacheDir), then must land on .sereno/cache/<name> under the root with
+ * name matching the pattern. path.relative compares case-insensitively on win32.
+ * @param {string} root @param {string} arg @param {RegExp} nameRe @returns {{ rel: string, m: RegExpExecArray }}
  */
-function cacheFileArg(arg, nameRe) {
-  const segs = String(arg).split(/[\\/]/);
-  if (segs.length !== 3 || segs[0] !== '.sereno' || segs[1] !== 'cache') throw new SerenoError('path_refused', 'only .sereno/cache/ files are accepted');
+function cacheFileArg(root, arg, nameRe) {
+  // Resolve against the cwd as spelled (it may be a junction, subst or 8.3 alias), then
+  // realpath the directory so it compares with git's realpath'd root.
+  if (process.platform === 'win32' && /^[\\/]{2}[?.][\\/]/.test(String(arg))) throw new SerenoError('path_refused', 'namespace-prefixed paths are not accepted');
+  const abs = path.resolve(process.cwd(), String(arg));
+  let dir = path.dirname(abs);
+  try { dir = fs.realpathSync.native(dir); } catch (_e) { /* fall back to lexical */ }
+  const rel = path.relative(root, path.join(dir, path.basename(abs)));
+  const segs = rel.split(/[\\/]/);
+  const fold = (/** @type {string} */ x) => (process.platform === 'win32' ? x.toLowerCase() : x);
+  if (segs.length !== 3 || fold(segs[0]) !== '.sereno' || fold(segs[1]) !== 'cache') throw new SerenoError('path_refused', 'only .sereno/cache/ files are accepted');
   const m = nameRe.exec(segs[2]);
   if (!m) throw new SerenoError('path_refused', 'file name not accepted');
-  return { rel: segs.join('/'), m };
+  return { rel: '.sereno/cache/' + segs[2], m };
 }
 
 /** @param {string} root @param {string} specArg @returns {{ rel: string, hash: string }} */
@@ -264,7 +274,7 @@ const COMMANDS = {
     let text;
     if (a.stdin) text = readStdin();
     else {
-      const cf = cacheFileArg(/** @type {string} */ (a.file), /^verdict-(rr_[A-Za-z0-9_]+)\.json$/);
+      const cf = cacheFileArg(root, /** @type {string} */ (a.file), /^verdict-(rr_[A-Za-z0-9_]+)\.json$/);
       if (cf.m[1] !== runId) throw new SerenoError('path_refused', 'verdict file does not match --run-id');
       cacheRel = cf.rel;
       text = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
@@ -385,7 +395,7 @@ const COMMANDS = {
     let cacheRel = null;
     if (a.stdin) body = readStdin();
     else {
-      const cf = cacheFileArg(/** @type {string} */ (a['body-file']), /^spec-([A-Za-z0-9._-]+)\.md$/);
+      const cf = cacheFileArg(root, /** @type {string} */ (a['body-file']), /^spec-([A-Za-z0-9._-]+)\.md$/);
       if (cf.m[1] !== task) throw new SerenoError('path_refused', 'spec file does not match --task');
       cacheRel = cf.rel;
       body = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
@@ -455,10 +465,15 @@ const COMMANDS = {
     const top = gitlib.toplevel(process.cwd());
     const root = top ? fs.realpathSync.native(path.resolve(top)) : null;
     const home = path.join(os.homedir(), '.sereno');
+    // cacheDir is absolute (Write needs that) but spelled from the session's own cwd, not
+    // git's: Claude Code compares paths case-sensitively. path.relative ignores case on win32.
+    let cwd = process.cwd();
+    try { cwd = fs.realpathSync.native(cwd); } catch (_e) { /* keep as is */ }
+    const cacheAbs = root && path.join(root, '.sereno', 'cache');
     return {
       repo_root: root,
       sereno_dir: root && path.join(root, '.sereno'),
-      cacheDir: root && path.join(root, '.sereno', 'cache').split(path.sep).join('/'),
+      cacheDir: cacheAbs && path.resolve(process.cwd(), path.relative(cwd, cacheAbs) || '.').split(path.sep).join('/'),
       layout: {
         pipeline: '.sereno/pipeline.json',
         specs: '.sereno/specs/<task>.md',

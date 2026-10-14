@@ -194,7 +194,8 @@ The Builder agents are told to stage only the files they changed and never `.ser
 - Nothing is sent anywhere except the normal Claude Code model calls. The plugin never
   contacts a git remote.
 - `/sereno:ship` and `/sereno:task` each write one file under `.sereno/cache/` (the
-  verdict, the spec text) and ask Claude Code to pre-approve only that write. If you start
+  verdict, the spec text) and ask Claude Code to pre-approve only that write. The skills write to the absolute `cacheDir` that `sereno.js paths` reports, spelled like the session's
+  working directory so path casing can't trip the permission check. If you start
   Claude Code outside the repo root, or the pre-approval isn't applied, you are asked
   once. To approve it for good, add `Edit(/.sereno/cache/**)` to the project's
   `.claude/settings.json` `permissions.allow` (there a leading `/` anchors at the
