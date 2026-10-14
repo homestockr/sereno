@@ -7371,7 +7371,7 @@ test('missing rate_limits degrades instead of throwing', () => {
   {
     const SERENO = path.join(ROOT, 'plugin', 'bin', 'sereno.js');
     const tmps = [];
-    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a-'))); tmps.push(d); return d; };
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a-'))); tmps.push(d); return d; };
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     function mkRepo() {
       const dir = mk();
@@ -7614,7 +7614,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const SERENO = path.join(ROOT, 'plugin', 'bin', 'sereno.js');
     const testrun = require('../plugin/bin/lib/testrun.js');
     const tmps = [];
-    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a2-'))); tmps.push(d); return d; };
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a2-'))); tmps.push(d); return d; };
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     // t.js: a tiny TAP test script driven by spec.json (committed, so base and head can differ).
     const T_JS = [
@@ -7836,7 +7836,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
     const { spawnSync } = require('node:child_process');
     const tmps = [];
-    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a3-'))); tmps.push(d); return d; };
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a3-'))); tmps.push(d); return d; };
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     const runS = (cwd, args, input) => {
       const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8' });
@@ -8007,7 +8007,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const { loadConfig } = require('../plugin/bin/lib/config.js');
     const { spawnSync } = require('node:child_process');
     const tmps = [];
-    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a4-'))); tmps.push(d); return d; };
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a4-'))); tmps.push(d); return d; };
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     const home = mk();
     const runS = (cwd, args, input) => {
@@ -8321,7 +8321,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const { spawnSync } = require('node:child_process');
     const appBriefs = require('../src/briefs.js');
     const tmps = [];
-    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a5-'))); tmps.push(d); return d; };
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4a5-'))); tmps.push(d); return d; };
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     const home = mk();
     const runS = (cwd, args) => {
@@ -8505,7 +8505,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
     const { spawnSync } = require('node:child_process');
     const tmps = [];
-    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4ae-'))); tmps.push(d); return d; };
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4ae-'))); tmps.push(d); return d; };
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     const home = mk();
     const S = (cwd, args, input) => {
@@ -8599,7 +8599,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const PLUGIN = path.join(ROOT, 'plugin');
     const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
     const tmps = [];
-    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-pexit-'))); tmps.push(d); return d; };
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-pexit-'))); tmps.push(d); return d; };
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     const home = mk();
     const S = (cwd, args, input) => {
@@ -8799,13 +8799,13 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[4a-heredoc] gate and spec read a bash heredoc body', () => {
       const probe = spawnSync('bash', ['-c', 'true'], { encoding: 'utf8' });
       if (probe.error || probe.status !== 0) return; // no bash on this machine
-      const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hd-')));
+      const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hd-')));
       try {
         const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
         g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
         fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
         const head = g('rev-parse', 'HEAD');
-        const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hdh-')));
+        const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hdh-')));
         const env = Object.assign({}, process.env, { HOME: home, USERPROFILE: home });
         const sh = (cmd) => { const r = spawnSync('bash', ['-c', cmd], { cwd: dir, encoding: 'utf8', env }); return JSON.parse(r.stdout); };
         const node = '"' + process.execPath.replace(/\\/g, '/') + '" "' + SERENO.replace(/\\/g, '/') + '"';
@@ -8823,8 +8823,8 @@ test('missing rate_limits degrades instead of throwing', () => {
   {
     const SERENO = path.join(ROOT, 'plugin', 'bin', 'sereno.js');
     const { spawnSync } = require('node:child_process');
-    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4cf-')));
-    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4cfh-')));
+    const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4cf-')));
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4cfh-')));
     const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
     fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
@@ -8931,7 +8931,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const { loadConfig } = require('../plugin/bin/lib/config.js');
     const { spawnSync } = require('node:child_process');
     const tmps = [];
-    const mk = () => { const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4arf-'))); tmps.push(d); return d; };
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4arf-'))); tmps.push(d); return d; };
     const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     const home = mk();
     const S = (cwd, args, input) => {
@@ -9268,7 +9268,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('[4a-r2-6] sweepStale removes an old plugin base dir without following its node_modules junction; fresh and unmarked dirs stay', () => {
       const sentinel = mk(); fs.writeFileSync(path.join(sentinel, 'keep.txt'), 'keep');
-      const tmpRoot = fs.realpathSync(os.tmpdir());
+      const tmpRoot = fs.realpathSync.native(os.tmpdir());
       const mkBase = (marked) => {
         const d = fs.mkdtempSync(path.join(tmpRoot, 'sereno-base-'));
         fs.mkdirSync(path.join(d, 'wt'));
@@ -9409,7 +9409,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(t, /~\/\.sereno\/pipeline\.json/);
     });
     test('[4a-r3-5] sweepStale removes a stale base dir whose wt/node_modules is a real directory; a junction target still survives', () => {
-      const tmpRoot = fs.realpathSync(os.tmpdir());
+      const tmpRoot = fs.realpathSync.native(os.tmpdir());
       const d = fs.mkdtempSync(path.join(tmpRoot, 'sereno-base-'));
       fs.mkdirSync(path.join(d, 'wt', 'node_modules', 'pkg'), { recursive: true });
       fs.writeFileSync(path.join(d, 'wt', 'node_modules', 'pkg', 'i.js'), 'x');
@@ -9542,12 +9542,12 @@ test('missing rate_limits degrades instead of throwing', () => {
     const SERENO = path.join(ROOT, 'plugin', 'bin', 'sereno.js');
     const { spawnSync } = require('node:child_process');
     const mk = () => {
-      const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hh-')));
+      const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hh-')));
       fs.mkdirSync(path.join(d, '.sereno', 'cache'), { recursive: true });
       return d;
     };
     test('[4a-harden] readFile and removeFile refuse a hard-linked file; both files untouched', () => {
-      const d = mk(); const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4ho-')));
+      const d = mk(); const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4ho-')));
       const victim = path.join(outside, 'victim.txt');
       fs.writeFileSync(victim, 'secret');
       const inside = path.join(d, '.sereno', 'cache', 'verdict-rr_h.json');
@@ -9576,7 +9576,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('[4a-harden] gate requires --run-id to end with _<first 7 hex of --head>; paths gives cacheDir', () => {
       const d = mk();
-      const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hhh-')));
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hhh-')));
       const g = (...a) => execFileSync('git', a, { cwd: d, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
       g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
       fs.writeFileSync(path.join(d, 'a.txt'), 'x\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
