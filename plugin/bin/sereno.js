@@ -127,10 +127,10 @@ function cacheFileArg(root, arg, nameRe) {
   const rel = path.relative(root, path.resolve(base, String(arg)));
   const segs = rel.split(/[\\/]/);
   const fold = (/** @type {string} */ x) => (process.platform === 'win32' ? x.toLowerCase() : x);
-  if (segs.length !== 3 || segs[0] !== '.sereno' || fold(segs[1]) !== 'cache') throw new SerenoError('path_refused', 'only .sereno/cache/ files are accepted');
+  if (segs.length !== 3 || fold(segs[0]) !== '.sereno' || fold(segs[1]) !== 'cache') throw new SerenoError('path_refused', 'only .sereno/cache/ files are accepted');
   const m = nameRe.exec(segs[2]);
   if (!m) throw new SerenoError('path_refused', 'file name not accepted');
-  return { rel: segs.join('/'), m };
+  return { rel: '.sereno/cache/' + segs[2], m };
 }
 
 /** @param {string} root @param {string} specArg @returns {{ rel: string, hash: string }} */
@@ -461,16 +461,15 @@ const COMMANDS = {
     const top = gitlib.toplevel(process.cwd());
     const root = top ? fs.realpathSync.native(path.resolve(top)) : null;
     const home = path.join(os.homedir(), '.sereno');
-    // cacheDir is relative to cwd so Claude Code's case-sensitive permission check matches
-    // the session's own spelling of the path; path.relative ignores case on win32.
+    // cacheDir is absolute (Write needs that) but spelled from the session's own cwd, not
+    // git's: Claude Code compares paths case-sensitively. path.relative ignores case on win32.
     let cwd = process.cwd();
     try { cwd = fs.realpathSync.native(cwd); } catch (_e) { /* keep as is */ }
     const cacheAbs = root && path.join(root, '.sereno', 'cache');
     return {
       repo_root: root,
       sereno_dir: root && path.join(root, '.sereno'),
-      cacheDir: cacheAbs && path.relative(cwd, cacheAbs).split(path.sep).join('/'),
-      cacheDirAbs: cacheAbs && cacheAbs.split(path.sep).join('/'),
+      cacheDir: cacheAbs && path.resolve(process.cwd(), path.relative(cwd, cacheAbs) || '.').split(path.sep).join('/'),
       layout: {
         pipeline: '.sereno/pipeline.json',
         specs: '.sereno/specs/<task>.md',

@@ -9591,12 +9591,11 @@ test('missing rate_limits degrades instead of throwing', () => {
       const upper = spawnSync(process.execPath, [SERENO, ...args('rr_20260101T000000Z_' + head.slice(0, 7).toUpperCase())], { cwd: d, encoding: 'utf8', env, input: '{"outcome":"pass"}' });
       assert.strictEqual(JSON.parse(upper.stdout).code, 'invalid_arg', 'RUN_ID format is lowercase hex');
       const p = run('paths');
-      assert.strictEqual(p.cacheDir, '.sereno/cache');
-      assert.strictEqual(p.cacheDirAbs, path.join(d, '.sereno', 'cache').split(path.sep).join('/'));
+      assert.strictEqual(p.cacheDir, path.join(d, '.sereno', 'cache').split(path.sep).join('/'));
       assert.ok(!p.cacheDir.includes(String.fromCharCode(92)));
       for (const x of [d, home]) fs.rmSync(x, { recursive: true, force: true });
     });
-    test('[4a-relcache] paths gives cwd-relative cacheDir (subdir, case mismatch) and gate/spec accept it', () => {
+    test('[4a-relcache] paths gives an absolute cacheDir spelled from cwd; gate/spec accept it and tricky paths are handled', () => {
       const d = mk();
       const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4rc-')));
       const g = (...a) => execFileSync('git', a, { cwd: d, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -9605,34 +9604,62 @@ test('missing rate_limits degrades instead of throwing', () => {
       const head = g('rev-parse', 'HEAD'); const h7 = head.slice(0, 7);
       const env = Object.assign({}, process.env, { HOME: home, USERPROFILE: home });
       const run = (cwd, ...a) => JSON.parse(spawnSync(process.execPath, [SERENO, ...a], { cwd, encoding: 'utf8', env }).stdout);
+      const fwd = (x) => x.split(path.sep).join('/');
+      const cache = path.join(d, '.sereno', 'cache'); fs.mkdirSync(cache, { recursive: true });
       const sub = path.join(d, 'pkg', 'deep'); fs.mkdirSync(sub, { recursive: true });
-      assert.strictEqual(run(d, 'paths').cacheDir, '.sereno/cache');
-      assert.strictEqual(run(path.join(d, 'pkg'), 'paths').cacheDir, '../.sereno/cache');
-      assert.strictEqual(run(sub, 'paths').cacheDir, '../../.sereno/cache');
-      // cwd spelled with different case than git's toplevel (Windows only)
+      const want = fwd(cache);
+      assert.strictEqual(run(d, 'paths').cacheDir, want);
+      assert.strictEqual(run(sub, 'paths').cacheDir, want);
+      assert.strictEqual(run(cache, 'paths').cacheDir, want, 'cwd == cache dir gives the dir itself, not empty');
+      assert.strictEqual(run(path.join(d, '.sereno'), 'paths').cacheDir, want);
+      // cwd spelled with different case than git's toplevel (Windows only): prefix keeps cwd's spelling
       let cwds = [sub];
       if (process.platform === 'win32') {
         const flip = (x) => x.replace(/sereno-p4hh/i, (m) => m === m.toLowerCase() ? m.toUpperCase() : m.toLowerCase());
         const alt = flip(sub); assert.notStrictEqual(alt, sub); cwds = [sub, alt];
+        assert.strictEqual(run(alt, 'paths').cacheDir, fwd(flip(cache)));
+        assert.notStrictEqual(fwd(flip(cache)), want);
       }
-      for (const [i, cwd] of cwds.entries()) {
+      let n = 0;
+      const putSpec = (task) => fs.writeFileSync(path.join(cache, 'spec-' + task + '.md'), '## Goal\nchange a\n');
+      const specArgs = (task, f) => ['spec', '--task', task, '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', f];
+      for (const cwd of cwds) {
         const p = run(cwd, 'paths');
-        assert.strictEqual(p.cacheDir, '../../.sereno/cache', cwd);
-        assert.ok(!path.isAbsolute(p.cacheDir));
-        const cache = path.join(d, '.sereno', 'cache'); fs.mkdirSync(cache, { recursive: true });
-        const task = 'rc' + i;
-        fs.writeFileSync(path.join(cache, 'spec-' + task + '.md'), '## Goal\nchange a\n');
-        const sp = run(cwd, 'spec', '--task', task, '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', p.cacheDir + '/spec-' + task + '.md');
+        assert.ok(path.isAbsolute(p.cacheDir));
+        const task = 'rc' + (n++);
+        putSpec(task);
+        const sp = run(cwd, ...specArgs(task, p.cacheDir + '/spec-' + task + '.md'));
         assert.strictEqual(sp.ok, true, JSON.stringify(sp));
         assert.ok(!fs.existsSync(path.join(cache, 'spec-' + task + '.md')));
-        const id = 'rr_2026010' + (i + 1) + 'T000000Z_' + h7;
+        const id = 'rr_2026010' + n + 'T000000Z_' + h7;
         fs.writeFileSync(path.join(cache, 'verdict-' + id + '.json'), '{"outcome":"pass","findings":[]}');
         const gt = run(cwd, 'gate', '--file', p.cacheDir + '/verdict-' + id + '.json', '--task', task, '--base', head, '--head', head, '--branch', 'main', '--run-id', id, '--tests-passed', 'true');
         assert.strictEqual(gt.ok, true, JSON.stringify(gt));
       }
-      // a relative path that does not land in the cache is still refused
+      // an absolute arg inside the cache is accepted (native separators too)
+      putSpec('rcabs');
+      assert.strictEqual(run(sub, ...specArgs('rcabs', path.join(cache, 'spec-rcabs.md'))).ok, true);
+      // refused: outside the cache, other drive, \\?\ namespace form
       fs.writeFileSync(path.join(sub, 'spec-zz.md'), 'x');
-      assert.strictEqual(run(sub, 'spec', '--task', 'zz', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', 'spec-zz.md').code, 'path_refused');
+      const refused = [['spec-zz.md'], [path.join(sub, 'spec-zz.md')]];
+      if (process.platform === 'win32') {
+        const drive = path.parse(d).root[0].toUpperCase();
+        const other = 'ABDEFGHIJKLMNOPQRSTUVWXYZ'.split('').find((c) => c !== drive && c !== 'C') || 'Z';
+        refused.push([other + ':\\.sereno\\cache\\spec-zz.md']);
+        refused.push(['\\\\?\\' + path.join(cache, 'spec-zz.md')]);
+      }
+      for (const [f] of refused) {
+        putSpec('zz');
+        const r = run(sub, ...specArgs('zz', f));
+        assert.strictEqual(r.code, 'path_refused', f + ' -> ' + JSON.stringify(r));
+        assert.ok(fs.existsSync(path.join(cache, 'spec-zz.md')), 'refused file is left alone');
+      }
+      // .SERENO/cache/... is accepted where the filesystem treats it as the real dir (Windows)
+      if (process.platform === 'win32') {
+        putSpec('rcup');
+        const r = run(d, ...specArgs('rcup', '.SERENO/cache/spec-rcup.md'));
+        assert.strictEqual(r.ok, true, JSON.stringify(r));
+      }
       for (const x of [d, home]) fs.rmSync(x, { recursive: true, force: true });
     });
   }
