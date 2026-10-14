@@ -9662,6 +9662,66 @@ test('missing rate_limits degrades instead of throwing', () => {
       }
       for (const x of [d, home]) fs.rmSync(x, { recursive: true, force: true });
     });
+    test('[4a-aliascwd] cwd via junction / subdir of junction / 8.3 short path: paths + spec/gate round trip; junctioned cache refused', () => {
+      if (process.platform !== 'win32') return;
+      const d = mk();
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4ac-')));
+      const lnkParent = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4acl-')));
+      const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4aco-')));
+      const g = (...a) => execFileSync('git', a, { cwd: d, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(d, 'a.txt'), 'x\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
+      const head = g('rev-parse', 'HEAD'); const h7 = head.slice(0, 7);
+      const env = Object.assign({}, process.env, { HOME: home, USERPROFILE: home });
+      const run = (cwd, ...a) => JSON.parse(spawnSync(process.execPath, [SERENO, ...a], { cwd, encoding: 'utf8', env }).stdout);
+      const cache = path.join(d, '.sereno', 'cache'); fs.mkdirSync(cache, { recursive: true });
+      fs.mkdirSync(path.join(d, 'pkg', 'deep'), { recursive: true });
+      const link = path.join(lnkParent, 'lnk');
+      let n = 0;
+      const roundTrip = (cwd, label) => {
+        const p = run(cwd, 'paths');
+        const want = path.resolve(cwd).split(path.sep).join('/');
+        assert.ok(p.cacheDir.toLowerCase().startsWith(want.toLowerCase().replace(/\/(pkg\/deep)$/i, '')), label + ': cacheDir keeps the alias spelling: ' + p.cacheDir);
+        const task = 'ac' + (n++);
+        fs.writeFileSync(path.join(cache, 'spec-' + task + '.md'), '## Goal\nchange a\n');
+        const sp = run(cwd, 'spec', '--task', task, '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', p.cacheDir + '/spec-' + task + '.md');
+        assert.strictEqual(sp.ok, true, label + ' spec: ' + JSON.stringify(sp));
+        const id = 'rr_2026010' + n + 'T000000Z_' + h7;
+        fs.writeFileSync(path.join(cache, 'verdict-' + id + '.json'), '{"outcome":"pass","findings":[]}');
+        const gt = run(cwd, 'gate', '--file', p.cacheDir + '/verdict-' + id + '.json', '--task', task, '--base', head, '--head', head, '--branch', 'main', '--run-id', id, '--tests-passed', 'true');
+        assert.strictEqual(gt.ok, true, label + ' gate: ' + JSON.stringify(gt));
+      };
+      let linked = false;
+      try { fs.symlinkSync(d, link, 'junction'); linked = true; } catch (_e) { console.log('    (junction unavailable; skipping a/b)'); }
+      try {
+        if (linked) {
+          roundTrip(link, 'junction');
+          roundTrip(path.join(link, 'pkg', 'deep'), 'junction subdir');
+        }
+        // (c) 8.3 short form of the repo root
+        let short = d;
+        try { short = execFileSync('cmd', ['/d', '/c', 'for %I in ("' + d + '") do @echo %~sI'], { encoding: 'utf8', windowsVerbatimArguments: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch (_e) { /* none */ }
+        if (short && short.toLowerCase() !== d.toLowerCase() && fs.existsSync(short)) roundTrip(short, '8.3');
+        else console.log('    (8.3 short names unavailable; skipping c)');
+        // .sereno/cache as a junction pointing outside the repo is refused
+        fs.writeFileSync(path.join(outside, 'spec-ac9.md'), '## Goal\nx\n');
+        const saved = path.join(d, '.sereno', 'cache-real');
+        fs.renameSync(cache, saved);
+        let cj = false;
+        try { fs.symlinkSync(outside, cache, 'junction'); cj = true; } catch (_e) { /* skip */ }
+        try {
+          if (cj) {
+            const r = run(d, 'spec', '--task', 'ac9', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', cache.split(path.sep).join('/') + '/spec-ac9.md');
+            assert.strictEqual(r.ok, false, JSON.stringify(r));
+            assert.strictEqual(r.code, 'path_refused', JSON.stringify(r));
+            assert.ok(fs.existsSync(path.join(outside, 'spec-ac9.md')), 'outside file untouched');
+          }
+        } finally { if (cj) fs.rmdirSync(cache); fs.renameSync(saved, cache); }
+      } finally {
+        if (linked) fs.rmdirSync(link);
+        for (const x of [d, home, lnkParent, outside]) fs.rmSync(x, { recursive: true, force: true });
+      }
+    });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

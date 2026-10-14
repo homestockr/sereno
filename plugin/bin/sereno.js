@@ -122,9 +122,13 @@ const CACHE_FILE_MAX = 64 * 1024;
  * @param {string} root @param {string} arg @param {RegExp} nameRe @returns {{ rel: string, m: RegExpExecArray }}
  */
 function cacheFileArg(root, arg, nameRe) {
-  let base = process.cwd();
-  try { base = fs.realpathSync.native(base); } catch (_e) { /* keep as is */ }
-  const rel = path.relative(root, path.resolve(base, String(arg)));
+  // Resolve against the cwd as spelled (it may be a junction, subst or 8.3 alias), then
+  // realpath the directory so it compares with git's realpath'd root.
+  if (process.platform === 'win32' && /^[\\/]{2}[?.][\\/]/.test(String(arg))) throw new SerenoError('path_refused', 'namespace-prefixed paths are not accepted');
+  const abs = path.resolve(process.cwd(), String(arg));
+  let dir = path.dirname(abs);
+  try { dir = fs.realpathSync.native(dir); } catch (_e) { /* fall back to lexical */ }
+  const rel = path.relative(root, path.join(dir, path.basename(abs)));
   const segs = rel.split(/[\\/]/);
   const fold = (/** @type {string} */ x) => (process.platform === 'win32' ? x.toLowerCase() : x);
   if (segs.length !== 3 || fold(segs[0]) !== '.sereno' || fold(segs[1]) !== 'cache') throw new SerenoError('path_refused', 'only .sereno/cache/ files are accepted');
