@@ -8789,8 +8789,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       }
       const ship = skills.find((x) => x[0] === 'ship')[1];
       const task = skills.find((x) => x[0] === 'task')[1];
-      assert.match(ship, /gate --file \.sereno\/cache\/verdict-<review_run_id>\.json /);
-      assert.match(task, /spec --task <name>[^\n]*--body-file \.sereno\/cache\/spec-<name>\.md/);
+      assert.match(ship, /gate --file <cacheDir>\/verdict-<review_run_id>\.json /);
+      assert.match(task, /spec --task <name>[^\n]*--body-file <cacheDir>\/spec-<name>\.md/);
       assert.match(ship, /^allowed-tools:.*Edit\(\.sereno\/cache\/verdict-\*\.json\)/m);
       assert.match(ship, /<cacheDir>\/verdict-<review_run_id>\.json/); assert.match(ship, /sereno\.js" paths/);
       assert.match(task, /^allowed-tools:.*Edit\(\.sereno\/cache\/spec-\*\.md\)/m);
@@ -9591,8 +9591,48 @@ test('missing rate_limits degrades instead of throwing', () => {
       const upper = spawnSync(process.execPath, [SERENO, ...args('rr_20260101T000000Z_' + head.slice(0, 7).toUpperCase())], { cwd: d, encoding: 'utf8', env, input: '{"outcome":"pass"}' });
       assert.strictEqual(JSON.parse(upper.stdout).code, 'invalid_arg', 'RUN_ID format is lowercase hex');
       const p = run('paths');
-      assert.strictEqual(p.cacheDir, path.join(d, '.sereno', 'cache').split(path.sep).join('/'));
+      assert.strictEqual(p.cacheDir, '.sereno/cache');
+      assert.strictEqual(p.cacheDirAbs, path.join(d, '.sereno', 'cache').split(path.sep).join('/'));
       assert.ok(!p.cacheDir.includes(String.fromCharCode(92)));
+      for (const x of [d, home]) fs.rmSync(x, { recursive: true, force: true });
+    });
+    test('[4a-relcache] paths gives cwd-relative cacheDir (subdir, case mismatch) and gate/spec accept it', () => {
+      const d = mk();
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4rc-')));
+      const g = (...a) => execFileSync('git', a, { cwd: d, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@example.invalid'); g('config', 'user.name', 't'); g('config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(d, 'a.txt'), 'x\n'); g('add', 'a.txt'); g('commit', '-q', '-m', 'init');
+      const head = g('rev-parse', 'HEAD'); const h7 = head.slice(0, 7);
+      const env = Object.assign({}, process.env, { HOME: home, USERPROFILE: home });
+      const run = (cwd, ...a) => JSON.parse(spawnSync(process.execPath, [SERENO, ...a], { cwd, encoding: 'utf8', env }).stdout);
+      const sub = path.join(d, 'pkg', 'deep'); fs.mkdirSync(sub, { recursive: true });
+      assert.strictEqual(run(d, 'paths').cacheDir, '.sereno/cache');
+      assert.strictEqual(run(path.join(d, 'pkg'), 'paths').cacheDir, '../.sereno/cache');
+      assert.strictEqual(run(sub, 'paths').cacheDir, '../../.sereno/cache');
+      // cwd spelled with different case than git's toplevel (Windows only)
+      let cwds = [sub];
+      if (process.platform === 'win32') {
+        const flip = (x) => x.replace(/sereno-p4hh/i, (m) => m === m.toLowerCase() ? m.toUpperCase() : m.toLowerCase());
+        const alt = flip(sub); assert.notStrictEqual(alt, sub); cwds = [sub, alt];
+      }
+      for (const [i, cwd] of cwds.entries()) {
+        const p = run(cwd, 'paths');
+        assert.strictEqual(p.cacheDir, '../../.sereno/cache', cwd);
+        assert.ok(!path.isAbsolute(p.cacheDir));
+        const cache = path.join(d, '.sereno', 'cache'); fs.mkdirSync(cache, { recursive: true });
+        const task = 'rc' + i;
+        fs.writeFileSync(path.join(cache, 'spec-' + task + '.md'), '## Goal\nchange a\n');
+        const sp = run(cwd, 'spec', '--task', task, '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', p.cacheDir + '/spec-' + task + '.md');
+        assert.strictEqual(sp.ok, true, JSON.stringify(sp));
+        assert.ok(!fs.existsSync(path.join(cache, 'spec-' + task + '.md')));
+        const id = 'rr_2026010' + (i + 1) + 'T000000Z_' + h7;
+        fs.writeFileSync(path.join(cache, 'verdict-' + id + '.json'), '{"outcome":"pass","findings":[]}');
+        const gt = run(cwd, 'gate', '--file', p.cacheDir + '/verdict-' + id + '.json', '--task', task, '--base', head, '--head', head, '--branch', 'main', '--run-id', id, '--tests-passed', 'true');
+        assert.strictEqual(gt.ok, true, JSON.stringify(gt));
+      }
+      // a relative path that does not land in the cache is still refused
+      fs.writeFileSync(path.join(sub, 'spec-zz.md'), 'x');
+      assert.strictEqual(run(sub, 'spec', '--task', 'zz', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', 'spec-zz.md').code, 'path_refused');
       for (const x of [d, home]) fs.rmSync(x, { recursive: true, force: true });
     });
   }

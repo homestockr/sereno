@@ -103,14 +103,14 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" context --head <head> <file> <file>
 Extract the single fenced `json` block from the red team's reply. If there is no such block,
 the verdict is the single object `{"outcome":"error"}`.
 
-First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (an absolute path at the repo root; your working directory may be a subdirectory).
+First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (a path relative to your working directory, e.g. `.sereno/cache` or `../.sereno/cache` from a subdirectory). Pass it to Write exactly as given, never made absolute: an absolute path can differ in letter case from your session's and be refused as outside the project.
 Write exactly that one JSON object, nothing else, with the Write tool to
 `<cacheDir>/verdict-<review_run_id>.json`. This is the only path you write to; never put
 JSON (or any `{"`) on a Bash command line, and never use heredocs, `echo` or pipes for it. Then
-run the gate (its `--file` stays the repo-relative `.sereno/cache/...` path; it resolves it from the repo root), which reads that file and deletes it:
+run the gate (its `--file` is the same `<cacheDir>/verdict-<review_run_id>.json` path, resolved from your working directory), which reads that file and deletes it:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file .sereno/cache/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file <cacheDir>/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true
 ```
 
 The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.
