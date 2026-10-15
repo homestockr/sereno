@@ -1,6 +1,6 @@
 {
   "name": "sereno",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Sereno pipeline for Claude Code: a gated build, review and ship workflow with per-role models. Works without the Sereno app; the app observes the files it writes.",
   "author": { "name": "Roberto Rosado" },
   "homepage": "https://github.com/homestockr/sereno",

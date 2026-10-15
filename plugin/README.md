@@ -7,7 +7,7 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.1.0, in development. Windows is the first
+can observe the files it writes. Version 0.2.0, in development. Windows is the first
 platform; other systems are not yet tested.
 
 ## Install
