@@ -7336,6 +7336,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(pj.name, /^[a-z0-9]+(-[a-z0-9]+)*$/);
       assert.match(pj.version, /^\d+\.\d+\.\d+$/);
     });
+    test('plugin README version sentence equals plugin.json version', () => {
+      const readme = fs.readFileSync(path.join(ROOT, 'plugin', 'README.md'), 'utf8');
+      const m = readme.match(/Version (\d+\.\d+\.\d+)/);
+      assert.ok(m, 'README has a "Version X.Y.Z" sentence');
+      assert.strictEqual(m[1], pj.version);
+    });
     test('marketplace: required fields and entry matches the plugin manifest', () => {
       assert.strictEqual(mj.name, 'sereno');
       assert.ok(mj.owner && mj.owner.name);
