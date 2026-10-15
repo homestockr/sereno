@@ -59,6 +59,8 @@
       "src/**/*",
       "bin/**/*",
       "templates/**/*",
+      "plugin/bin/lib/**/*",
+      "plugin/agents/*.md",
       "package.json"
     ],
     "asarUnpack": [

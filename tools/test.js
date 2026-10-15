@@ -7356,9 +7356,11 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('plugin/ has no package.json (no dependencies, no install step)', () => {
       assert.ok(!fs.existsSync(path.join(ROOT, 'plugin', 'package.json')));
     });
-    test('Electron build files do not include plugin/ or .claude-plugin/', () => {
+    test('Electron build files do not include plugin/ or .claude-plugin/ (except the 4b bundled rules)', () => {
       const files = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files;
+      const bundledRules = ['plugin/bin/lib/**/*', 'plugin/agents/*.md'];
       for (const f of files) {
+        if (bundledRules.includes(f)) continue;
         assert.ok(!/^!?\.?\/?(plugin|\.claude-plugin)(\/|$)/.test(f) || f.startsWith('!'), 'packages ' + f);
         assert.ok(!/^\*\*/.test(f), 'broad glob ' + f);
       }
@@ -9882,6 +9884,42 @@ test('missing rate_limits degrades instead of throwing', () => {
         if (linked) fs.rmdirSync(link);
         for (const x of [d, home, lnkParent, outside]) fs.rmSync(x, { recursive: true, force: true });
       }
+    });
+  }
+
+  /* ---- Phase 4b: bundled plugin rules ---- */
+  {
+    const globRe = (g) => new RegExp('^' + g.replace(/[.+^$|()[\]{}]/g, (c) => '\\' + c).replace(/\*\*\//g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '(?:.*/)?') + '$');
+    const patterns = require('../package.json').build.files.map(globRe);
+    const bundled = (rel) => patterns.some((re) => re.test(rel));
+    test('[4b-bundle] build.files globs match what the matcher expects', () => {
+      assert.ok(bundled('plugin/bin/lib/recovery.js'));
+      assert.ok(bundled('plugin/bin/lib/sub/x.js'));
+      assert.ok(bundled('plugin/agents/builder.md'));
+      assert.ok(!bundled('plugin/bin/sereno.js'));
+    });
+    test('[4b-bundle] every relative require of recovery.js and config.js (transitively) is bundled', () => {
+      const seen = new Set(); const queue = ['plugin/bin/lib/recovery.js', 'plugin/bin/lib/config.js'];
+      while (queue.length) {
+        const rel = queue.pop();
+        if (seen.has(rel)) continue;
+        seen.add(rel);
+        assert.ok(bundled(rel), rel + ' is not matched by build.files');
+        const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+        for (const m of src.matchAll(/require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g)) {
+          let next = path.posix.normalize(path.posix.join(path.posix.dirname(rel), m[1]));
+          if (!path.posix.extname(next)) next += '.js';
+          assert.ok(fs.existsSync(path.join(ROOT, next)), rel + ' requires missing ' + next);
+          queue.push(next);
+        }
+      }
+      assert.ok(seen.has('plugin/bin/lib/fsafe.js'), 'walk reached fsafe.js');
+    });
+    test('[4b-bundle] src/pipeline.js loads and exposes decide', () => {
+      const pl = require('../src/pipeline.js');
+      assert.strictEqual(typeof pl.decide, 'function');
+      assert.strictEqual(pl.decide, require('../plugin/bin/lib/recovery.js').decide);
+      assert.strictEqual(typeof pl.config, 'object');
     });
   }
 
