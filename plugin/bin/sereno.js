@@ -374,7 +374,7 @@ const COMMANDS = {
     const dl = str(a, 'deadline-sec');
     if (dl !== undefined && !(/^[1-9]\d{0,6}$/.test(dl) && Number(dl) <= 2147483)) throw new SerenoError('invalid_arg', '--deadline-sec must be a positive integer');
     if (dl !== undefined) {
-      // One wall-clock budget for the whole command: stop every suite, remove the worktree, write no cache.
+      // One wall-clock budget for the whole command: stop every suite, remove the worktree, keep a base cache only if the base suite already passed in full.
       setTimeout(() => {
         testrun.abortAll();
         // Synchronous on purpose: nothing may run between the abort and the exit.
