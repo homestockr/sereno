@@ -3,13 +3,13 @@ name: merge
 description: Merge a shipped task branch into its base branch locally. Use after /sereno:ship says it is ready.
 argument-hint: <task>
 disable-model-invocation: true
-model: sonnet
-allowed-tools: Bash, Read, Agent
+model: claude-sonnet-5-5
+allowed-tools: Bash, Read, Agent(sereno:scribe)
 ---
 
 ## How to run commands
 
-Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
+Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written. Run every command and every agent in the foreground and wait for it in this turn: a background result arrives as a new turn on the session model with a cold cache. Never use `run_in_background`. For a long command such as the test run, pass a Bash `timeout` of 600000.
 
 Typing `/sereno:merge` is the user's explicit yes. You merge one task branch into its base
 branch with a local `--no-ff` merge, and nothing else. You do not write feature code and you
@@ -31,10 +31,12 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" recovery --task <task>
 ```
 
 Merge only when `next` is `merge`. `recovery` returns `merge` only when the latest attempt
-passed (or was skipped because the gate is off), the gate passed for the commit that is now
-the tip of `task/<task>`, and the spec is the one that was reviewed. For any other `next`, show
-the `reason` in one line, tell the user to run `/sereno:ship <task>` (or `/sereno:task <task>`
-if the reason starts with `spec_changed`), and stop.
+passed (or was skipped because the gate is off), the reviewed commit is still the tip of
+`task/<task>`, the gate belongs to this task and branch, and the spec is the one that was
+reviewed. Take `head_commit` from the result: that is the commit you merge. For any other `next`,
+show the `reason` in one line and stop. Tell the user what to run: if the reason starts with
+`head_moved`, `/sereno:build <task>`; if it starts with `spec_changed`, `/sereno:task <task>`;
+for anything else, `/sereno:ship <task>`.
 
 ## 2. Clean tree
 
@@ -43,9 +45,13 @@ You are on any branch, but there must be no uncommitted changes to tracked files
 
 ## 3. Merge
 
+Immediately before merging, check that `git rev-parse refs/heads/task/<task>` equals
+`head_commit`. If it does not, stop and say the branch moved. Then merge the reviewed commit,
+not the branch name:
+
 ```
 git switch <base_branch>
-git merge --no-ff task/<task>
+git merge --no-ff -m "Merge branch 'task/<task>'" <head_commit>
 ```
 
 If the merge reports conflicts, run `git merge --abort`, tell the user, and stop. Never add

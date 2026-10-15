@@ -15,20 +15,20 @@ There was no quality gain, so the pipeline cost about five times as much. The Bu
 
 ## What
 
-1. **Orchestration on Sonnet.** Add `model: sonnet` to the frontmatter of `task`, `build`, `ship` and `brief`. The docs say the override is turn-scoped: the session model resumes on the next prompt. The Builders, red team and scribe keep their own models.
-2. **Merge is its own command.** Add `/sereno:merge <task>` with `model: sonnet` and `disable-model-invocation: true`, so only the user can start it. Typing it is the explicit yes.
+1. **Orchestration on Sonnet.** Add `model: claude-sonnet-5-5` to the frontmatter of `task`, `build`, `ship` and `brief`. The docs say the override is turn-scoped: the session model resumes on the next prompt. The Builders, red team and scribe keep their own models.
+2. **Merge is its own command.** Add `/sereno:merge <task>` with `model: claude-sonnet-5-5` and `disable-model-invocation: true`, so only the user can start it. Typing it is the explicit yes.
    - It runs `sereno.js recovery --task <task>`. It merges only when the action is `merge`; otherwise it says why and stops.
    - `recovery` today only checks that the latest attempt passed (gate `pass` with tests passed, or `skipped` with the red team off). Add the two missing checks in `recovery.js`/the subcommand, so they hold for ship too:
      - The gate's `head_commit` must equal the current tip of `refs/heads/task/<task>`. If it doesn't, the action is `review` with reason `head_moved`.
      - The gate's `spec_hash` must equal the current spec's hash. If it doesn't, the action is `decide` with reason `spec_changed`.
-   - It runs the same clean-tree check as ship, then `git switch <base_branch>`, then `git merge --no-ff task/<task>`. On conflicts it runs `git merge --abort` and stops. It never runs a remote step.
+   - It runs the same clean-tree check as ship, then `git switch <base_branch>`, then `git merge --no-ff -m "Merge branch 'task/<task>'" <head_commit>` (the reviewed sha from `recovery`, re-checked against the branch tip first). On conflicts it runs `git merge --abort` and stops. It never runs a remote step.
    - Then the scribe refreshes the base branch's brief. Ship step 6 moves here unchanged.
    - Ship's step 6 now shows the same summary, then says: "Ready. Run `/sereno:merge <task>` to merge `task/<task>` into `<base_branch>`." Ship never merges.
 3. **Docs.**
    - The README covers the flow, the roles table (orchestration: Sonnet), and the fact that skill models are fixed in frontmatter, like agents.
    - Update the recovery wording: "merge only after the user runs /sereno:merge".
 4. **Tests.**
-   - A lint test that every orchestration skill has `model: sonnet`.
+   - A lint test that every orchestration skill has `model: claude-sonnet-5-5`.
    - A lint test that `merge` has `disable-model-invocation: true` and no `Agent` in `allowed-tools` beyond the scribe.
    - Ship's text no longer contains `git merge`.
    - Merge's text runs `recovery` before `git merge`.
@@ -40,4 +40,4 @@ Rerun the benchmark with merge as `/sereno:merge tN` (no `--continue`). Record e
 
 ## Known limit
 
-With the red team switched off (`skipped`), no record carries the commit that was tested, so `recovery` checks only the spec pin there. Closing it needs a `head_commit` on the attempt record. Decide in Phase 4b.
+With the red team switched off (`skipped`), `/sereno:ship` stamps the tested head on the attempt (`attempt --update --outcome skipped --head`); a skipped attempt without it returns `decide` with `head_unknown`.

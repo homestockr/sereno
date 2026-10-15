@@ -3,15 +3,15 @@ name: ship
 description: Test, review and gate a built task branch, repair once if needed, then hand off to /sereno:merge. Use after /sereno:build.
 argument-hint: <task>
 disable-model-invocation: true
-model: sonnet
+model: claude-sonnet-5-5
 allowed-tools: Bash, Read, Agent, Edit(.sereno/cache/verdict-*.json)
 ---
 
 ## How to run commands
 
-Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
+Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written. Run every command and every agent in the foreground and wait for it in this turn: a background result arrives as a new turn on the session model with a cold cache. Never use `run_in_background`. For a long command such as the test run, pass a Bash `timeout` of 600000.
 
-You are the architect. You run the checks, relay the red team's verdict into the gate
+You run the ship step. You run the checks, relay the red team's verdict into the gate
 file, follow the recovery rules, and hand off to the user for the merge. You do not
 write feature code and you do not review the diff yourself.
 
@@ -42,19 +42,16 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" config
 ## 1. Run the tests
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" test --task <task> --base <base> --head <head>
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" test --task <task> --base <base> --head <head> --deadline-sec 540
 ```
 
-Run it with the Bash tool's `run_in_background: true`, not in the foreground (the foreground
-cap is 600 s and a suite may need up to `tests.timeoutSec`, default 900, per suite). Wait for the
-completion notice, then read the output file it names: the one JSON line is the result. Do not
-poll and do not re-run it meanwhile. To shorten the limit for yourself, a personal override goes
-in `~/.sereno/pipeline.json`; never edit the tracked `.sereno/pipeline.json` for it.
+Run it in the foreground with a Bash `timeout` of 600000 and read the one JSON line it prints. `--deadline-sec 540` is a wall-clock budget for the whole call (setup, base, head and a flaky re-run), so the script stops itself before the Bash cap. If the result has `"status":"deadline"` (exit code 20), the script already stopped its suites, removed its worktree and wrote no base cache: run the same command once more WITHOUT `--deadline-sec` and with `run_in_background: true`, wait for its completion notice, then read the output file it names. Say in one line that the suite outlasted the foreground cap and this costs one extra turn on the session model. Do the same if the Bash call itself times out (the tool reports a timeout, not a JSON result), which should never happen. Do not poll, and never re-run it otherwise. A personal limit override goes in `~/.sereno/pipeline.json`; never edit the tracked
+`.sereno/pipeline.json` for it.
 Always pass `--task <task>` to `test` and `gate`; without it the script refuses with
 `task_required` once the task has attempt records. A refusal with `code: "spec_changed"` means the spec was edited
 after `/sereno:build`: stop and say so.
 
-The result has `passed`, `diagnosis` (`none`, `environment`, `defect`, `unknown_baseline`),
+The result has `passed` (a `deadline` result has only `status`, `code`, `deadline_sec` and `passed: false`), `diagnosis` (`none`, `environment`, `defect`, `unknown_baseline`),
 `newFailures` and `note`. Failures that already fail at the base are not counted.
 
 If `passed` is false, update the attempt, then go to step 5:
@@ -72,7 +69,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --update <attem
 ## 2. Red team
 
 If `roles.redTeam.enabled` is false there is no review. Update the attempt with
-`--outcome skipped --diagnosis none --ended-at now` (same command as above), then go to
+`--outcome skipped --diagnosis none --head <head> --ended-at now` (same command as above, plus `--head`, which records the tested commit), then go to
 step 5. Otherwise make the run id:
 
 ```

@@ -57,8 +57,11 @@ switched off), it shows a summary and tells you to run `/sereno:merge <name>`. S
 
 **`/sereno:merge <name>`** only you can start it, and typing it is the yes. It runs the recovery
 rules again and merges only when the next step is `merge`: the latest attempt passed (or the
-gate is off), the gate passed for the current tip of `task/<name>`, and the spec is unchanged.
-It then runs a local `git merge --no-ff task/<name>` into the base branch and refreshes the
+gate is off), the reviewed commit is still the tip of `task/<name>`, and the spec is unchanged.
+With the red team on, that commit comes from the gate record, which must also belong to this task
+and branch. With it off, it comes from the skipped attempt, which `/sereno:ship` stamps with the
+tested head; a skipped attempt without one never merges. It then runs a local
+`git merge --no-ff` of that exact commit (not the branch name) into the base branch and refreshes the
 base branch brief. On conflicts it aborts the merge. It never touches a remote.
 
 **`/sereno:brief`** writes the branch brief at `.sereno/briefs/<branch>.md`: three lines,
@@ -78,7 +81,7 @@ or by this command is read the same way. Run it whenever you want the brief refr
 | Red team, `lean` preset (and fallback) | `sereno:red-team-lean` | claude-opus-5-5 | 60 |
 | Scribe (briefs, commit text) | `sereno:scribe` | claude-haiku-4-5-20251001 | 20 |
 
-The model and turn cap are fixed in each agent file, and the orchestration model in each skill's front matter (`model: sonnet`, which applies to that turn only; your session model resumes on the next prompt). Config cannot change them. The
+The model and turn cap are fixed in each agent file, and the orchestration model in each skill's front matter (`model: claude-sonnet-5-5`, which applies to that turn only; your session model resumes on the next prompt). Config cannot change them. The
 spec chooses the Builder per task, and that choice is never changed automatically.
 
 ## Presets and pipeline.json
@@ -120,7 +123,7 @@ invalid file stops the pipeline and lists the errors.
 | `tests.command` | `null` | Test command. `null` uses `npm test` when `package.json` has a `test` script. Otherwise `/sereno:ship` asks. |
 | `tests.setup` | `null` | Command run in the temporary base worktree before the base suite. |
 | `tests.parallel` | `false` | `true` runs base and head together. Leave it `false` if the suites share ports or temp files. |
-| `tests.timeoutSec` | `900` | Time limit for each suite run, in seconds. `/sereno:ship` runs the tests in the background, so this can exceed the Bash tool's 600 s foreground cap. For a personal override use `~/.sereno/pipeline.json`, not the tracked file. |
+| `tests.timeoutSec` | `900` | Time limit for each suite run, in seconds. Suites up to 900 s are supported. `/sereno:ship` runs the tests in the foreground with a 540 s overall deadline; if the whole `test` call hits it, it runs the command once more in the background, at the cost of one extra turn on the session model, so only short suites stay on Sonnet the whole way. For a personal override use `~/.sereno/pipeline.json`, not the tracked file. |
 
 A minimal example:
 
@@ -178,6 +181,8 @@ keep the generated parts out of git:
 .sereno/cache/
 .sereno/attempts/
 ```
+
+`sereno.js test --deadline-sec <n>` sets one wall-clock budget for the whole call. When it runs out the script kills every running suite (the whole process tree), removes its temporary worktree, writes no base cache, prints `{"ok":false,"status":"deadline","code":"deadline",...}` and exits 20. The other exit codes are 2 usage, 3 config_invalid, 4 invalid_arg, 5 not_a_repo, 6 path_refused, 7 exists, 8 head_mismatch, 9 no_test_command, 10 worktree_failed, 11 dirty_tree, 12-19 record and spec refusals, and 130 interrupted. `/sereno:ship` passes 540 so the script stops before the Bash tool's 600 s cap.
 
 A failing head is passed only when it provably completed: it printed a TAP plan (`1..N`) that was reached, or a TAP summary (`# tests N`, plus `# pass`/`# fail` when printed) that matches the result lines seen, as `node --test --test-reporter=tap` and tape do. Without either (no plan or summary, or a non-TAP runner), `sereno.js test` reports `unknown_baseline` ("cannot confirm the head suite completed") and the run goes to a decision; a head that exits 0 still passes. On every path (named failures or exit-code mode), a head re-run that exits 0 only excuses flaky failures if it printed at least as many results as the first run and the base.
 

@@ -103,15 +103,23 @@ function decide(a) {
   if (o === 'needs_context') return out('decide', 'the review needs context, or the test baseline is unusable');
   if (o === 'skipped') {
     if (red.enabled) return out('decide', 'attempt is marked skipped but the red team is enabled');
-    // No record carries a reviewed head when the gate is off; only the spec pin (newest attempt that has one) can be checked.
+    // With the gate off, the skipped attempt itself carries the head it was tested at (sereno.js attempt --update --head).
+    const sh = last.rec.head_commit;
+    if (typeof sh !== 'string' || !/^[0-9a-f]{40}$/.test(sh)) return out('decide', 'head_unknown: the skipped attempt does not record which commit was tested');
     let pin;
     for (let i = attempts.length - 1; i >= 0; i--) if (typeof attempts[i].rec.spec_hash === 'string') { pin = attempts[i].rec.spec_hash; break; }
-    return mergeGuard(undefined, pin) || out('merge', 'tests passed and the gate is switched off in the config');
+    return mergeGuard(sh, pin) || { ...out('merge', 'tests passed and the gate is switched off in the config'), head_commit: sh };
   }
   if (o === 'pass') {
     const g = last.gate;
     if (g && g.outcome === 'pass' && g.tests_passed === true) {
-      return mergeGuard(String(g.head_commit), String(g.spec_hash)) || out('merge', 'tests passed and the gate passed');
+      if (g.task_id !== a.task || g.branch !== 'task/' + a.task) return out('decide', 'the gate record belongs to another task or branch');
+      const guard = mergeGuard(String(g.head_commit), String(g.spec_hash));
+      if (guard) return guard;
+      /** @type {any} */ const m = out('merge', 'tests passed and the gate passed');
+      m.head_commit = g.head_commit;
+      if (typeof g.base_commit === 'string') m.base_commit = g.base_commit;
+      return m;
     }
     return out('decide', 'attempt says pass but the gate record is missing or does not confirm it');
   }
