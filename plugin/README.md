@@ -84,6 +84,8 @@ or by this command is read the same way. Run it whenever you want the brief refr
 The model and turn cap are fixed in each agent file, and the orchestration model in each skill's front matter (`model: claude-sonnet-5-5`, which applies to that turn only; your session model resumes on the next prompt). Config cannot change them. The
 spec chooses the Builder per task, and that choice is never changed automatically.
 
+**Cheapest setup:** start the session on Sonnet (`claude --model sonnet`) when you run the pipeline. A result that arrives in a later turn, such as a background agent or the ship test retry, runs on the session model, so on an Opus session it can cost an extra cold-cache Opus turn. In our small-task benchmark, Opus leaked this way in 2 of 3 `default` ships, adding about $0.44 each (an estimate).
+
 ## Presets and pipeline.json
 
 Two presets:
