@@ -9899,7 +9899,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!bundled('plugin/bin/sereno.js'));
     });
     test('[4b-bundle] every relative require of recovery.js and config.js (transitively) is bundled', () => {
-      const seen = new Set(); const queue = ['plugin/bin/lib/recovery.js', 'plugin/bin/lib/config.js'];
+      const seen = new Set(); const queue = [...fs.readFileSync(path.join(ROOT, 'src/pipeline.js'), 'utf8').matchAll(/require\(\s*['"]\.\.\/(plugin\/[^'"]+)['"]\s*\)/g)].map((m) => m[1]);
+      assert.ok(queue.length >= 3, 'found the plugin requires in src/pipeline.js');
       while (queue.length) {
         const rel = queue.pop();
         if (seen.has(rel)) continue;
@@ -9921,6 +9922,198 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(pl.decide, require('../plugin/bin/lib/recovery.js').decide);
       assert.strictEqual(typeof pl.config, 'object');
     });
+    /* ---- [4b-reader] ---- */
+    {
+      const pl = require('../src/pipeline.js');
+      const tmps = [];
+      const mkd = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4br-'))); tmps.push(d); return d; };
+      const sub = (r, s) => { const d = path.join(r, '.sereno', s); fs.mkdirSync(d, { recursive: true }); return d; };
+      const wj = (d, n, o) => fs.writeFileSync(path.join(d, n), typeof o === 'string' ? o : JSON.stringify(o));
+      const HEX = 'a1b2c3d';
+      const runId = (stamp, h) => 'rr_' + stamp + '_' + (h || HEX);
+      const attempt = (task, n, extra) => Object.assign({ project_id: 'p1', task_id: task, spec_revision: 1, attempt: n, builder_requested: 'sonnet', agent_id: 'a_1',
+        config_hash: 'sha256:' + 'a'.repeat(64), kind: 'feature', fixes: null, diagnosis: 'none', outcome: 'pass', review_run_id: null,
+        started_at: '2026-10-15T10:00:00.000Z', ended_at: '2026-10-15T10:05:00.000Z' }, extra || {});
+      const gate = (task, id, extra) => Object.assign({ review_run_id: id, task_id: task, spec: '.sereno/specs/' + task + '.md', spec_hash: 'sha256:' + 'b'.repeat(64),
+        branch: 'task/' + task, base_commit: 'abcdef1', head_commit: 'abcdef2', session_id: 's-1', agent_id: 'a_2', model: 'claude-fable-5',
+        outcome: 'block', tests_passed: true, findings: [], context_requests: [], reviewed_at: '2026-10-15T11:00:00.000Z', config_hash: 'sha256:' + 'a'.repeat(64) }, extra || {});
+      const link = (target, at) => { try { fs.symlinkSync(target, at, process.platform === 'win32' ? 'junction' : 'dir'); return true; } catch (_) { return false; } };
+
+      await atest('[4b-reader] no .sereno, a relative path and a non-string give null (no throw)', async () => {
+        assert.strictEqual(await pl.readRepo(mkd()), null);
+        assert.strictEqual(await pl.readRepo('relative/path'), null);
+        assert.strictEqual(await pl.readRepo(undefined), null);
+        assert.strictEqual(await pl.listAttempts(mkd()), null);
+      });
+
+      await atest('[4b-reader] reads attempts, gates and spec front matter; groups by task; spec body is never returned', async () => {
+        const r = mkd();
+        wj(sub(r, 'attempts'), 'demo-1.json', attempt('demo', 1, { outcome: 'block' }));
+        wj(sub(r, 'attempts'), 'demo-2.json', attempt('demo', 2));
+        wj(sub(r, 'attempts'), 'other-1.json', attempt('other', 1));
+        const id = runId('20261015T110000Z');
+        wj(sub(r, 'gates'), id + '.json', gate('demo', id, { findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 4, summary: 'x' }] }));
+        const specText = '---\ntask: "demo"\nbuilder: sonnet\nkind: feature\nreason: "cheap enough"\nfixes: null\nbase_branch: "main"\nspec_revision: 3\ncreated_at: "2026-10-15T09:00:00.000Z"\n---\n\nSECRET-BODY-TEXT acceptance criteria\n';
+        wj(sub(r, 'specs'), 'demo.md', specText);
+        const out = await pl.readRepo(r);
+        assert.ok(out);
+        assert.deepStrictEqual(out.tasks.map((t) => t.task), ['demo', 'other']);
+        const demo = out.tasks[0];
+        assert.deepStrictEqual(demo.attempts.map((a) => a.attempt), [2, 1]);
+        assert.strictEqual(demo.gates.length, 1);
+        assert.strictEqual(demo.gates[0].findings[0].file, 'src/a.js');
+        assert.strictEqual(demo.spec.reason, 'cheap enough');
+        assert.strictEqual(demo.spec.spec_revision, 3);
+        assert.strictEqual(demo.spec.base_branch, 'main');
+        assert.strictEqual(out.tasks[1].spec, null);
+        assert.ok(!JSON.stringify(out).includes('SECRET-BODY-TEXT'), 'spec body leaked');
+        assert.strictEqual(out.skipped, 0);
+        assert.ok(out.config && out.config.roles, 'effective config present');
+        assert.deepStrictEqual((await pl.listAttempts(r)).sort(), ['demo-1.json', 'demo-2.json', 'other-1.json']);
+      });
+
+      await atest('[4b-reader] unknown fields are dropped from attempts, gates and findings; summaries are capped and stripped', async () => {
+        const r = mkd();
+        wj(sub(r, 'attempts'), 'demo-1.json', attempt('demo', 1, { prompt: 'PROMPT-TEXT', command: 'rm -rf', extra: { a: 1 } }));
+        const id = runId('20261015T110000Z');
+        wj(sub(r, 'gates'), id + '.json', gate('demo', id, {
+          transcript: 'TRANSCRIPT', findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 4, summary: 'a\u0000b‮' + 'z'.repeat(400), diff: 'DIFF-TEXT', prompt: 'P' }],
+        }));
+        const out = await pl.readRepo(r);
+        const a = out.tasks[0].attempts[0], g = out.tasks[0].gates[0];
+        assert.deepStrictEqual(Object.keys(a).sort(), ['agent_id', 'attempt', 'builder_requested', 'config_hash', 'diagnosis', 'ended_at', 'fixes', 'head_commit', 'kind', 'outcome',
+          'project_id', 'review_run_id', 'spec_hash', 'spec_revision', 'started_at', 'task_id']);
+        assert.deepStrictEqual(Object.keys(g).sort(), ['agent_id', 'base_commit', 'branch', 'config_hash', 'context_requests', 'findings', 'head_commit', 'model', 'outcome',
+          'review_run_id', 'reviewed_at', 'session_id', 'spec', 'spec_hash', 'task_id', 'tests_passed']);
+        assert.deepStrictEqual(Object.keys(g.findings[0]).sort(), ['file', 'kind', 'line', 'severity', 'summary']);
+        assert.ok(g.findings[0].summary.length <= 300);
+        assert.ok(g.findings[0].summary.startsWith('ab'), 'control chars stripped');
+        const all = JSON.stringify(out);
+        for (const s of ['PROMPT-TEXT', 'rm -rf', 'TRANSCRIPT', 'DIFF-TEXT']) assert.ok(!all.includes(s), s + ' leaked');
+      });
+
+      await atest('[4b-reader] tests.command and tests.setup are dropped from config', async () => {
+        const r = mkd();
+        sub(r, 'attempts');
+        wj(path.join(r, '.sereno'), 'pipeline.json', { tests: { command: 'npm run SECRET-CMD', setup: 'SECRET-SETUP' } });
+        const out = await pl.readRepo(r);
+        assert.ok(out && out.config && out.config.tests, 'config loaded');
+        assert.ok(!('command' in out.config.tests) && !('setup' in out.config.tests));
+        assert.ok(!JSON.stringify(out).includes('SECRET'));
+      });
+
+      await atest('[4b-reader] a linked or non-file .sereno/pipeline.json is never loaded (config null, counted)', async () => {
+        const outside = mkd(), r = mkd();
+        sub(r, 'attempts');
+        wj(outside, 'pipeline.json', { tests: { command: 'OUTSIDE-CMD' }, preset: 'lean' });
+        const f = path.join(r, '.sereno', 'pipeline.json');
+        let linked = true;
+        try { fs.symlinkSync(path.join(outside, 'pipeline.json'), f, 'file'); } catch (_) { linked = false; }
+        if (!linked) { fs.rmSync(f, { force: true }); linked = link(outside, f); }
+        if (!linked) { console.log('    (link not permitted here; case not exercised)'); return; }
+        const out = await pl.readRepo(r);
+        assert.ok(out);
+        assert.strictEqual(out.config, null);
+        assert.strictEqual(out.skipped, 1);
+        assert.ok(!JSON.stringify(out).includes('OUTSIDE'));
+      });
+
+      await atest('[4b-reader] a config that fails to load gives config null and is counted in skipped', async () => {
+        const r = mkd();
+        sub(r, 'attempts');
+        wj(path.join(r, '.sereno'), 'pipeline.json', '{not json');
+        const out = await pl.readRepo(r);
+        assert.ok(out);
+        assert.strictEqual(out.config, null);
+        assert.strictEqual(out.skipped, 1);
+      });
+
+      await atest('[4b-reader] malformed, mismatched, oversized and non-file entries are skipped and counted', async () => {
+        const r = mkd();
+        const ad = sub(r, 'attempts'), gd = sub(r, 'gates'), sd = sub(r, 'specs');
+        wj(ad, 'demo-1.json', attempt('demo', 1));
+        wj(ad, 'bad-1.json', '{nope');
+        wj(ad, 'liar-1.json', attempt('someone', 1));
+        wj(ad, 'big-1.json', JSON.stringify(attempt('big', 1, { project_id: 'x'.repeat(300 * 1024) })));
+        fs.mkdirSync(path.join(ad, 'dir-1.json'));
+        wj(ad, 'notes.txt', 'ignored');
+        const good = runId('20261015T110000Z'), wrong = runId('20261015T120000Z');
+        wj(gd, good + '.json', gate('demo', good));
+        wj(gd, wrong + '.json', gate('demo', 'rr_other'));
+        wj(gd, runId('20261015T130000Z') + '.json', '[]');
+        wj(sd, 'nofront.md', 'just text, no front matter\n');
+        const out = await pl.readRepo(r);
+        const demo = out.tasks.find((t) => t.task === 'demo');
+        assert.strictEqual(demo.attempts.length, 1);
+        assert.strictEqual(demo.gates.length, 1);
+        assert.strictEqual(out.tasks.length, 1, 'skipped files create no task');
+        assert.strictEqual(out.skipped, 7); // bad, liar, big, dir-1.json, wrong gate, [] gate, nofront spec
+      });
+
+      await atest('[4b-reader] caps: 200 newest attempt files and 200 newest gate files', async () => {
+        const r = mkd();
+        const ad = sub(r, 'attempts'), gd = sub(r, 'gates');
+        for (let n = 1; n <= 230; n++) wj(ad, 'big-' + n + '.json', attempt('big', n));
+        for (let i = 0; i < 230; i++) {
+          const id = runId('20261015T' + String(100000 + i).padStart(6, '0') + 'Z');
+          wj(gd, id + '.json', gate('big', id));
+        }
+        const out = await pl.readRepo(r);
+        const t = out.tasks[0];
+        assert.strictEqual(t.attempts.length, 200);
+        assert.strictEqual(t.attempts[0].attempt, 230);
+        assert.strictEqual(t.attempts[199].attempt, 31);
+        assert.strictEqual(t.gates.length, 200);
+        assert.ok(t.gates[0].review_run_id > t.gates[199].review_run_id, 'newest first');
+        assert.strictEqual((await pl.listAttempts(r)).length, 200);
+      });
+
+      await atest('[4b-reader] a symlinked/junctioned .sereno is refused before anything is read', async () => {
+        const target = mkd(), r = mkd();
+        wj(sub(target, 'attempts'), 'demo-1.json', attempt('demo', 1));
+        if (!link(path.join(target, '.sereno'), path.join(r, '.sereno'))) { console.log('    (link not permitted here; case not exercised)'); return; }
+        assert.strictEqual(await pl.readRepo(r), null);
+        assert.strictEqual(await pl.listAttempts(r), null);
+        assert.strictEqual(await pl.guard(r), false);
+      });
+
+      for (const s of ['attempts', 'gates', 'specs']) {
+        await atest('[4b-reader] a symlinked/junctioned .sereno/' + s + ' is refused (whole repo null)', async () => {
+          const outside = mkd(), r = mkd();
+          fs.mkdirSync(path.join(r, '.sereno'));
+          wj(outside, 'demo-1.json', attempt('demo', 1));
+          wj(outside, 'demo.md', '---\ntask: "demo"\n---\n');
+          if (!link(outside, path.join(r, '.sereno', s))) { console.log('    (link not permitted here; case not exercised)'); return; }
+          assert.strictEqual(await pl.readRepo(r), null);
+          assert.strictEqual(await pl.listAttempts(r), null);
+          assert.strictEqual(await pl.guard(r), false);
+        });
+      }
+
+      await atest('[4b-reader] a symlinked file inside attempts is skipped, never followed', async () => {
+        const r = mkd(), outside = mkd();
+        const ad = sub(r, 'attempts');
+        wj(outside, 'real.json', attempt('demo', 1, { project_id: 'OUTSIDE' }));
+        let linked = true;
+        try { fs.symlinkSync(path.join(outside, 'real.json'), path.join(ad, 'demo-1.json'), 'file'); } catch (_) { linked = false; }
+        if (!linked) { console.log('    (symlink not permitted here; case not exercised)'); return; }
+        const out = await pl.readRepo(r);
+        assert.ok(!JSON.stringify(out).includes('OUTSIDE'));
+        assert.strictEqual(out.skipped, 1);
+      });
+
+      await atest('[4b-reader] a non-local root (UNC) is refused', async () => {
+        assert.strictEqual(await pl.readRepo('\\\\server\\share\\repo'), null);
+      });
+
+      await atest('[4b-reader] a throwing fs layer never escapes readRepo or listAttempts', async () => {
+        const boom = new Proxy({}, { get() { return () => { throw new Error('boom'); }; } });
+        assert.strictEqual(await pl.readRepo(mkd(), { fsp: boom }), null);
+        assert.strictEqual(await pl.listAttempts(mkd(), { fsp: boom }), null);
+      });
+
+      await atest('[4b-reader] cleanup', async () => { for (const d of tmps) fs.rmSync(d, { recursive: true, force: true }); });
+    }
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
