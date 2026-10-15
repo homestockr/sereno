@@ -10112,6 +10112,223 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(await pl.listAttempts(mkd(), { fsp: boom }), null);
       });
 
+      /* ---- [4b-stage] ---- */
+      {
+        const repos = require('../src/repos.js');
+        const { gitExec } = require('../src/gitexec.js');
+        const rec = require('../plugin/bin/lib/records.js');
+        const genv = Object.assign({}, process.env, { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' });
+        const g = (cwd, ...a) => execFileSync('git', a, { cwd, env: genv, stdio: 'pipe', windowsHide: true }).toString().trim();
+        const gx = async (args, cwd) => (await gitExec('git', args, { cwd })).stdout;
+        const NOW = Date.parse('2026-10-15T12:00:00.000Z');
+        const SPEC = (task, extra) => '---\ntask: "' + task + '"\nbuilder: sonnet\nkind: feature\nreason: "r"\nfixes: null\nbase_branch: "main"\nspec_revision: 1\ncreated_at: "2026-10-15T09:00:00.000Z"\n---\n\nbody ' + (extra || '') + '\n';
+        const mkrepo = () => { const r = mkd(); g(r, 'init', '-q', '-b', 'main'); g(r, 'commit', '-q', '--allow-empty', '-m', 'init'); return r; };
+        /** a task branch with one commit; main stays checked out. Returns the branch tip. */
+        const mkTask = (r, task) => { g(r, 'checkout', '-q', '-b', 'task/' + task); g(r, 'commit', '-q', '--allow-empty', '-m', 'work ' + task); const t = g(r, 'rev-parse', 'HEAD'); g(r, 'checkout', '-q', 'main'); return t; };
+        const putSpec = (r, task, extra) => { wj(sub(r, 'specs'), task + '.md', SPEC(task, extra)); return rec.sha256(fs.readFileSync(path.join(r, '.sereno', 'specs', task + '.md'))); };
+        let rn = 0;
+        const rid = () => runId('20261015T11' + String(10 + (rn++ % 40)) + '00Z', ('abcdef' + rn).slice(-7));
+        const putGate = (r, task, id, extra) => wj(sub(r, 'gates'), id + '.json', gate(task, id, extra));
+        const putAtt = (r, task, n, extra) => wj(sub(r, 'attempts'), task + '-' + n + '.json', attempt(task, n, extra));
+        const viewOf = async (r, task, now, gitFn) => {
+          const out = await pl.readRepo(r);
+          const e = out.tasks.find((t) => t.task === task);
+          return pl.taskView(r, e, out.config, gitFn || gx, now === undefined ? NOW : now);
+        };
+
+        await atest('[4b-stage] spec only, no attempts: architect, "Spec written", decide is not called', async () => {
+          const r = mkrepo(); putSpec(r, 'demo');
+          const v = await viewOf(r, 'demo', NOW, async () => { throw new Error('git must not run'); });
+          assert.strictEqual(v.stage, 'architect');
+          assert.strictEqual(v.step, 'Spec written');
+          assert.strictEqual(v.reviewRuns, 0);
+          assert.strictEqual(v.expired, false);
+          assert.deepStrictEqual(Object.keys(v).sort(), ['attempt', 'expired', 'findings', 'gate', 'reason', 'reviewRuns', 'stage', 'startedAt', 'step', 'task', 'updatedAt']);
+        });
+
+        await atest('[4b-stage] builder: an environment error is retried', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          putAtt(r, 'demo', 1, { outcome: 'error', diagnosis: 'environment' });
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'builder');
+          assert.ok(/retry/i.test(v.step), v.step);
+          assert.strictEqual(v.attempt, 1);
+        });
+
+        await atest('[4b-stage] builder: a defect block repairs, "Fixing N findings" counts non-low findings of the latest gate', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          const id = rid();
+          putGate(r, 'demo', id, { findings: [
+            { severity: 'high', kind: 'bug', file: 'a.js', line: 1, summary: 'x' },
+            { severity: 'medium', kind: 'defect', file: 'b.js', line: 2, summary: 'y' },
+            { severity: 'low', kind: 'bug', file: 'c.js', line: 3, summary: 'z' }] });
+          putAtt(r, 'demo', 1, { outcome: 'block', diagnosis: 'defect', review_run_id: id });
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'builder');
+          assert.strictEqual(v.step, 'Fixing 2 findings');
+          assert.strictEqual(v.findings.length, 3);
+          assert.strictEqual(v.reviewRuns, 1);
+          assert.strictEqual(v.gate.review_run_id, id);
+        });
+
+        await atest('[4b-stage] red-team: a built attempt awaits review; decision: a running one never finished; stopped: stopped', async () => {
+          const r = mkrepo(); mkTask(r, 'a'); mkTask(r, 'b'); mkTask(r, 'c');
+          for (const t of ['a', 'b', 'c']) putSpec(r, t);
+          putAtt(r, 'a', 1, { outcome: 'built' });
+          putAtt(r, 'b', 1, { outcome: 'running', ended_at: null });
+          putAtt(r, 'c', 1, { outcome: 'stopped' });
+          assert.strictEqual((await viewOf(r, 'a')).stage, 'red-team');
+          const b = await viewOf(r, 'b');
+          assert.strictEqual(b.stage, 'decision');
+          assert.ok(b.reason && b.reason.length);
+          assert.strictEqual((await viewOf(r, 'c')).stage, 'stopped');
+        });
+
+        const passTask = (r, task) => {
+          const tip = mkTask(r, task);
+          const sh = putSpec(r, task);
+          const id = rid();
+          putGate(r, task, id, { outcome: 'pass', tests_passed: true, head_commit: tip, spec_hash: sh });
+          putAtt(r, task, 1, { outcome: 'pass', review_run_id: id, spec_hash: sh, head_commit: tip });
+          return { tip, sh, id };
+        };
+
+        await atest('[4b-stage] ready: pass + gate pass at the branch tip', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'ready');
+          assert.strictEqual(v.step, 'Ready: run /sereno:merge');
+        });
+
+        await atest('[4b-stage] merged: the gate head is an ancestor of the spec base branch', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'merged');
+        });
+
+        await atest('[4b-stage] head_moved: a commit on the task branch after the gate sends it back to review', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          g(r, 'checkout', '-q', 'task/demo'); g(r, 'commit', '-q', '--allow-empty', '-m', 'late'); g(r, 'checkout', '-q', 'main');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'red-team');
+          assert.ok(/head_moved/.test(v.reason), v.reason);
+        });
+
+        await atest('[4b-stage] spec_changed: an edited spec needs a decision', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          putSpec(r, 'demo', 'EDITED');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'decision');
+          assert.ok(/spec_changed/.test(v.reason), v.reason);
+        });
+
+        await atest('[4b-stage] expired: nothing newer than 7 days; stage is still computed; a fresh one is not expired', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          putAtt(r, 'demo', 1, { outcome: 'built', started_at: '2026-10-01T10:00:00.000Z', ended_at: '2026-10-01T10:05:00.000Z' });
+          const v = await viewOf(r, 'demo', NOW);
+          assert.strictEqual(v.stage, 'red-team');
+          assert.strictEqual(v.expired, true);
+          assert.strictEqual(v.startedAt, Date.parse('2026-10-01T10:00:00.000Z'));
+          assert.strictEqual((await viewOf(r, 'demo', Date.parse('2026-10-05T10:00:00.000Z'))).expired, false);
+          // a newer gate keeps it alive
+          putGate(r, 'demo', rid(), { reviewed_at: '2026-10-14T10:00:00.000Z' });
+          assert.strictEqual((await viewOf(r, 'demo', NOW)).expired, false);
+        });
+
+        await atest('[4b-stage] a git or decide failure gives stage unknown with a code, never a throw', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          putAtt(r, 'demo', 1, { outcome: 'built' });
+          const v = await viewOf(r, 'demo', NOW, async () => { throw Object.assign(new Error('boom'), { code: 'spawn_failed' }); });
+          assert.strictEqual(v.stage, 'red-team', 'built needs no git');
+          const r2 = mkrepo(); mkTask(r2, 'demo'); const sh = putSpec(r2, 'demo');
+          const id = rid();
+          putGate(r2, 'demo', id, { outcome: 'pass', tests_passed: true, head_commit: 'a'.repeat(40), spec_hash: sh });
+          putAtt(r2, 'demo', 1, { outcome: 'pass', review_run_id: id });
+          const v1 = await viewOf(r2, 'demo', NOW, async () => { throw Object.assign(new Error('boom'), { code: 'spawn_failed' }); });
+          assert.strictEqual(v1.stage, 'unknown');
+          assert.strictEqual(v1.reason, 'spawn_failed');
+          const out = await pl.readRepo(r);
+          const v2 = await pl.taskView(r, out.tasks[0], null, gx, NOW);
+          assert.strictEqual(v2.stage, 'unknown');
+          assert.strictEqual(v2.reason, 'config_unavailable');
+        });
+
+        const mkPoll = (r, o) => {
+          let reads = 0;
+          const reg = { list: () => [{ id: 'p0', name: 'demo-proj', repoPath: r, hidden: false }] };
+          const p = repos.createPoller(Object.assign({ registry: reg, onPipelineRead: () => { reads++; } }, o || {}));
+          return { p, reads: () => reads };
+        };
+        const isTipsCall = (a) => a.some((x) => String(x).includes('%(objectname) %(refname)'));
+
+        await atest('[4b-stage] poller: snapshot carries pipeline per project; unchanged fingerprint does not recompute', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo'); putAtt(r, 'demo', 1, { outcome: 'built' });
+          const { p, reads } = mkPoll(r);
+          await p.pollNow();
+          const s1 = p.snapshot().p0.pipeline;
+          assert.strictEqual(s1.error, false);
+          assert.deepStrictEqual(s1.tasks.map((t) => [t.task, t.stage]), [['demo', 'red-team']]);
+          assert.strictEqual(typeof s1.skipped, 'number');
+          assert.strictEqual(reads(), 1);
+          await p.pollNow(); await p.pollNow();
+          assert.strictEqual(reads(), 1, 'no recompute while nothing changed');
+          // a new attempt file changes the record stamp
+          putAtt(r, 'demo', 2, { outcome: 'error', diagnosis: 'environment' });
+          await p.pollNow();
+          assert.strictEqual(reads(), 2);
+          assert.strictEqual(p.snapshot().p0.pipeline.tasks[0].stage, 'builder');
+          // a commit on the task branch (not checked out) changes a branch tip
+          g(r, 'checkout', '-q', 'task/demo'); g(r, 'commit', '-q', '--allow-empty', '-m', 'more'); g(r, 'checkout', '-q', 'main');
+          await p.pollNow();
+          assert.strictEqual(reads(), 3);
+        });
+
+        await atest('[4b-stage] poller: a project without .sereno costs no pipeline git call and shows no tasks', async () => {
+          const r = mkrepo();
+          let refCalls = 0;
+          const exec = async (f, a, o) => { if (isTipsCall(a)) refCalls++; return gitExec(f, a, o); };
+          const { p, reads } = mkPoll(r, { exec });
+          await p.pollNow();
+          assert.deepStrictEqual(p.snapshot().p0.pipeline, { tasks: [], skipped: 0, error: false });
+          assert.strictEqual(refCalls, 0);
+          assert.strictEqual(reads(), 0);
+        });
+
+        await atest('[4b-stage] poller: a git error keeps the last good pipeline view with error: true, then recovers', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo'); putAtt(r, 'demo', 1, { outcome: 'built' });
+          let fail = false;
+          const exec = async (f, a, o) => {
+            if (fail && isTipsCall(a)) throw Object.assign(new Error('git down'), { code: 128 });
+            return gitExec(f, a, o);
+          };
+          const { p } = mkPoll(r, { exec });
+          await p.pollNow();
+          const good = p.snapshot().p0.pipeline;
+          assert.strictEqual(good.error, false);
+          fail = true;
+          await p.pollNow();
+          const bad = p.snapshot().p0.pipeline;
+          assert.strictEqual(bad.error, true);
+          assert.deepStrictEqual(bad.tasks, good.tasks);
+          fail = false;
+          await p.pollNow();
+          assert.strictEqual(p.snapshot().p0.pipeline.error, false);
+        });
+
+        await atest('[4b-stage] poller: a git error before any good view gives an empty view with error: true', async () => {
+          const r = mkrepo(); putSpec(r, 'demo');
+          const exec = async (f, a, o) => {
+            if (isTipsCall(a)) throw Object.assign(new Error('git down'), { code: 128 });
+            return gitExec(f, a, o);
+          };
+          const { p } = mkPoll(r, { exec });
+          await p.pollNow();
+          assert.deepStrictEqual(p.snapshot().p0.pipeline, { tasks: [], skipped: 0, error: true });
+        });
+
+      }
+
       await atest('[4b-reader] cleanup', async () => { for (const d of tmps) fs.rmSync(d, { recursive: true, force: true }); });
     }
   }

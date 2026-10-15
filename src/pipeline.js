@@ -18,6 +18,7 @@ const { isLocalPath } = require('./gitexec.js');
 const recovery = require('../plugin/bin/lib/recovery.js');
 const config = require('../plugin/bin/lib/config.js');
 const rec = require('../plugin/bin/lib/records.js');
+const briefsLib = require('./briefs.js');
 
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_FILES = 200;
@@ -312,7 +313,111 @@ async function readRepo(root, opts) {
   } catch (_) { return null; }
 }
 
+const EXPIRE_MS = 7 * 24 * 3600 * 1000;
+const NON_LOW = (/** @type {any} */ f) => f && f.severity !== 'low';
+
+/**
+ * The plugin's own spec hash (records.sha256 over the spec file's bytes, as
+ * `sereno.js recovery` computes it), read with the reader's guards. Null on any problem.
+ * @param {string} root @param {string} task @param {typeof nodeFs.promises} fsp
+ * @returns {Promise<string | null>}
+ */
+async function specHashOf(root, task, fsp) {
+  try {
+    const file = path.join(root, '.sereno', 'specs', task + '.md');
+    const st = await fsp.lstat(file);
+    if (st.isSymbolicLink() || !st.isFile() || st.size > 1024 * 1024) return null;
+    return rec.sha256(await fsp.readFile(file));
+  } catch (_) { return null; }
+}
+
+/** @param {any} e @returns {string} */
+function errCode(e) { return e && typeof e.code === 'string' && /^[a-z_]{2,40}$/.test(e.code) ? e.code : 'error'; }
+
+/**
+ * One task's stage, from the plugin's own `recovery.decide`. Never throws.
+ * `git(args, cwd)` resolves to stdout and rejects on a non-zero exit (an error with `.code`).
+ * @param {string} root main worktree root
+ * @param {{ task: string, spec: any, attempts: any[], gates: any[] }} entry one item of readRepo().tasks
+ * @param {any} cfg effective config from readRepo (tests.command/setup already dropped)
+ * @param {(args: string[], cwd: string) => Promise<string>} git
+ * @param {number} now
+ * @param {{ fsp?: typeof nodeFs.promises }} [opts]
+ */
+async function taskView(root, entry, cfg, git, now, opts) {
+  const fsp = (opts && opts.fsp) || nodeFs.promises;
+  const attempts = Array.isArray(entry.attempts) ? entry.attempts : [];
+  const gates = Array.isArray(entry.gates) ? entry.gates : [];
+  const spec = entry.spec || null;
+  const latest = attempts.length ? attempts[0] : null;   // reader sorts newest first
+  const byRun = latest && latest.review_run_id ? gates.find((g) => g.review_run_id === latest.review_run_id) : null;
+  const gate = byRun || gates[0] || null;
+  const findings = gate ? gate.findings : [];
+
+  /** @type {number[]} */
+  const stamps = [];
+  const push = (/** @type {any} */ v) => { const t = typeof v === 'string' ? Date.parse(v) : NaN; if (Number.isFinite(t)) stamps.push(t); };
+  for (const a of attempts) { push(a.started_at); push(a.ended_at); }
+  for (const g of gates) push(g.reviewed_at);
+  const starts = attempts.map((a) => Date.parse(a.started_at)).filter(Number.isFinite);
+  if (!stamps.length && spec) push(spec.created_at);
+  const startedAt = starts.length ? Math.min(...starts) : (stamps.length ? Math.min(...stamps) : null);
+  const updatedAt = stamps.length ? Math.max(...stamps) : null;
+  const expired = updatedAt !== null && now - updatedAt > EXPIRE_MS;
+
+  const view = (/** @type {string} */ stage, /** @type {string} */ step, /** @type {string | null} */ reason, /** @type {number | null} */ attempt) =>
+    ({ task: entry.task, stage, step, reason, attempt, gate, findings, startedAt, updatedAt, reviewRuns: gates.length, expired });
+
+  try {
+    if (!attempts.length) return view('architect', 'Spec written', null, null);
+    if (!cfg || !isObj(cfg.recovery) || !isObj(cfg.roles) || !isObj(cfg.roles.redTeam)) return view('unknown', 'Status unavailable', 'config_unavailable', latest.attempt);
+
+    // Merged: the reviewed commit is already in the spec's base branch.
+    const head = gate && gate.head_commit;
+    const base = spec && spec.base_branch;
+    if (head && base && briefsLib.validBranchName(base)) {
+      try { await git(['merge-base', '--is-ancestor', head, 'refs/heads/' + base], root); return view('merged', 'Merged', null, latest.attempt); }
+      catch (e) {
+        // 1: not an ancestor. 128: the commit is not in this repo (pruned, other clone): not merged.
+        const c = e && /** @type {any} */ (e).code;
+        if (c !== 1 && c !== 128) throw e;
+      }
+    }
+
+    const names = await listAttempts(root, { fsp });
+    if (!names) return view('unknown', 'Status unavailable', 'repo_refused', latest.attempt);
+    // Only a latest attempt that says pass/skipped reaches recovery's merge guard.
+    const guarded = latest.outcome === 'pass' || latest.outcome === 'skipped';
+    const tip = !guarded ? null : await git(['rev-parse', '--verify', '--quiet', '--end-of-options', 'refs/heads/task/' + entry.task + '^{commit}'], root)
+      .then((o) => { const t = o.trim(); return /^[0-9a-f]{40}$/.test(t) ? t : null; }, (e) => { if (e && /** @type {any} */ (e).code === 1) return null; throw e; });
+    const specHash = guarded ? await specHashOf(root, entry.task, fsp) : null;
+
+    const d = recovery.decide({
+      root, task: entry.task, config: cfg,
+      listAttempts: () => names,
+      currentHead: () => tip,
+      currentSpecHash: () => specHash,
+    });
+    const reason = typeof d.reason === 'string' ? d.reason : null;
+    const n = typeof d.attempt === 'number' ? d.attempt : latest.attempt;
+    switch (d.next) {
+      case 'retry': return view('builder', 'Retrying after an environment failure', reason, n);
+      case 'repair': {
+        const c = findings.filter(NON_LOW).length;
+        return view('builder', 'Fixing ' + c + ' finding' + (c === 1 ? '' : 's'), reason, n);
+      }
+      case 'review': return view('red-team', 'In review', reason, n);
+      case 'decide': return view('decision', 'Needs a decision', reason, n);
+      case 'merge': return view('ready', 'Ready: run /sereno:merge', reason, n);
+      case 'done': return view('stopped', 'Stopped', reason, n);
+      default: return view('unknown', 'Status unavailable', 'unknown_next', n);
+    }
+  } catch (e) {
+    return view('unknown', 'Status unavailable', errCode(e), latest ? latest.attempt : null);
+  }
+}
+
 /** True when the repo passes the guards (use before handing it to recovery.decide). @param {string} root */
 async function guard(root) { return (await guardRepo(root, nodeFs.promises)) !== null; }
 
-module.exports = { recovery, config, decide: recovery.decide, readRepo, listAttempts, guard };
+module.exports = { recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView };

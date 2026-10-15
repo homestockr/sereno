@@ -18,6 +18,7 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const nodeFs = require('node:fs');
 const { gitExec, isLocalPath } = require('./gitexec.js');
 const briefsLib = require('./briefs.js');
+const pipelineLib = require('./pipeline.js');
 const { normalizePath } = require('./projects.js');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -64,7 +65,8 @@ function ghExecDefault(args, o) {
  *   id: string, name: string, defaultBranch: string | null, ahead: number | null, behind: number | null,
  *   dirty: boolean | null, lastCommitAt: number | null, worktrees: Worktree[], branches: Branch[],
  *   polledAt: number | null, error: boolean, brief: any, freshness: string, behindSince?: number | null, briefsMalformed: number,
- *   prs?: number | null
+ *   prs?: number | null,
+ *   pipeline?: { tasks: any[], skipped: number, error: boolean }
  * }} RepoState
  */
 
@@ -137,7 +139,7 @@ async function pool(items, limit, fn) {
  *   exec?: Exec, now?: () => number, intervalMs?: number, concurrency?: number,
  *   fsp?: typeof nodeFs.promises,
  *   quietMs?: number, hotIds?: () => Iterable<string>,
- *   ghExec?: (args: string[], o: { cwd?: string }) => Promise<{ stdout: string }>, ghIntervalMs?: number }} opts
+ *   ghExec?: (args: string[], o: { cwd?: string }) => Promise<{ stdout: string }>, ghIntervalMs?: number, onPipelineRead?: (id: string) => void }} opts
  */
 function createPoller(opts) {
   const registry = opts.registry;
@@ -247,6 +249,67 @@ function createPoller(opts) {
   }
 
   /**
+   * Names, sizes and mtimes of the plugin's task records (attempts, gates, specs) and its
+   * config in one worktree; stat only. '-' when there is no .sereno, 's' when linked.
+   * @param {string} wt
+   */
+  async function pipelineStamp(wt) {
+    try {
+      const sereno = wt + '/.sereno';
+      let ls;
+      try { ls = await fsp.lstat(sereno); } catch (_) { return '-'; }
+      if (ls.isSymbolicLink() || !ls.isDirectory()) return 's';
+      const parts = [await mtime(sereno + '/pipeline.json')];
+      for (const sub of ['attempts', 'gates', 'specs']) {
+        const dir = sereno + '/' + sub;
+        try { ls = await fsp.lstat(dir); } catch (_) { parts.push(sub + '=-'); continue; }
+        if (ls.isSymbolicLink()) { parts.push(sub + '=s'); continue; }
+        const names = (await fsp.readdir(dir)).filter((n) => /\.(json|md)$/i.test(n)).sort().slice(-400);
+        const ps = [];
+        for (const n of names) {
+          try { const st = await fsp.lstat(dir + '/' + n); ps.push(n + ':' + Math.round(st.mtimeMs) + ':' + st.size); }
+          catch (_) { ps.push(n + ':?'); }
+        }
+        parts.push(sub + '=' + ps.join(','));
+      }
+      return parts.join(';');
+    } catch (_) { return '?'; }
+  }
+
+  /** Last good pipeline view per project with the fingerprint it was built under. @type {Map<string, { fp: string, view: { tasks: any[], skipped: number, error: boolean } }>} */
+  const pipeGood = new Map();
+
+  /**
+   * The project's pipeline view: recomputed only when the record stamp or any branch tip
+   * changed. The main worktree only (the plugin writes .sereno there). A git failure keeps
+   * the last good view with error: true. Never throws.
+   * @param {string} id @param {string} root
+   * @returns {Promise<{ tasks: any[], skipped: number, error: boolean }>}
+   */
+  async function pipelineOf(id, root) {
+    const prev = pipeGood.get(id);
+    try {
+      if (!isLocalPath(root)) return { tasks: [], skipped: 0, error: false };
+      const stamp = await pipelineStamp(root);
+      if (stamp === '-' || stamp === 's') { pipeGood.delete(id); return { tasks: [], skipped: 0, error: false }; }
+      const tips = await git(['for-each-ref', '--count=2000', 'refs/heads', '--format=%(objectname) %(refname)'], root);
+      const fp = stamp + '\n' + tips;
+      if (prev && prev.fp === fp && !prev.view.error) return prev.view;
+      if (opts.onPipelineRead) { try { opts.onPipelineRead(id); } catch (_) { /* test hook */ } }
+      const repo = await pipelineLib.readRepo(root, { fsp });
+      if (!repo) { const v = { tasks: [], skipped: 0, error: false }; pipeGood.set(id, { fp, view: v }); return v; }
+      const t = now();
+      const tasks = [];
+      for (const entry of repo.tasks) tasks.push(await pipelineLib.taskView(root, entry, repo.config, git, t, { fsp }));
+      const view = { tasks, skipped: repo.skipped, error: false };
+      pipeGood.set(id, { fp, view });
+      return view;
+    } catch (_) {
+      return prev ? Object.assign({}, prev.view, { error: true }) : { tasks: [], skipped: 0, error: true };
+    }
+  }
+
+  /**
    * Cheap change detector for a project: HEAD, index, packed-refs, refs/heads and the HEAD
    * reflog mtimes per worktree, plus the brief files. Local paths and fs.stat only.
    * Null when anything cannot be resolved, which means "no skipping".
@@ -290,12 +353,13 @@ function createPoller(opts) {
       // A branch name that is not a valid ref name never reaches git again.
       wts.push(Object.assign(w, { branch: briefsLib.validBranchName(w.branch) ? w.branch : null }));
     }
+    const mainRoot = wts.length ? wts[0].path : cwd;
     // Nothing changed since the last good read and it is recent: reuse it without config/status/briefs.
     const fp = await fingerprint(wts);
     const prevGood = good.get(p.id);
     if (fp !== null && prevGood && prevGood.fp === fp && now() - prevGood.at < FULL_RECHECK_MS) {
       pendingGood.set(p.id, prevGood);   // still the last full read, so the 5 minute clock keeps running
-      return Object.assign({}, prevGood.result, { polledAt: now() });
+      return Object.assign({}, prevGood.result, { polledAt: now(), pipeline: await pipelineOf(p.id, mainRoot) });
     }
     const fullAt = now();
     if (prevGood && now() - prevGood.at >= FULL_RECHECK_MS) for (const w of wts) gitDirs.delete(w.path);
@@ -373,6 +437,7 @@ function createPoller(opts) {
       branches: shown, polledAt: t, error: false,
       brief: headline ? headline.brief : null, freshness: headline ? headline.freshness : 'none',
       behindSince: headline ? headline.behindSince : null, briefsMalformed: malformed,
+      pipeline: await pipelineOf(p.id, mainRoot),
     };
     if (fp !== null) pendingGood.set(p.id, { fp, at: fullAt, result });
     return result;
@@ -464,6 +529,7 @@ function createPoller(opts) {
     for (const id of Array.from(backoff.keys())) if (!ids.has(id)) backoff.delete(id);
     for (const id of Array.from(lastTry.keys())) if (!ids.has(id)) lastTry.delete(id);
     for (const id of Array.from(good.keys())) if (!ids.has(id)) good.delete(id);
+    for (const id of Array.from(pipeGood.keys())) if (!ids.has(id)) pipeGood.delete(id);
   }
 
   async function runGh() {
