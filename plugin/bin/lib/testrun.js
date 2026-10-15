@@ -36,8 +36,11 @@ function killTree(child) {
   } catch (_e) { /* best effort */ }
 }
 
-/** Kill every running suite and run every pending cleanup. Used on SIGINT. */
+let aborted = false;
+
+/** Kill every running suite and run every pending cleanup. Used on SIGINT and the deadline. After it no suite starts. */
 function abortAll() {
+  aborted = true;
   for (const c of liveChildren) killTree(c);
   for (const f of Array.from(cleanups)) { try { f(); } catch (_e) { /* best effort */ } }
 }
@@ -146,6 +149,7 @@ function tapValid(output) {
  */
 function runSuite(command, cwd, timeoutSec) {
   return new Promise((resolve) => {
+    if (aborted) { resolve({ exitCode: null, timedOut: false, startFailed: true, output: '', failures: [] }); return; }
     /** @type {Buffer[]} */
     const chunks = [];
     let size = 0, timedOut = false, spawnError = false, done = false;
@@ -384,13 +388,25 @@ async function runTests(o) {
   let baseSuite;
   /** @type {Suite} */
   let head;
+  // The base cache is written the moment the base suite completes and passes in full, so a
+  // deadline during the head run does not waste it. Same conditions as before.
+  const cacheBase = (/** @type {Suite} */ s) => {
+    if (aborted || s.timedOut || s.startFailed || s.exitCode !== 0 || s.failures.length) return;
+    try {
+      fsafe.writeJson(cacheRel(o.base), {
+        sha: o.base, config_hash: o.configHash, command,
+        suite: { exitCode: 0, failures: [], parsed: !!s.parsed, count: s.count || 0, plan: s.plan === undefined ? null : s.plan },
+      });
+    } catch (_e) { /* the cache is an optimisation */ }
+  };
+  const runBase = () => runAtBase(root, o.base, command, timeoutSec, setup, wtTimeoutSec).then((s) => { cacheBase(s); return s; });
   if (cached) {
     baseSuite = cached;
     head = await runSuite(command, root, timeoutSec);
   } else if (parallel) {
-    [baseSuite, head] = await Promise.all([runAtBase(root, o.base, command, timeoutSec, setup, wtTimeoutSec), runSuite(command, root, timeoutSec)]);
+    [baseSuite, head] = await Promise.all([runBase(), runSuite(command, root, timeoutSec)]);
   } else {
-    baseSuite = await runAtBase(root, o.base, command, timeoutSec, setup, wtTimeoutSec);
+    baseSuite = await runBase();
     head = await runSuite(command, root, timeoutSec);
   }
   addLog(baseCached ? 'base (cached, not re-run)' : 'base', baseSuite);
@@ -401,15 +417,6 @@ async function runTests(o) {
   // reports results, a failing base must have reported some too.
   const baseUsable = !baseEnv && !(baseSuite.exitCode !== 0 && !baseSuite.parsed && !!head.parsed);
   const basePassed = baseSuite.exitCode === 0 && baseSuite.failures.length === 0 && !baseSuite.timedOut && !baseSuite.startFailed;
-  if (!baseCached && baseUsable && basePassed) {
-    try {
-      fsafe.writeJson(cacheRel(o.base), {
-        sha: o.base, config_hash: o.configHash, command,
-        suite: { exitCode: 0, failures: [], parsed: !!baseSuite.parsed, count: baseSuite.count || 0, plan: baseSuite.plan === undefined ? null : baseSuite.plan },
-      });
-    } catch (_e) { /* the cache is an optimisation */ }
-  }
-
   const headFailed = head.exitCode !== 0;
   const baseFailed = baseSuite.exitCode !== 0;
   const headEnv = head.timedOut || head.startFailed;

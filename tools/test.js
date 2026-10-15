@@ -7626,11 +7626,11 @@ test('missing rate_limits degrades instead of throwing', () => {
       "if(s.sleep){ fs.writeFileSync(s.sleep+(inBase?'.b':'.h'), String(process.pid)); setInterval(()=>{},1000); }",
       "else {",
       "if(s.crash) throw new Error('boom');",
-      "const fails=(s.fails||[]).slice();",
-      "if(s.flaky && !inBase){ let n=0; try{n=+fs.readFileSync(s.flaky.counter,'utf8')}catch(e){} fs.writeFileSync(s.flaky.counter,String(n+1)); if(n===0) fails.push(s.flaky.name); }",
+      "let hang=false; const fails=(s.fails||[]).slice();",
+      "if(s.flaky && !inBase){ let n=0; try{n=+fs.readFileSync(s.flaky.counter,'utf8')}catch(e){} fs.writeFileSync(s.flaky.counter,String(n+1)); if(n===0) fails.push(s.flaky.name); if(n>=1 && s.sleepOnSecond){ fs.writeFileSync(s.sleepOnSecond+'.h', String(process.pid)); hang=true; setInterval(()=>{},1000); } }",
       "const all=(s.tests||[]).concat(s.flaky?[s.flaky.name]:[]);",
       "if(!s.quiet){ console.log('TAP version 13'); all.forEach((t,i)=>console.log((fails.includes(t)?'not ok ':'ok ')+(i+1)+' - '+t)); if(s.plan) console.log('1..'+all.length); }",
-      "process.exit(fails.length?2:0);",
+      "if(!hang) process.exit(fails.length?2:0);",
       "}",
     ].join('\n');
     function mkSuite(baseSpec, headSpec, cfg) {
@@ -7770,7 +7770,32 @@ test('missing rate_limits degrades instead of throwing', () => {
       const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('sereno-base-') && !before.includes(n));
       assert.deepStrictEqual(after, [], 'no leftover sereno-base dir');
       assert.strictEqual(runT(r, ['--deadline-sec', '0']).out.code, 'invalid_arg');
+      assert.ok(!('diagnosis' in out), 'a deadline result carries no diagnosis');
     });
+    test('[4a2] test: --deadline-sec value check: 540 and 60 accepted, 5dd refused', () => {
+      const r = mkSuite({ tests: ['A'] }, { tests: ['A'] });
+      for (const v of ['540', '60']) { const x = runT(r, ['--deadline-sec', v]); assert.strictEqual(x.out.ok, true, v + ' ' + JSON.stringify(x.out)); assert.strictEqual(x.status, 0); }
+      const bad = runT(r, ['--deadline-sec', '5dd']);
+      assert.strictEqual(bad.out.code, 'invalid_arg');
+    });
+    const deadlineAt = (label, mkR, sleepName, expectCache) => test('[4a2] test: deadline during ' + label + ' leaves no live pid, no worktree, one stdout line', () => {
+      const pidBase = path.join(mk(), 'pid');
+      const r = mkR(pidBase);
+      const { status, out } = runT(r, ['--deadline-sec', '3']);
+      assert.strictEqual(status, 20); assert.strictEqual(out.status, 'deadline'); assert.ok(!('diagnosis' in out));
+      const pid = parseInt(fs.readFileSync(pidBase + sleepName, 'utf8'), 10);
+      let gone = false;
+      for (let i = 0; i < 20 && !gone; i++) { gone = !alive(pid); if (!gone) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200); }
+      assert.ok(pid > 0 && gone, 'suite process was killed');
+      assert.strictEqual(wtCount(r), 1);
+      assert.strictEqual(fs.existsSync(path.join(r.dir, '.sereno', 'cache', 'base-' + r.base + '.json')), expectCache);
+    });
+    deadlineAt('the head suite (base cache kept)', (pb) => mkSuite({ tests: ['A'], plan: true }, { sleep: pb }), '.h', true);
+    deadlineAt('the flaky re-run (base cache kept)', (pb) => {
+      const counter = path.join(mk(), 'n');
+      // head run 1 fails a new test, then the re-run hangs
+      return mkSuite({ tests: ['A'], plan: true }, { tests: ['A'], plan: true, flaky: { counter, name: 'F' }, sleepOnSecond: pb });
+    }, '.h', true);
     test('[4a2] test: a missing test command is an environment failure, not a defect', () => {
       const r = mkSuite({ tests: ['A'] }, { tests: ['A'] }, { command: 'sereno-no-such-command-xyz' });
       const { status, out } = runT(r);
@@ -8353,7 +8378,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           const t = fmOf(n).text.replace(/\s+/g, ' ');
           assert.ok(/in the foreground and wait for it in this turn/.test(t) && /Never use `run_in_background`/.test(t) && /`timeout` of 600000/.test(t), n);
         }
-        assert.strictEqual((fmOf('ship').text.match(/run_in_background: true/g) || []).length, 1, 'ship has exactly one background exception'); assert.ok(/Bash call itself times out/.test(fmOf('ship').text) && /--deadline-sec 540/.test(fmOf('ship').text) && /"status":"deadline"/.test(fmOf('ship').text) && !/You are the architect/.test(fmOf('ship').text));
+        assert.strictEqual((fmOf('ship').text.match(/run_in_background: true/g) || []).length, 1, 'ship has exactly one background exception'); assert.ok(/except the one retry this skill describes/.test(fmOf('ship').text) && /A `deadline` result is not a test result: don't update the attempt; run the retry\./.test(fmOf('ship').text) && /Bash call itself times out[^\n]*\n?[^\n]*treat it as an environment failure/.test(fmOf('ship').text) && !/once more with `run_in_background: true`[^.]*Bash call/.test(fmOf('ship').text) && /--deadline-sec 540/.test(fmOf('ship').text) && /"status":"deadline"/.test(fmOf('ship').text) && !/You are the architect/.test(fmOf('ship').text));
         assert.ok(/--outcome skipped --diagnosis none --head <head>/.test(fmOf('ship').text));
       });
       test('[4a-cost] recovery CLI: editing the spec or moving the branch after a gate pass stops the merge', () => {

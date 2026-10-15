@@ -372,12 +372,14 @@ const COMMANDS = {
   async test(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, { value: ['base', 'head', 'task', 'spec', 'deadline-sec'], bool: ['json'] });
     const dl = str(a, 'deadline-sec');
-    if (dl !== undefined && !(/^[1-9]d{0,6}$/.test(dl) && Number(dl) <= 2147483)) throw new SerenoError('invalid_arg', '--deadline-sec must be a positive integer');
+    if (dl !== undefined && !(/^[1-9]\d{0,6}$/.test(dl) && Number(dl) <= 2147483)) throw new SerenoError('invalid_arg', '--deadline-sec must be a positive integer');
     if (dl !== undefined) {
       // One wall-clock budget for the whole command: stop every suite, remove the worktree, write no cache.
       setTimeout(() => {
         testrun.abortAll();
-        finish({ ok: false, status: 'deadline', code: 'deadline', error: 'the test run exceeded --deadline-sec ' + dl, deadline_sec: Number(dl), passed: false }, EXIT.deadline);
+        // Synchronous on purpose: nothing may run between the abort and the exit.
+        try { fs.writeSync(1, JSON.stringify({ ok: false, status: 'deadline', code: 'deadline', error: 'the test run exceeded --deadline-sec ' + dl, deadline_sec: Number(dl), passed: false }) + '\n'); } catch (_e) { /* exit anyway */ }
+        process.exit(EXIT.deadline);
       }, Number(dl) * 1000);
     }
     const { root, fsafe } = needRepo();
