@@ -4,7 +4,7 @@ A gated build, review and ship pipeline for Claude Code, with a model per role. 
 architect is your main session. A Builder (Haiku, Sonnet or Opus, chosen per task)
 implements one task on its own branch and commits. A red team reviews the diff against
 the spec and returns a verdict. `/sereno:ship` runs the tests against the base commit,
-writes a gate file, repairs once for a defect, and asks you before it merges anything.
+writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
 can observe the files it writes. Version 0.1.0, in development. Windows is the first
@@ -53,8 +53,16 @@ recorded in `.sereno/attempts/`. It never sends commits to a remote.
 **`/sereno:ship <name>`** runs the tests at the base commit and at the head. It sends
 the diff and spec to the red team, writes the verdict to `.sereno/gates/`, and applies
 the recovery rules below. When tests pass and the gate passes (or the red team is
-switched off), it shows a summary and asks whether to merge `task/<name>` into the base
-branch with `--no-ff`. It merges only on a yes.
+switched off), it shows a summary and tells you to run `/sereno:merge <name>`. Ship never merges.
+
+**`/sereno:merge <name>`** only you can start it, and typing it is the yes. It runs the recovery
+rules again and merges only when the next step is `merge`: the latest attempt passed (or the
+gate is off), the reviewed commit is still the tip of `task/<name>`, and the spec is unchanged.
+With the red team on, that commit comes from the gate record, which must also belong to this task
+and branch. With it off, it comes from the skipped attempt, which `/sereno:ship` stamps with the
+tested head; a skipped attempt without one never merges. It then runs a local
+`git merge --no-ff` of that exact commit (not the branch name) into the base branch and refreshes the
+base branch brief. On conflicts it aborts the merge. It never touches a remote.
 
 **`/sereno:brief`** writes the branch brief at `.sereno/briefs/<branch>.md`: three lines,
 Now, Next and Blocked. It uses a version check, so a brief written by the app's `/brief`
@@ -64,7 +72,8 @@ or by this command is read the same way. Run it whenever you want the brief refr
 
 | Role | Agent | Model | Turn cap |
 |------|-------|-------|----------|
-| Architect | main session (no agent) | your session's model | n/a |
+| Architect, your session | main session (no agent) | your session's model | n/a |
+| Orchestration (`task`, `build`, `ship`, `merge`, `brief`) | skills | claude-sonnet-5-5 | n/a |
 | Builder, default | `sereno:builder` | claude-sonnet-5-5 | 80 |
 | Builder, mechanical | `sereno:builder-haiku` | claude-haiku-4-5-20251001 | 40 |
 | Builder, substantial | `sereno:builder-opus` | claude-opus-5-5 | 120 |
@@ -72,8 +81,10 @@ or by this command is read the same way. Run it whenever you want the brief refr
 | Red team, `lean` preset (and fallback) | `sereno:red-team-lean` | claude-opus-5-5 | 60 |
 | Scribe (briefs, commit text) | `sereno:scribe` | claude-haiku-4-5-20251001 | 20 |
 
-The model and turn cap are fixed in each agent file. Config cannot change them. The
+The model and turn cap are fixed in each agent file, and the orchestration model in each skill's front matter (`model: claude-sonnet-5-5`, which applies to that turn only; your session model resumes on the next prompt). Config cannot change them. The
 spec chooses the Builder per task, and that choice is never changed automatically.
+
+**Cheapest setup:** start the session on Sonnet (`claude --model sonnet`) when you run the pipeline. A result that arrives in a later turn, such as a background agent or the ship test retry, runs on the session model, so on an Opus session it can cost an extra cold-cache Opus turn. In our small-task benchmark, Opus leaked this way in 2 of 3 `default` ships, adding about $0.44 each (an estimate).
 
 ## Presets and pipeline.json
 
@@ -114,7 +125,7 @@ invalid file stops the pipeline and lists the errors.
 | `tests.command` | `null` | Test command. `null` uses `npm test` when `package.json` has a `test` script. Otherwise `/sereno:ship` asks. |
 | `tests.setup` | `null` | Command run in the temporary base worktree before the base suite. |
 | `tests.parallel` | `false` | `true` runs base and head together. Leave it `false` if the suites share ports or temp files. |
-| `tests.timeoutSec` | `900` | Time limit for each suite run, in seconds. `/sereno:ship` runs the tests in the background, so this can exceed the Bash tool's 600 s foreground cap. For a personal override use `~/.sereno/pipeline.json`, not the tracked file. |
+| `tests.timeoutSec` | `900` | Time limit for each suite run, in seconds. Suites up to 900 s are supported. `/sereno:ship` runs the tests in the foreground with a 540 s overall deadline; if the whole `test` call hits it, it runs the command once more in the background, at the cost of one extra turn on the session model, so only short suites stay on Sonnet the whole way. For a personal override use `~/.sereno/pipeline.json`, not the tracked file. |
 
 A minimal example:
 
@@ -136,6 +147,9 @@ A minimal example:
   or turn-cap stop, or too many blocks in a row): the run stops and puts one decision to
   you, "Review needs a decision". The choices are: clarify the spec, use a stronger
   Builder, or stop. Builders are never changed automatically.
+- **Merge** happens only after you run `/sereno:merge`. `recovery` returns `merge` only if the gate
+  reviewed the current tip of `task/<name>` (otherwise `review`, reason `head_moved`) and the spec
+  is unchanged (otherwise `decide`, reason `spec_changed`).
 
 ## What it writes
 
@@ -158,7 +172,7 @@ uses your installed dependencies. Checking out the base commit applies the repo'
 `.gitattributes` filters using your own git config; that is the same trust as running
 your test command. `git worktree` calls get their own timeout, `tests.worktreeTimeoutSec`
 (default 300); both it and `tests.timeoutSec` are capped at 2147483. Git changes are limited to creating `task/<name>`, switching between branches, the
-Builder's commits on `task/<name>`, and, after your yes, the local `--no-ff` merge.
+Builder's commits on `task/<name>`, and, when you run `/sereno:merge`, the local `--no-ff` merge.
 Nothing is ever sent to a remote.
 
 Whether to commit `.sereno/` is your choice. Specs, gates and attempts make a useful
@@ -169,6 +183,8 @@ keep the generated parts out of git:
 .sereno/cache/
 .sereno/attempts/
 ```
+
+`sereno.js test --deadline-sec <n>` sets one wall-clock budget for the whole call. When it runs out the script kills every running suite (the whole process tree), removes its temporary worktree, keeps a base cache only if the base suite already passed in full (never a partial one), prints `{"ok":false,"status":"deadline","code":"deadline",...}` and exits 20. The other exit codes are 2 usage, 3 config_invalid, 4 invalid_arg, 5 not_a_repo, 6 path_refused, 7 exists, 8 head_mismatch, 9 no_test_command, 10 worktree_failed, 11 dirty_tree, 12-19 record and spec refusals, and 130 interrupted. `/sereno:ship` passes 540 so the script stops before the Bash tool's 600 s cap.
 
 A failing head is passed only when it provably completed: it printed a TAP plan (`1..N`) that was reached, or a TAP summary (`# tests N`, plus `# pass`/`# fail` when printed) that matches the result lines seen, as `node --test --test-reporter=tap` and tape do. Without either (no plan or summary, or a non-TAP runner), `sereno.js test` reports `unknown_baseline` ("cannot confirm the head suite completed") and the run goes to a decision; a head that exits 0 still passes. On every path (named failures or exit-code mode), a head re-run that exits 0 only excuses flaky failures if it printed at least as many results as the first run and the base.
 

@@ -3,12 +3,13 @@ name: brief
 description: Write or refresh this branch's Sereno brief. Use to record where the work stands.
 argument-hint: [task]
 disable-model-invocation: true
+model: claude-sonnet-5-5
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
 ## How to run commands
 
-Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
+Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written. Run every command and every agent in the foreground and wait for it in this turn: a background result arrives as a new turn on the session model with a cold cache. Never use `run_in_background`. For a long command such as the test run, pass a Bash `timeout` of 600000.
 
 Write or refresh the Sereno brief for the branch I am on. Sereno reads this file to show
 where the project stands. Arguments: `$ARGUMENTS` (an optional task name).

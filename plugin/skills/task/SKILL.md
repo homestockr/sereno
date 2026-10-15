@@ -3,12 +3,13 @@ name: task
 description: Write a task spec and create its task branch. Use to start a piece of work for the Sereno pipeline.
 argument-hint: <name> [one-line goal]
 disable-model-invocation: true
+model: claude-sonnet-5-5
 allowed-tools: Bash, Read, Grep, Glob, Edit(.sereno/cache/spec-*.md)
 ---
 
 ## How to run commands
 
-Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
+Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written. Run every command and every agent in the foreground and wait for it in this turn: a background result arrives as a new turn on the session model with a cold cache. Never use `run_in_background`. For a long command such as the test run, pass a Bash `timeout` of 600000.
 
 You are the architect. You plan; you do not write the feature code. Turn the request
 into a spec a Builder can follow with no other context, then create its branch.

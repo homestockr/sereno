@@ -42,7 +42,7 @@ function agentModel(name) {
   return m ? m[1] : null;
 }
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -308,13 +308,14 @@ const COMMANDS = {
 
   attempt(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash'],
+      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash', 'head'],
       bool: ['json'],
     });
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
     checkTaskBranch(root, task);
     if (a.update !== undefined) return updateAttempt(root, fsafe, task, a);
+    if (a.head !== undefined) throw new SerenoError('usage', '--head is only for --update with --outcome skipped');
     const { config_hash } = loadConfig(root);
     const fixes = str(a, 'fixes');
     const rr = str(a, 'review-run-id');
@@ -369,7 +370,18 @@ const COMMANDS = {
   },
 
   async test(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['base', 'head', 'task', 'spec'], bool: ['json'] });
+    const a = parseArgs(argv, { value: ['base', 'head', 'task', 'spec', 'deadline-sec'], bool: ['json'] });
+    const dl = str(a, 'deadline-sec');
+    if (dl !== undefined && !(/^[1-9]\d{0,6}$/.test(dl) && Number(dl) <= 2147483)) throw new SerenoError('invalid_arg', '--deadline-sec must be a positive integer');
+    if (dl !== undefined) {
+      // One wall-clock budget for the whole command: stop every suite, remove the worktree, keep a base cache only if the base suite already passed in full.
+      setTimeout(() => {
+        testrun.abortAll();
+        // Synchronous on purpose: nothing may run between the abort and the exit.
+        try { fs.writeSync(1, JSON.stringify({ ok: false, status: 'deadline', code: 'deadline', error: 'the test run exceeded --deadline-sec ' + dl, deadline_sec: Number(dl), passed: false }) + '\n'); } catch (_e) { /* exit anyway */ }
+        process.exit(EXIT.deadline);
+      }, Number(dl) * 1000);
+    }
     const { root, fsafe } = needRepo();
     if (str(a, 'task') !== undefined) {
       const t = rec.checkTask(str(a, 'task'));
@@ -442,7 +454,12 @@ const COMMANDS = {
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
     const { config } = loadConfig(root);
-    return recovery.decide({ root, task, config, listAttempts: () => fsafe.listDir('.sereno/attempts') });
+    return recovery.decide({
+      root, task, config,
+      listAttempts: () => fsafe.listDir('.sereno/attempts'),
+      currentHead: () => gitlib.resolveCommit(root, 'refs/heads/task/' + task),
+      currentSpecHash: () => { try { return readSpec(root, '.sereno/specs/' + task + '.md').hash; } catch (_e) { return null; } },
+    });
   },
 
   brief(/** @type {string[]} */ argv) {
@@ -521,6 +538,13 @@ function updateAttempt(root, fsafe, task, a) {
   if (rr !== undefined) {
     if (!rec.RUN_ID.test(rr)) throw new SerenoError('invalid_arg', '--review-run-id has an invalid format');
     record.review_run_id = rr;
+  }
+  const headArg = str(a, 'head');
+  if (headArg !== undefined) {
+    if (record.outcome !== 'skipped') throw new SerenoError('usage', '--head is only for --outcome skipped');
+    const h = gitlib.resolveCommit(root, headArg);
+    if (!h) throw new SerenoError('invalid_arg', '--head must name an existing commit');
+    record.head_commit = h;
   }
   const agentId = str(a, 'agent-id');
   if (agentId !== undefined) record.agent_id = matchId(agentId, '--agent-id', /^[A-Za-z0-9._:-]{1,128}$/);

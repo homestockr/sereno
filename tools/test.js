@@ -7626,11 +7626,11 @@ test('missing rate_limits degrades instead of throwing', () => {
       "if(s.sleep){ fs.writeFileSync(s.sleep+(inBase?'.b':'.h'), String(process.pid)); setInterval(()=>{},1000); }",
       "else {",
       "if(s.crash) throw new Error('boom');",
-      "const fails=(s.fails||[]).slice();",
-      "if(s.flaky && !inBase){ let n=0; try{n=+fs.readFileSync(s.flaky.counter,'utf8')}catch(e){} fs.writeFileSync(s.flaky.counter,String(n+1)); if(n===0) fails.push(s.flaky.name); }",
+      "let hang=false; const fails=(s.fails||[]).slice();",
+      "if(s.flaky && !inBase){ let n=0; try{n=+fs.readFileSync(s.flaky.counter,'utf8')}catch(e){} fs.writeFileSync(s.flaky.counter,String(n+1)); if(n===0) fails.push(s.flaky.name); if(n>=1 && s.sleepOnSecond){ fs.writeFileSync(s.sleepOnSecond+'.h', String(process.pid)); hang=true; setInterval(()=>{},1000); } }",
       "const all=(s.tests||[]).concat(s.flaky?[s.flaky.name]:[]);",
       "if(!s.quiet){ console.log('TAP version 13'); all.forEach((t,i)=>console.log((fails.includes(t)?'not ok ':'ok ')+(i+1)+' - '+t)); if(s.plan) console.log('1..'+all.length); }",
-      "process.exit(fails.length?2:0);",
+      "if(!hang) process.exit(fails.length?2:0);",
       "}",
     ].join('\n');
     function mkSuite(baseSpec, headSpec, cfg) {
@@ -7754,6 +7754,48 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(wtCount(r), 1);
       assert.ok(!fs.existsSync(path.join(r.dir, '.sereno', 'cache', 'base-' + r.base + '.json')), 'an environment failure is not cached');
     });
+    test('[4a2] test: --deadline-sec stops the run, kills the suite, leaves no worktree, base cache or sereno-base dir', () => {
+      const pidBase = path.join(mk(), 'pid');
+      const r = mkSuite({ sleep: pidBase }, { sleep: pidBase });
+      const before = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('sereno-base-'));
+      const { status, out } = runT(r, ['--deadline-sec', '2']);
+      assert.strictEqual(status, 20); assert.strictEqual(out.ok, false);
+      assert.strictEqual(out.status, 'deadline'); assert.strictEqual(out.code, 'deadline'); assert.strictEqual(out.passed, false);
+      const pid = parseInt(fs.readFileSync(pidBase + '.b', 'utf8'), 10);
+      let gone = false;
+      for (let i = 0; i < 20 && !gone; i++) { gone = !alive(pid); if (!gone) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200); }
+      assert.ok(pid > 0 && gone, 'suite process was killed');
+      assert.strictEqual(wtCount(r), 1);
+      assert.ok(!fs.existsSync(path.join(r.dir, '.sereno', 'cache', 'base-' + r.base + '.json')), 'no base cache');
+      const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith('sereno-base-') && !before.includes(n));
+      assert.deepStrictEqual(after, [], 'no leftover sereno-base dir');
+      assert.strictEqual(runT(r, ['--deadline-sec', '0']).out.code, 'invalid_arg');
+      assert.ok(!('diagnosis' in out), 'a deadline result carries no diagnosis');
+    });
+    test('[4a2] test: --deadline-sec value check: 540 and 60 accepted, 5dd refused', () => {
+      const r = mkSuite({ tests: ['A'] }, { tests: ['A'] });
+      for (const v of ['540', '60']) { const x = runT(r, ['--deadline-sec', v]); assert.strictEqual(x.out.ok, true, v + ' ' + JSON.stringify(x.out)); assert.strictEqual(x.status, 0); }
+      const bad = runT(r, ['--deadline-sec', '5dd']);
+      assert.strictEqual(bad.out.code, 'invalid_arg');
+    });
+    const deadlineAt = (label, mkR, sleepName, expectCache) => test('[4a2] test: deadline during ' + label + ' leaves no live pid, no worktree, one stdout line', () => {
+      const pidBase = path.join(mk(), 'pid');
+      const r = mkR(pidBase);
+      const { status, out } = runT(r, ['--deadline-sec', '3']);
+      assert.strictEqual(status, 20); assert.strictEqual(out.status, 'deadline'); assert.ok(!('diagnosis' in out));
+      const pid = parseInt(fs.readFileSync(pidBase + sleepName, 'utf8'), 10);
+      let gone = false;
+      for (let i = 0; i < 20 && !gone; i++) { gone = !alive(pid); if (!gone) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200); }
+      assert.ok(pid > 0 && gone, 'suite process was killed');
+      assert.strictEqual(wtCount(r), 1);
+      assert.strictEqual(fs.existsSync(path.join(r.dir, '.sereno', 'cache', 'base-' + r.base + '.json')), expectCache);
+    });
+    deadlineAt('the head suite (base cache kept)', (pb) => mkSuite({ tests: ['A'], plan: true }, { sleep: pb }), '.h', true);
+    deadlineAt('the flaky re-run (base cache kept)', (pb) => {
+      const counter = path.join(mk(), 'n');
+      // head run 1 fails a new test, then the re-run hangs
+      return mkSuite({ tests: ['A'], plan: true }, { tests: ['A'], plan: true, flaky: { counter, name: 'F' }, sleepOnSecond: pb });
+    }, '.h', true);
     test('[4a2] test: a missing test command is an environment failure, not a defect', () => {
       const r = mkSuite({ tests: ['A'] }, { tests: ['A'] }, { command: 'sereno-no-such-command-xyz' });
       const { status, out } = runT(r);
@@ -8026,7 +8068,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     /* recovery helper: table-driven over hand-written attempt and gate files */
     const A = (outcome, diagnosis, extra) => Object.assign({ outcome, diagnosis: diagnosis || 'none', review_run_id: null }, extra || {});
-    const gateFile = (id, outcome, findings) => ({ review_run_id: id, outcome, tests_passed: true, findings: findings || [] });
+    const gateFile = (id, outcome, findings) => ({ review_run_id: id, task_id: 'demo', branch: 'task/demo', outcome, tests_passed: true, findings: findings || [] });
     const F = (kind, severity) => ({ severity: severity || 'high', kind, file: 'a.js', line: 1, summary: 'x' });
     function decide(attempts, gates, cfgOver) {
       const dir = mk();
@@ -8067,7 +8109,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       ['pass without a gate record does not merge', [A('pass', 'none', { review_run_id: RR(1) })], {}, null, 'decide', 0, 0],
       ['pass whose gate says block does not merge', [A('pass', 'none', { review_run_id: RR(1) })], { [RR(1)]: gateFile(RR(1), 'block', [F('defect')]) }, null, 'decide', 0, 0],
       ['repair then pass merges', [A('block', 'defect'), A('pass', 'none', { review_run_id: RR(2) })], { [RR(2)]: gateFile(RR(2), 'pass') }, null, 'merge', 1, 0],
-      ['gate disabled: skipped merges', [A('skipped')], {}, (c) => { c.roles.redTeam.enabled = false; }, 'merge', 0, 0],
+      ['gate disabled: skipped with a recorded head merges', [A('skipped', 'none', { head_commit: 'c'.repeat(40) })], {}, (c) => { c.roles.redTeam.enabled = false; }, 'merge', 0, 0],
       ['skipped while the red team is enabled does not merge', [A('skipped')], {}, null, 'decide', 0, 0],
       ['stopped is done', [A('stopped')], {}, null, 'done', 0, 0],
     ];
@@ -8232,9 +8274,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(SHIP.includes('Review needs a decision'));
       for (const s of ['clarify the spec', 'stronger Builder', 'stop']) assert.ok(SHIP.includes(s), s);
       assert.ok(!/push/i.test(SHIP), 'no push');
-      assert.ok(/wait for an explicit yes/.test(SHIP1) && /never merge without an explicit yes/.test(SHIP1));
-      assert.ok(at('wait for an explicit yes') < at('git merge --no-ff task/<task>'), 'the ask comes before the merge command');
-      assert.ok(/git merge-base task\/<task> <base_branch>/.test(SHIP) && /git switch <base_branch>/.test(SHIP));
+      assert.ok(/Run `\/sereno:merge <task>` to merge `task\/<task>` into `<base_branch>`/.test(SHIP1) && /never merge/.test(SHIP1));
+      assert.ok(/git merge-base task\/<task> <base_branch>/.test(SHIP));
       assert.ok(/roles.redTeam.fallback/.test(SHIP) && /onFallback/.test(SHIP) && /One round only/.test(SHIP));
       assert.ok(/--tests-passed true/.test(SHIP) && /--run-id <review_run_id>/.test(SHIP));
       assert.ok(/pass no `model`\s+parameter/.test(SHIP1.replace('`model` parameter', '`model` parameter')) || /pass no `model` parameter/.test(SHIP1));
@@ -8253,6 +8294,119 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(run > 0 && spawn > run && upd > spawn, 'running, then spawn, then update');
       assert.ok(/--diagnosis environment/.test(B) && /StopFailure/.test(B));
     });
+
+    /* ---- cheaper orchestration: skill models, /sereno:merge, recovery head and spec guards ---- */
+    const fmOf = (name) => { const t = fs.readFileSync(path.join(PLUGIN, 'skills', name, 'SKILL.md'), 'utf8'); const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(t); assert.ok(m, name); return { fm: m[1], text: t }; };
+    test('[4a-cost] every orchestration skill runs on Sonnet', () => {
+      for (const n of ['task', 'build', 'ship', 'brief', 'merge']) assert.ok(/^model: claude-sonnet-5-5$/m.test(fmOf(n).fm), n);
+    });
+    test('[4a-cost] merge skill: user-only, scribe is the only agent, recovery before git merge, ship never merges', () => {
+      const { fm, text } = fmOf('merge');
+      assert.ok(/^name: merge$/m.test(fm) && /^disable-model-invocation: true$/m.test(fm));
+      const tools = (/^allowed-tools: (.*)$/m.exec(fm) || [])[1] || '';
+      assert.deepStrictEqual(tools.split(',').map((x) => x.trim()), ['Bash', 'Read', 'Agent(sereno:scribe)']);
+      const rIdx = text.indexOf('sereno.js" recovery --task'), cIdx = text.indexOf('sereno.js" clean');
+      assert.ok(rIdx > 0 && rIdx < text.indexOf('git merge --no-ff'));
+      assert.ok(text.includes(`git merge --no-ff -m "Merge branch 'task/<task>'" <head_commit>`) && !/git merge --no-ff task\//.test(text), 'merges the reviewed sha');
+      assert.ok(text.indexOf('git rev-parse refs/heads/task/<task>') > cIdx && text.indexOf('git rev-parse refs/heads/task/<task>') < text.indexOf('git merge --no-ff'), 'tip re-checked right before the merge');
+      assert.ok(/head_moved[^\n]*\/sereno:build <task>/.test(text) && /spec_changed[^\n]*\/sereno:task <task>/.test(text) && /\/sereno:ship <task>/.test(text));
+      assert.ok(cIdx > rIdx && cIdx < text.indexOf('git switch <base_branch>'));
+      assert.ok(/git merge --abort/.test(text) && /## How to run commands/.test(text) && !/push/i.test(text));
+      for (const n of [...text.matchAll(/`sereno:([^`]*)`/g)].map((m) => m[1])) assert.strictEqual(n, 'scribe');
+      assert.ok(!/git merge(?!-base)/.test(SHIP), 'ship never runs git merge');
+    });
+    {
+      const SPEC1 = 'sha256:' + '1'.repeat(64), TIP = 'a'.repeat(40);
+      const G = (over) => Object.assign({ review_run_id: RR(1), task_id: 'demo', branch: 'task/demo', outcome: 'pass', tests_passed: true, findings: [], head_commit: TIP, spec_hash: SPEC1 }, over || {});
+      const guarded = (attempts, gates, cfg, tip, spec) => {
+        const dir = mk();
+        fs.mkdirSync(path.join(dir, '.sereno', 'attempts'), { recursive: true }); fs.mkdirSync(path.join(dir, '.sereno', 'gates'), { recursive: true });
+        attempts.forEach((a, i) => fs.writeFileSync(path.join(dir, '.sereno', 'attempts', 'demo-' + (i + 1) + '.json'), JSON.stringify(a)));
+        for (const [id, g] of Object.entries(gates || {})) fs.writeFileSync(path.join(dir, '.sereno', 'gates', id + '.json'), JSON.stringify(g));
+        const config = loadConfig(null).config; if (cfg) cfg(config);
+        return recoveryLib.decide({ root: dir, task: 'demo', config, listAttempts: () => fs.readdirSync(path.join(dir, '.sereno', 'attempts')), currentHead: () => tip, currentSpecHash: () => spec });
+      };
+      const PASS = [A('pass', 'none', { review_run_id: RR(1) })];
+      test('[4a-cost] recovery: head moved after the gate goes back to review', () => {
+        const r = guarded(PASS, { [RR(1)]: G() }, null, 'b'.repeat(40), SPEC1);
+        assert.strictEqual(r.next, 'review'); assert.ok(/^head_moved/.test(r.reason));
+      });
+      test('[4a-cost] recovery: spec changed after the gate goes to decide', () => {
+        const r = guarded(PASS, { [RR(1)]: G() }, null, TIP, 'sha256:' + '2'.repeat(64));
+        assert.strictEqual(r.next, 'decide'); assert.ok(/^spec_changed/.test(r.reason));
+      });
+      test('[4a-cost] recovery: head and spec both match still merges', () => {
+        assert.strictEqual(guarded(PASS, { [RR(1)]: G() }, null, TIP, SPEC1).next, 'merge');
+      });
+      test('[4a-cost] recovery: a missing branch tip, spec or gate field never merges', () => {
+        assert.strictEqual(guarded(PASS, { [RR(1)]: G() }, null, null, SPEC1).next, 'review');
+        assert.strictEqual(guarded(PASS, { [RR(1)]: G() }, null, TIP, null).next, 'decide');
+        assert.strictEqual(guarded(PASS, { [RR(1)]: G({ head_commit: undefined }) }, null, TIP, SPEC1).next, 'review');
+      });
+      test('[4a-cost] recovery: skipped gate needs the recorded head and the spec pin', () => {
+        const off = (c) => { c.roles.redTeam.enabled = false; };
+        const pin = 'sha256:' + '3'.repeat(64), B = 'b'.repeat(40);
+        const sk = (extra) => [A('skipped', 'none', Object.assign({ spec_hash: pin, head_commit: B }, extra || {}))];
+        const ok = guarded(sk(), {}, off, B, pin);
+        assert.strictEqual(ok.next, 'merge'); assert.strictEqual(ok.head_commit, B);
+        let r = guarded(sk(), {}, off, 'd'.repeat(40), pin);
+        assert.strictEqual(r.next, 'review'); assert.ok(/^head_moved/.test(r.reason));
+        r = guarded(sk(), {}, off, B, 'sha256:' + '4'.repeat(64));
+        assert.strictEqual(r.next, 'decide'); assert.ok(/^spec_changed/.test(r.reason));
+        r = guarded([A('skipped', 'none', { spec_hash: pin })], {}, off, B, pin);
+        assert.strictEqual(r.next, 'decide'); assert.ok(/^head_unknown/.test(r.reason), 'a skipped attempt without a head fails closed');
+      });
+      test('[4a-cost] recovery: merge output carries head_commit and base_commit; a gate from another task or branch never merges', () => {
+        const r = guarded(PASS, { [RR(1)]: G({ base_commit: 'e'.repeat(40) }) }, null, TIP, SPEC1);
+        assert.strictEqual(r.next, 'merge'); assert.strictEqual(r.head_commit, TIP); assert.strictEqual(r.base_commit, 'e'.repeat(40));
+        assert.strictEqual(guarded(PASS, { [RR(1)]: G({ task_id: 'other' }) }, null, TIP, SPEC1).next, 'decide');
+        assert.strictEqual(guarded(PASS, { [RR(1)]: G({ branch: 'task/other' }) }, null, TIP, SPEC1).next, 'decide');
+      });
+      test('[4a-cost] attempt --update --head records the tested commit for skipped only', () => {
+        const dir = initRepo('main');
+        fs.writeFileSync(path.join(dir, 'a.txt'), 'x\n'); git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'c');
+        const head = git(dir, 'rev-parse', 'HEAD');
+        runS(dir, ['attempt', '--task', 'demo', '--outcome', 'running']);
+        assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--outcome', 'running', '--head', head]).out.code, 'usage');
+        assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--update', '1', '--head', head]).out.code, 'usage', 'not while the outcome is not skipped');
+        assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--update', '1', '--outcome', 'skipped', '--head', 'zzz']).out.ok, false);
+        assert.strictEqual(runS(dir, ['attempt', '--task', 'demo', '--update', '1', '--outcome', 'skipped', '--diagnosis', 'none', '--head', head.slice(0, 10), '--ended-at', 'now']).out.ok, true);
+        assert.strictEqual(readAttempt(dir, 1).head_commit, head, 'stored as 40 hex');
+      });
+      test('[4a-cost] ship, build, merge, task and brief run everything in the foreground', () => {
+        for (const n of ['ship', 'build', 'merge', 'task', 'brief']) {
+          const t = fmOf(n).text.replace(/\s+/g, ' ');
+          assert.ok(/in the foreground and wait for it in this turn/.test(t) && /Never use `run_in_background`/.test(t) && /`timeout` of 600000/.test(t), n);
+        }
+        assert.strictEqual((fmOf('ship').text.match(/run_in_background: true/g) || []).length, 1, 'ship has exactly one background exception'); assert.ok(/except the one retry this skill describes/.test(fmOf('ship').text) && /A `deadline` result is not a test result: don't update the attempt; run the retry\./.test(fmOf('ship').text) && /Bash call itself times out[^\n]*\n?[^\n]*--outcome needs_context --diagnosis none[^\n]*test run killed without cleanup; check for leftover test processes/.test(fmOf('ship').text) && !/once more with `run_in_background: true`[^.]*Bash call/.test(fmOf('ship').text) && /--deadline-sec 540/.test(fmOf('ship').text) && /"status":"deadline"/.test(fmOf('ship').text) && !/You are the architect/.test(fmOf('ship').text));
+        assert.ok(/--outcome skipped --diagnosis none --head <head>/.test(fmOf('ship').text));
+      });
+      test('[4a-cost] recovery CLI: editing the spec or moving the branch after a gate pass stops the merge', () => {
+        const dir = initRepo('main');
+        fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+        fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: { command: 'node -e "process.exit(0)"' } }));
+        runS(dir, ['branch', '--task', 'demo']);
+        runS(dir, ['spec', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', 'main', '--stdin'], '## Goal\nchange a\n');
+        git(dir, 'switch', '-q', 'task/demo');
+        runS(dir, ['attempt', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--started-at', 'now', '--spec', '.sereno/specs/demo.md']);
+        fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); git(dir, 'commit', '-q', '-am', 'work');
+        const base = git(dir, 'merge-base', 'task/demo', 'main'), head = git(dir, 'rev-parse', 'HEAD'), rid = runS(dir, ['run-id', '--head', head]).out.review_run_id;
+        const v = '```json\n{"outcome":"pass","findings":[],"context_requests":[]}\n```\n';
+        assert.strictEqual(runS(dir, ['gate', '--stdin', '--task', 'demo', '--spec', '.sereno/specs/demo.md', '--base', base, '--head', head, '--branch', 'task/demo', '--run-id', rid, '--model', 'claude-fable-5-1', '--tests-passed', 'true'], v).out.outcome, 'pass');
+        runS(dir, ['attempt', '--task', 'demo', '--update', '1', '--outcome', 'pass', '--review-run-id', rid, '--diagnosis', 'none', '--ended-at', 'now']);
+        assert.strictEqual(runS(dir, ['recovery', '--task', 'demo']).out.next, 'merge');
+        const specFile = path.join(dir, '.sereno', 'specs', 'demo.md'), original = fs.readFileSync(specFile, 'utf8');
+        fs.writeFileSync(specFile, original + '\nextra\n');
+        let r = runS(dir, ['recovery', '--task', 'demo']).out;
+        assert.ok(r.next === 'decide' && /^spec_changed/.test(r.reason), JSON.stringify(r));
+        fs.writeFileSync(specFile, original);
+        assert.strictEqual(runS(dir, ['recovery', '--task', 'demo']).out.next, 'merge');
+        fs.writeFileSync(path.join(dir, 'a.txt'), 'three\n'); git(dir, 'commit', '-q', '-am', 'late');
+        r = runS(dir, ['recovery', '--task', 'demo']).out;
+        assert.ok(r.next === 'review' && /^head_moved/.test(r.reason), JSON.stringify(r));
+      });
+    }
 
     /* exit criterion 6: a full simulated ship writes only under .sereno/ */
     test('[plugin exit 6] a simulated ship (test, gate, attempts, recovery) changes only .sereno/; the local merge follows', () => {
@@ -8738,11 +8892,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       const br = S(r.dir, ['branch', '--task', 'demo']);
       assert.strictEqual(br.out.ok, true, JSON.stringify(br.out));
       assert.strictEqual(S(r.dir, ['spec', '--task', 'demo', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', br.out.from_branch, '--stdin'], '## Goal\nx\n').out.ok, true);
+      git(r.dir, 'switch', '-q', 'task/demo');
       attempt(r.dir, ['--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running']);
       fs.writeFileSync(path.join(r.dir, 'a.txt'), 'two\n'); git(r.dir, 'commit', '-q', '-am', 'builder work');
       const head = git(r.dir, 'rev-parse', 'HEAD');
-      const t = S(r.dir, ['test', '--base', r.base, '--head', head, '--json']);
-      assert.strictEqual(t.out.passed, true);
+      const t = S(r.dir, ['test', '--task', 'demo', '--base', r.base, '--head', head, '--json']);
+      assert.strictEqual(t.out.passed, true, JSON.stringify(t.out));
       attempt(r.dir, ['--update', '1', '--outcome', 'built', '--ended-at', 'now']);
       const g = S(r.dir, ['gate', '--stdin', '--task', 'demo', '--base', r.base, '--head', head, '--session', 's', '--agent', 'a', '--model', 'm', '--tests-passed', 'true'], JSON.stringify({ outcome: 'pass', findings: [] }));
       assert.strictEqual(g.out.ok, true, JSON.stringify(g.out));
@@ -9404,7 +9559,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!/exactly as `\/sereno:build` does/.test(t));
       assert.match(t, /attempt --task <task> --spec-revision[^\n]*--spec \.sereno\/specs\/<task>\.md/);
       assert.match(t, /sereno\.js" test --task <task> --base/); assert.match(t, /sereno\.js" gate --file [^ ]+ --task <task>/);
-      assert.match(t, /`run_in_background: true`/); assert.match(t, /completion notice/);
+      assert.match(t, /foreground with a Bash `timeout` of 600000/); assert.match(t, /`run_in_background: true`/);
       assert.ok(!/timeoutSec` lower/.test(t), 'the "lower timeoutSec in .sereno/pipeline.json" advice is gone');
       assert.match(t, /~\/\.sereno\/pipeline\.json/);
     });

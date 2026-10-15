@@ -1,23 +1,24 @@
 ---
 name: ship
-description: Test, review and gate a built task branch, repair once if needed, then ask before merging it locally. Use after /sereno:build.
+description: Test, review and gate a built task branch, repair once if needed, then hand off to /sereno:merge. Use after /sereno:build.
 argument-hint: <task>
 disable-model-invocation: true
+model: claude-sonnet-5-5
 allowed-tools: Bash, Read, Agent, Edit(.sereno/cache/verdict-*.json)
 ---
 
 ## How to run commands
 
-Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written.
+Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written. Run every command and every agent in the foreground and wait for it in this turn: a background result arrives as a new turn on the session model with a cold cache. Never use `run_in_background`, except the one retry this skill describes in step 1. For a long command such as the test run, pass a Bash `timeout` of 600000.
 
-You are the architect. You run the checks, relay the red team's verdict into the gate
-file, follow the recovery rules, and ask the user before anything merges. You do not
+You run the ship step. You run the checks, relay the red team's verdict into the gate
+file, follow the recovery rules, and hand off to the user for the merge. You do not
 write feature code and you do not review the diff yourself.
 
 Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, ask for it.
 
 Rules that hold throughout: never run anything against a remote, never change which
-Builder is used by yourself, and never merge without an explicit yes from the user.
+Builder is used by yourself, and never merge: merging is `/sereno:merge`, which only the user can start.
 Every script result is one JSON object; if `ok` is false, show the `error` and stop.
 
 ## 0. Preconditions
@@ -41,19 +42,16 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" config
 ## 1. Run the tests
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" test --task <task> --base <base> --head <head>
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" test --task <task> --base <base> --head <head> --deadline-sec 540
 ```
 
-Run it with the Bash tool's `run_in_background: true`, not in the foreground (the foreground
-cap is 600 s and a suite may need up to `tests.timeoutSec`, default 900, per suite). Wait for the
-completion notice, then read the output file it names: the one JSON line is the result. Do not
-poll and do not re-run it meanwhile. To shorten the limit for yourself, a personal override goes
-in `~/.sereno/pipeline.json`; never edit the tracked `.sereno/pipeline.json` for it.
+Run it in the foreground with a Bash `timeout` of 600000 and read the one JSON line it prints. `--deadline-sec 540` is a wall-clock budget for the whole call (setup, base, head and a flaky re-run), so the script stops itself before the Bash cap. If the result has `"status":"deadline"` (exit code 20), the script already stopped its suites, removed its worktree, and kept a base cache only if the base suite had already passed in full (never a partial one). A `deadline` result is not a test result: don't update the attempt; run the retry. Run the same command once more WITHOUT `--deadline-sec` and with `run_in_background: true`, wait for its completion notice, then read the output file it names. Say in one line that the suite outlasted the foreground cap and this costs one extra turn on the session model. This is the only retry; never re-run `test` otherwise and do not poll. If instead the Bash call itself times out (the tool reports a timeout, not a JSON result), sereno was killed without cleanup: record the attempt with `--outcome needs_context --diagnosis none` (reason: "test run killed without cleanup; check for leftover test processes"), tell the user that reason in one line, then go to step 5 so `recovery` returns `decide`, not `retry`; do not retry or start a new Builder attempt, because orphaned test processes may still run. A personal limit override goes in `~/.sereno/pipeline.json`; never edit the tracked
+`.sereno/pipeline.json` for it.
 Always pass `--task <task>` to `test` and `gate`; without it the script refuses with
 `task_required` once the task has attempt records. A refusal with `code: "spec_changed"` means the spec was edited
 after `/sereno:build`: stop and say so.
 
-The result has `passed`, `diagnosis` (`none`, `environment`, `defect`, `unknown_baseline`),
+The result has `passed` (a `deadline` result has only `status`, `code`, `deadline_sec` and `passed: false`), `diagnosis` (`none`, `environment`, `defect`, `unknown_baseline`),
 `newFailures` and `note`. Failures that already fail at the base are not counted.
 
 If `passed` is false, update the attempt, then go to step 5:
@@ -71,7 +69,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --update <attem
 ## 2. Red team
 
 If `roles.redTeam.enabled` is false there is no review. Update the attempt with
-`--outcome skipped --diagnosis none --ended-at now` (same command as above), then go to
+`--outcome skipped --diagnosis none --head <head> --ended-at now` (same command as above, plus `--head`, which records the tested commit), then go to
 step 5. Otherwise make the run id:
 
 ```
@@ -154,7 +152,9 @@ The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `n
   summary) and tell it to fix only those; for `retry` after a test failure, give it the
   failing test names. Then go back to step 1 with the new head. A repair never changes
   the Builder, and `retry` does not use the repair.
-- **`review`**: the attempt is built and not yet reviewed. Go to step 1.
+- **`review`**: the attempt is built and not yet reviewed. Go to step 1. If the `reason` starts
+  with `head_moved`, the attempt is already final and the branch changed after its review: stop,
+  say so, and tell the user to run `/sereno:build <task>` for a new attempt.
 - **`decide`**: stop. Present exactly one decision, titled "Review needs a decision",
   with the `reason` and the findings or failure in one line each, and these choices:
   clarify the spec (run `/sereno:task` to revise it), use a stronger Builder (revise the
@@ -169,16 +169,4 @@ The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `n
 
 Show a short summary: tests (passed, any failures that already fail at the base), gate
 outcome (or "skipped, the red team is switched off"), the number of findings, the
-attempt count and the head commit. Then ask the user whether to merge `task/<task>` into
-`<base_branch>`, and wait for an explicit yes. Anything else means do not merge.
-
-Only after a yes, with a clean tracked tree (the same clean check as step 0):
-
-```
-git switch <base_branch>
-git merge --no-ff task/<task>
-```
-
-If the merge reports conflicts, run `git merge --abort`, tell the user, and stop. Never
-add a remote step. After the merge, ask `sereno:scribe` to refresh the brief for
-`<base_branch>`, giving it the same literal command line as in step 5 with `--branch <base_branch>`, and report the merge commit in one line.
+attempt count and the head commit. Then say: "Ready. Run `/sereno:merge <task>` to merge `task/<task>` into `<base_branch>`." You never merge; only the user starting `/sereno:merge` does.
