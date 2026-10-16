@@ -281,7 +281,7 @@ function createPoller(opts) {
 
   /** Attempt fields the stall check reads; server-side only, newest first as the reader sorts them. @param {any} list */
   function slimAttempts(list) {
-    return (Array.isArray(list) ? list : []).slice(0, 20).map((a) => ({ attempt: a.attempt, outcome: a.outcome, started_at: a.started_at, ended_at: a.ended_at }));
+    return (Array.isArray(list) ? list : []).slice(0, 20).map((a) => ({ attempt: a.attempt, agent_id: a.agent_id, outcome: a.outcome, started_at: a.started_at, ended_at: a.ended_at }));
   }
 
   /**

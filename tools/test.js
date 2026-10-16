@@ -3977,7 +3977,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(cjs, /el.style.width/);
     });
 
-    test('console page: absolute /console/ assets, nav is Projects then Spend, source colours match the widget', () => {
+    test('console page: absolute /console/ assets, nav is Projects, Spend, then Pipeline, source colours match the widget', () => {
       const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
       const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
       const appcss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
@@ -3985,8 +3985,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(html, /src="\/console\/console\.js"/);
       assert.match(html, /LOCAL WORKSPACE/);
       assert.match(html, /Local only/);
-      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 2);
+      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 3);
       assert.ok(html.indexOf('data-route="projects"') < html.indexOf('data-route="spend"'));
+      assert.ok(html.indexOf('data-route="spend"') < html.indexOf('data-route="pipeline"'));
       for (const v of ['--src-main', '--src-subagent', '--src-auxiliary', '--src-unattributed', '--src-hatch']) {
         const re = new RegExp(v + ':\\s*(#[0-9a-f]{6})', 'i');
         assert.strictEqual(css.match(re)[1].toLowerCase(), appcss.match(re)[1].toLowerCase(), v);
@@ -5856,7 +5857,10 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(p.git.defaultBranch, 'main');
           assert.strictEqual(p.spend14, null, 'ledger off: absent, not zero');
           assert.strictEqual(p.prs, null);
-          assert.ok(p.branches.length >= 1 && Object.keys(p.branches[0]).sort().join() === 'behindSince,freshness,name,now');
+          assert.ok(p.branches.length >= 1 && Object.keys(p.branches[0]).sort().join() === 'behindSince,freshness,generatedAt,name,now');
+          const mainB = p.branches.find((x) => x.name === 'main');
+          assert.strictEqual(mainB.generatedAt, Date.parse('2026-10-11T10:00:00Z'), 'branch brief time, epoch ms');
+          assert.ok(p.branches.every((x) => x.generatedAt === null || Number.isFinite(x.generatedAt)));
           assert.ok(typeof p.lastActivity === 'number');
           const h = r.projects.find((x) => x.hidden);
           assert.strictEqual(h.id, hid);
@@ -10529,7 +10533,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const KEYS = {
       body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin'],
       project: ['id', 'name', 'tasks', 'idle'],
-      task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired'],
+      task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd'],
       gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model'],
       finding: ['severity', 'kind', 'file', 'line', 'summary'],
       signals: ['days', 'projects', 'outcomes', 'rework', 'runsThisWeek'],
@@ -10590,6 +10594,28 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.ok(!text.includes(bad), 'leaked ' + bad);
         assert.ok(text.includes('src/a.js'), 'finding file names stay');
       } finally { await haltP(c); }
+    });
+
+    await atest('[4b-api] /api/pipeline: costUsd sums the gate and attempt agents, skips zero-spend runs, null with no spend or no ledger', async () => {
+      const l = openLedger({ file: ':memory:' });
+      l.ingestRequests([rqL({ requestKey: '1', requestId: 'r1', costMicros: 2000000 }), rqL({ requestKey: '2', requestId: 'r2', costMicros: 500000 })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a-t-run', ts: NOW }, { requestId: 'r2', sessionId: 's9', agentId: 'att-1', ts: NOW }]);
+      assert.strictEqual(l.spendForAgentId('att-1'), 0.5);
+      assert.strictEqual(l.spendForAgentId('nope'), 0);
+      const snap = () => { const o = mkSnap(); o.p1.pipeline.tasks[0].attempts = [{ attempt: 1, agent_id: 'att-1' }, { attempt: 2, agent_id: 'att-zero' }]; return o; };
+      const c = await bootP({ projects: reg(), repos: { snapshot: snap }, ledger: l });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        const tasks = b.projects[0].tasks;
+        assert.strictEqual(tasks[0].costUsd, 2.5, 'gate agent 2.0 + attempt agent 0.5; the zero-spend attempt adds nothing');
+        assert.strictEqual(tasks[1].costUsd, null, 'no spend at all is null, not 0');
+        checkBody(b);
+      } finally { await haltP(c); l.close(); }
+      const off = await bootP({ projects: reg(), repos: { snapshot: snap } });
+      try {
+        const b = JSON.parse((await getP(off.port, '/api/pipeline')).text);
+        assert.ok(b.projects[0].tasks.every((t) => t.costUsd === null));
+      } finally { await haltP(off); }
     });
 
     await atest('[4b-api] /api/pipeline: ledger off gives zero role spend and no red-team $/merge', async () => {
@@ -10865,6 +10891,186 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.deepStrictEqual(Object.keys(A.attentionState({ sessions: [] })).sort(), ['amber', 'count', 'items']);
       });
     }
+  }
+
+  /* ---- 4b step 6: console Pipeline tab ---- */
+  {
+    const cj = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'index.html'), 'utf8');
+    const consts = ['PIPE_STEPS', 'OUTCOME_LABEL', 'ROLE_LABEL', 'IDLE_LABEL', 'INSTALL_CMDS'].map((n) => cj.match(new RegExp('^const ' + n + ' = .*;$', 'm'))[0]);
+    const fnames = ['estMoney', 'esc', 'largestRemainder', 'relTime', 'pillText', 'ringIcon', 'pillHtml', 'parseRoute', 'initialRoute',
+      'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'pipelineSteps', 'outcomeShape', 'stepShape', 'findingsHtml', 'taskBrief', 'taskCardHtml',
+      'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'installHtml', 'pipelineHasData', 'pipelineBody'];
+    const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
+    const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
+    const NOW = 1_800_000_000_000;
+    const gate = (o) => ({ review_run_id: 'r1', outcome: o, tests_passed: true, reviewed_at: '2026-10-01T00:00:00Z', model: 'm' });
+    const task = (stage, over) => Object.assign({ task: 'demo', stage, step: 'x', reason: null, attempt: 1, gate: gate('pass'), findings: [], startedAt: NOW - 8 * 60000, updatedAt: NOW - 60000, reviewRuns: 2, expired: false }, over || {});
+    const body = (tasks, over) => Object.assign({
+      projects: [{ id: 'p1', name: 'alpha', tasks, idle: tasks.length ? null : 'no-task' }],
+      signals: { days: 30, projects: [{ id: 'p1', gate: { outcome: 'pass', task: 'demo', ageMs: 3600000 } }],
+        outcomes: { n: 10, pass: 6, block: 2, needs_context: 1, error: 1, skipped: 0 }, rework: { n: 4, median: 1, max: 3, excluded: 1 }, runsThisWeek: 5 },
+      roleSpend: { enabled: true, days: 30, roles: { builder: { costUsd: 3, explicit: 2, inferred: 1, unattributed: 0 }, 'red-team': { costUsd: 1, explicit: 0, inferred: 0, unattributed: 1 }, scribe: { costUsd: 0 }, main: { costUsd: 0 }, auxiliary: { costUsd: 0 }, unattributed: { costUsd: 0 } } },
+      redTeamPerMerge: { mean: 0.5, n: 3, excluded: 1 },
+      routing: { models: [{ agent: 'builder', role: 'builder', model: 'sonnet' }], projects: [{ id: 'p1', redTeam: { agent: 'red-team', fallback: 'red-team-lite', onFallback: 'warn' } }] },
+      plugin: { installed: true, version: '0.1.0' },
+    }, over || {});
+    const states = (t) => T.pipelineSteps(t).map((s) => s.state).join(',');
+
+    test('[4b-tab] #pipeline parses; unknown hashes still fall back to projects; saved tab is honoured', () => {
+      assert.strictEqual(T.parseRoute('#pipeline'), 'pipeline');
+      assert.strictEqual(T.parseRoute('#/Pipeline'), 'pipeline');
+      assert.strictEqual(T.parseRoute('#spend'), 'spend');
+      for (const j of ['', '#nope', '#pipeline/x', null, undefined]) assert.strictEqual(T.parseRoute(j), 'projects', String(j));
+      assert.strictEqual(T.initialRoute('', 'pipeline'), 'pipeline');
+      assert.strictEqual(T.initialRoute('#spend', 'pipeline'), 'spend');
+      assert.strictEqual(T.initialRoute('', 'bogus'), 'projects');
+    });
+
+    test('[4b-tab] nav order is Projects, Spend, Pipeline and the tab is registered', () => {
+      const order = [...html.matchAll(/data-route="(\w+)"/g)].map((m) => m[1]);
+      assert.deepStrictEqual(order, ['projects', 'spend', 'pipeline']);
+      assert.match(cj, /const TABS = \{ projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline' \}/);
+      assert.match(cj, /getJson\('\/api\/pipeline'\)/);
+    });
+
+    test('[4b-tab] every stage renders the right track state', () => {
+      assert.strictEqual(states(task('architect')), 'current,pending,pending,pending');
+      assert.strictEqual(states(task('builder')), 'done,current,pending,pending');
+      assert.strictEqual(states(task('red-team')), 'done,done,current,pending');
+      assert.strictEqual(states(task('decision')), 'done,done,decision,pending');
+      assert.strictEqual(states(task('ready')), 'done,done,done,current');
+      assert.strictEqual(states(task('unknown')), 'pending,pending,pending,pending');
+      assert.deepStrictEqual(T.pipelineSteps(task('architect')).map((s) => s.label), ['Architect', 'Builder', 'Red team', 'Merge']);
+      assert.strictEqual(T.pipelineSteps(task('builder', { step: 'Fixing 2 findings' }))[1].status, 'Fixing 2 findings');
+      assert.strictEqual(T.pipelineSteps(task('ready', { step: 'Ready: run /sereno:merge' }))[3].status, 'Ready: run /sereno:merge');
+      assert.strictEqual(T.pipelineSteps(task('decision', { step: 'Needs a decision' }))[2].status, 'Needs a decision');
+    });
+
+    test('[4b-tab] repair marker only when a repair happened; header counts', () => {
+      const rep = T.taskCardHtml('alpha', task('builder', { step: 'Fixing 2 findings', attempt: 2 }), null, NOW);
+      assert.match(rep, /Repair loop/);
+      assert.match(rep, /attempt 2/);
+      assert.ok(!/Repair loop/.test(T.taskCardHtml('alpha', task('red-team'), null, NOW)));
+      const b = body([task('builder', { step: 'Fixing 1 finding', attempt: 2 }), task('decision', { task: 'd2' }), task('ready', { task: 'r3' })]);
+      assert.deepStrictEqual(T.pipelineCounts(b), { active: 3, repairs: 1, decisions: 1, runs: 5 });
+      assert.match(T.pipelineBody(b, [], NOW), /3 active tasks · 1 repair · 1 decision · 5 runs this week/);
+    });
+
+    test('[4b-tab] amber only on a pending decision: the pill and the decision step, never expired or other stages', () => {
+      assert.match(T.pillHtml(T.pipelineCounts(body([task('decision')])).decisions), /1 decision needs you/);
+      assert.strictEqual(T.pillHtml(T.pipelineCounts(body([task('ready')])).decisions), '');
+      for (const s of ['architect', 'builder', 'red-team', 'ready', 'unknown']) {
+        assert.ok(!/tstep-decision|ptask[^"]*decision/.test(T.taskCardHtml('alpha', task(s), null, NOW)), s);
+      }
+      const dec = T.taskCardHtml('alpha', task('decision'), null, NOW);
+      assert.match(dec, /tstep-decision/);
+      assert.match(dec, /class="ptask decision"/);
+      const exp = T.taskCardHtml('alpha', task('decision', { expired: true }), null, NOW);
+      assert.ok(!/decision/.test(exp.replace(/Needs a decision/g, '')), exp);
+      assert.match(exp, /class="ptask expired"/);
+      assert.match(exp, /Expired/);
+      assert.strictEqual(T.pipelineCounts(body([task('decision', { expired: true })])).decisions, 0);
+      assert.ok(!/pill-amber/.test(T.pipelineBody(body([task('decision', { expired: true })]), [], NOW)));
+    });
+
+    test('[4b-tab] outcome shapes are distinct and every one carries a text label', () => {
+      const shapes = ['pass', 'block', 'needs_context', 'error', 'skipped'].map((k) => T.outcomeShape(k));
+      assert.strictEqual(new Set(shapes).size, 5);
+      assert.match(shapes[1], /M3\.8 12\.2L12\.2 3\.8/);   // slash
+      assert.match(shapes[3], /M8 2\.5L14 13H2z/);          // triangle
+      const h = T.outcomesHtml({ n: 10, pass: 6, block: 2, needs_context: 1, error: 1, skipped: 0 });
+      for (const l of ['Pass', 'Block', 'Needs context', 'Error', 'Skipped']) assert.ok(h.includes('>' + l + '<'), l);
+    });
+
+    test('[4b-tab] every rate carries n; every dollar figure carries est.', () => {
+      const h = T.outcomesHtml({ n: 10, pass: 6, block: 2, needs_context: 1, error: 1, skipped: 0 });
+      assert.strictEqual((h.match(/n=10/g) || []).length, 5);
+      assert.match(h, /60% · n=10/);
+      assert.match(T.outcomesHtml({ n: 0 }), /n=0/);
+      assert.strictEqual(T.reworkLine({ n: 4, median: 1, max: 3, excluded: 1 }), 'Rework: median 1 · max 3 reruns before a pass (n=4, 1 excluded (no pass yet))');
+      assert.match(T.reworkLine({ n: 0, median: null, max: null, excluded: 2 }), /^Rework: — \(n=0, 2 excluded/);
+      assert.strictEqual(T.perMergeLine({ mean: 0.5, n: 3, excluded: 1 }), 'Red team per merge: $0.50 est. (n=3, 1 excluded)');
+      assert.strictEqual(T.perMergeLine({ mean: null, n: 0, excluded: 2 }), 'Red team per merge: — (n=0, 2 excluded)');
+      const rs = T.roleSpendHtml(body([]).roleSpend);
+      assert.match(rs, /\$3\.00 est\./);
+      assert.match(rs, /75% of spend/);
+      assert.match(rs, /67% explicit · 33% inferred · 0% unattributed/);
+      assert.strictEqual(T.roleSpendHtml({ enabled: false }), '<p class="empty-note">Spend history is off</p>');
+      const card = T.taskCardHtml('alpha', task('red-team', { costUsd: 1.234 }), null, NOW);
+      assert.match(card, /\$1\.23 est\. · 2 review runs/);
+      const noMoney = T.taskCardHtml('alpha', task('red-team'), null, NOW);
+      assert.ok(!/\$/.test(noMoney.replace(/<[^>]*>/g, '')), 'no figure, no $');
+      assert.match(noMoney, /2 review runs/);
+      const full = T.pipelineBody(body([task('red-team', { costUsd: 2 })]), [], NOW).replace(/<[^>]*>/g, ' ');
+      let seen = 0;
+      for (const m of full.matchAll(/\$[\d.]+/g)) { seen++; assert.ok(full.slice(m.index + m[0].length).startsWith(' est.'), m[0]); }
+      assert.ok(seen >= 4);
+    });
+
+    test('[4b-tab] idle repos, gate state, routing and the Scribe line', () => {
+      const idle = (k) => T.pipelineBody(body([], { projects: [{ id: 'p1', name: 'alpha', tasks: [], idle: k }] }), [], NOW);
+      assert.match(idle('no-task'), /No active task/);
+      assert.match(idle('gate-off'), /Gate off/);
+      assert.match(idle('latest-pass'), /Latest review passed/);
+      const full = T.pipelineBody(body([task('red-team')]), [], NOW);
+      assert.match(full, /oshape-pass/);
+      assert.match(full, /<strong>alpha<\/strong><span>Pass<\/span><span class="mono">demo<\/span><span class="quiet-text">1 hour ago/);
+      assert.match(full, /red-team-lite/);
+      assert.match(full, /sonnet/);
+      assert.ok(!/Scribe ·/.test(full), 'no brief, no Scribe line');
+      const withBrief = T.taskCardHtml('alpha', task('red-team'), { branches: [{ name: 'task/demo', freshness: 'fresh', generatedAt: NOW - 5 * 60000 }] }, NOW);
+      assert.match(withBrief, /Scribe · brief updated 5 min ago/);
+      assert.ok(!/Scribe ·/.test(T.taskCardHtml('alpha', task('red-team'), { branches: [{ name: 'task/demo', freshness: 'none' }] }, NOW)));
+      assert.match(T.taskCardHtml('alpha', task('red-team'), null, NOW), /Started 8 min ago/);
+    });
+
+    test('[4b-tab] findings are collapsible, text-escaped and show file:line', () => {
+      const h = T.taskCardHtml('alpha', task('builder', { findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'Wrong thing' }] }), null, NOW);
+      assert.match(h, /<details class="pfind"><summary>1 finding<\/summary>/);
+      assert.match(h, /src\/a\.js:12/);
+      assert.match(h, /Wrong thing/);
+      assert.strictEqual(T.findingsHtml([]), '');
+    });
+
+    test('[4b-tab] install empty state: two commands with copy buttons; data keeps the tab normal', () => {
+      const empty = body([], { projects: [{ id: 'p1', name: 'alpha', tasks: [], idle: 'no-task' }], plugin: null,
+        signals: { days: 30, projects: [], outcomes: { n: 0 }, rework: { n: 0 }, runsThisWeek: 0 }, routing: { models: [], projects: [{ id: 'p1', redTeam: null }] } });
+      const h = T.pipelineBody(empty, [], NOW);
+      assert.match(h, /\/plugin marketplace add homestockr\/sereno/);
+      assert.match(h, /\/plugin install sereno@sereno/);
+      assert.strictEqual((h.match(/data-act="copy"/g) || []).length, 2);
+      assert.match(h, /data-text="\/plugin install sereno@sereno"/);
+      const withData = T.pipelineBody(body([task('builder')], { plugin: null }), [], NOW);
+      assert.ok(!/data-act="copy"/.test(withData));
+      assert.match(withData, /Active tasks/);
+      assert.match(T.pipelineBody(null, [], NOW), /unavailable/);
+    });
+
+    test('[4b-tab] hostile strings from the API are escaped everywhere', () => {
+      const evil = '<img src=x onerror=alert(1)>"\'&';
+      const hostile = () => task('decision', { task: evil, step: evil, findings: [{ severity: evil, kind: evil, file: evil, line: 3, summary: evil }], gate: gate(evil) });
+      const b = body([], {
+        projects: [{ id: 'p1', name: evil, tasks: [hostile()], idle: null }, { id: 'p2', name: evil, tasks: [], idle: evil }],
+        signals: { days: 30, projects: [{ id: 'p1', gate: { outcome: evil, task: evil, ageMs: 5 } }, { id: evil, gate: null }], outcomes: { n: 1, pass: 1 }, rework: { n: 0 }, runsThisWeek: 0 },
+        routing: { models: [{ agent: evil, role: evil, model: evil }], projects: [{ id: 'p1', redTeam: { agent: evil, fallback: evil, onFallback: evil } }] },
+      });
+      const h = T.pipelineBody(b, [{ id: 'p1', branches: [{ name: 'task/' + evil, freshness: 'fresh' }] }], NOW);
+      assert.ok(!h.includes('<img'), h);
+      assert.match(h, /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
+      assert.ok(!h.includes('data-text="' + evil));
+    });
+
+    test('[4b-tab] source: one innerHTML write, no inline styles, 11px minimum, the tab posts nothing', () => {
+      assert.strictEqual((cj.match(/\.innerHTML\s*=/g) || []).length, 1);
+      const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
+      const tab = css.slice(css.indexOf('Pipeline tab (Phase 4b step 6)'));
+      for (const m of tab.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+      assert.ok(!/style=/.test(cj.slice(cj.indexOf('Pipeline tab: pure helpers'), cj.indexOf('/* ---------- state ---------- */'))));
+      assert.match(cj, /async function refreshPipeline/);
+      assert.ok(!/postAction\([^)]*pipeline/i.test(cj));
+      assert.ok(!/\r|[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(cj + css + html));
+    });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

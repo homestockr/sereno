@@ -476,6 +476,14 @@ function openLedger(opts = {}) {
     return Number(r.c) / 1e6;
   }
 
+  /** Summed request cost (USD) for one agent id alone (agent ids are unique). @param {string} agentId */
+  function spendForAgentId(agentId) {
+    live();
+    if (typeof agentId !== 'string' || !agentId) return 0;
+    const r = db.prepare('SELECT COALESCE(SUM(cost_micros),0) AS c FROM requests WHERE agent_id=?').get(agentId);
+    return Number(r.c) / 1e6;
+  }
+
   /** True once any request has ever been recorded (not just today). */
   function hasAny() {
     live();
@@ -515,7 +523,7 @@ function openLedger(opts = {}) {
   }
 
   prune(retentionDays);
-  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, today, hasAny, roleSpend, spendForAgent, reconcile, prune, close, _db: db };
+  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, prune, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }

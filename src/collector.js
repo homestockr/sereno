@@ -381,6 +381,7 @@ function createCollector(store, port, opts) {
       } catch (_) { spend = null; }
     }
     const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const briefTime = (v) => { const t = typeof v === 'string' ? Date.parse(v) : NaN; return Number.isFinite(t) ? t : null; };
     const normsOf = new Map(meta.map((m) => [m.p.id, pathsOf(m.p, m.st)]));
     const owns = (cwd, id) => {
       const mine = depth(cwd, normsOf.get(id) || []);
@@ -419,7 +420,7 @@ function createCollector(store, port, opts) {
         },
         prs: st ? num(st.prs) : null,
         branches: st && Array.isArray(st.branches)
-          ? st.branches.map((x) => ({ name: x.name, freshness: x.freshness || 'none', now: x.brief ? (x.brief.now ?? null) : null, behindSince: num(x.behindSince) }))
+          ? st.branches.map((x) => ({ name: x.name, freshness: x.freshness || 'none', now: x.brief ? (x.brief.now ?? null) : null, generatedAt: x.brief ? briefTime(x.brief.generatedAt) : null, behindSince: num(x.behindSince) }))
           : [],
         spend14: sp ? { costMicros: sp.costMicros, trend: sp.trend.slice() } : null,
         lastActivity: last,
@@ -449,12 +450,33 @@ function createCollector(store, port, opts) {
     f = f && typeof f === 'object' ? f : {};
     return { severity: pStr(f.severity, 16), kind: pStr(f.kind, 32), file: pStr(f.file, 260), line: pNum(f.line), summary: pStr(f.summary, 300) };
   }
+  /** Ledger spend (USD, an estimate) over a task's runs: each gate's agent and each attempt's agent; null when nothing was measured. */
+  function taskCost(t) {
+    if (!ledger || typeof ledger.spendForAgentId !== 'function') return null;
+    let sum = 0, any = false;
+    const seen = new Set();
+    const add = (c) => { if (Number.isFinite(c) && c > 0) { sum += c; any = true; } };
+    try {
+      for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+        if (!g || typeof g.agent_id !== 'string' || !g.agent_id || seen.has(g.agent_id)) continue;
+        seen.add(g.agent_id);
+        add(typeof g.session_id === 'string' && g.session_id ? ledger.spendForAgent(g.session_id, g.agent_id) : ledger.spendForAgentId(g.agent_id));
+      }
+      for (const a of (Array.isArray(t.attempts) ? t.attempts : [])) {
+        if (!a || typeof a.agent_id !== 'string' || !a.agent_id || seen.has(a.agent_id)) continue;
+        seen.add(a.agent_id);
+        add(ledger.spendForAgentId(a.agent_id));
+      }
+    } catch (_) { return null; }
+    return any ? sum : null;
+  }
   function pipeTask(t) {
     return {
       task: pStr(t.task, 128), stage: pStr(t.stage, 32), step: pStr(t.step, 120), reason: pStr(t.reason, 64), attempt: pNum(t.attempt),
       gate: pipeGate(t.gate),
       findings: Array.isArray(t.findings) ? t.findings.slice(0, 50).map(pipeFinding) : [],
       startedAt: pNum(t.startedAt), updatedAt: pNum(t.updatedAt), reviewRuns: pNum(t.reviewRuns) || 0, expired: pBool(t.expired),
+      costUsd: taskCost(t),
     };
   }
   function pipeRedTeam(r) {
