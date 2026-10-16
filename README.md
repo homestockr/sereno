@@ -46,7 +46,9 @@ Windows 11 · Node + Electron · no build step, no framework, no deps beyond Ele
 **State is carried by shape, not colour** — an equalizer for running, a dotted ring
 for thinking, a hollow ring for idle, a dashed rule for stale. That survives a
 daltonized theme and a glance from across the room; a coloured dot does not. The
-one interruption that matters gets warm amber rather than alarm red.
+one interruption that matters gets warm amber rather than alarm red. The widget and the
+console share a navy palette, with a matching light variant that follows your system
+setting; amber stays reserved for "needs you" and pending decisions.
 
 ## Install
 
@@ -190,7 +192,14 @@ A "Today · estimated usage" block appears under the usage windows: today's esti
 
 ### Console
 
-`http://127.0.0.1:8787/console`, local only. One tab for now: Spend. It shows today and month-to-date totals with the unattributed share and request count; usage cost by source for 24 hours (hourly), 7 or 30 days; each project by source with its attribution split and a 14-day trend; the ten costliest prompts by time, project, session, cost, model and attribution. Prompt text is never stored, so it never appears. An attention panel turns amber only when a session is waiting on a permission prompt, telling you to answer it in the terminal. Light and dark themes follow your system setting.
+`http://127.0.0.1:8787/console`, local only. The **Spend** tab has four sub-tabs (the route keeps them, e.g. `#spend/projects`):
+
+- **Overview**: today and month-to-date totals with the unattributed share, and usage cost by source as stacked bars for 24 hours (hourly), 7 or 30 days.
+- **Projects**: where the spend goes, project by source (main, subagent, auxiliary), each with a 14-day trend; the rest fold into "Other projects".
+- **Turns**: the costliest turns by time, project, session id, cost, models and attribution. Prompt text is never stored, so it never appears.
+- **Cache**: cache read, cache write and uncached input as shares of tokens. Token shares only; there is no savings figure.
+
+The side panel shows the selected project: month-to-date total, source breakdown, the attribution mix with its n, and a 14-day trend. "View project" jumps to it in Projects. Every dollar figure is an estimate. An attention panel turns amber only when a session is waiting on a permission prompt, telling you to answer it in the terminal.
 
 **Telemetry.** The ledger needs Claude Code's OpenTelemetry logs exported to Sereno
 at `http://127.0.0.1:8787`. Offered as a **separate confirmation** after you enable
@@ -240,7 +249,20 @@ cost estimate.
 
 The console opens on **Projects**, at `http://127.0.0.1:8787/console`. Every git repo a
 Claude Code session runs in appears there by itself. A worktree counts as its repo, not as
-a second project. Hide a project from its **⋯** menu. Hidden projects are not polled.
+a second project. Hidden projects are not polled.
+
+**The navigator.** A list on the left, the selected project in detail on the right. Filter chips
+(**All**, **Active**, **With blockers**, each with a count) sit above a search box (name and path)
+and a sort menu (Pinned first, Recent, Name). Active is the default: a project is active when it
+has a live session, a commit in the last 14 days, or a pipeline task that has not expired.
+The rest fold into a collapsed **Inactive** group, so 90 repos stay usable. Pin a project with the
+pin on its row; pins live in `~/.sereno/projects.json` and are Sereno's own setting, not a change
+to the repo. **Manage projects** (top right) hides and unhides. Arrow keys move through the list.
+
+The detail shows the brief (Now, Next, Blocked, with its freshness), a 14-day spend sparkline
+labelled `est.`, and tabs for branches, recent activity (commit subjects, brief updates and
+pipeline events, kept in memory only) and git and PRs. With no brief it offers **Copy
+/sereno:brief**.
 
 **Briefs.** A brief is `.sereno/briefs/<branch>.md` in a repo: front matter, then three
 lines, `Now:`, `Next:` and `Blocked:`. The `/` in a branch name becomes `%2F`, so `feat/x`
@@ -290,8 +312,9 @@ repo points to on to a share. A mapped network drive letter looks local and cann
 apart. Open PR counts come from `gh`, when it is installed and signed in, using only the
 GitHub owner and name from `origin`.
 
-**Review in terminal** is in the console's attention panel. It raises the waiting session's
-terminal, as the widget's button does. It is not available under `npm run serve`.
+**Review in terminal** is in the console's attention panel and in a project's detail when it has a
+live session. It raises the session's terminal, as the widget's button does. It is the only
+action Sereno offers. It is not available under `npm run serve`.
 
 ## Pipeline tab (alpha)
 
@@ -300,6 +323,10 @@ Builder, Red team, Merge track, repairs, tasks that need a decision, the gate st
 and the last 30 days of review outcomes, rework and spend by role. It reads the plugin's
 `.sereno/` files in each project and never acts: the plugin does everything that changes a
 repo. A task waiting on you raises "Review needs a decision" the way "needs you" does.
+
+Tasks are rows with Plan, Build, Review and Merge, pill sub-tabs, an accent outline on the
+selected row, and a row of outcome dots for recent reviews. Amber marks only a task waiting on
+your decision.
 
 Every dollar figure is an estimate. Spend by role is split into **explicit** (the request is
 linked to a subagent), **inferred** (no link, but the model belongs to one role only) and

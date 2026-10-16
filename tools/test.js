@@ -13324,6 +13324,244 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  // ---- [alpha6 exit] release gate: the six exit criteria of docs/plans/alpha6-projects-navigator-theme.md, end to end ----
+  // Temp homes, the real collector on an ephemeral port, the real registry, and the real renderer functions
+  // lifted out of console.js. Fixtures are synthetic; nothing here binds 8787.
+  {
+    const projects = require('../src/projects.js');
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const ccss = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+    const wcss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+    const names = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'hasBlocker', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
+      'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'navCounts', 'navFilter', 'navBranches',
+      'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
+      'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
+      'navManageHtml', 'navPage'];
+    const consts = ["const OUTCOME_LABEL = { pass: 'Pass', block: 'Block', needs_context: 'Needs context', error: 'Error', skipped: 'Skipped' };",
+      "const INSTALL_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];"].concat(cjs.match(/^const NAV_\w+ = .*;$/gm));
+    const R = new Function(consts.join('\n') + '\n' + names.map((n) => {
+      const m = cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'));
+      assert.ok(m, 'console.js has ' + n);
+      return m[0];
+    }).join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+
+    const DAY = 86400000;
+    const tmps = [];
+    const tmp = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-exit-'))); tmps.push(d); return d; };
+    const withHome = async (fn) => {
+      const home = tmp(); const prev = process.env.SERENO_HOME; const prevCfg = process.env.CLAUDE_CONFIG_DIR;
+      process.env.SERENO_HOME = home; process.env.CLAUDE_CONFIG_DIR = path.join(home, 'claude');
+      try { await fn(home); } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        if (prevCfg === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevCfg;
+      }
+    };
+    const rq = (port, o) => new Promise((resolve, reject) => {
+      const body = o.body === undefined ? null : (typeof o.body === 'string' ? o.body : JSON.stringify(o.body));
+      const headers = Object.assign({}, o.headers || {});
+      if (body !== null) headers['content-length'] = Buffer.byteLength(body);
+      const req = http.request({ host: '127.0.0.1', port, path: o.path, method: o.method || 'GET', headers }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (c) => { t += c; });
+        r.on('end', () => resolve({ status: r.statusCode, text: t }));
+      });
+      req.on('error', reject);
+      req.end(body === null ? undefined : body);
+    });
+    const boot = async (store, opts) => {
+      const c = createCollector(store, 0, opts);
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      return c;
+    };
+    const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const getJson = async (port, p) => JSON.parse((await rq(port, { path: p })).text);
+    const writeRegistry = (home, entries) => fs.writeFileSync(path.join(home, 'projects.json'), JSON.stringify({ projects: entries }));
+    const entryOf = (id, name, repoPath) => ({ id, name, repoPath, hidden: false, pinned: false, firstSeen: 1 });
+    const snapOf = (extra) => Object.assign({ id: 'x', worktrees: [], branches: [], error: false, freshness: 'none', brief: null, lastCommitAt: null, commits: [], pipeline: null }, extra || {});
+    const UI = (o) => Object.assign({ filter: 'active', q: '', sort: 'pinned', open: { inactive: false }, tab: 'branches', managing: false }, o);
+    const pageOf = (r, o) => R.navPage(Object.assign({ projects: r.projects, counts: r.counts, sessions: [], nowMs: Date.now(), sel: null, pluginMissing: false, ui: UI(), opts: { review: true } }, o || {}));
+    const files = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+    const tokenOf = async (port) => JSON.parse((await rq(port, { path: '/api/token' })).text).token;
+
+    await atest('[alpha6 exit 1] about 90 registered projects: Active is the default, the inactive ones sit in a collapsed group', async () => {
+      await withHome(async (home) => {
+        const now = Date.now();
+        const entries = Array.from({ length: 90 }, (_, i) => entryOf('e' + String(i).padStart(2, '0'), 'repo-' + String(i).padStart(2, '0'), 'C:/exit/repo-' + i));
+        writeRegistry(home, entries);
+        const snap = {};
+        entries.forEach((e, i) => { snap[e.id] = snapOf({ lastCommitAt: now - (i < 12 ? (i + 1) * 3600000 : 60 * DAY) }); });
+        const c = await boot(new Store(), { projects: projects.createRegistry(), repos: { snapshot: () => snap } });
+        try {
+          const r = await getJson(c.port, '/api/projects');
+          assert.strictEqual(r.projects.length, 90);
+          assert.strictEqual(r.counts.total, 90);
+          assert.strictEqual(r.counts.active, 12);
+          // the client opens on Active, with the inactive group closed
+          assert.match(cjs, /proj: \{ mode: 'loading', list: \[\], counts: null, filter: 'active'[^}]*open: \{ inactive: false \}/);
+          const page = pageOf(r);
+          assert.match(page, /data-filter="active" aria-pressed="true"/);
+          assert.match(page, /All <span class="num">90<\/span>/);
+          assert.match(page, /Active <span class="num">12<\/span>/);
+          assert.strictEqual((page.match(/class="nrow[ "]/g) || []).length, 12, 'only the active projects are listed by default');
+          assert.ok(!/ninactive/.test(page), 'the default view lists no inactive project');
+          // All: the other 78 fold into one collapsed group
+          const all = pageOf(r, { ui: UI({ filter: 'all' }) });
+          assert.match(all, /<details class="ngroup ninactive"><summary>Inactive \(78\)<\/summary>/);
+          assert.strictEqual((all.match(/<details/g) || []).length, 1);
+          assert.ok(!/ninactive" open>/.test(all), 'collapsed until the user opens it');
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[alpha6 exit 2] pin and unpin persist in projects.json; without a valid token the request is refused', async () => {
+      await withHome(async (home) => {
+        writeRegistry(home, [entryOf('pa', 'alpha', 'C:/exit/a'), entryOf('pb', 'beta', 'C:/exit/b')]);
+        const file = path.join(home, 'projects.json');
+        const before = fs.readFileSync(file, 'utf8');
+        const c = await boot(new Store(), { projects: projects.createRegistry(), repos: { snapshot: () => ({ pa: snapOf(), pb: snapOf() }) } });
+        try {
+          const token = await tokenOf(c.port);
+          const good = { origin: 'http://127.0.0.1:' + c.port, 'content-type': 'application/json', 'x-sereno-token': token };
+          const post = (h, b, id) => rq(c.port, { method: 'POST', path: '/api/projects/' + (id || 'pa') + '/pin', headers: h, body: b });
+          const noTok = Object.assign({}, good); delete noTok['x-sereno-token'];
+          assert.strictEqual((await post(noTok, { pinned: true })).status, 403, 'no token');
+          assert.strictEqual((await post(Object.assign({}, good, { 'x-sereno-token': 'nope' }), { pinned: true })).status, 403, 'wrong token');
+          assert.strictEqual((await post(Object.assign({}, good, { origin: 'http://evil.example' }), { pinned: true })).status, 403, 'foreign origin');
+          assert.strictEqual(fs.readFileSync(file, 'utf8'), before, 'a refused request changes nothing on disk');
+          // a valid pin persists, survives a reload of the registry, and leads the list
+          assert.strictEqual((await post(good, { pinned: true }, 'pb')).status, 204);
+          assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).projects.find((p) => p.id === 'pb').pinned, true);
+          assert.strictEqual(projects.createRegistry().list().find((p) => p.id === 'pb').pinned, true);
+          const r = await getJson(c.port, '/api/projects');
+          assert.strictEqual(r.projects.find((p) => p.id === 'pb').pinned, true);
+          assert.match(pageOf(r, { ui: UI({ filter: 'all' }) }), /<h3 class="ngroup-title">Pinned <span>1<\/span>/);
+          assert.strictEqual((await post(good, { pinned: false }, 'pb')).status, 204);
+          assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).projects.find((p) => p.id === 'pb').pinned, false);
+          assert.strictEqual(projects.createRegistry().list().find((p) => p.id === 'pb').pinned, false);
+          assert.ok(!fs.existsSync(file + '.tmp'), 'written atomically');
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[alpha6 exit 3] activity holds no text but capped commit subjects, and none of it reaches the disk', async () => {
+      await withHome(async (home) => {
+        const CANARY = 'EXIT3-CANARY-SUBJECT';
+        const now = Date.now();
+        writeRegistry(home, [entryOf('pa', 'alpha', 'C:/exit/a')]);
+        const commits = Array.from({ length: 14 }, (_, i) => ({ at: now - (i + 1) * 3600000, subject: CANARY + ' ' + i + ' ' + 'Q'.repeat(300) }));
+        const stamp = (h) => new Date(now - h * 3600000).toISOString();
+        const snap = { pa: snapOf({ commits, lastCommitAt: commits[0].at,
+          brief: { now: CANARY + ' brief now', next: CANARY + ' brief next', blocked: CANARY + ' blocked', generatedAt: stamp(30) },
+          pipeline: { tasks: [{ task: CANARY + '-task', stage: 'building', expired: false, attempts: [{ attempt: 1, outcome: 'pass', started_at: stamp(9), ended_at: stamp(8) }], gates: [{ reviewed_at: stamp(7), outcome: 'block' }] }] } }) };
+        const c = await boot(new Store(), { projects: projects.createRegistry(), repos: { snapshot: () => snap } });
+        try {
+          const token = await tokenOf(c.port);
+          const r = await getJson(c.port, '/api/projects');
+          const a = r.projects[0].activity;
+          assert.ok(a.length > 0 && a.length <= 20);
+          assert.deepStrictEqual(Array.from(new Set(a.map((e) => e.kind))).sort(), ['brief', 'commit', 'pipeline']);
+          for (const e of a) {
+            assert.deepStrictEqual(Object.keys(e).sort(), e.kind === 'pipeline' ? ['at', 'kind', 'outcome', 'subject'] : ['at', 'kind', 'subject']);
+            if (e.kind === 'commit') { assert.ok(typeof e.subject === 'string' && e.subject.length <= 120); assert.ok(!/[\x00-\x1f\x7f-\x9f]/.test(e.subject)); }
+            else assert.strictEqual(e.subject, null, e.kind + ' carries no text');
+            if (e.kind === 'pipeline') assert.ok(e.outcome === null || ['pass', 'fail', 'block', 'needs_context', 'error', 'skipped'].includes(e.outcome), 'outcome is an enum, not text: ' + e.outcome);
+          }
+          assert.strictEqual(a.filter((e) => e.kind === 'commit').length, 10, 'at most 10 commit subjects');
+          assert.ok(!JSON.stringify(a.filter((e) => e.kind !== 'commit')).includes(CANARY), 'no brief or task text in the activity');
+          // a pin plus a few reads: whatever the app writes, it never writes activity
+          const good = { origin: 'http://127.0.0.1:' + c.port, 'content-type': 'application/json', 'x-sereno-token': token };
+          assert.strictEqual((await rq(c.port, { method: 'POST', path: '/api/projects/pa/pin', headers: good, body: { pinned: true } })).status, 204);
+          await getJson(c.port, '/api/projects'); await getJson(c.port, '/state');
+          // the renderer shows the capped subject
+          assert.match(pageOf(r, { sel: 'pa', ui: UI({ tab: 'activity' }) }), new RegExp(CANARY));
+        } finally { await halt(c); }
+        const found = files(home).map((f) => path.relative(home, f).split(path.sep).join('/'));
+        for (const f of found) {
+          assert.ok(f === 'projects.json' || f.startsWith('claude/'), 'unexpected file under the home: ' + f);
+          assert.ok(!fs.readFileSync(path.join(home, f)).includes(CANARY), 'activity text written to ' + f);
+        }
+        assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(home, 'projects.json'), 'utf8')).projects[0]).sort(), ['firstSeen', 'hidden', 'id', 'name', 'pinned', 'repoPath']);
+      });
+    });
+
+    await atest('[alpha6 exit 4] the only action in the detail pane is Review in terminal, and only with a live session', async () => {
+      await withHome(async (home) => {
+        const repo = tmp();
+        writeRegistry(home, [entryOf('pl', 'livep', repo), entryOf('pq', 'quiet', tmp())]);
+        const store = new Store();
+        store.applyHook('SessionStart', { session_id: 'live-sess', cwd: path.join(repo, 'sub') }, { ppid: 4242 });
+        const snap = { pl: snapOf({ freshness: 'none' }), pq: snapOf({ freshness: 'none' }) };
+        const c = await boot(store, { projects: projects.createRegistry(), repos: { snapshot: () => snap } });
+        try {
+          const r = await getJson(c.port, '/api/projects');
+          const sessions = (await getJson(c.port, '/state')).sessions;
+          const detail = (html) => html.slice(html.indexOf('id="ndetail"'));
+          const live = detail(pageOf(r, { sel: 'pl', sessions, ui: UI({ filter: 'all' }) }));
+          assert.ok(live.length > 10, 'detail rendered');
+          assert.strictEqual((live.match(/data-act="review"/g) || []).length, 1, 'one Review control');
+          assert.match(live, /<button type="button" class="btn-review" data-act="review" data-sid="live-sess">Review in terminal/);
+          const quiet = detail(pageOf(r, { sel: 'pq', sessions, ui: UI({ filter: 'all' }) }));
+          assert.ok(!/data-act="review"|btn-review/.test(quiet), 'no live session, no action');
+          for (const tab of ['branches', 'activity', 'git']) {
+            for (const [sel, ses] of [['pl', sessions], ['pl', []], ['pq', sessions]]) {
+              const d = detail(pageOf(r, { sel, sessions: ses, ui: UI({ filter: 'all', tab }) }));
+              for (const m of d.matchAll(/data-act="([a-z-]+)"/g)) assert.ok(['review', 'copy'].includes(m[1]), 'unexpected action ' + m[1]);
+              for (const m of d.matchAll(/<button\b[^>]*>/g)) assert.match(m[0], /data-act="(review|copy)"|data-ntab=/, m[0]);
+              assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin|resume|kill|stop)"/.test(d));
+              if (ses.length === 0 || sel === 'pq') assert.ok(!/data-act="review"/.test(d));
+            }
+          }
+        } finally { await halt(c); }
+      });
+    });
+
+    test('[alpha6 exit 5] contrast holds for both themes and both stylesheets', () => {
+      const LIGHT = /@media \(prefers-color-scheme: light\) \{\s*:root \{([^}]*)\}\s*\}/;
+      const DARK = /^:root \{([^}]*)\}/m;
+      const decls = (b) => Object.fromEntries([...b.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]));
+      const lum = (hex) => {
+        const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+      };
+      const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+      const sheets = { 'console.css': [ccss, ['--bg', '--panel', '--panel2']], 'app.css': [wcss, ['--bg', '--raised', '--panel2']] };
+      let checked = 0;
+      for (const [name, [css, surfaces]] of Object.entries(sheets)) {
+        const dark = css.match(DARK), light = css.match(LIGHT);
+        assert.ok(dark && light, name + ' has a dark block and a light variant');
+        for (const [mode, t] of [['dark', decls(dark[1])], ['light', Object.assign(decls(dark[1]), decls(light[1]))]]) {
+          for (const s of surfaces) {
+            for (const fg of ['--text', '--muted']) { assert.ok(ratio(t[fg], t[s]) >= 4.5, `${name} ${mode} ${fg} on ${s}: ${ratio(t[fg], t[s]).toFixed(2)}`); checked++; }
+            assert.ok(ratio(t['--quiet'], t[s]) >= 3, `${name} ${mode} --quiet on ${s}: ${ratio(t['--quiet'], t[s]).toFixed(2)}`); checked++;
+          }
+        }
+      }
+      assert.strictEqual(checked, 36, '2 sheets x 2 themes x 3 surfaces x 3 pairs');
+    });
+
+    test('[alpha6 exit 6] amber appears only in needs-you and decision contexts, across console and widget', () => {
+      const rulesOf = (css) => [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] }));
+      const users = (css) => rulesOf(css).filter((r) => /--amber/.test(r.body) && r.sel !== ':root').map((r) => r.sel);
+      assert.deepStrictEqual(users(ccss).sort(), ['.attn-amber .attn-head', '.btn-review', '.mk-dec', '.pill-amber', '.pshape-need', '.prow.decision', '.prow.sel.decision'].sort());
+      assert.deepStrictEqual(users(wcss).sort(), ['.alert #banner', '.blocked .state-symbol', '.timer'].sort());
+      assert.ok(!/amber/i.test(fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8').replace(/\/\/.*$/gm, '')), 'the widget script never names amber');
+      // the console renders those classes only for a blocked session or a pending decision
+      const ps = [{ id: 'c1', name: 'calm', hidden: false, pinned: false, active: true, blockers: false, freshness: 'fresh', lastActivityAt: Date.now(),
+        brief: { now: 'x', next: 'y', blocked: 'None', generatedAt: new Date().toISOString(), behindSince: null }, git: { defaultBranch: 'main', ahead: 0, behind: 0, dirty: false, lastCommitAt: null }, prs: 0,
+        branches: [], spend14: { costMicros: 0, trend: new Array(14).fill(0) }, activity: [], live: { state: 'running', sessionIds: ['s'] }, error: false }];
+      const base = { projects: ps, counts: null, sessions: [{ id: 's', state: 'running', stateSince: Date.now() }], nowMs: Date.now(), sel: 'c1', pluginMissing: false, ui: UI(), opts: { review: true } };
+      const calm = R.navPage(base);
+      assert.ok(!/amber|pshape-need|Needs you/i.test(calm), 'a running session is not amber');
+      const need = R.navPage(Object.assign({}, base, { projects: [Object.assign({}, ps[0], { live: { state: 'blocked', sessionIds: ['s'] } })], sessions: [{ id: 's', state: 'blocked', stateSince: Date.now() }] }));
+      assert.match(need, /pill-amber/);
+      for (const m of cjs.matchAll(/^.*(?:pill-amber|attn-amber|pshape-need|mk-dec|prow decision).*$/gm)) {
+        assert.ok(/blocked|decision|needs|Needs|NEEDS|attn|pshape|count|\bdec\b/.test(m[0]), 'amber class outside a needs-you context: ' + m[0].slice(0, 100));
+      }
+    });
+
+    await atest('[alpha6 exit] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

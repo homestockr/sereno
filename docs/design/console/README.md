@@ -17,6 +17,9 @@ is illustrative.
 | Style sheet | `style-sheet.html` | Role colours (dark/light), attribution fills, gate shapes, amber, type, spacing, live-state shapes |
 | Colour check | `role-colour-cvd.png` | Role colours under protan, deutan and tritan simulation (Machado, severity 100) |
 
+> The console moved to the navy palette on 2026-10-16 (tokens in `console.css` and the widget's
+> `app.css`). The older mockups here predate it, so their colours differ; the rules below still hold.
+
 ## Rules these mockups settle
 
 - **Sereno observes; it never acts.** The attention panel's button is "Review in
