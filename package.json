@@ -59,7 +59,10 @@
       "src/**/*",
       "bin/**/*",
       "templates/**/*",
-      "plugin/bin/lib/**/*",
+      "plugin/bin/lib/recovery.js",
+      "plugin/bin/lib/config.js",
+      "plugin/bin/lib/records.js",
+      "plugin/bin/lib/fsafe.js",
       "plugin/agents/*.md",
       "plugin/skills/*/SKILL.md",
       "package.json"

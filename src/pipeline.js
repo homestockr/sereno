@@ -314,6 +314,8 @@ async function readRepo(root, opts) {
 }
 
 const EXPIRE_MS = 7 * 24 * 3600 * 1000;
+/** Whether a task last touched at `updatedAt` has aged out at `now`. @param {number | null} updatedAt @param {number} now */
+function isExpired(updatedAt, now) { return typeof updatedAt === 'number' && now - updatedAt > EXPIRE_MS; }
 const NON_LOW = (/** @type {any} */ f) => f && f.severity !== 'low';
 
 /**
@@ -363,7 +365,7 @@ async function taskView(root, entry, cfg, git, now, opts) {
   if (!stamps.length && spec) push(spec.created_at);
   const startedAt = starts.length ? Math.min(...starts) : (stamps.length ? Math.min(...stamps) : null);
   const updatedAt = stamps.length ? Math.max(...stamps) : null;
-  const expired = updatedAt !== null && now - updatedAt > EXPIRE_MS;
+  const expired = isExpired(updatedAt, now);
 
   const view = (/** @type {string} */ stage, /** @type {string} */ step, /** @type {string | null} */ reason, /** @type {number | null} */ attempt) =>
     ({ task: entry.task, stage, step, reason, attempt, gate, findings, startedAt, updatedAt, reviewRuns: gates.length, expired });
@@ -388,7 +390,10 @@ async function taskView(root, entry, cfg, git, now, opts) {
     }
 
     // Merged: the reviewed commit is already in the spec's base branch.
-    const head = gate && gate.head_commit;
+    // Only a gate that belongs to the latest attempt (or a latest attempt that passed/skipped) can
+    // say "merged"; a task re-opened under the same name after a merge has a fresh built attempt.
+    const gateIsLatest = !!byRun || latest.outcome === 'pass' || latest.outcome === 'skipped';
+    const head = gateIsLatest && gate && gate.head_commit;
     const base = spec && spec.base_branch;
     if (head && base && briefsLib.validBranchName(base)) {
       try { await git(['merge-base', '--is-ancestor', head, 'refs/heads/' + base], root); return view('merged', 'Merged', null, latest.attempt); }
@@ -637,4 +642,4 @@ function redTeamPerMerge(projects, spendForAgent) {
   return { mean: n ? sum / n : null, n, excluded };
 }
 
-module.exports = { roleMap, inferModels, agentModels, signals, redTeamPerMerge, recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView };
+module.exports = { roleMap, inferModels, agentModels, signals, redTeamPerMerge, recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView, isExpired };

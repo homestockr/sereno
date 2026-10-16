@@ -299,7 +299,14 @@ function createPoller(opts) {
       if (stamp === '-' || stamp === 's') { pipeGood.delete(id); return { tasks: [], skipped: 0, error: false }; }
       const tips = await git(['for-each-ref', '--count=2000', 'refs/heads', '--format=%(objectname) %(refname)'], root);
       const fp = stamp + '\n' + tips;
-      if (prev && prev.fp === fp && !prev.view.error) return prev.view;
+      if (prev && prev.fp === fp && !prev.view.error) {
+        // Nothing changed on disk, but time still passes: re-derive `expired` at read time.
+        const t = now();
+        if (!prev.view.tasks.some((x) => pipelineLib.isExpired(x.updatedAt, t) !== x.expired)) return prev.view;
+        const v = Object.assign({}, prev.view, { tasks: prev.view.tasks.map((x) => Object.assign({}, x, { expired: pipelineLib.isExpired(x.updatedAt, t) })) });
+        pipeGood.set(id, { fp, view: v });
+        return v;
+      }
       if (opts.onPipelineRead) { try { opts.onPipelineRead(id); } catch (_) { /* test hook */ } }
       const repo = await pipelineLib.readRepo(root, { fsp });
       if (!repo) { const v = { tasks: [], skipped: 0, error: false }; pipeGood.set(id, { fp, view: v }); return v; }

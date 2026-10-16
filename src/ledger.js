@@ -459,7 +459,8 @@ function openLedger(opts = {}) {
       else if (r.s === 'auxiliary') { role = 'auxiliary'; kind = null; }
       else if (r.s === 'subagent') {
         if (has(roleMap, r.t) && has(out.roles, roleMap[r.t]) && !['main', 'auxiliary', 'unattributed'].includes(roleMap[r.t])) { role = roleMap[r.t]; kind = 'explicit'; }
-        else if (has(inferModels, r.m) && has(out.roles, inferModels[r.m]) && !['main', 'auxiliary', 'unattributed'].includes(inferModels[r.m])) { role = inferModels[r.m]; kind = 'inferred'; }
+        // Inferred only when the request joins no agents row: a joined agent outside the role map stays unattributed.
+        else if (r.t == null && has(inferModels, r.m) && has(out.roles, inferModels[r.m]) && !['main', 'auxiliary', 'unattributed'].includes(inferModels[r.m])) { role = inferModels[r.m]; kind = 'inferred'; }
       }
       const b = out.roles[role];
       b.costUsd += usd;

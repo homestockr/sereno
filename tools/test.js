@@ -7215,7 +7215,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('Electron build files do not include plugin/ or .claude-plugin/ (except the 4b bundled rules)', () => {
       const files = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files;
-      const bundledRules = ['plugin/bin/lib/**/*', 'plugin/agents/*.md', 'plugin/skills/*/SKILL.md'];
+      const bundledRules = ['plugin/bin/lib/recovery.js', 'plugin/bin/lib/config.js', 'plugin/bin/lib/records.js', 'plugin/bin/lib/fsafe.js', 'plugin/agents/*.md', 'plugin/skills/*/SKILL.md'];
       assert.deepStrictEqual(files.filter((f) => /^plugin\//.test(f)).sort(), bundledRules.slice().sort());
       for (const f of files) {
         if (bundledRules.includes(f)) continue;
@@ -9752,7 +9752,8 @@ test('missing rate_limits degrades instead of throwing', () => {
     const bundled = (rel) => patterns.some((re) => re.test(rel));
     test('[4b-bundle] build.files globs match what the matcher expects', () => {
       assert.ok(bundled('plugin/bin/lib/recovery.js'));
-      assert.ok(bundled('plugin/bin/lib/sub/x.js'));
+      assert.ok(bundled('plugin/bin/lib/config.js') && bundled('plugin/bin/lib/records.js') && bundled('plugin/bin/lib/fsafe.js'));
+      assert.ok(!bundled('plugin/bin/lib/git.js') && !bundled('plugin/bin/lib/sub/x.js'));
       assert.ok(bundled('plugin/agents/builder.md'));
       assert.ok(bundled('plugin/skills/build/SKILL.md'));
       assert.ok(!bundled('plugin/skills/build/notes.md'));
@@ -10084,6 +10085,15 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(v.stage, 'merged');
         });
 
+        await atest('[4b-fix] a merged task re-opened under the same name (new built attempt, no gate) is not merged', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          assert.strictEqual((await viewOf(r, 'demo')).stage, 'merged');
+          putAtt(r, 'demo', 2, { outcome: 'built' });
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'red-team');
+        });
+
         await atest('[4b-stage] head_moved: a commit on the task branch after the gate sends it back to review', async () => {
           const r = mkrepo(); passTask(r, 'demo');
           g(r, 'checkout', '-q', 'task/demo'); g(r, 'commit', '-q', '--allow-empty', '-m', 'late'); g(r, 'checkout', '-q', 'main');
@@ -10159,6 +10169,27 @@ test('missing rate_limits degrades instead of throwing', () => {
           g(r, 'checkout', '-q', 'task/demo'); g(r, 'commit', '-q', '--allow-empty', '-m', 'more'); g(r, 'checkout', '-q', 'main');
           await p.pollNow();
           assert.strictEqual(reads(), 3);
+        });
+
+        await atest('[4b-fix] poller: expired is re-derived with the clock while the fingerprint is unchanged, and the open decision drops', async () => {
+          const r = mkrepo(); passTask(r, 'demo'); putSpec(r, 'demo', 'EDITED');   // spec_changed -> decision
+          let clock = NOW;
+          const { p, reads } = mkPoll(r, { now: () => clock });
+          await p.pollNow();
+          const t1 = p.snapshot().p0.pipeline.tasks[0];
+          assert.deepStrictEqual([t1.stage, t1.expired], ['decision', false]);
+          const pa = require('../src/pipeline-alerts.js');
+          const reg = { list: () => [{ id: 'p0', name: 'demo-proj', repoPath: r, hidden: false }] };
+          const al = pa.createPipelineAlerts({ now: () => clock });
+          al.update(pa.toInput(reg.list(), p.snapshot()), []);
+          assert.strictEqual(al.open().length, 1);
+          clock = NOW + 8 * 86400000;
+          await p.pollNow();
+          assert.strictEqual(reads(), 1, 'no file change, no recompute');
+          const t2 = p.snapshot().p0.pipeline.tasks[0];
+          assert.strictEqual(t2.expired, true);
+          al.update(pa.toInput(reg.list(), p.snapshot()), []);
+          assert.strictEqual(al.open().length, 0);
         });
 
         await atest('[4b-stage] poller: a project without .sereno costs no pipeline git call and shows no tasks', async () => {
@@ -10286,6 +10317,23 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(r.unattributed.unattributed, 0.85);
       assert.strictEqual(snap(), before);
       assert.strictEqual(l.roleSpend(NOW - 20 * 86400000, pl.roleMap(), { [FABLE]: 'red-team' }).roles['red-team'].inferred, 9.5);
+      l.close();
+    });
+
+    test('[4b-fix] roleSpend: a span-joined agent outside the role map is unattributed, never inferred; a Fable request with no agents join is inferred', () => {
+      const l = mem();
+      agent(l, 's1', 'ag-x', 'general-purpose'); agent(l, 's1', 'ag-rt', 'red-team');
+      l.ingestRequests([
+        rq({ requestKey: '1', requestId: 'r1', model: FABLE }),
+        rq({ requestKey: '2', requestId: 'r2', model: FABLE }),
+        rq({ requestKey: '3', requestId: 'r3', model: FABLE, costMicros: 500000 }),
+        rq({ requestKey: '4', requestId: 'r4', model: FABLE, costMicros: 250000 }),
+      ]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag-x', ts: NOW }, { requestId: 'r2', sessionId: 's1', agentId: 'ag-rt', ts: NOW },
+        { requestId: 'r4', sessionId: 's1', agentId: 'ag-gone', ts: NOW }]);
+      const r = l.roleSpend(0, pl.roleMap(), { [FABLE]: 'red-team' }).roles;
+      assert.deepStrictEqual(r['red-team'], { costUsd: 0.75, explicit: 0, inferred: 0.75, unattributed: 0 });
+      assert.strictEqual(r.unattributed.costUsd, 2);
       l.close();
     });
 
@@ -10675,6 +10723,26 @@ test('missing rate_limits degrades instead of throwing', () => {
       const out = pa.toInput(reg, snap);
       assert.strictEqual(out.length, 1);
       assert.deepStrictEqual(out[0].paths, ['C:\\a', 'C:\\a-wt']);
+    });
+
+    test('[4b-fix] a builder inside one long tool call (no hooks for 15 min) still counts; once stopped it does not, and a stall follows', () => {
+      const s = new Store();
+      const hook = (ev, p) => s.applyHook(ev, Object.assign({ session_id: 's1', cwd: REPO }, p));
+      hook('PreToolUse', { agent_id: 'a1', agent_type: 'sereno:builder', tool_name: 'Bash', tool_input: { command: 'x' } });
+      s.sessions.get('s1').lastSeen = Date.now() - 15 * MIN;
+      assert.strictEqual(s.liveBuilders().length, 1);
+      clock = T0;
+      const m = mk();
+      const att = [{ attempt: 1, outcome: 'running', started_at: new Date(T0 - 30 * MIN).toISOString() }];
+      const tasks = () => proj([task({ attempt: 1, attempts: att })]);
+      m.update(tasks(), s.liveBuilders());
+      clock = T0 + 15 * MIN;
+      assert.deepStrictEqual(m.update(tasks(), s.liveBuilders()), [], 'long tool call is not a stall');
+      hook('SubagentStop', { agent_id: 'a1', agent_type: 'sereno:builder' });
+      assert.strictEqual(s.liveBuilders().length, 0);
+      m.update(tasks(), s.liveBuilders());
+      clock = T0 + 26 * MIN;
+      assert.deepStrictEqual(types(m.update(tasks(), s.liveBuilders())), ['stalled']);
     });
 
     test('[4b-alerts] store.liveBuilders: only live sereno:builder* subagents, with the session cwd', () => {
