@@ -206,7 +206,24 @@ function attentionState(snapshot) {
       since: Number.isFinite(Number(s.stateSince)) && Number(s.stateSince) > 0 ? Number(s.stateSince) : null,
       ...(typeof s.id === 'string' && s.id ? { sessionId: s.id } : {}),
     }));
-  return { amber: items.length > 0, count: items.length, items };
+  // Pipeline decisions (amber) and stalled repairs (informational, never amber) ride along on /state.
+  const decs = (snapshot && Array.isArray(snapshot.decisions) ? snapshot.decisions : [])
+    .filter((d) => d && typeof d === 'object' && typeof d.task === 'string')
+    .map((d) => ({
+      project: projectLabel(d.project),
+      task: d.task,
+      reason: typeof d.reason === 'string' ? d.reason : '',
+      attempt: Number.isFinite(Number(d.attempt)) && d.attempt !== null ? Number(d.attempt) : null,
+      ...(typeof d.sessionId === 'string' && d.sessionId ? { sessionId: d.sessionId } : {}),
+    }));
+  const stalled = (snapshot && Array.isArray(snapshot.stalled) ? snapshot.stalled : [])
+    .filter((d) => d && typeof d === 'object' && typeof d.task === 'string')
+    .map((d) => ({ project: projectLabel(d.project), task: d.task, kind: d.kind === 'repair' ? 'repair' : 'build' }));
+  return {
+    amber: items.length + decs.length > 0, count: items.length + decs.length, items,
+    ...(decs.length ? { decisions: decs } : {}),
+    ...(stalled.length ? { stalled } : {}),
+  };
 }
 
 /** 'waiting 3m' / 'waiting 45s'; '' when the start time is unknown. */
@@ -254,15 +271,37 @@ function reviewControl(it, opts) {
  * opts (optional) adds the review controls, see reviewControl().
  */
 function attentionHtml(st, nowMs, opts) {
+  const stalledNote = (x) => {
+    const rows = x && Array.isArray(x.stalled) ? x.stalled : [];
+    if (!rows.length) return '';
+    return '<ul class="attn-stalled">' + rows.map((r) => '<li><strong>' + esc(r.project) + '</strong><span class="mono">' + esc(r.task)
+      + '</span><span class="wait">' + (r.kind === 'repair' ? 'Repair stalled' : 'Build stalled') + '</span></li>').join('') + '</ul>';
+  };
   if (!st || st.unavailable) {
     return '<div class="attn attn-off"><div class="attn-head"><span>LIVE STATUS</span></div>'
       + '<h2 class="attn-title">Live status unavailable</h2></div>';
   }
   if (!st.amber) {
     return '<div class="attn attn-calm"><div class="attn-head"><i class="dot" aria-hidden="true"></i><span>ALL CLEAR</span></div>'
-      + '<p class="attn-body">Nothing needs you right now.</p></div>';
+      + '<p class="attn-body">Nothing needs you right now.</p>' + stalledNote(st) + '</div>';
   }
   const items = Array.isArray(st.items) ? st.items : [];
+  const decs = Array.isArray(st.decisions) ? st.decisions : [];
+  if (decs.length) {
+    const rows = '<ul class="attn-list">' + items.map((it) => {
+      const what = waitWhat(it);
+      const w = waitLabel(it.since, nowMs);
+      return '<li><strong>' + esc(it.project) + '</strong>' + (what ? '<span class="mono">' + what + '</span>' : '')
+        + (w ? '<span class="wait">' + esc(w) + '</span>' : '') + reviewControl(it, opts) + '</li>';
+    }).join('') + decs.map((d) => '<li class="attn-decision"><strong>' + esc(d.project) + '</strong><span class="mono">' + esc(d.task) + '</span>'
+      + (d.reason ? '<span class="wait">' + esc(d.reason) + '</span>' : '') + reviewControl(d, opts) + '</li>').join('') + '</ul>';
+    const head = items.length === 0 && decs.length === 1
+      ? esc(decs[0].project) + ': review needs a decision.'
+      : st.count + ' things need you.';
+    return '<div class="attn attn-amber"><div class="attn-head">' + ringIcon() + '<span>NEEDS YOUR ATTENTION</span></div>'
+      + '<h2 class="attn-title">' + head + '</h2>' + rows + stalledNote(st)
+      + '<p class="attn-body">Answer it in the terminal. Sereno only points you there.</p></div>';
+  }
   const title = items.length === 1
     ? esc(items[0].project) + ' is waiting for permission.'
     : st.count + ' sessions are waiting for permission.';
@@ -291,13 +330,13 @@ function attentionHtml(st, nowMs, opts) {
 /** '#spend' -> 'spend'; '#projects', '', and anything else -> 'projects'. */
 function parseRoute(hash) {
   const h = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim().toLowerCase();
-  return h === 'spend' ? 'spend' : 'projects';
+  return h === 'spend' || h === 'pipeline' ? h : 'projects';
 }
 
 /** No hash -> the remembered tab (default projects); a hash always wins. */
 function initialRoute(hash, saved) {
   const h = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim();
-  if (h === '') return saved === 'spend' ? 'spend' : 'projects';
+  if (h === '') return saved === 'spend' || saved === 'pipeline' ? saved : 'projects';
   return parseRoute(hash);
 }
 
@@ -597,6 +636,254 @@ function reviewRequest(sessionId, token) {
   return actionRequest({ sessionId: String(sessionId) }, token);
 }
 
+/* ---------- Pipeline tab: pure helpers (Phase 4b step 6). Observe only; amber only for a pending decision. ---------- */
+
+const PIPE_STEPS = [['architect', 'Architect'], ['builder', 'Builder'], ['red-team', 'Red team'], ['merge', 'Merge']];
+const OUTCOME_LABEL = { pass: 'Pass', block: 'Block', needs_context: 'Needs context', error: 'Error', skipped: 'Skipped' };
+const ROLE_LABEL = { builder: 'Builder', 'red-team': 'Red team', scribe: 'Scribe', main: 'Main', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };
+const IDLE_LABEL = { 'no-task': 'No active task', 'gate-off': 'Gate off', 'latest-pass': 'Latest review passed' };
+const INSTALL_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];
+
+/** Dollars (a number) as '$1.23 est.'; '' when there is no figure. */
+function usdEst(usd) {
+  return typeof usd === 'number' && Number.isFinite(usd) ? estMoney(usd * 1e6) : '';
+}
+
+/** A task waiting on the user: stage 'decision' and not expired (expired is grey, never amber). */
+function isOpenDecision(t) {
+  return !!t && t.stage === 'decision' && t.expired !== true;
+}
+
+/** A task that is (or was) in a repair loop. */
+function isRepair(t) {
+  return !!t && (/^Fixing /.test(String(t.step || '')) || Number(t.attempt) > 1);
+}
+
+/** Header counts over the /api/pipeline body. */
+function pipelineCounts(body) {
+  const tasks = [];
+  for (const p of (body && Array.isArray(body.projects) ? body.projects : [])) {
+    for (const t of (p && Array.isArray(p.tasks) ? p.tasks : [])) tasks.push(t);
+  }
+  const runs = body && body.signals ? Number(body.signals.runsThisWeek) : 0;
+  return {
+    active: tasks.length,
+    repairs: tasks.filter((t) => t.expired !== true && isRepair(t)).length,
+    decisions: tasks.filter(isOpenDecision).length,
+    runs: Number.isFinite(runs) && runs > 0 ? runs : 0,
+  };
+}
+
+/** Architect, Builder, Red team, Merge, each { key, label, state, status }; state is done | current | decision | pending. */
+function pipelineSteps(t) {
+  const stage = t ? t.stage : null;
+  const cur = stage === 'architect' ? 0 : stage === 'builder' ? 1 : (stage === 'red-team' || stage === 'decision') ? 2 : stage === 'ready' ? 3 : -1;
+  const step = t && typeof t.step === 'string' ? t.step : '';
+  const outcome = t && t.gate && t.gate.outcome ? t.gate.outcome : '';
+  return PIPE_STEPS.map((s, i) => {
+    let state = cur < 0 ? 'pending' : i < cur ? 'done' : i === cur ? 'current' : 'pending';
+    if (state === 'current' && stage === 'decision' && !(t && t.expired === true)) state = 'decision';
+    let status = 'Waiting';
+    if (state === 'done') {
+      status = i === 0 ? 'Spec written' : i === 1 ? 'Built' : (outcome ? 'Review: ' + (OUTCOME_LABEL[outcome] || outcome) : 'Reviewed');
+    } else if (state === 'current' || state === 'decision') {
+      status = step || (i === 0 ? 'Spec written' : i === 1 ? 'Building' : i === 2 ? 'In review' : 'Ready to merge');
+    }
+    return { key: s[0], label: s[1], state, status };
+  });
+}
+
+/** Outcome as a shape, so it reads without colour: pass dot, block slashed ring, needs_context question ring, error triangle, skipped dash. */
+function outcomeShape(outcome) {
+  const open = '<svg class="oshape oshape-' + esc(outcome) + '" viewBox="0 0 16 16" aria-hidden="true">';
+  if (outcome === 'pass') return open + '<circle cx="8" cy="8" r="4.5" fill="currentColor"/></svg>';
+  if (outcome === 'block') return open + '<circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3.8 12.2L12.2 3.8" stroke="currentColor" stroke-width="1.4"/></svg>';
+  if (outcome === 'needs_context') return open + '<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/>'
+    + '<path d="M6.2 6.3c0-1.9 3.6-1.9 3.6 0 0 1.3-1.8 1.4-1.8 2.6M8 11.1v.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+  if (outcome === 'error') return open + '<path d="M8 2.5L14 13H2z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  if (outcome === 'skipped') return open + '<path d="M3.5 8h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  return open + '<circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2 2"/></svg>';
+}
+
+/** Track step marker: done dot, current ring with dot, decision question ring (amber), pending dashed ring. */
+function stepShape(state) {
+  const open = '<svg class="tshape tshape-' + esc(state) + '" viewBox="0 0 16 16" aria-hidden="true">';
+  if (state === 'done') return open + '<circle cx="8" cy="8" r="4.5" fill="currentColor"/></svg>';
+  if (state === 'current') return open + '<circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2.4" fill="currentColor"/></svg>';
+  if (state === 'decision') return open + '<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/>'
+    + '<path d="M6.2 6.3c0-1.9 3.6-1.9 3.6 0 0 1.3-1.8 1.4-1.8 2.6M8 11.1v.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+  return open + '<circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2 2"/></svg>';
+}
+
+/** Findings list (collapsed): severity, kind, file:line, summary. Every string escaped; '' when none. */
+function findingsHtml(findings) {
+  const list = Array.isArray(findings) ? findings : [];
+  if (!list.length) return '';
+  return '<details class="pfind"><summary>' + list.length + (list.length === 1 ? ' finding' : ' findings') + '</summary><ul>'
+    + list.map((f) => {
+      const loc = f && f.file ? esc(f.file) + (f.line !== null && Number.isFinite(f.line) ? ':' + esc(f.line) : '') : '';
+      return '<li><span class="sev">' + esc(f && f.severity ? f.severity : '—') + '</span>'
+        + '<span class="fkind">' + esc(f && f.kind ? f.kind : '') + '</span>'
+        + (loc ? '<span class="mono floc">' + loc + '</span>' : '')
+        + '<span class="fsum">' + esc(f && f.summary ? f.summary : '') + '</span></li>';
+    }).join('') + '</ul></details>';
+}
+
+/** The project's brief for a task (branch task/<name>), or null. */
+function taskBrief(project, task) {
+  if (!project || !task) return null;
+  const want = 'task/' + task;
+  const b = (Array.isArray(project.branches) ? project.branches : []).find((x) => x && x.name === want);
+  if (!b || b.freshness === 'none' || b.freshness == null) return null;
+  return { at: b.generatedAt != null && Number.isFinite(Number(b.generatedAt)) ? Number(b.generatedAt) : null };
+}
+
+/** One active task card. proj is the matching /api/projects entry (or null). */
+function taskCardHtml(projName, t, proj, nowMs) {
+  const expired = t.expired === true;
+  const open = isOpenDecision(t);
+  const steps = pipelineSteps(t);
+  const track = '<ol class="track">' + steps.map((s) => '<li class="tstep tstep-' + esc(s.state) + '">' + stepShape(s.state)
+    + '<span class="tname">' + esc(s.label) + '</span><span class="tstat">' + esc(s.status) + '</span></li>').join('') + '</ol>';
+  const started = relTime(t.startedAt, nowMs);
+  const money = usdEst(t.costUsd);
+  const runs = Number(t.reviewRuns) > 0 ? Math.floor(Number(t.reviewRuns)) : 0;
+  const meta = (money ? esc(money) + ' · ' : '') + runs + (runs === 1 ? ' review run' : ' review runs');
+  const brief = taskBrief(proj, t.task);
+  const scribe = brief ? '<div class="pscribe">Scribe · ' + (brief.at !== null ? 'brief updated ' + esc(relTime(brief.at, nowMs)) : 'brief on this branch') + '</div>' : '';
+  const repair = !expired && isRepair(t)
+    ? '<div class="prepair"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Repair loop'
+      + (Number(t.attempt) > 0 ? ' · attempt ' + esc(Math.floor(Number(t.attempt))) : '') + '</div>' : '';
+  return '<article class="ptask' + (expired ? ' expired' : '') + (open ? ' decision' : '') + '">'
+    + '<div class="ptask-head"><h3>' + esc(projName) + '</h3><span class="mono">' + esc(t.task) + '</span>'
+    + (expired ? '<span class="chip chip-none">Expired</span>' : '') + '</div>'
+    + '<div class="ptask-sub"><span class="mono">task/' + esc(t.task) + '</span>' + (started ? '<span>Started ' + esc(started) + '</span>' : '') + '</div>'
+    + track + repair + scribe + '<div class="pmeta num">' + meta + '</div>' + findingsHtml(t.findings) + '</article>';
+}
+
+/** Gate-state line for one project (shape + label + task + age). */
+function gateLine(name, g, nowMs) {
+  if (!g) return '<li class="gline"><strong>' + esc(name) + '</strong><span class="quiet-text">No review in 30 days</span></li>';
+  const age = relTime(Number(nowMs) - Number(g.ageMs), nowMs);
+  return '<li class="gline">' + outcomeShape(g.outcome) + '<strong>' + esc(name) + '</strong><span>' + esc(OUTCOME_LABEL[g.outcome] || g.outcome || 'Unknown') + '</span>'
+    + '<span class="mono">' + esc(g.task) + '</span>' + (age ? '<span class="quiet-text">' + esc(age) + '</span>' : '') + '</li>';
+}
+
+/** Outcome mix over the fixed 30 days; every count carries n. */
+function outcomesHtml(o) {
+  const n = o && Number(o.n) > 0 ? Math.floor(Number(o.n)) : 0;
+  if (!n) return '<p class="empty-note">No review runs in the last 30 days (n=0)</p>';
+  return '<ul class="outcomes">' + ['pass', 'block', 'needs_context', 'error', 'skipped'].map((k) => {
+    const c = Number(o[k]) > 0 ? Math.floor(Number(o[k])) : 0;
+    return '<li>' + outcomeShape(k) + '<span>' + esc(OUTCOME_LABEL[k]) + '</span><strong class="num">' + c + ' of ' + n + '</strong>'
+      + '<span class="quiet-text num">' + Math.round((c / n) * 100) + '% · n=' + n + '</span></li>';
+  }).join('') + '</ul>';
+}
+
+/** Rework: review runs before the first pass. */
+function reworkLine(r) {
+  const n = r && Number(r.n) > 0 ? Math.floor(Number(r.n)) : 0;
+  const ex = r && Number(r.excluded) > 0 ? Math.floor(Number(r.excluded)) : 0;
+  const tail = 'n=' + n + (ex ? ', ' + ex + ' excluded (no pass yet)' : '');
+  if (!n || r.median == null) return 'Rework: — (' + tail + ')';
+  return 'Rework: median ' + r.median + ' · max ' + r.max + ' reruns before a pass (' + tail + ')';
+}
+
+/** Red-team cost per merge: an estimate, an em dash when there is no mean. */
+function perMergeLine(m) {
+  const n = m && Number(m.n) > 0 ? Math.floor(Number(m.n)) : 0;
+  const ex = m && Number(m.excluded) > 0 ? Math.floor(Number(m.excluded)) : 0;
+  const tail = 'n=' + n + (ex ? ', ' + ex + ' excluded' : '');
+  const v = m && m.mean != null ? usdEst(Number(m.mean)) : '';
+  return 'Red team per merge: ' + (v || '—') + ' (' + tail + ')';
+}
+
+/** Role spend share with its attribution mix. Not enabled -> the history-off note. */
+function roleSpendHtml(rs) {
+  if (!rs || rs.enabled !== true) return '<p class="empty-note">Spend history is off</p>';
+  const roles = rs.roles || {};
+  const keys = Object.keys(ROLE_LABEL);
+  const costs = keys.map((k) => (roles[k] && Number(roles[k].costUsd) > 0 ? Number(roles[k].costUsd) : 0));
+  const days = Number(rs.days) || 30;
+  if (costs.reduce((a, b) => a + b, 0) <= 0) return '<p class="empty-note">No spend in the last ' + days + ' days</p>';
+  const pct = largestRemainder(costs);
+  return '<ul class="rspend">' + keys.map((k, i) => {
+    if (costs[i] <= 0) return '';
+    const r = roles[k];
+    const mix = [Number(r.explicit) || 0, Number(r.inferred) || 0, Number(r.unattributed) || 0];
+    const mp = largestRemainder(mix);
+    return '<li><strong>' + esc(ROLE_LABEL[k]) + '</strong><span class="num">' + esc(usdEst(costs[i])) + '</span><span class="num">' + pct[i] + '% of spend</span>'
+      + (mix[0] + mix[1] + mix[2] > 0 ? '<span class="quiet-text num">' + mp[0] + '% explicit · ' + mp[1] + '% inferred · ' + mp[2] + '% unattributed</span>' : '') + '</li>';
+  }).join('') + '</ul><p class="quiet-text rnote">Last ' + days + ' days · estimates from the local ledger</p>';
+}
+
+/** Role routing: agent, role, model; then each project's red-team agent and fallback. */
+function routingHtml(routing, projects) {
+  const models = routing && Array.isArray(routing.models) ? routing.models : [];
+  const names = {};
+  for (const p of (Array.isArray(projects) ? projects : [])) if (p) names[p.id] = p.name;
+  const rt = (routing && Array.isArray(routing.projects) ? routing.projects : []).filter((p) => p && p.redTeam);
+  const dash = (v) => esc(v == null || v === '' ? '—' : v);
+  return '<div class="table-wrap"><table class="route-table"><thead><tr><th>Agent</th><th>Role</th><th>Model</th></tr></thead><tbody>'
+    + (models.length ? models.map((m) => '<tr><td class="mono">' + dash(m.agent) + '</td><td>' + dash(ROLE_LABEL[m.role] || m.role) + '</td><td class="mono">' + dash(m.model) + '</td></tr>').join('')
+      : '<tr><td colspan="3" class="quiet-text">No agents found</td></tr>')
+    + '</tbody></table></div>'
+    + (rt.length ? '<div class="table-wrap"><table class="route-table"><thead><tr><th>Project</th><th>Red-team agent</th><th>Fallback</th><th>On fallback</th></tr></thead><tbody>'
+      + rt.map((p) => '<tr><td>' + dash(names[p.id] || p.id) + '</td><td class="mono">' + dash(p.redTeam.agent) + '</td><td class="mono">' + dash(p.redTeam.fallback)
+        + '</td><td>' + dash(p.redTeam.onFallback) + '</td></tr>').join('') + '</tbody></table></div>' : '');
+}
+
+/** The install empty state: the two commands, each with a copy button. */
+function installHtml() {
+  return '<div class="state-panel install"><h2>The Sereno pipeline plugin is not detected</h2>'
+    + '<p>Install it in Claude Code, then this tab fills in. Sereno only observes what the plugin writes.</p>'
+    + INSTALL_CMDS.map((c) => '<div class="cmd"><code>' + esc(c) + '</code><button type="button" class="btn-copy" data-act="copy" data-text="' + esc(c) + '">Copy</button></div>').join('')
+    + '</div>';
+}
+
+/** True when the body shows any pipeline activity or configuration at all. */
+function pipelineHasData(body) {
+  if (!body) return false;
+  if ((body.projects || []).some((p) => p && Array.isArray(p.tasks) && p.tasks.length)) return true;
+  if (body.signals && body.signals.outcomes && Number(body.signals.outcomes.n) > 0) return true;
+  return !!(body.routing && Array.isArray(body.routing.projects) && body.routing.projects.some((p) => p && p.redTeam));
+}
+
+/** The whole Pipeline view body (below the title row). projectsList: /api/projects entries (for the Scribe line); may be empty. */
+function pipelineBody(body, projectsList, nowMs) {
+  if (!body) return '<div class="state-panel"><h2>Pipeline is unavailable right now</h2><p>Sereno will try again on the next refresh.</p></div>';
+  const plugin = body.plugin;
+  const installed = !!plugin && plugin.installed !== false;
+  if (!pipelineHasData(body) && !installed) return installHtml();
+  const c = pipelineCounts(body);
+  const byId = {};
+  for (const p of (Array.isArray(projectsList) ? projectsList : [])) if (p) byId[p.id] = p;
+  const projs = Array.isArray(body.projects) ? body.projects : [];
+  const cards = [];
+  const idle = [];
+  const names = {};
+  for (const p of projs) {
+    names[p.id] = p.name;
+    const tasks = Array.isArray(p.tasks) ? p.tasks : [];
+    for (const t of tasks) cards.push(taskCardHtml(p.name, t, byId[p.id] || null, nowMs));
+    if (p.idle && !tasks.length) idle.push('<li><strong>' + esc(p.name) + '</strong><span class="quiet-text">' + esc(IDLE_LABEL[p.idle] || IDLE_LABEL['no-task']) + '</span></li>');
+  }
+  const sg = body.signals || {};
+  const gates = (Array.isArray(sg.projects) ? sg.projects : []).map((g) => gateLine(names[g.id] || g.id || 'Unknown project', g.gate, nowMs));
+  const summary = c.active + (c.active === 1 ? ' active task' : ' active tasks') + ' · ' + c.repairs + (c.repairs === 1 ? ' repair' : ' repairs') + ' · '
+    + c.decisions + (c.decisions === 1 ? ' decision' : ' decisions') + ' · ' + c.runs + (c.runs === 1 ? ' run' : ' runs') + ' this week';
+  return '<p class="summary">' + esc(summary) + '</p>'
+    + '<div class="section-top"><h2>Active tasks</h2></div>'
+    + (cards.length ? '<div class="ptasks">' + cards.join('') + '</div>' : '<p class="empty-note">No active tasks</p>')
+    + (idle.length ? '<div class="section-top"><h2>Idle repos</h2></div><ul class="idle">' + idle.join('') + '</ul>' : '')
+    + '<div class="section-top"><h2>Signals<span class="sub">Last ' + (Number(sg.days) || 30) + ' days</span></h2></div>'
+    + '<div class="sig"><h3>Gate state</h3>' + (gates.length ? '<ul class="glist">' + gates.join('') + '</ul>' : '<p class="empty-note">No projects</p>') + '</div>'
+    + '<div class="sig"><h3>Review outcomes</h3>' + outcomesHtml(sg.outcomes) + '</div>'
+    + '<div class="sig"><h3>Rework and cost</h3><p>' + esc(reworkLine(sg.rework)) + '</p><p>' + esc(perMergeLine(body.redTeamPerMerge)) + '</p></div>'
+    + '<div class="sig"><h3>Spend by role</h3>' + roleSpendHtml(body.roleSpend) + '</div>'
+    + '<div class="sig"><h3>Role routing</h3>' + routingHtml(body.routing, projs) + '</div>';
+}
+
 /* ---------- state ---------- */
 
 const RANGES = ['24h', '7d', '30d'];
@@ -609,12 +896,13 @@ const state = {
   attn: null, attnToken: 0,   // attn: attentionState() output, { unavailable: true }, or null before the first read
   route: 'projects',
   proj: { mode: 'loading', list: [], filter: 'all', showHidden: false, token: 0, lastOk: null },
+  pipe: { mode: 'loading', body: null, token: 0, lastOk: null },
   sessions: [],               // /state sessions, for the Projects summary, filters and live strip
   liveMap: {}, liveSig: '', seenIds: new Set(),   // client-side live states from the SSE stream
   apiToken: null, reviewNA: false, reviewMsgs: {},
 };
 
-const TABS = { projects: 'Projects', spend: 'Spend' };
+const TABS = { projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline' };
 
 function loadTab() {
   try { return localStorage.getItem('sereno.console.tab'); } catch (_) { return null; }
@@ -774,7 +1062,7 @@ function renderAttention() {
       { review: true, na: state.reviewNA, msgs: state.reviewMsgs }));
   }
   const slot = document.getElementById('pill-slot');
-  if (slot) setHtml(slot, pillHtml(state.attn && state.attn.amber ? state.attn.count : 0));
+  if (slot && state.route !== 'pipeline') setHtml(slot, pillHtml(state.attn && state.attn.amber ? state.attn.count : 0));   // the Pipeline pill counts decisions only
 }
 
 function panel(title, text) {
@@ -825,6 +1113,21 @@ function renderProjects() {
     return;
   }
   setHtml(view, projectsTitle() + projectsBody(withLive(p.list, state.liveMap), state.sessions, p.filter, p.showHidden, Date.now()));
+}
+
+function pipelineTitle() {
+  const c = state.pipe.body ? pipelineCounts(state.pipe.body) : { decisions: 0 };
+  return '<div class="title-row"><h1>Pipeline</h1><span id="pill-slot">' + pillHtml(c.decisions) + '</span></div>';
+}
+
+function renderPipeline() {
+  if (state.route !== 'pipeline') return;
+  const view = document.getElementById('view');
+  const p = state.pipe;
+  view.setAttribute('aria-busy', p.mode === 'loading' ? 'true' : 'false');
+  if (p.mode === 'loading') { setHtml(view, ''); return; }
+  if (p.mode === 'unavailable') { setHtml(view, pipelineTitle() + pipelineBody(null, [], Date.now())); return; }
+  setHtml(view, pipelineTitle() + pipelineBody(p.body, state.proj.list, Date.now()));
 }
 
 /* ---------- data ---------- */
@@ -886,6 +1189,21 @@ async function refreshAttention() {
   if (state.route === 'projects') renderProjects();
 }
 
+async function refreshPipeline() {
+  const p = state.pipe;
+  const token = ++p.token;
+  const [r, pr] = await Promise.all([getJson('/api/pipeline'), getJson('/api/projects')]);
+  if (token !== p.token) return;
+  if (pr.body && Array.isArray(pr.body.projects)) state.proj.list = pr.body.projects;   // for the Scribe line
+  if (!r.body || !Array.isArray(r.body.projects)) {
+    if (p.mode !== 'data') p.mode = 'unavailable';   // keep the last good body on a blip
+  } else {
+    p.body = r.body; p.mode = 'data'; p.lastOk = Date.now();
+  }
+  renderPipeline();
+  tickSync();
+}
+
 async function refreshProjects() {
   const p = state.proj;
   const token = ++p.token;
@@ -930,6 +1248,13 @@ async function reviewSession(sid) {
   renderAttention();
 }
 
+/** Copy text to the clipboard; the button says Copied, or Select and copy when the browser refuses. */
+async function copyText(text, btn) {
+  let ok = false;
+  try { await navigator.clipboard.writeText(String(text)); ok = true; } catch (_) { ok = false; }
+  if (btn) { btn.textContent = ok ? 'Copied' : 'Select and copy'; setTimeout(() => { btn.textContent = 'Copy'; }, 2000); }
+}
+
 async function setHidden(id, hidden) {
   const status = await postAction('/api/projects/' + encodeURIComponent(id) + '/hide', { hidden });
   if (status === 204) refreshProjects();
@@ -957,6 +1282,7 @@ async function refresh() {
 /** Refresh whatever the current tab shows. */
 function refreshActive() {
   if (state.route === 'spend') refresh();
+  else if (state.route === 'pipeline') { refreshAttention(); refreshPipeline(); }
   else { refreshAttention(); refreshProjects(); }
 }
 
@@ -972,11 +1298,14 @@ function applyRoute(route, first) {
   const foot = document.getElementById('foot-note');
   if (foot) foot.textContent = route === 'spend'
     ? 'Totals include unattributed usage \u00b7 every figure is an estimate'
-    : 'Dollar figures are estimates \u00b7 nothing leaves this machine';
+    : route === 'pipeline'
+      ? 'Sereno observes the pipeline; it never acts \u00b7 every dollar figure is an estimate'
+      : 'Dollar figures are estimates \u00b7 nothing leaves this machine';
   if (!first) saveTab(route);
   const side = document.getElementById('side-today');
   if (side) setHtml(side, '');
   if (route === 'spend') { render(); refresh(); }
+  else if (route === 'pipeline') { renderPipeline(); refreshActive(); }
   else { renderProjects(); refreshActive(); }
 }
 
@@ -994,7 +1323,7 @@ async function refreshSeries() {
 
 function tickSync() {
   const el = document.getElementById('sync');
-  if (el) el.textContent = syncLabel(state.route === 'spend' ? state.lastOk : state.proj.lastOk, Date.now());
+  if (el) el.textContent = syncLabel(state.route === 'spend' ? state.lastOk : state.route === 'pipeline' ? state.pipe.lastOk : state.proj.lastOk, Date.now());
 }
 
 /* ---------- boot ---------- */
@@ -1011,6 +1340,7 @@ function boot() {
       const a = act.getAttribute('data-act');
       if (f) { state.proj.filter = f; renderProjects(); return; }
       if (a === 'toggle-hidden') { state.proj.showHidden = !state.proj.showHidden; renderProjects(); return; }
+      if (a === 'copy') { copyText(act.getAttribute('data-text'), act); return; }
       if (a === 'hide' || a === 'unhide') { setHidden(act.getAttribute('data-id'), a === 'hide'); return; }
     }
     const b = tgt ? tgt.closest('button[data-range]') : null;
@@ -1040,6 +1370,7 @@ function boot() {
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshActive(); });
   setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'spend') refresh(); }, 60000);
   setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'projects') refreshProjects(); }, 30000);
+  setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'pipeline') refreshPipeline(); }, 30000);
   // The /events stream drives the attention panel; poll /state only while it is not open.
   setInterval(() => {
     if (stream && stream.readyState === 2) { stream = null; openStream(); }   // the server refused or dropped it: try again

@@ -36,6 +36,14 @@ CREATE TABLE status (session_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, cost_micr
 `;
 const MIGRATIONS = [SCHEMA_V1];
 
+/** @returns {{ roles: Record<string, { costUsd: number, explicit: number, inferred: number, unattributed: number }> }} */
+function emptyRoleSpend() {
+  /** @type {Record<string, any>} */
+  const roles = {};
+  for (const k of ['builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed']) roles[k] = { costUsd: 0, explicit: 0, inferred: 0, unattributed: 0 };
+  return { roles };
+}
+
 /** @param {any} v @returns {string|null} */
 const str = v => (typeof v === 'string' && v !== '' ? v : null);
 
@@ -427,6 +435,56 @@ function openLedger(opts = {}) {
     };
   }
 
+  /**
+   * Spend by pipeline role since `sinceMs`, classified at query time (stored attribution is
+   * never touched). Explicit: a subagent request whose agent_id joins agents.agent_type for
+   * the same session and that type is in roleMap. Inferred: a subagent request with no such
+   * join whose model is in inferModels (model -> role). main/auxiliary stay their own buckets.
+   * @param {number} sinceMs
+   * @param {Record<string, string>} roleMap agent_type -> role
+   * @param {Record<string, string>} inferModels model -> role
+   */
+  function roleSpend(sinceMs, roleMap, inferModels) {
+    live();
+    const out = emptyRoleSpend();
+    const rows = db.prepare(`SELECT r.source AS s, r.model AS m, a.agent_type AS t, SUM(r.cost_micros) AS c
+      FROM requests r LEFT JOIN agents a ON a.session_id = r.session_id AND a.agent_id = r.agent_id AND r.agent_id IS NOT NULL
+      WHERE r.ts >= ? GROUP BY r.source, r.model, a.agent_type`).all(Number(sinceMs) || 0);
+    const has = (/** @type {any} */ o, /** @type {any} */ k) => !!o && typeof k === 'string' && Object.prototype.hasOwnProperty.call(o, k);
+    for (const r of rows) {
+      const usd = Number(r.c) / 1e6;
+      /** @type {string} */ let role = 'unattributed';
+      /** @type {'explicit'|'inferred'|'unattributed'|null} */ let kind = 'unattributed';
+      if (r.s === 'main') { role = 'main'; kind = null; }
+      else if (r.s === 'auxiliary') { role = 'auxiliary'; kind = null; }
+      else if (r.s === 'subagent') {
+        if (has(roleMap, r.t) && has(out.roles, roleMap[r.t]) && !['main', 'auxiliary', 'unattributed'].includes(roleMap[r.t])) { role = roleMap[r.t]; kind = 'explicit'; }
+        // Inferred only when the request joins no agents row: a joined agent outside the role map stays unattributed.
+        else if (r.t == null && has(inferModels, r.m) && has(out.roles, inferModels[r.m]) && !['main', 'auxiliary', 'unattributed'].includes(inferModels[r.m])) { role = inferModels[r.m]; kind = 'inferred'; }
+      }
+      const b = out.roles[role];
+      b.costUsd += usd;
+      if (kind) b[kind] += usd;
+    }
+    return out;
+  }
+
+  /** Summed request cost (USD) for one subagent run. @param {string} sessionId @param {string} agentId */
+  function spendForAgent(sessionId, agentId) {
+    live();
+    if (typeof sessionId !== 'string' || typeof agentId !== 'string' || !sessionId || !agentId) return 0;
+    const r = db.prepare('SELECT COALESCE(SUM(cost_micros),0) AS c FROM requests WHERE session_id=? AND agent_id=?').get(sessionId, agentId);
+    return Number(r.c) / 1e6;
+  }
+
+  /** Summed request cost (USD) for one agent id alone (agent ids are unique). @param {string} agentId */
+  function spendForAgentId(agentId) {
+    live();
+    if (typeof agentId !== 'string' || !agentId) return 0;
+    const r = db.prepare('SELECT COALESCE(SUM(cost_micros),0) AS c FROM requests WHERE agent_id=?').get(agentId);
+    return Number(r.c) / 1e6;
+  }
+
   /** True once any request has ever been recorded (not just today). */
   function hasAny() {
     live();
@@ -466,7 +524,7 @@ function openLedger(opts = {}) {
   }
 
   prune(retentionDays);
-  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, today, hasAny, reconcile, prune, close, _db: db };
+  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, prune, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }
@@ -474,4 +532,4 @@ function openLedger(opts = {}) {
   }
 }
 
-module.exports = { openLedger, LedgerUnavailableError };
+module.exports = { openLedger, emptyRoleSpend, LedgerUnavailableError };

@@ -125,6 +125,8 @@ td.proj { font-weight: 500; }
 .attn .wait { font-size: 11px; color: var(--quiet); }
 .attn-what + .wait { margin-top: 4px; }
 .attn-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 12px; }
+.attn-stalled { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted, inherit); }
+.attn-stalled li { display: flex; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
 .attn-list li { display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
 .attn-amber .attn-head { color: var(--amber); }
 .attn-off .attn-title { color: var(--muted); font-size: 15px; font-weight: 500; }
@@ -189,3 +191,46 @@ td.proj { font-weight: 500; }
 }
 .pshape-need { color: var(--amber); }
 .live-more { align-self: center; font-size: 12px; color: var(--quiet); }
+
+/* Pipeline tab (Phase 4b step 6). Shapes carry state; amber appears only on a pending decision. */
+.ptasks { display: flex; flex-direction: column; gap: 12px; }
+.ptask { border: 1px solid var(--line); background: var(--panel); border-radius: 4px; padding: 14px 16px; }
+.ptask.decision { border-color: var(--amber); }
+.ptask.expired { color: var(--quiet); border-style: dashed; }
+.ptask-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ptask-head h3 { margin: 0; font-size: 18px; line-height: 24px; font-weight: 600; letter-spacing: -.2px; overflow-wrap: anywhere; }
+.ptask-sub { display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.track { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--grid); }
+.tstep { display: grid; grid-template-columns: 18px minmax(0, 1fr); column-gap: 8px; padding: 10px 10px 0 0; color: var(--quiet); }
+.tshape { width: 16px; height: 16px; grid-row: 1 / span 2; margin-top: 2px; }
+.tname { font-size: 12px; font-weight: 600; }
+.tstat { font-size: 12px; color: var(--quiet); overflow-wrap: anywhere; }
+.tstep-done { color: var(--muted); }
+.tstep-current { color: var(--text); }
+.tstep-current .tstat { color: var(--muted); }
+.tstep-decision { color: var(--amber); }
+.tstep-decision .tstat { color: var(--amber); }
+.ptask.expired .tstep, .ptask.expired .tstep .tstat { color: var(--quiet); }
+.prepair, .pscribe, .pmeta { margin-top: 8px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.prepair svg { width: 14px; height: 14px; }
+.pfind { margin-top: 8px; font-size: 12px; }
+.pfind summary { cursor: pointer; color: var(--muted); }
+.pfind summary:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+.pfind ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.pfind li { display: flex; gap: 4px 12px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.pfind .sev { font-weight: 600; min-width: 56px; }
+.pfind .fkind { color: var(--quiet); }
+.idle, .glist, .outcomes, .rspend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.idle li, .gline, .outcomes li, .rspend li { display: flex; align-items: center; gap: 4px 14px; flex-wrap: wrap; }
+.sig { border-top: 1px solid var(--line); padding: 12px 0; font-size: 13px; }
+.sig h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.sig p { color: var(--muted); }
+.oshape { width: 16px; height: 16px; flex: none; color: var(--muted); }
+.oshape-pass { color: var(--text); }
+.rnote { margin-top: 8px; font-size: 11px; }
+.route-table { min-width: 420px; margin-bottom: 10px; }
+.install .cmd { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 8px 10px; background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; }
+.install code { flex: 1; font: 12px/1.45 'Cascadia Code', Consolas, monospace; overflow-wrap: anywhere; }
+.btn-copy { font: inherit; font-size: 12px; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+.btn-copy:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+@media (max-width: 760px) { .track { grid-template-columns: 1fr 1fr; } }

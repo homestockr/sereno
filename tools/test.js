@@ -3977,7 +3977,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(cjs, /el.style.width/);
     });
 
-    test('console page: absolute /console/ assets, nav is Projects then Spend, source colours match the widget', () => {
+    test('console page: absolute /console/ assets, nav is Projects, Spend, then Pipeline, source colours match the widget', () => {
       const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
       const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
       const appcss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
@@ -3985,8 +3985,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(html, /src="\/console\/console\.js"/);
       assert.match(html, /LOCAL WORKSPACE/);
       assert.match(html, /Local only/);
-      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 2);
+      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 3);
       assert.ok(html.indexOf('data-route="projects"') < html.indexOf('data-route="spend"'));
+      assert.ok(html.indexOf('data-route="spend"') < html.indexOf('data-route="pipeline"'));
       for (const v of ['--src-main', '--src-subagent', '--src-auxiliary', '--src-unattributed', '--src-hatch']) {
         const re = new RegExp(v + ':\\s*(#[0-9a-f]{6})', 'i');
         assert.strictEqual(css.match(re)[1].toLowerCase(), appcss.match(re)[1].toLowerCase(), v);
@@ -5512,11 +5513,8 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
-  /* ---- Phase 3 step 3: /brief command ---- */
+  /* ---- Phase 3 step 3 (retired in 4b step 7): legacy /brief removal, scribe template ---- */
   {
-    const briefs = require('../src/briefs.js');
-    const TPL = path.join(ROOT, 'templates', 'commands', 'brief.md');
-    const tplText = fs.readFileSync(TPL, 'utf8');
     const sha = (b) => require('node:crypto').createHash('sha256').update(b).digest('hex');
     const mkEnv = () => {
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-cmd-'));
@@ -5534,67 +5532,28 @@ test('missing rate_limits degrades instead of throwing', () => {
       };
     };
     const rec = (e) => JSON.parse(fs.readFileSync(path.join(e.tmp, 'wired.json'), 'utf8'));
-
-    test('commands: install writes the template, creates the dir, records the sha256', () => {
-      const e = mkEnv();
-      try {
-        assert.strictEqual(wiring.commandsStatus(), 'not-installed');
-        const dry = wiring.installCommands({ dryRun: true });
-        assert.ok(dry.dryRun && dry.changes.length === 1);
-        assert.ok(!fs.existsSync(path.join(e.tmp, 'commands')), 'dry run wrote something');
-        const r = wiring.installCommands();
-        assert.strictEqual(r.conflict, null);
-        assert.strictEqual(fs.readFileSync(e.target, 'utf8'), tplText);
-        assert.strictEqual(rec(e).commands['commands/brief.md'], sha(fs.readFileSync(TPL)));
-        assert.strictEqual(wiring.commandsStatus(), 'installed');
-        assert.ok(wiring.commandsInstalled());
-        assert.deepStrictEqual(fs.readdirSync(path.dirname(e.target)), ['brief.md'], 'tmp file left behind');
-      } finally { e.done(); }
-    });
-
-    test('commands: installing again is a no-op (same bytes, same mtime)', () => {
-      const e = mkEnv();
-      try {
-        wiring.installCommands();
-        const old = new Date(Date.now() - 3600 * 1000);
-        fs.utimesSync(e.target, old, old);
-        const before = fs.statSync(e.target).mtimeMs;
-        const r = wiring.installCommands();
-        assert.deepStrictEqual(r.changes, []);
-        assert.strictEqual(r.conflict, null);
-        assert.strictEqual(fs.statSync(e.target).mtimeMs, before, 'file was rewritten');
-      } finally { e.done(); }
-    });
-
-    test('commands: a different existing brief.md is a conflict and stays byte-identical', () => {
-      const e = mkEnv();
-      try {
-        fs.mkdirSync(path.dirname(e.target), { recursive: true });
-        const mine = Buffer.from('# my own /brief\r\nkeep me\n');
-        fs.writeFileSync(e.target, mine);
-        const r = wiring.installCommands();
-        assert.deepStrictEqual(r.conflict, ['commands/brief.md']);
-        assert.ok(fs.readFileSync(e.target).equals(mine));
-        assert.strictEqual(wiring.commandsStatus(), 'conflict');
-        assert.strictEqual(wiring.commandsInstalled(), false);
-        assert.ok(!fs.existsSync(path.join(e.tmp, 'wired.json')), 'a conflict must not record anything');
-        assert.deepStrictEqual(wiring.uninstallCommands().removed, [], 'must not remove a file we never wrote');
-        assert.ok(fs.readFileSync(e.target).equals(mine));
-      } finally { e.done(); }
-    });
+    // An older Sereno install: the file plus the sha256 it recorded.
+    const seedOld = (e, text) => {
+      fs.mkdirSync(path.dirname(e.target), { recursive: true });
+      fs.writeFileSync(e.target, text);
+      fs.writeFileSync(path.join(e.tmp, 'wired.json'), JSON.stringify({ commands: { 'commands/brief.md': sha(Buffer.from(text)) } }));
+    };
 
     test('commands: uninstall removes an unchanged file and the record; keeps an edited one', () => {
       const e = mkEnv();
       try {
-        wiring.installCommands();
+        seedOld(e, 'an older Sereno brief command\n');
+        assert.strictEqual(wiring.commandsStatus(), 'installed');
         const r = wiring.uninstallCommands();
         assert.deepStrictEqual(r.removed, ['commands/brief.md']);
         assert.ok(!fs.existsSync(e.target));
         assert.strictEqual(rec(e).commands, undefined);
+        assert.strictEqual(wiring.commandsStatus(), 'not-installed');
 
-        wiring.installCommands();
+        seedOld(e, 'an older Sereno brief command\n');
         fs.appendFileSync(e.target, '\nmy edit\n');
         const edited = fs.readFileSync(e.target);
+        assert.strictEqual(wiring.commandsStatus(), 'conflict');
         const k = wiring.uninstallCommands();
         assert.deepStrictEqual(k.kept, ['commands/brief.md']);
         assert.deepStrictEqual(k.removed, []);
@@ -5604,38 +5563,20 @@ test('missing rate_limits degrades instead of throwing', () => {
       } finally { e.done(); }
     });
 
-    test('commands: an unedited older copy is update-available and is replaced; an edited one stays a conflict', () => {
+    test('commands: a brief.md Sereno never recorded is a conflict and is never removed', () => {
       const e = mkEnv();
       try {
-        const oldTpl = path.join(e.tmp, 'old-template.md');
-        fs.writeFileSync(oldTpl, 'old version of the command\n');
-        wiring.installCommands({ templatePath: oldTpl });
-        assert.strictEqual(wiring.commandsStatus({ templatePath: oldTpl }), 'installed');
-        // The bundled template moves on.
-        assert.strictEqual(wiring.commandsStatus(), 'update-available');
-        assert.strictEqual(wiring.commandsInstalled(), false);
-        const dry = wiring.installCommands({ dryRun: true });
-        assert.deepStrictEqual(dry.changes, ['commands/brief.md: updated']);
-        assert.strictEqual(fs.readFileSync(e.target, 'utf8'), 'old version of the command\n');
-        const r = wiring.installCommands();
-        assert.strictEqual(r.conflict, null);
-        assert.strictEqual(fs.readFileSync(e.target, 'utf8'), tplText);
-        assert.strictEqual(rec(e).commands['commands/brief.md'], sha(fs.readFileSync(TPL)));
-        assert.strictEqual(wiring.commandsStatus(), 'installed');
-        assert.deepStrictEqual(fs.readdirSync(path.dirname(e.target)), ['brief.md']);
-
-        // User-edited older copy: matches neither the record nor the bundle.
-        wiring.uninstallCommands();
-        wiring.installCommands({ templatePath: oldTpl });
-        fs.appendFileSync(e.target, 'my edit\n');
-        const edited = fs.readFileSync(e.target);
+        fs.mkdirSync(path.dirname(e.target), { recursive: true });
+        const mine = Buffer.from('# my own /brief\r\nkeep me\n');
+        fs.writeFileSync(e.target, mine);
         assert.strictEqual(wiring.commandsStatus(), 'conflict');
-        assert.deepStrictEqual(wiring.installCommands().conflict, ['commands/brief.md']);
-        assert.ok(fs.readFileSync(e.target).equals(edited));
+        assert.deepStrictEqual(wiring.uninstallCommands().removed, [], 'must not remove a file we never wrote');
+        assert.ok(fs.readFileSync(e.target).equals(mine));
+        assert.ok(!fs.existsSync(path.join(e.tmp, 'wired.json')));
       } finally { e.done(); }
     });
 
-    test('commands: wired.json keeps shim and telemetry records intact', () => {
+    test('commands: removal keeps shim and telemetry records intact', () => {
       const e = mkEnv();
       try {
         fs.writeFileSync(path.join(e.tmp, 'settings.json'), '{}\n');
@@ -5643,129 +5584,56 @@ test('missing rate_limits degrades instead of throwing', () => {
         wiring.wireTelemetry({ traces: true });
         const before = rec(e);
         assert.ok(before.shims.length && before.telemetry);
-        wiring.installCommands();
-        const mid = rec(e);
-        assert.deepStrictEqual(mid.shims, before.shims);
-        assert.deepStrictEqual(mid.telemetry, before.telemetry);
+        const withCmd = Object.assign({}, before, { commands: { 'commands/brief.md': sha(Buffer.from('x\n')) } });
+        fs.mkdirSync(path.dirname(e.target), { recursive: true });
+        fs.writeFileSync(e.target, 'x\n');
+        fs.writeFileSync(path.join(e.tmp, 'wired.json'), JSON.stringify(withCmd));
         wiring.uninstallCommands();
-        const after = rec(e);
-        assert.deepStrictEqual(after, before);
+        assert.deepStrictEqual(rec(e), before);
         // And the other direction: telemetry/shim writes keep the commands record.
-        wiring.installCommands();
+        fs.writeFileSync(path.join(e.tmp, 'wired.json'), JSON.stringify(withCmd));
         wiring.unwireTelemetry();
         assert.ok(rec(e).commands['commands/brief.md']);
       } finally { e.done(); }
     });
 
-    await atest('commands: CLI --commands honours --dry-run, installs, prints conflict and exits 0, unwires', async () => {
+    await atest('commands: CLI --commands no longer installs; unwire --commands removes an unchanged file only', async () => {
       const e = mkEnv();
       try {
         const env = Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: e.tmp, SERENO_HOME: e.tmp });
         const run = (script, ...a) => spawnSync(process.execPath, [path.join(ROOT, 'tools', script), ...a], { env, encoding: 'utf8' });
-        let r = run('wire.js', '--commands', '--dry-run');
+        let r = run('wire.js', '--commands', '--yes');
         assert.strictEqual(r.status, 0, r.stderr);
-        assert.ok(/dry-run/.test(r.stdout) && !fs.existsSync(e.target));
-        r = run('wire.js', '--commands', '--yes');
-        assert.strictEqual(r.status, 0, r.stderr);
-        assert.strictEqual(fs.readFileSync(e.target, 'utf8'), tplText);
-        assert.ok(!fs.existsSync(path.join(e.tmp, 'settings.json')), 'the commands flag must not touch settings.json');
-        r = run('wire.js', '--commands', '--yes');
-        assert.ok(/already installed/.test(r.stdout), r.stdout);
+        assert.ok(!fs.existsSync(e.target) && !fs.existsSync(path.join(e.tmp, 'settings.json')));
+        assert.ok(/plugin install sereno@sereno/.test(r.stdout), r.stdout);
+        seedOld(e, 'old\n');
         r = run('unwire.js', '--commands');
         assert.strictEqual(r.status, 0, r.stderr);
         assert.ok(!fs.existsSync(e.target));
-        fs.mkdirSync(path.dirname(e.target), { recursive: true });
         fs.writeFileSync(e.target, 'someone else\n');
-        r = run('wire.js', '--commands', '--yes');
+        r = run('unwire.js', '--commands');
         assert.strictEqual(r.status, 0, r.stderr);
-        assert.ok(/different commands\/brief\.md/.test(r.stdout), r.stdout);
         assert.strictEqual(fs.readFileSync(e.target, 'utf8'), 'someone else\n');
       } finally { e.done(); }
     });
 
-    test('commands: the template ships in the build and is reachable from wiring', () => {
-      const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-      assert.ok(pkg.build.files.includes('templates/**/*'), 'templates/ missing from build.files');
-      assert.strictEqual(path.resolve(wiring.commandTemplatePath()), path.resolve(TPL));
-    });
-
-    test('commands: the template names every front-matter key and line key the parser reads', () => {
-      for (const k of ['branch', 'worktree', 'version', 'source_commit', 'task', 'generated_at']) {
-        assert.ok(new RegExp('^' + k + ':', 'm').test(tplText), 'template lacks front-matter key ' + k);
-      }
-      for (const k of ['Now', 'Next', 'Blocked']) {
-        assert.ok(new RegExp('^' + k + ':', 'm').test(tplText), 'template lacks line ' + k);
-      }
-      assert.ok(tplText.includes('feat%2Fx.md'), 'the encoding example is missing');
-      assert.ok(/^description: .+/m.test(tplText.split('\n---')[0]));
-      assert.ok(tplText.includes('$ARGUMENTS'));
-      for (const c of ['git branch --show-current', 'git rev-parse --show-toplevel', 'git rev-parse HEAD']) {
-        assert.ok(tplText.includes(c), 'missing ' + c);
-      }
-    });
-
-    test('commands: the format the template shows parses, and so does a brief rendered by its rules', () => {
-      const m = /```\n(---\n[\s\S]*?\n---\n[\s\S]*?)\n```/.exec(tplText);
-      assert.ok(m, 'no format example in the template');
-      const b = briefs.parseBrief(m[1]);
-      assert.ok(b, 'the template example does not parse');
-      assert.strictEqual(b.branch, 'feat/x');
-      assert.strictEqual(b.version, 3);
-      assert.ok(b.sourceCommit && b.sourceCommit.length === 40);
-      assert.ok(b.now && b.next && b.blocked === 'None');
-
-      // Rendered by hand following the template: CRLF-free, forward-slash worktree, kebab task, UTC time.
-      const branch = 'feat/projects-briefs';
-      const sample = [
-        '---', 'branch: ' + branch, 'worktree: C:/Users/me/code/sereno', 'version: 1',
-        'source_commit: ' + 'a1b2c3d4'.repeat(5), 'task: brief-command', 'generated_at: 2026-10-11T14:05:00Z', '---',
-        'Now: Adding the /brief command template and its installer.',
-        'Next: Wire the install button into the settings panel.',
-        'Blocked: None', '',
-      ].join('\n');
-      const p = briefs.parseBrief(sample);
-      assert.ok(p, 'rendered brief rejected');
-      assert.deepStrictEqual([p.branch, p.worktree, p.version, p.task, p.generatedAt, p.blocked],
-        [branch, 'C:/Users/me/code/sereno', 1, 'brief-command', '2026-10-11T14:05:00Z', 'None']);
-      // The file name rule: encodeURIComponent, which the reader decodes back.
-      const name = encodeURIComponent(branch) + '.md';
-      assert.strictEqual(name, 'feat%2Fprojects-briefs.md');
-      assert.strictEqual(briefs.decodeBriefName(name), branch);
-    });
-
-    test('commands: neither template tells Claude to commit or stage', () => {
+    test('commands: sereno-scribe is a haiku agent that points at the same brief rules, and never commits', () => {
       const scribe = fs.readFileSync(path.join(ROOT, 'templates', 'agents', 'sereno-scribe.md'), 'utf8');
-      for (const [n, t] of [['brief.md', tplText], ['sereno-scribe.md', scribe]]) {
-        assert.ok(!/git\s+(commit|add|stage|push|reset|checkout)\b/i.test(t), n + ' mentions a git write command');
-        assert.ok(/do not commit|not commit/i.test(t), n + ' should forbid committing');
-      }
-    });
-
-    test('commands: sereno-scribe is a haiku agent that points at the same brief rules', () => {
-      const scribe = fs.readFileSync(path.join(ROOT, 'templates', 'agents', 'sereno-scribe.md'), 'utf8');
+      assert.ok(!/git\s+(commit|add|stage|push|reset|checkout)\b/i.test(scribe));
+      assert.ok(/do not commit|not commit/i.test(scribe));
       assert.ok(/^name: sereno-scribe$/m.test(scribe) && /^model: haiku$/m.test(scribe));
       for (const k of ['branch', 'worktree', 'version', 'source_commit', 'task', 'generated_at', 'Now:', 'Next:', 'Blocked:']) {
         assert.ok(scribe.includes(k), 'sereno-scribe lacks ' + k);
       }
       assert.ok(scribe.includes('.sereno/briefs/'));
+      assert.ok(scribe.includes('/sereno:brief'));
       // The Phase 1 scribe is untouched.
       assert.ok(fs.existsSync(path.join(ROOT, 'templates', 'agents', 'scribe.md')));
     });
 
-    test('commands: the settings row is wired through preload and main, hidden without preload', () => {
-      const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
-      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
-      const pre = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
-      const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
-      assert.ok(html.includes('id="brief-row"') && /id="brief-row"[^>]*hidden/.test(html));
-      assert.ok(/if \(!api \|\| !api\.commandsStatus\) \{ ui\.briefRow\.hidden = true/.test(app));
-      assert.ok(pre.includes('sereno:commands-status') && pre.includes('sereno:commands-toggle'));
-      // The confirmation lives in main, defaults to Cancel, and precedes the write.
-      const i = main.indexOf("'sereno:commands-toggle'");
-      const seg = main.slice(i, i + 1800);
-      assert.ok(/defaultId: 1/.test(seg) && /Cancel/.test(seg));
-      assert.ok(seg.indexOf('showMessageBox') < seg.indexOf('installCommands'));
-      assert.ok(seg.includes('Sereno writes one file and changes nothing else.'));
+    test('commands: templates still ship in the build', () => {
+      const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+      assert.ok(pkg.build.files.includes('templates/**/*'), 'templates/ missing from build.files');
     });
   }
 
@@ -5856,7 +5724,10 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(p.git.defaultBranch, 'main');
           assert.strictEqual(p.spend14, null, 'ledger off: absent, not zero');
           assert.strictEqual(p.prs, null);
-          assert.ok(p.branches.length >= 1 && Object.keys(p.branches[0]).sort().join() === 'behindSince,freshness,name,now');
+          assert.ok(p.branches.length >= 1 && Object.keys(p.branches[0]).sort().join() === 'behindSince,freshness,generatedAt,name,now');
+          const mainB = p.branches.find((x) => x.name === 'main');
+          assert.strictEqual(mainB.generatedAt, Date.parse('2026-10-11T10:00:00Z'), 'branch brief time, epoch ms');
+          assert.ok(p.branches.every((x) => x.generatedAt === null || Number.isFinite(x.generatedAt)));
           assert.ok(typeof p.lastActivity === 'number');
           const h = r.projects.find((x) => x.hidden);
           assert.strictEqual(h.id, hid);
@@ -6435,33 +6306,19 @@ test('missing rate_limits degrades instead of throwing', () => {
       });
     });
 
-    await atest('[projects exit 7] /brief install never overwrites a different brief.md (bytes unchanged); Sereno\'s own unedited older copy is updated', async () => {
+    await atest('[projects exit 7] a brief.md that is not Sereno\'s recorded copy stays byte-identical (hash-match removal: see [4b-plugin])', async () => {
       const tmp = mkd('c7');
       const prev = { c: process.env.CLAUDE_CONFIG_DIR, h: process.env.SERENO_HOME };
       process.env.CLAUDE_CONFIG_DIR = tmp; process.env.SERENO_HOME = tmp;
       try {
         const target = path.join(tmp, 'commands', 'brief.md');
-        const tpl = fs.readFileSync(wiring.commandTemplatePath(), 'utf8');
         fs.mkdirSync(path.dirname(target), { recursive: true });
         const theirs = Buffer.from('---\ndescription: mine\n---\nSomebody else wrote this brief command.\r\n');
         fs.writeFileSync(target, theirs);
         assert.strictEqual(wiring.commandsStatus(), 'conflict');
-        const r = wiring.installCommands();
-        assert.deepStrictEqual(r.conflict, ['commands/brief.md']);
+        assert.deepStrictEqual(wiring.uninstallCommands().removed, []);
         assert.ok(fs.readFileSync(target).equals(theirs), 'bytes unchanged');
         assert.deepStrictEqual(fs.readdirSync(path.dirname(target)), ['brief.md'], 'no temp or backup file left');
-        // Sereno's own older copy, never edited
-        fs.rmSync(target);
-        const oldTpl = path.join(tmp, 'old-template.md');
-        fs.writeFileSync(oldTpl, 'an older Sereno brief command\n');
-        wiring.installCommands({ templatePath: oldTpl });
-        assert.strictEqual(fs.readFileSync(target, 'utf8'), 'an older Sereno brief command\n');
-        assert.strictEqual(wiring.commandsStatus(), 'update-available');
-        const up = wiring.installCommands();
-        assert.strictEqual(up.conflict, null);
-        assert.deepStrictEqual(up.changes, ['commands/brief.md: updated']);
-        assert.strictEqual(fs.readFileSync(target, 'utf8'), tpl);
-        assert.strictEqual(wiring.commandsStatus(), 'installed');
       } finally {
         if (prev.c === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev.c;
         if (prev.h === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev.h;
@@ -7356,9 +7213,12 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('plugin/ has no package.json (no dependencies, no install step)', () => {
       assert.ok(!fs.existsSync(path.join(ROOT, 'plugin', 'package.json')));
     });
-    test('Electron build files do not include plugin/ or .claude-plugin/', () => {
+    test('Electron build files do not include plugin/ or .claude-plugin/ (except the 4b bundled rules)', () => {
       const files = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files;
+      const bundledRules = ['plugin/bin/lib/recovery.js', 'plugin/bin/lib/config.js', 'plugin/bin/lib/records.js', 'plugin/bin/lib/fsafe.js', 'plugin/agents/*.md', 'plugin/skills/*/SKILL.md'];
+      assert.deepStrictEqual(files.filter((f) => /^plugin\//.test(f)).sort(), bundledRules.slice().sort());
       for (const f of files) {
+        if (bundledRules.includes(f)) continue;
         assert.ok(!/^!?\.?\/?(plugin|\.claude-plugin)(\/|$)/.test(f) || f.startsWith('!'), 'packages ' + f);
         assert.ok(!/^\*\*/.test(f), 'broad glob ' + f);
       }
@@ -9883,6 +9743,1693 @@ test('missing rate_limits degrades instead of throwing', () => {
         for (const x of [d, home, lnkParent, outside]) fs.rmSync(x, { recursive: true, force: true });
       }
     });
+  }
+
+  /* ---- Phase 4b: bundled plugin rules ---- */
+  {
+    const globRe = (g) => new RegExp('^' + g.replace(/[.+^$|()[\]{}]/g, (c) => '\\' + c).replace(/\*\*\//g, '\u0000').replace(/\*/g, '[^/]*').replace(/\u0000/g, '(?:.*/)?') + '$');
+    const patterns = require('../package.json').build.files.map(globRe);
+    const bundled = (rel) => patterns.some((re) => re.test(rel));
+    test('[4b-bundle] build.files globs match what the matcher expects', () => {
+      assert.ok(bundled('plugin/bin/lib/recovery.js'));
+      assert.ok(bundled('plugin/bin/lib/config.js') && bundled('plugin/bin/lib/records.js') && bundled('plugin/bin/lib/fsafe.js'));
+      assert.ok(!bundled('plugin/bin/lib/git.js') && !bundled('plugin/bin/lib/sub/x.js'));
+      assert.ok(bundled('plugin/agents/builder.md'));
+      assert.ok(bundled('plugin/skills/build/SKILL.md'));
+      assert.ok(!bundled('plugin/skills/build/notes.md'));
+      assert.ok(!bundled('plugin/bin/sereno.js'));
+    });
+    test('[4b-bundle] every relative require of recovery.js and config.js (transitively) is bundled', () => {
+      const seen = new Set(); const queue = [...fs.readFileSync(path.join(ROOT, 'src/pipeline.js'), 'utf8').matchAll(/require\(\s*['"]\.\.\/(plugin\/[^'"]+)['"]\s*\)/g)].map((m) => m[1]);
+      assert.ok(queue.length >= 3, 'found the plugin requires in src/pipeline.js');
+      while (queue.length) {
+        const rel = queue.pop();
+        if (seen.has(rel)) continue;
+        seen.add(rel);
+        assert.ok(bundled(rel), rel + ' is not matched by build.files');
+        const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+        for (const m of src.matchAll(/require\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g)) {
+          let next = path.posix.normalize(path.posix.join(path.posix.dirname(rel), m[1]));
+          if (!path.posix.extname(next)) next += '.js';
+          assert.ok(fs.existsSync(path.join(ROOT, next)), rel + ' requires missing ' + next);
+          queue.push(next);
+        }
+      }
+      assert.ok(seen.has('plugin/bin/lib/fsafe.js'), 'walk reached fsafe.js');
+    });
+    test('[4b-bundle] every agent and skill file inferModels reads is covered by build.files', () => {
+      for (const n of fs.readdirSync(path.join(ROOT, 'plugin/agents'))) if (n.endsWith('.md')) assert.ok(bundled('plugin/agents/' + n), n);
+      for (const n of fs.readdirSync(path.join(ROOT, 'plugin/skills'))) if (fs.existsSync(path.join(ROOT, 'plugin/skills', n, 'SKILL.md'))) assert.ok(bundled('plugin/skills/' + n + '/SKILL.md'), n);
+    });
+    test('[4b-bundle] src/pipeline.js loads and exposes decide', () => {
+      const pl = require('../src/pipeline.js');
+      assert.strictEqual(typeof pl.decide, 'function');
+      assert.strictEqual(pl.decide, require('../plugin/bin/lib/recovery.js').decide);
+      assert.strictEqual(typeof pl.config, 'object');
+    });
+    /* ---- [4b-reader] ---- */
+    {
+      const pl = require('../src/pipeline.js');
+      const tmps = [];
+      const mkd = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4br-'))); tmps.push(d); return d; };
+      const sub = (r, s) => { const d = path.join(r, '.sereno', s); fs.mkdirSync(d, { recursive: true }); return d; };
+      const wj = (d, n, o) => fs.writeFileSync(path.join(d, n), typeof o === 'string' ? o : JSON.stringify(o));
+      const HEX = 'a1b2c3d';
+      const runId = (stamp, h) => 'rr_' + stamp + '_' + (h || HEX);
+      const attempt = (task, n, extra) => Object.assign({ project_id: 'p1', task_id: task, spec_revision: 1, attempt: n, builder_requested: 'sonnet', agent_id: 'a_1',
+        config_hash: 'sha256:' + 'a'.repeat(64), kind: 'feature', fixes: null, diagnosis: 'none', outcome: 'pass', review_run_id: null,
+        started_at: '2026-10-15T10:00:00.000Z', ended_at: '2026-10-15T10:05:00.000Z' }, extra || {});
+      const gate = (task, id, extra) => Object.assign({ review_run_id: id, task_id: task, spec: '.sereno/specs/' + task + '.md', spec_hash: 'sha256:' + 'b'.repeat(64),
+        branch: 'task/' + task, base_commit: 'abcdef1', head_commit: 'abcdef2', session_id: 's-1', agent_id: 'a_2', model: 'claude-fable-5',
+        outcome: 'block', tests_passed: true, findings: [], context_requests: [], reviewed_at: '2026-10-15T11:00:00.000Z', config_hash: 'sha256:' + 'a'.repeat(64) }, extra || {});
+      const link = (target, at) => { try { fs.symlinkSync(target, at, process.platform === 'win32' ? 'junction' : 'dir'); return true; } catch (_) { return false; } };
+
+      await atest('[4b-reader] no .sereno, a relative path and a non-string give null (no throw)', async () => {
+        assert.strictEqual(await pl.readRepo(mkd()), null);
+        assert.strictEqual(await pl.readRepo('relative/path'), null);
+        assert.strictEqual(await pl.readRepo(undefined), null);
+        assert.strictEqual(await pl.listAttempts(mkd()), null);
+      });
+
+      await atest('[4b-reader] reads attempts, gates and spec front matter; groups by task; spec body is never returned', async () => {
+        const r = mkd();
+        wj(sub(r, 'attempts'), 'demo-1.json', attempt('demo', 1, { outcome: 'block' }));
+        wj(sub(r, 'attempts'), 'demo-2.json', attempt('demo', 2));
+        wj(sub(r, 'attempts'), 'other-1.json', attempt('other', 1));
+        const id = runId('20261015T110000Z');
+        wj(sub(r, 'gates'), id + '.json', gate('demo', id, { findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 4, summary: 'x' }] }));
+        const specText = '---\ntask: "demo"\nbuilder: sonnet\nkind: feature\nreason: "cheap enough"\nfixes: null\nbase_branch: "main"\nspec_revision: 3\ncreated_at: "2026-10-15T09:00:00.000Z"\n---\n\nSECRET-BODY-TEXT acceptance criteria\n';
+        wj(sub(r, 'specs'), 'demo.md', specText);
+        const out = await pl.readRepo(r);
+        assert.ok(out);
+        assert.deepStrictEqual(out.tasks.map((t) => t.task), ['demo', 'other']);
+        const demo = out.tasks[0];
+        assert.deepStrictEqual(demo.attempts.map((a) => a.attempt), [2, 1]);
+        assert.strictEqual(demo.gates.length, 1);
+        assert.strictEqual(demo.gates[0].findings[0].file, 'src/a.js');
+        assert.strictEqual(demo.spec.reason, 'cheap enough');
+        assert.strictEqual(demo.spec.spec_revision, 3);
+        assert.strictEqual(demo.spec.base_branch, 'main');
+        assert.strictEqual(out.tasks[1].spec, null);
+        assert.ok(!JSON.stringify(out).includes('SECRET-BODY-TEXT'), 'spec body leaked');
+        assert.strictEqual(out.skipped, 0);
+        assert.ok(out.config && out.config.roles, 'effective config present');
+        assert.deepStrictEqual((await pl.listAttempts(r)).sort(), ['demo-1.json', 'demo-2.json', 'other-1.json']);
+      });
+
+      await atest('[4b-reader] unknown fields are dropped from attempts, gates and findings; summaries are capped and stripped', async () => {
+        const r = mkd();
+        wj(sub(r, 'attempts'), 'demo-1.json', attempt('demo', 1, { prompt: 'PROMPT-TEXT', command: 'rm -rf', extra: { a: 1 } }));
+        const id = runId('20261015T110000Z');
+        wj(sub(r, 'gates'), id + '.json', gate('demo', id, {
+          transcript: 'TRANSCRIPT', findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 4, summary: 'a\u0000b‮' + 'z'.repeat(400), diff: 'DIFF-TEXT', prompt: 'P' }],
+        }));
+        const out = await pl.readRepo(r);
+        const a = out.tasks[0].attempts[0], g = out.tasks[0].gates[0];
+        assert.deepStrictEqual(Object.keys(a).sort(), ['agent_id', 'attempt', 'builder_requested', 'config_hash', 'diagnosis', 'ended_at', 'fixes', 'head_commit', 'kind', 'outcome',
+          'project_id', 'review_run_id', 'spec_hash', 'spec_revision', 'started_at', 'task_id']);
+        assert.deepStrictEqual(Object.keys(g).sort(), ['agent_id', 'base_commit', 'branch', 'config_hash', 'context_requests', 'findings', 'head_commit', 'model', 'outcome',
+          'review_run_id', 'reviewed_at', 'session_id', 'spec', 'spec_hash', 'task_id', 'tests_passed']);
+        assert.deepStrictEqual(Object.keys(g.findings[0]).sort(), ['file', 'kind', 'line', 'severity', 'summary']);
+        assert.ok(g.findings[0].summary.length <= 300);
+        assert.ok(g.findings[0].summary.startsWith('ab'), 'control chars stripped');
+        const all = JSON.stringify(out);
+        for (const s of ['PROMPT-TEXT', 'rm -rf', 'TRANSCRIPT', 'DIFF-TEXT']) assert.ok(!all.includes(s), s + ' leaked');
+      });
+
+      await atest('[4b-reader] tests.command and tests.setup are dropped from config', async () => {
+        const r = mkd();
+        sub(r, 'attempts');
+        wj(path.join(r, '.sereno'), 'pipeline.json', { tests: { command: 'npm run SECRET-CMD', setup: 'SECRET-SETUP' } });
+        const out = await pl.readRepo(r);
+        assert.ok(out && out.config && out.config.tests, 'config loaded');
+        assert.ok(!('command' in out.config.tests) && !('setup' in out.config.tests));
+        assert.ok(!JSON.stringify(out).includes('SECRET'));
+      });
+
+      await atest('[4b-reader] a linked or non-file .sereno/pipeline.json is never loaded (config null, counted)', async () => {
+        const outside = mkd(), r = mkd();
+        sub(r, 'attempts');
+        wj(outside, 'pipeline.json', { tests: { command: 'OUTSIDE-CMD' }, preset: 'lean' });
+        const f = path.join(r, '.sereno', 'pipeline.json');
+        let linked = true;
+        try { fs.symlinkSync(path.join(outside, 'pipeline.json'), f, 'file'); } catch (_) { linked = false; }
+        if (!linked) { fs.rmSync(f, { force: true }); linked = link(outside, f); }
+        if (!linked) { console.log('    (link not permitted here; case not exercised)'); return; }
+        const out = await pl.readRepo(r);
+        assert.ok(out);
+        assert.strictEqual(out.config, null);
+        assert.strictEqual(out.skipped, 1);
+        assert.ok(!JSON.stringify(out).includes('OUTSIDE'));
+      });
+
+      await atest('[4b-reader] a config that fails to load gives config null and is counted in skipped', async () => {
+        const r = mkd();
+        sub(r, 'attempts');
+        wj(path.join(r, '.sereno'), 'pipeline.json', '{not json');
+        const out = await pl.readRepo(r);
+        assert.ok(out);
+        assert.strictEqual(out.config, null);
+        assert.strictEqual(out.skipped, 1);
+      });
+
+      await atest('[4b-reader] malformed, mismatched, oversized and non-file entries are skipped and counted', async () => {
+        const r = mkd();
+        const ad = sub(r, 'attempts'), gd = sub(r, 'gates'), sd = sub(r, 'specs');
+        wj(ad, 'demo-1.json', attempt('demo', 1));
+        wj(ad, 'bad-1.json', '{nope');
+        wj(ad, 'liar-1.json', attempt('someone', 1));
+        wj(ad, 'big-1.json', JSON.stringify(attempt('big', 1, { project_id: 'x'.repeat(300 * 1024) })));
+        fs.mkdirSync(path.join(ad, 'dir-1.json'));
+        wj(ad, 'notes.txt', 'ignored');
+        const good = runId('20261015T110000Z'), wrong = runId('20261015T120000Z');
+        wj(gd, good + '.json', gate('demo', good));
+        wj(gd, wrong + '.json', gate('demo', 'rr_other'));
+        wj(gd, runId('20261015T130000Z') + '.json', '[]');
+        wj(sd, 'nofront.md', 'just text, no front matter\n');
+        const out = await pl.readRepo(r);
+        const demo = out.tasks.find((t) => t.task === 'demo');
+        assert.strictEqual(demo.attempts.length, 1);
+        assert.strictEqual(demo.gates.length, 1);
+        assert.strictEqual(out.tasks.length, 1, 'skipped files create no task');
+        assert.strictEqual(out.skipped, 7); // bad, liar, big, dir-1.json, wrong gate, [] gate, nofront spec
+      });
+
+      await atest('[4b-reader] caps: 200 newest attempt files and 200 newest gate files', async () => {
+        const r = mkd();
+        const ad = sub(r, 'attempts'), gd = sub(r, 'gates');
+        for (let n = 1; n <= 230; n++) wj(ad, 'big-' + n + '.json', attempt('big', n));
+        for (let i = 0; i < 230; i++) {
+          const id = runId('20261015T' + String(100000 + i).padStart(6, '0') + 'Z');
+          wj(gd, id + '.json', gate('big', id));
+        }
+        const out = await pl.readRepo(r);
+        const t = out.tasks[0];
+        assert.strictEqual(t.attempts.length, 200);
+        assert.strictEqual(t.attempts[0].attempt, 230);
+        assert.strictEqual(t.attempts[199].attempt, 31);
+        assert.strictEqual(t.gates.length, 200);
+        assert.ok(t.gates[0].review_run_id > t.gates[199].review_run_id, 'newest first');
+        assert.strictEqual((await pl.listAttempts(r)).length, 200);
+      });
+
+      await atest('[4b-reader] a symlinked/junctioned .sereno is refused before anything is read', async () => {
+        const target = mkd(), r = mkd();
+        wj(sub(target, 'attempts'), 'demo-1.json', attempt('demo', 1));
+        if (!link(path.join(target, '.sereno'), path.join(r, '.sereno'))) { console.log('    (link not permitted here; case not exercised)'); return; }
+        assert.strictEqual(await pl.readRepo(r), null);
+        assert.strictEqual(await pl.listAttempts(r), null);
+        assert.strictEqual(await pl.guard(r), false);
+      });
+
+      for (const s of ['attempts', 'gates', 'specs']) {
+        await atest('[4b-reader] a symlinked/junctioned .sereno/' + s + ' is refused (whole repo null)', async () => {
+          const outside = mkd(), r = mkd();
+          fs.mkdirSync(path.join(r, '.sereno'));
+          wj(outside, 'demo-1.json', attempt('demo', 1));
+          wj(outside, 'demo.md', '---\ntask: "demo"\n---\n');
+          if (!link(outside, path.join(r, '.sereno', s))) { console.log('    (link not permitted here; case not exercised)'); return; }
+          assert.strictEqual(await pl.readRepo(r), null);
+          assert.strictEqual(await pl.listAttempts(r), null);
+          assert.strictEqual(await pl.guard(r), false);
+        });
+      }
+
+      await atest('[4b-reader] a symlinked file inside attempts is skipped, never followed', async () => {
+        const r = mkd(), outside = mkd();
+        const ad = sub(r, 'attempts');
+        wj(outside, 'real.json', attempt('demo', 1, { project_id: 'OUTSIDE' }));
+        let linked = true;
+        try { fs.symlinkSync(path.join(outside, 'real.json'), path.join(ad, 'demo-1.json'), 'file'); } catch (_) { linked = false; }
+        if (!linked) { console.log('    (symlink not permitted here; case not exercised)'); return; }
+        const out = await pl.readRepo(r);
+        assert.ok(!JSON.stringify(out).includes('OUTSIDE'));
+        assert.strictEqual(out.skipped, 1);
+      });
+
+      await atest('[4b-reader] a non-local root (UNC) is refused', async () => {
+        assert.strictEqual(await pl.readRepo('\\\\server\\share\\repo'), null);
+      });
+
+      await atest('[4b-reader] a throwing fs layer never escapes readRepo or listAttempts', async () => {
+        const boom = new Proxy({}, { get() { return () => { throw new Error('boom'); }; } });
+        assert.strictEqual(await pl.readRepo(mkd(), { fsp: boom }), null);
+        assert.strictEqual(await pl.listAttempts(mkd(), { fsp: boom }), null);
+      });
+
+      /* ---- [4b-stage] ---- */
+      {
+        const repos = require('../src/repos.js');
+        const { gitExec } = require('../src/gitexec.js');
+        const rec = require('../plugin/bin/lib/records.js');
+        const genv = Object.assign({}, process.env, { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' });
+        const g = (cwd, ...a) => execFileSync('git', a, { cwd, env: genv, stdio: 'pipe', windowsHide: true }).toString().trim();
+        const gx = async (args, cwd) => (await gitExec('git', args, { cwd })).stdout;
+        const NOW = Date.parse('2026-10-15T12:00:00.000Z');
+        const SPEC = (task, extra) => '---\ntask: "' + task + '"\nbuilder: sonnet\nkind: feature\nreason: "r"\nfixes: null\nbase_branch: "main"\nspec_revision: 1\ncreated_at: "2026-10-15T09:00:00.000Z"\n---\n\nbody ' + (extra || '') + '\n';
+        const mkrepo = () => { const r = mkd(); g(r, 'init', '-q', '-b', 'main'); g(r, 'commit', '-q', '--allow-empty', '-m', 'init'); return r; };
+        /** a task branch with one commit; main stays checked out. Returns the branch tip. */
+        const mkTask = (r, task) => { g(r, 'checkout', '-q', '-b', 'task/' + task); g(r, 'commit', '-q', '--allow-empty', '-m', 'work ' + task); const t = g(r, 'rev-parse', 'HEAD'); g(r, 'checkout', '-q', 'main'); return t; };
+        const putSpec = (r, task, extra) => { wj(sub(r, 'specs'), task + '.md', SPEC(task, extra)); return rec.sha256(fs.readFileSync(path.join(r, '.sereno', 'specs', task + '.md'))); };
+        let rn = 0;
+        const rid = () => runId('20261015T11' + String(10 + (rn++ % 40)) + '00Z', ('abcdef' + rn).slice(-7));
+        const putGate = (r, task, id, extra) => wj(sub(r, 'gates'), id + '.json', gate(task, id, extra));
+        const putAtt = (r, task, n, extra) => wj(sub(r, 'attempts'), task + '-' + n + '.json', attempt(task, n, extra));
+        const viewOf = async (r, task, now, gitFn) => {
+          const out = await pl.readRepo(r);
+          const e = out.tasks.find((t) => t.task === task);
+          return pl.taskView(r, e, out.config, gitFn || gx, now === undefined ? NOW : now);
+        };
+
+        await atest('[4b-stage] spec only, no attempts: architect, "Spec written", decide is not called', async () => {
+          const r = mkrepo(); putSpec(r, 'demo');
+          const v = await viewOf(r, 'demo', NOW, async () => { throw new Error('git must not run'); });
+          assert.strictEqual(v.stage, 'architect');
+          assert.strictEqual(v.step, 'Spec written');
+          assert.strictEqual(v.reviewRuns, 0);
+          assert.strictEqual(v.expired, false);
+          assert.deepStrictEqual(Object.keys(v).sort(), ['attempt', 'expired', 'findings', 'gate', 'reason', 'reviewRuns', 'stage', 'startedAt', 'step', 'task', 'updatedAt']);
+        });
+
+        await atest('[4b-stage] builder: an environment error is retried', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          putAtt(r, 'demo', 1, { outcome: 'error', diagnosis: 'environment' });
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'builder');
+          assert.ok(/retry/i.test(v.step), v.step);
+          assert.strictEqual(v.attempt, 1);
+        });
+
+        await atest('[4b-stage] builder: a defect block repairs, "Fixing N findings" counts non-low findings of the latest gate', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          const id = rid();
+          putGate(r, 'demo', id, { findings: [
+            { severity: 'high', kind: 'bug', file: 'a.js', line: 1, summary: 'x' },
+            { severity: 'medium', kind: 'defect', file: 'b.js', line: 2, summary: 'y' },
+            { severity: 'low', kind: 'bug', file: 'c.js', line: 3, summary: 'z' }] });
+          putAtt(r, 'demo', 1, { outcome: 'block', diagnosis: 'defect', review_run_id: id });
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'builder');
+          assert.strictEqual(v.step, 'Fixing 2 findings');
+          assert.strictEqual(v.findings.length, 3);
+          assert.strictEqual(v.reviewRuns, 1);
+          assert.strictEqual(v.gate.review_run_id, id);
+        });
+
+        await atest('[4b-stage] red-team: a built attempt awaits review; building: a running one; decision: needs_context; stopped: stopped', async () => {
+          const r = mkrepo(); mkTask(r, 'a'); mkTask(r, 'b'); mkTask(r, 'c');
+          for (const t of ['a', 'b', 'c']) putSpec(r, t);
+          putAtt(r, 'a', 1, { outcome: 'built' });
+          putAtt(r, 'b', 1, { outcome: 'needs_context', ended_at: null });
+          putAtt(r, 'c', 1, { outcome: 'stopped' });
+          assert.strictEqual((await viewOf(r, 'a')).stage, 'red-team');
+          const b = await viewOf(r, 'b');
+          assert.strictEqual(b.stage, 'decision');
+          assert.ok(b.reason && b.reason.length);
+          assert.strictEqual((await viewOf(r, 'c')).stage, 'stopped');
+        });
+
+        const passTask = (r, task) => {
+          const tip = mkTask(r, task);
+          const sh = putSpec(r, task);
+          const id = rid();
+          putGate(r, task, id, { outcome: 'pass', tests_passed: true, head_commit: tip, spec_hash: sh });
+          putAtt(r, task, 1, { outcome: 'pass', review_run_id: id, spec_hash: sh, head_commit: tip });
+          return { tip, sh, id };
+        };
+
+        await atest('[4b-stage] a running attempt is a Builder working: "Building", or "Fixing N findings" after a block; never a decision', async () => {
+          const r = mkrepo(); mkTask(r, 'first'); putSpec(r, 'first'); putAtt(r, 'first', 1, { outcome: 'running', ended_at: null });
+          const v = await viewOf(r, 'first', NOW, async () => { throw new Error('git must not run'); });
+          assert.deepStrictEqual([v.stage, v.step, v.attempt], ['builder', 'Building', 1]);
+          const r2 = mkrepo(); mkTask(r2, 'fix'); putSpec(r2, 'fix'); const id = rid();
+          putGate(r2, 'fix', id, { findings: [{ severity: 'high', kind: 'bug', file: 'a.js', line: 1, summary: 'x' }, { severity: 'low', kind: 'bug', file: 'b.js', line: 2, summary: 'y' }] });
+          putAtt(r2, 'fix', 1, { outcome: 'block', diagnosis: 'defect', review_run_id: id });
+          putAtt(r2, 'fix', 2, { outcome: 'running', ended_at: null });
+          const w = await viewOf(r2, 'fix');
+          assert.deepStrictEqual([w.stage, w.step, w.attempt], ['builder', 'Fixing 1 finding', 2]);
+          assert.strictEqual(w.findings.length, 2);
+        });
+
+        await atest('[4b-stage] ready: pass + gate pass at the branch tip', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'ready');
+          assert.strictEqual(v.step, 'Ready: run /sereno:merge');
+        });
+
+        await atest('[4b-stage] merged: the gate head is an ancestor of the spec base branch', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'merged');
+        });
+
+        await atest('[4b-fix] a merged task re-opened under the same name (new built attempt, no gate) is not merged', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          assert.strictEqual((await viewOf(r, 'demo')).stage, 'merged');
+          putAtt(r, 'demo', 2, { outcome: 'built' });
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'red-team');
+        });
+
+        await atest('[4b-stage] head_moved: a commit on the task branch after the gate sends it back to review', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          g(r, 'checkout', '-q', 'task/demo'); g(r, 'commit', '-q', '--allow-empty', '-m', 'late'); g(r, 'checkout', '-q', 'main');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'red-team');
+          assert.ok(/head_moved/.test(v.reason), v.reason);
+        });
+
+        await atest('[4b-stage] spec_changed: an edited spec needs a decision', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          putSpec(r, 'demo', 'EDITED');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'decision');
+          assert.ok(/spec_changed/.test(v.reason), v.reason);
+        });
+
+        await atest('[4b-stage] expired: nothing newer than 7 days; stage is still computed; a fresh one is not expired', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          putAtt(r, 'demo', 1, { outcome: 'built', started_at: '2026-10-01T10:00:00.000Z', ended_at: '2026-10-01T10:05:00.000Z' });
+          const v = await viewOf(r, 'demo', NOW);
+          assert.strictEqual(v.stage, 'red-team');
+          assert.strictEqual(v.expired, true);
+          assert.strictEqual(v.startedAt, Date.parse('2026-10-01T10:00:00.000Z'));
+          assert.strictEqual((await viewOf(r, 'demo', Date.parse('2026-10-05T10:00:00.000Z'))).expired, false);
+          // a newer gate keeps it alive
+          putGate(r, 'demo', rid(), { reviewed_at: '2026-10-14T10:00:00.000Z' });
+          assert.strictEqual((await viewOf(r, 'demo', NOW)).expired, false);
+        });
+
+        await atest('[4b-stage] a git or decide failure gives stage unknown with a code, never a throw', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          putAtt(r, 'demo', 1, { outcome: 'built' });
+          const v = await viewOf(r, 'demo', NOW, async () => { throw Object.assign(new Error('boom'), { code: 'spawn_failed' }); });
+          assert.strictEqual(v.stage, 'red-team', 'built needs no git');
+          const r2 = mkrepo(); mkTask(r2, 'demo'); const sh = putSpec(r2, 'demo');
+          const id = rid();
+          putGate(r2, 'demo', id, { outcome: 'pass', tests_passed: true, head_commit: 'a'.repeat(40), spec_hash: sh });
+          putAtt(r2, 'demo', 1, { outcome: 'pass', review_run_id: id });
+          const v1 = await viewOf(r2, 'demo', NOW, async () => { throw Object.assign(new Error('boom'), { code: 'spawn_failed' }); });
+          assert.strictEqual(v1.stage, 'unknown');
+          assert.strictEqual(v1.reason, 'spawn_failed');
+          const out = await pl.readRepo(r);
+          const v2 = await pl.taskView(r, out.tasks[0], null, gx, NOW);
+          assert.strictEqual(v2.stage, 'unknown');
+          assert.strictEqual(v2.reason, 'config_unavailable');
+        });
+
+        const mkPoll = (r, o) => {
+          let reads = 0;
+          const reg = { list: () => [{ id: 'p0', name: 'demo-proj', repoPath: r, hidden: false }] };
+          const p = repos.createPoller(Object.assign({ registry: reg, onPipelineRead: () => { reads++; } }, o || {}));
+          return { p, reads: () => reads };
+        };
+        const isTipsCall = (a) => a.some((x) => String(x).includes('%(objectname) %(refname)'));
+
+        await atest('[4b-stage] poller: snapshot carries pipeline per project; unchanged fingerprint does not recompute', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo'); putAtt(r, 'demo', 1, { outcome: 'built' });
+          const { p, reads } = mkPoll(r);
+          await p.pollNow();
+          const s1 = p.snapshot().p0.pipeline;
+          assert.strictEqual(s1.error, false);
+          assert.deepStrictEqual(s1.tasks.map((t) => [t.task, t.stage]), [['demo', 'red-team']]);
+          assert.strictEqual(typeof s1.skipped, 'number');
+          assert.strictEqual(reads(), 1);
+          await p.pollNow(); await p.pollNow();
+          assert.strictEqual(reads(), 1, 'no recompute while nothing changed');
+          // a new attempt file changes the record stamp
+          putAtt(r, 'demo', 2, { outcome: 'error', diagnosis: 'environment' });
+          await p.pollNow();
+          assert.strictEqual(reads(), 2);
+          assert.strictEqual(p.snapshot().p0.pipeline.tasks[0].stage, 'builder');
+          // a commit on the task branch (not checked out) changes a branch tip
+          g(r, 'checkout', '-q', 'task/demo'); g(r, 'commit', '-q', '--allow-empty', '-m', 'more'); g(r, 'checkout', '-q', 'main');
+          await p.pollNow();
+          assert.strictEqual(reads(), 3);
+        });
+
+        await atest('[4b-fix] poller: expired is re-derived with the clock while the fingerprint is unchanged, and the open decision drops', async () => {
+          const r = mkrepo(); passTask(r, 'demo'); putSpec(r, 'demo', 'EDITED');   // spec_changed -> decision
+          let clock = NOW;
+          const { p, reads } = mkPoll(r, { now: () => clock });
+          await p.pollNow();
+          const t1 = p.snapshot().p0.pipeline.tasks[0];
+          assert.deepStrictEqual([t1.stage, t1.expired], ['decision', false]);
+          const pa = require('../src/pipeline-alerts.js');
+          const reg = { list: () => [{ id: 'p0', name: 'demo-proj', repoPath: r, hidden: false }] };
+          const al = pa.createPipelineAlerts({ now: () => clock });
+          al.update(pa.toInput(reg.list(), p.snapshot()), []);
+          assert.strictEqual(al.open().length, 1);
+          clock = NOW + 8 * 86400000;
+          await p.pollNow();
+          assert.strictEqual(reads(), 1, 'no file change, no recompute');
+          const t2 = p.snapshot().p0.pipeline.tasks[0];
+          assert.strictEqual(t2.expired, true);
+          al.update(pa.toInput(reg.list(), p.snapshot()), []);
+          assert.strictEqual(al.open().length, 0);
+        });
+
+        await atest('[4b-stage] poller: a project without .sereno costs no pipeline git call and shows no tasks', async () => {
+          const r = mkrepo();
+          let refCalls = 0;
+          const exec = async (f, a, o) => { if (isTipsCall(a)) refCalls++; return gitExec(f, a, o); };
+          const { p, reads } = mkPoll(r, { exec });
+          await p.pollNow();
+          assert.deepStrictEqual(p.snapshot().p0.pipeline, { tasks: [], skipped: 0, error: false });
+          assert.strictEqual(refCalls, 0);
+          assert.strictEqual(reads(), 0);
+        });
+
+        await atest('[4b-stage] poller: a git error keeps the last good pipeline view with error: true, then recovers', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo'); putAtt(r, 'demo', 1, { outcome: 'built' });
+          let fail = false;
+          const exec = async (f, a, o) => {
+            if (fail && isTipsCall(a)) throw Object.assign(new Error('git down'), { code: 128 });
+            return gitExec(f, a, o);
+          };
+          const { p } = mkPoll(r, { exec });
+          await p.pollNow();
+          const good = p.snapshot().p0.pipeline;
+          assert.strictEqual(good.error, false);
+          fail = true;
+          await p.pollNow();
+          const bad = p.snapshot().p0.pipeline;
+          assert.strictEqual(bad.error, true);
+          assert.deepStrictEqual(bad.tasks, good.tasks);
+          fail = false;
+          await p.pollNow();
+          assert.strictEqual(p.snapshot().p0.pipeline.error, false);
+        });
+
+        await atest('[4b-stage] poller: a git error before any good view gives an empty view with error: true', async () => {
+          const r = mkrepo(); putSpec(r, 'demo');
+          const exec = async (f, a, o) => {
+            if (isTipsCall(a)) throw Object.assign(new Error('git down'), { code: 128 });
+            return gitExec(f, a, o);
+          };
+          const { p } = mkPoll(r, { exec });
+          await p.pollNow();
+          assert.deepStrictEqual(p.snapshot().p0.pipeline, { tasks: [], skipped: 0, error: true });
+        });
+
+      }
+
+      await atest('[4b-reader] cleanup', async () => { for (const d of tmps) fs.rmSync(d, { recursive: true, force: true }); });
+    }
+  }
+
+  /* ---- [4b-signals] roles, role spend, signals ---- */
+  {
+    const pl = require('../src/pipeline.js');
+    const { openLedger } = require('../src/ledger.js');
+    const mem = () => openLedger({ file: ':memory:' });
+    const NOW = Date.parse('2026-10-15T12:00:00.000Z');
+    const rq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's1', promptId: null, ts: NOW,
+      model: 'claude-sonnet-5-5', querySource: null, source: 'subagent', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 1000000, durationMs: 0 }, o);
+    const agent = (l, sid, aid, type) => l._db.prepare('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,NULL)').run(sid, aid, type, NOW);
+    const FABLE = 'claude-fable-5-1';
+
+    test('[4b-signals] roleMap covers the plugin agents', () => {
+      const m = pl.roleMap();
+      assert.strictEqual(m['sereno:builder-opus'], 'builder');
+      assert.strictEqual(m['sereno:red-team-lean'], 'red-team');
+      assert.strictEqual(m['sereno:scribe'], 'scribe');
+      m['x'] = 'y'; assert.strictEqual(pl.roleMap()['x'], undefined);
+    });
+
+    test('[4b-signals] inferModels from a temp agents dir: only a single-role model infers', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4bs-'));
+      const w = (n, name, model) => fs.writeFileSync(path.join(d, n), '---\nname: ' + name + '\nmodel: ' + model + '\n---\nbody text\n');
+      w('a.md', 'builder', 'm-shared'); w('b.md', 'red-team', 'm-rt'); w('c.md', 'red-team-lean', 'm-shared');
+      w('d.md', 'scribe', 'm-scribe'); w('e.md', 'unknown-agent', 'm-x'); w('f.md', 'red-team-lean', 'm-rt');
+      fs.writeFileSync(path.join(d, 'g.md'), 'no front matter\n');
+      assert.deepStrictEqual(pl.inferModels(d), { 'm-rt': 'red-team', 'm-scribe': 'scribe' });
+      assert.deepStrictEqual(pl.inferModels(path.join(d, 'missing')), {});
+      fs.rmSync(d, { recursive: true, force: true });
+    });
+
+    test('[4b-signals] inferModels on the bundled files is exactly Fable -> red-team', () => {
+      assert.deepStrictEqual(pl.inferModels(), { [FABLE]: 'red-team' });
+    });
+
+    test('[4b-signals] inferModels: a skill sharing a model with an agent removes it; an orchestration-only model is not a role', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4bs-'));
+      fs.mkdirSync(path.join(d, 'agents')); fs.mkdirSync(path.join(d, 'skills', 's1'), { recursive: true }); fs.mkdirSync(path.join(d, 'skills', 's2'), { recursive: true });
+      const ag = (n, name, model) => fs.writeFileSync(path.join(d, 'agents', n), '---\nname: ' + name + '\nmodel: ' + model + '\n---\n');
+      ag('a.md', 'builder', 'm-shared'); ag('b.md', 'red-team', 'm-rt');
+      fs.writeFileSync(path.join(d, 'skills', 's1', 'SKILL.md'), '---\nmodel: m-shared\n---\nbody\n');
+      fs.writeFileSync(path.join(d, 'skills', 's2', 'SKILL.md'), '---\nmodel: m-orch\n---\nbody\n');
+      assert.deepStrictEqual(pl.inferModels(path.join(d, 'agents')), { 'm-shared': 'builder', 'm-rt': 'red-team' });
+      assert.deepStrictEqual(pl.inferModels(path.join(d, 'agents'), path.join(d, 'skills')), { 'm-rt': 'red-team' });
+      fs.rmSync(d, { recursive: true, force: true });
+    });
+
+    test('[4b-signals] roleSpend: explicit join, inferred only for Fable, others unattributed, buckets, stored rows unchanged', () => {
+      const l = mem();
+      agent(l, 's1', 'ag-b', 'sereno:builder'); agent(l, 's1', 'ag-r', 'sereno:red-team'); agent(l, 's1', 'ag-x', 'general-purpose');
+      l.ingestRequests([
+        rq({ requestKey: '1', requestId: 'r1', model: 'claude-sonnet-5-5' }),                      // explicit builder (via span)
+        rq({ requestKey: '2', requestId: 'r2', model: FABLE }),                                    // explicit red-team
+        rq({ requestKey: '3', requestId: 'r3', model: FABLE, costMicros: 500000 }),                // no join, Fable -> inferred
+        rq({ requestKey: '4', requestId: 'r4', model: 'claude-sonnet-5-5', costMicros: 250000 }),  // no join, Sonnet -> unattributed
+        rq({ requestKey: '5', requestId: 'r5', model: 'claude-opus-5-5', costMicros: 250000 }),
+        rq({ requestKey: '6', requestId: 'r6', model: 'claude-haiku-4-5-20251001', costMicros: 250000 }),
+        rq({ requestKey: '7', requestId: 'r7', model: 'claude-sonnet-5-5', costMicros: 100000 }),  // joined, type not in map
+        rq({ requestKey: '8', requestId: 'r8', source: 'main', costMicros: 2000000 }),
+        rq({ requestKey: '9', requestId: 'r9', source: 'auxiliary', costMicros: 300000 }),
+        rq({ requestKey: '10', requestId: 'r10', model: FABLE, ts: NOW - 10 * 86400000, costMicros: 9000000 }), // before since
+      ]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag-b', ts: NOW }, { requestId: 'r2', sessionId: 's1', agentId: 'ag-r', ts: NOW },
+        { requestId: 'r7', sessionId: 's1', agentId: 'ag-x', ts: NOW }]);
+      const snap = () => JSON.stringify(l._db.prepare('SELECT request_id, attribution, agent_id FROM requests ORDER BY request_id').all());
+      const before = snap();
+      const r = l.roleSpend(NOW - 86400000, pl.roleMap(), { [FABLE]: 'red-team' }).roles;
+      assert.deepStrictEqual(r.builder, { costUsd: 1, explicit: 1, inferred: 0, unattributed: 0 });
+      assert.deepStrictEqual(r['red-team'], { costUsd: 1.5, explicit: 1, inferred: 0.5, unattributed: 0 });
+      assert.strictEqual(r.scribe.costUsd, 0);
+      assert.strictEqual(r.main.costUsd, 2);
+      assert.strictEqual(r.auxiliary.costUsd, 0.3);
+      assert.strictEqual(r.unattributed.costUsd, 0.85);
+      assert.strictEqual(r.unattributed.unattributed, 0.85);
+      assert.strictEqual(snap(), before);
+      assert.strictEqual(l.roleSpend(NOW - 20 * 86400000, pl.roleMap(), { [FABLE]: 'red-team' }).roles['red-team'].inferred, 9.5);
+      l.close();
+    });
+
+    test('[4b-fix] roleSpend: a span-joined agent outside the role map is unattributed, never inferred; a Fable request with no agents join is inferred', () => {
+      const l = mem();
+      agent(l, 's1', 'ag-x', 'general-purpose'); agent(l, 's1', 'ag-rt', 'red-team');
+      l.ingestRequests([
+        rq({ requestKey: '1', requestId: 'r1', model: FABLE }),
+        rq({ requestKey: '2', requestId: 'r2', model: FABLE }),
+        rq({ requestKey: '3', requestId: 'r3', model: FABLE, costMicros: 500000 }),
+        rq({ requestKey: '4', requestId: 'r4', model: FABLE, costMicros: 250000 }),
+      ]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag-x', ts: NOW }, { requestId: 'r2', sessionId: 's1', agentId: 'ag-rt', ts: NOW },
+        { requestId: 'r4', sessionId: 's1', agentId: 'ag-gone', ts: NOW }]);
+      const r = l.roleSpend(0, pl.roleMap(), { [FABLE]: 'red-team' }).roles;
+      assert.deepStrictEqual(r['red-team'], { costUsd: 0.75, explicit: 0, inferred: 0.75, unattributed: 0 });
+      assert.strictEqual(r.unattributed.costUsd, 2);
+      l.close();
+    });
+
+    test('[4b-signals] roleSpend: an agent_id in another session does not join; empty ledger is all zeros', () => {
+      const l = mem();
+      const z = l.roleSpend(0, pl.roleMap(), { [FABLE]: 'red-team' });
+      assert.deepStrictEqual(Object.keys(z.roles).sort(), ['auxiliary', 'builder', 'main', 'red-team', 'scribe', 'unattributed']);
+      for (const k of Object.keys(z.roles)) assert.deepStrictEqual(z.roles[k], { costUsd: 0, explicit: 0, inferred: 0, unattributed: 0 });
+      agent(l, 'other', 'ag1', 'sereno:builder');
+      l.ingestRequests([rq({ requestKey: '1', requestId: 'r1', sessionId: 's1' })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag1', ts: NOW }]);
+      const r = l.roleSpend(0, pl.roleMap(), { [FABLE]: 'red-team' }).roles;
+      assert.strictEqual(r.builder.costUsd, 0); assert.strictEqual(r.unattributed.costUsd, 1);
+      assert.strictEqual(l.spendForAgent('s1', 'ag1'), 1);
+      assert.strictEqual(l.spendForAgent('s1', 'nope'), 0);
+      l.close();
+    });
+
+    const G = (task, outcome, at, extra) => Object.assign({ task_id: task, outcome, reviewed_at: new Date(at).toISOString(), session_id: 's1', agent_id: 'a-' + task }, extra || {});
+    const D = 86400000;
+
+    test('[4b-signals] signals: outcome counts only inside 30 days, runs this week, gate state', () => {
+      const projects = [{ id: 'p1', tasks: [
+        { task: 'a', stage: 'ready', gates: [G('a', 'block', NOW - 2 * D), G('a', 'pass', NOW - 1 * D), G('a', 'error', NOW - 40 * D)] },
+        { task: 'b', stage: 'builder', gates: [G('b', 'needs_context', NOW - 10 * D), G('b', 'skipped', NOW - 3 * D, { reviewed_at: 'garbage' })] },
+      ] }, { id: 'p2', tasks: [] }];
+      const s = pl.signals(projects, NOW);
+      assert.deepStrictEqual(s.outcomes, { n: 3, pass: 1, block: 1, needs_context: 1, error: 0, skipped: 0 });
+      assert.strictEqual(s.runsThisWeek, 2);
+      assert.deepStrictEqual(s.projects[0], { id: 'p1', gate: { outcome: 'pass', task: 'a', ageMs: D } });
+      assert.deepStrictEqual(s.projects[1], { id: 'p2', gate: null });
+      assert.strictEqual(s.days, 30);
+    });
+
+    test('[4b-signals] signals: rework median/max with n; tasks without a pass are excluded and counted', () => {
+      const t = (task, outs) => ({ task, stage: 'x', gates: outs.map((o, i) => G(task, o, NOW - (20 - i) * D)) });
+      const s = pl.signals([{ id: 'p', tasks: [t('a', ['pass']), t('b', ['block', 'pass']), t('c', ['block', 'block', 'block', 'pass']), t('d', ['block', 'needs_context']), t('e', [])] }], NOW);
+      assert.deepStrictEqual(s.rework, { n: 3, median: 1, max: 3, excluded: 1 });
+      assert.deepStrictEqual(pl.signals([], NOW).rework, { n: 0, median: null, max: null, excluded: 0 });
+      assert.strictEqual(pl.signals(undefined, NOW).outcomes.n, 0);
+    });
+
+    test('[4b-signals] red-team $/merge: merged pass gates only, a gate without agent_id is excluded and counted, no ledger', () => {
+      const l = mem();
+      l.ingestRequests([rq({ requestKey: '1', requestId: 'r1', costMicros: 2000000 }), rq({ requestKey: '2', requestId: 'r2', costMicros: 4000000 })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a-m1', ts: NOW }, { requestId: 'r2', sessionId: 's1', agentId: 'a-m2', ts: NOW }]);
+      const projects = [{ tasks: [
+        { task: 'm1', stage: 'merged', gates: [G('m1', 'pass', NOW)] },
+        { task: 'm2', stage: 'merged', gates: [G('m2', 'pass', NOW), G('m2', 'block', NOW - D)] },
+        { task: 'm3', stage: 'merged', gates: [G('m3', 'pass', NOW, { agent_id: null })] },
+        { task: 'r1', stage: 'ready', gates: [G('r1', 'pass', NOW, { agent_id: 'a-m1' })] },
+      ] }];
+      assert.deepStrictEqual(pl.redTeamPerMerge(projects, l.spendForAgent), { mean: 3, n: 2, excluded: 1 });
+      assert.deepStrictEqual(pl.redTeamPerMerge(projects, null), { mean: null, n: 0, excluded: 3 });
+      assert.deepStrictEqual(pl.redTeamPerMerge([], l.spendForAgent), { mean: null, n: 0, excluded: 0 });
+      // rows exist for the session but none with this agent_id (spans off): excluded, never averaged as $0
+      const none = [{ tasks: [{ task: 'z', stage: 'merged', gates: [G('z', 'pass', NOW, { agent_id: 'a-unlinked' })] }] }];
+      assert.deepStrictEqual(pl.redTeamPerMerge(none, l.spendForAgent), { mean: null, n: 0, excluded: 1 });
+      assert.deepStrictEqual(pl.redTeamPerMerge(projects.concat(none), l.spendForAgent), { mean: 3, n: 2, excluded: 2 });
+      l.close();
+    });
+  }
+
+  /* ---- Step 4: GET /api/pipeline ---- */
+  {
+    const pl = require('../src/pipeline.js');
+    const { openLedger } = require('../src/ledger.js');
+    const NOW = Date.parse('2026-10-15T12:00:00.000Z');
+    const DAY = 86400000;
+    const iso = (ms) => new Date(ms).toISOString();
+    const bootP = async (opts) => {
+      const c = createCollector(new Store(), 0, Object.assign({ now: () => NOW, pluginStatus: () => ({ installed: false, detected: false }) }, opts));
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      return c;
+    };
+    const haltP = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const getP = (port, p, headers) => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: p, headers: headers || {}, agent: false }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (x) => { t += x; }); r.on('end', () => resolve({ status: r.statusCode, text: t }));
+      }).on('error', reject);
+    });
+    // Poller snapshots are hand-built here and carry extra fields on purpose (command, prompt, paths).
+    const gate = (task, outcome, at, extra) => Object.assign({ review_run_id: 'rr-' + task + '-' + at, task_id: task, spec: '.sereno/specs/' + task + '.md', spec_hash: 'sha256:' + 'a'.repeat(64),
+      branch: 'task/' + task, base_commit: 'b'.repeat(40), head_commit: 'c'.repeat(40), session_id: 's1', agent_id: 'a-' + task, model: 'claude-fable-5-1',
+      outcome, tests_passed: true, findings: [], context_requests: [], reviewed_at: iso(at), config_hash: 'sha256:' + 'd'.repeat(64),
+      command: 'SECRET-CMD', prompt: 'SECRET-PROMPT' }, extra || {});
+    const tview = (task, stage, extra) => Object.assign({ task, stage, step: 'Step ' + stage, reason: null, attempt: 1, gate: null, findings: [], startedAt: NOW - DAY, updatedAt: NOW - 3600000,
+      reviewRuns: 1, expired: false, gates: [], command: 'SECRET-CMD', prompt: 'SECRET-PROMPT', specBody: 'SECRET-BODY', repoPath: 'C:\\secret\\repo' }, extra || {});
+    const mkSnap = () => ({
+      p1: { pipeline: { tasks: [
+        tview('t-run', 'builder', { gates: [gate('t-run', 'block', NOW - 2 * DAY)], gate: gate('t-run', 'block', NOW - 2 * DAY),
+          findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'boom', command: 'SECRET-CMD', prompt: 'SECRET-PROMPT', extra: 1 }] }),
+        tview('t-old', 'red-team', { expired: true, updatedAt: NOW - 9 * DAY }),
+        tview('t-done', 'merged', { gates: [gate('t-done', 'pass', NOW - DAY)] }),
+        tview('t-stop', 'stopped'),
+      ], skipped: 0, error: false, redTeam: { agent: 'red-team', fallback: 'red-team-lean', onFallback: 'ask', enabled: true, command: 'SECRET-CMD' } } },
+      p2: { pipeline: { tasks: [], skipped: 0, error: false, redTeam: { agent: 'red-team-lean', fallback: null, onFallback: 'never', enabled: false } } },
+      p3: { pipeline: { tasks: [tview('t-pass', 'merged', { gates: [gate('t-pass', 'pass', NOW - 2 * DAY)] })], skipped: 0, error: false, redTeam: { agent: 'red-team', fallback: null, onFallback: 'ask', enabled: true } } },
+      p4: { pipeline: { tasks: [], skipped: 0, error: false } },
+      p5: {},
+    });
+    const reg = () => ({ list: () => [
+      { id: 'p1', name: 'one', repoPath: 'C:\\secret\\one', hidden: false }, { id: 'p2', name: 'two', repoPath: 'C:\\secret\\two', hidden: false },
+      { id: 'p3', name: 'three', repoPath: 'C:\\secret\\three', hidden: false }, { id: 'p4', name: 'four', repoPath: 'C:\\secret\\four', hidden: false },
+      { id: 'p5', name: 'five', repoPath: 'C:\\secret\\five', hidden: false }, { id: 'ph', name: 'hidden', repoPath: 'C:\\secret\\h', hidden: true },
+    ] });
+    const rqL = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's1', promptId: null, ts: NOW, model: 'claude-fable-5-1', querySource: null, source: 'subagent',
+      agentName: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 2000000, durationMs: 0 }, o);
+
+    // Expected key sets, walked recursively against the real body.
+    const KEYS = {
+      body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin'],
+      project: ['id', 'name', 'tasks', 'idle'],
+      task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd'],
+      gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model'],
+      finding: ['severity', 'kind', 'file', 'line', 'summary'],
+      signals: ['days', 'projects', 'outcomes', 'rework', 'runsThisWeek'],
+      sigProject: ['id', 'gate'], sigGate: ['outcome', 'task', 'ageMs'],
+      outcomes: ['n', 'pass', 'block', 'needs_context', 'error', 'skipped'], rework: ['n', 'median', 'max', 'excluded'],
+      roleSpend: ['enabled', 'days', 'roles'], role: ['costUsd', 'explicit', 'inferred', 'unattributed'],
+      rpm: ['mean', 'n', 'excluded'], routing: ['models', 'projects'], model: ['agent', 'role', 'model'], routeProject: ['id', 'redTeam'], redTeam: ['agent', 'fallback', 'onFallback'],
+    };
+    const ROLES = ['builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed'];
+    const same = (o, keys, where) => assert.deepStrictEqual(Object.keys(o).sort(), keys.slice().sort(), where);
+    const checkBody = (b) => {
+      same(b, KEYS.body, 'body'); same(b.plugin, ['installed', 'detected', 'version'], 'plugin');
+      for (const p of b.projects) { same(p, KEYS.project, 'project'); for (const t of p.tasks) { same(t, KEYS.task, 'task'); if (t.gate) same(t.gate, KEYS.gate, 'gate'); for (const f of t.findings) same(f, KEYS.finding, 'finding'); } }
+      same(b.signals, KEYS.signals, 'signals'); same(b.signals.outcomes, KEYS.outcomes, 'outcomes'); same(b.signals.rework, KEYS.rework, 'rework');
+      for (const p of b.signals.projects) { same(p, KEYS.sigProject, 'sigProject'); if (p.gate) same(p.gate, KEYS.sigGate, 'sigGate'); }
+      same(b.roleSpend, KEYS.roleSpend, 'roleSpend'); same(b.roleSpend.roles, ROLES, 'roles'); for (const k of ROLES) same(b.roleSpend.roles[k], KEYS.role, 'role ' + k);
+      same(b.redTeamPerMerge, KEYS.rpm, 'rpm'); same(b.routing, KEYS.routing, 'routing');
+      for (const m of b.routing.models) same(m, KEYS.model, 'model');
+      for (const p of b.routing.projects) { same(p, KEYS.routeProject, 'routeProject'); if (p.redTeam) same(p.redTeam, KEYS.redTeam, 'redTeam'); }
+    };
+
+    await atest('[4b-api] /api/pipeline: every key in the body is on the allowlist, recursively (exit criterion 4)', async () => {
+      const l = openLedger({ file: ':memory:' });
+      l.ingestRequests([rqL({ requestKey: '1', requestId: 'r1' })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a-t-done', ts: NOW }]);
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap }, ledger: l });
+      try {
+        const r = await getP(c.port, '/api/pipeline');
+        assert.strictEqual(r.status, 200);
+        const b = JSON.parse(r.text);
+        checkBody(b);
+        assert.deepStrictEqual(b.plugin, { installed: false, detected: false, version: null });
+        assert.deepStrictEqual(b.projects.map((p) => p.id), ['p1', 'p2', 'p3', 'p4', 'p5'], 'hidden projects are left out');
+        assert.strictEqual(b.projects[0].tasks.length, 2, 'merged and stopped leave the cards');
+        assert.deepStrictEqual(b.projects[0].tasks[0].findings, [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'boom' }]);
+        assert.strictEqual(b.projects[0].tasks[1].expired, true, 'expired tasks are included, flagged');
+        assert.strictEqual(b.projects[0].tasks[0].gate.outcome, 'block');
+        assert.deepStrictEqual(b.redTeamPerMerge, { mean: 2, n: 1, excluded: 1 });
+        assert.strictEqual(b.roleSpend.enabled, true);
+        assert.strictEqual(b.roleSpend.roles['red-team'].costUsd, 2);
+        assert.strictEqual(b.roleSpend.roles['red-team'].explicit, 0);
+        assert.deepStrictEqual(b.signals.projects.find((p) => p.id === 'p1').gate, { outcome: 'pass', task: 't-done', ageMs: DAY });
+        assert.strictEqual(b.signals.outcomes.n, 3);
+        // routing: bundled models, plus only the red-team fields per project
+        assert.deepStrictEqual(b.routing.models, pl.agentModels());
+        assert.ok(b.routing.models.some((m) => m.agent === 'sereno:red-team' && m.model === 'claude-fable-5-1'));
+        assert.deepStrictEqual(b.routing.projects.find((p) => p.id === 'p1').redTeam, { agent: 'red-team', fallback: 'red-team-lean', onFallback: 'ask' });
+        assert.deepStrictEqual(b.routing.projects.find((p) => p.id === 'p2').redTeam, { agent: 'red-team-lean', fallback: null, onFallback: 'never' });
+        assert.strictEqual(b.routing.projects.find((p) => p.id === 'p4').redTeam, null);
+      } finally { await haltP(c); l.close(); }
+    });
+
+    await atest('[4b-api] /api/pipeline: no command, prompt, spec body, path, hash or id text even when records carry extra fields', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap } });
+      try {
+        const text = (await getP(c.port, '/api/pipeline')).text;
+        for (const bad of ['SECRET', 'C:\\\\secret', '"command"', '"prompt"', '"specBody"', 'sha256:', 'session_id', 'agent_id', 'head_commit', '.sereno/specs', 'spec_hash', 'a-t-run'])
+          assert.ok(!text.includes(bad), 'leaked ' + bad);
+        assert.ok(text.includes('src/a.js'), 'finding file names stay');
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-api] /api/pipeline: costUsd sums the gate and attempt agents, skips zero-spend runs, null with no spend or no ledger', async () => {
+      const l = openLedger({ file: ':memory:' });
+      l.ingestRequests([rqL({ requestKey: '1', requestId: 'r1', costMicros: 2000000 }), rqL({ requestKey: '2', requestId: 'r2', costMicros: 500000 })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a-t-run', ts: NOW }, { requestId: 'r2', sessionId: 's9', agentId: 'att-1', ts: NOW }]);
+      assert.strictEqual(l.spendForAgentId('att-1'), 0.5);
+      assert.strictEqual(l.spendForAgentId('nope'), 0);
+      const snap = () => { const o = mkSnap(); o.p1.pipeline.tasks[0].attempts = [{ attempt: 1, agent_id: 'att-1' }, { attempt: 2, agent_id: 'att-zero' }]; return o; };
+      const c = await bootP({ projects: reg(), repos: { snapshot: snap }, ledger: l });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        const tasks = b.projects[0].tasks;
+        assert.strictEqual(tasks[0].costUsd, 2.5, 'gate agent 2.0 + attempt agent 0.5; the zero-spend attempt adds nothing');
+        assert.strictEqual(tasks[1].costUsd, null, 'no spend at all is null, not 0');
+        checkBody(b);
+      } finally { await haltP(c); l.close(); }
+      const off = await bootP({ projects: reg(), repos: { snapshot: snap } });
+      try {
+        const b = JSON.parse((await getP(off.port, '/api/pipeline')).text);
+        assert.ok(b.projects[0].tasks.every((t) => t.costUsd === null));
+      } finally { await haltP(off); }
+    });
+
+    await atest('[4b-api] /api/pipeline: ledger off gives zero role spend and no red-team $/merge', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        assert.strictEqual(b.roleSpend.enabled, false);
+        for (const k of ROLES) assert.deepStrictEqual(b.roleSpend.roles[k], { costUsd: 0, explicit: 0, inferred: 0, unattributed: 0 });
+        assert.deepStrictEqual(b.redTeamPerMerge, { mean: null, n: 0, excluded: 2 });
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-api] /api/pipeline: no projects, no poller, a throwing poller all give a well-formed empty body', async () => {
+      for (const o of [{}, { projects: { list: () => [] }, repos: { snapshot: mkSnap } }, { projects: reg(), repos: { snapshot: () => { throw new Error('x'); } } }]) {
+        const c = await bootP(o);
+        try {
+          const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+          checkBody(b);
+          assert.ok(b.projects.every((p) => p.tasks.length === 0 && p.idle === 'no-task'));
+          assert.strictEqual(b.signals.outcomes.n, 0);
+        } finally { await haltP(c); }
+      }
+    });
+
+    await atest('[4b-api] /api/pipeline: idle is no-task, gate-off or latest-pass; a project with an active task has none', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        const idle = Object.fromEntries(b.projects.map((p) => [p.id, p.idle]));
+        assert.deepStrictEqual(idle, { p1: null, p2: 'gate-off', p3: 'latest-pass', p4: 'no-task', p5: 'no-task' });
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-api] /api/pipeline: a bad Host or Origin is refused like the other /api routes; POST is not a route', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap } });
+      try {
+        assert.strictEqual((await getP(c.port, '/api/pipeline', { host: 'evil.example' })).status, 403);
+        assert.strictEqual((await getP(c.port, '/api/pipeline', { origin: 'http://evil.example' })).status, 403);
+        assert.strictEqual((await getP(c.port, '/api/pipeline', { host: '127.0.0.1:' + c.port, origin: 'http://127.0.0.1:' + c.port })).status, 200);
+        const post = await new Promise((resolve, reject) => {
+          const q = http.request({ host: '127.0.0.1', port: c.port, path: '/api/pipeline', method: 'POST', agent: false }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode)); });
+          q.on('error', reject); q.end();
+        });
+        assert.notStrictEqual(post, 200);
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-api] the real poller keeps cleaned gates and red-team config server-side for the API', async () => {
+      const repos = require('../src/repos.js');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4bapi-'));
+      try {
+        const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't'); g('commit', '-q', '--allow-empty', '-m', 'init');
+        const sd = path.join(dir, '.sereno');
+        fs.mkdirSync(path.join(sd, 'attempts'), { recursive: true }); fs.mkdirSync(path.join(sd, 'gates')); fs.mkdirSync(path.join(sd, 'specs'));
+        fs.writeFileSync(path.join(sd, 'pipeline.json'), JSON.stringify({ tests: { command: 'SECRET-CMD', setup: 'SECRET-SETUP' }, roles: { redTeam: { onFallback: 'never' } } }));
+        fs.writeFileSync(path.join(sd, 'attempts', 'demo-1.json'), JSON.stringify({ task_id: 'demo', attempt: 1, outcome: 'built', started_at: iso(NOW - 3600000), ended_at: iso(NOW - 3000000), prompt: 'SECRET-PROMPT' }));
+        const list = () => [{ id: 'p0', name: 'demo-proj', repoPath: dir, hidden: false }];
+        const p = repos.createPoller({ registry: { list }, now: () => NOW });
+        await p.pollNow();
+        const c = await bootP({ projects: { list }, repos: p });
+        try {
+          const text = (await getP(c.port, '/api/pipeline')).text;
+          const b = JSON.parse(text);
+          checkBody(b);
+          assert.ok(!text.includes('SECRET') && !text.includes(dir.replace(/\\/g, '\\\\')));
+          assert.strictEqual(b.projects[0].tasks.length, 1);
+          assert.strictEqual(b.projects[0].tasks[0].stage, 'red-team');
+          assert.strictEqual(b.routing.projects[0].redTeam.onFallback, 'never');
+          assert.strictEqual(b.routing.projects[0].redTeam.agent, 'red-team');
+        } finally { await haltP(c); }
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold the temp dir briefly */ } }
+    });
+
+    test('[4b-api] agentModels: bundled agents with their models; missing dir is empty', () => {
+      const m = pl.agentModels();
+      assert.deepStrictEqual(m.map((x) => x.agent).sort(), ['sereno:builder', 'sereno:builder-haiku', 'sereno:builder-opus', 'sereno:red-team', 'sereno:red-team-lean', 'sereno:scribe']);
+      assert.deepStrictEqual(pl.agentModels(path.join(os.tmpdir(), 'sereno-no-such-dir')), []);
+    });
+  }
+
+  /* ---- [4b-alerts] step 5: pipeline alerts ---- */
+  {
+    const pa = require('../src/pipeline-alerts.js');
+    const MIN = 60 * 1000;
+    const T0 = Date.parse('2026-10-14T12:00:00.000Z');
+    const REPO = 'C:\\work\\demo';
+    let clock = T0;
+    const mk = () => pa.createPipelineAlerts({ now: () => clock });
+    const gate = (run, outcome) => ({ review_run_id: run, outcome });
+    const task = (o) => Object.assign({ task: 'demo', stage: 'builder', attempt: 1, reason: null, expired: false, gate: null, gates: [], attempts: [] }, o);
+    const proj = (tasks) => [{ id: 'p0', name: 'demo-proj', paths: [REPO], tasks }];
+    const types = (ev) => ev.map((e) => e.type);
+
+    test('[4b-alerts] decision: one open event per episode, reviewing on a newer attempt, reopen on the next decision', () => {
+      clock = T0;
+      const m = mk();
+      assert.deepStrictEqual(types(m.update(proj([task({ stage: 'decision', attempt: 2, reason: 'retry_limit', gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), [])), ['decision-open']);
+      assert.strictEqual(m.open().length, 1);
+      assert.strictEqual(m.open()[0].project, 'demo-proj');
+      // polled again, nothing new: silent
+      for (let i = 0; i < 3; i++) assert.deepStrictEqual(m.update(proj([task({ stage: 'decision', attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), []), []);
+      // a newer attempt starts: reviewing, no longer open
+      assert.deepStrictEqual(types(m.update(proj([task({ stage: 'builder', attempt: 3, gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), [])), ['decision-reviewing']);
+      assert.strictEqual(m.open().length, 0);
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'red-team', attempt: 3, gates: [gate('r1', 'block')] })]), []), []);
+      // the second decision reopens, exactly once
+      const again = m.update(proj([task({ stage: 'decision', attempt: 3, gate: gate('r2', 'block'), gates: [gate('r2', 'block'), gate('r1', 'block')] })]), []);
+      assert.deepStrictEqual(types(again), ['decision-reopen']);
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'decision', attempt: 3, gate: gate('r2', 'block'), gates: [gate('r2', 'block'), gate('r1', 'block')] })]), []), []);
+      assert.strictEqual(m.open().length, 1);
+    });
+
+    test('[4b-alerts] decision: a new gate alone moves it to reviewing; an unreadable status keeps the episode', () => {
+      const m = mk();
+      m.update(proj([task({ stage: 'decision', attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), []);
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'unknown', attempt: 2, gates: [gate('r1', 'block')] })]), []), []);
+      assert.strictEqual(m.open().length, 1);
+      assert.deepStrictEqual(types(m.update(proj([task({ stage: 'red-team', attempt: 2, gate: gate('r2', 'pass'), gates: [gate('r2', 'pass'), gate('r1', 'block')] })]), [])), ['decision-reviewing']);
+      assert.strictEqual(m.open().length, 0);
+    });
+
+    test('[4b-alerts] decision: review and next decision between two polls give reviewing then reopen', () => {
+      const m = mk();
+      m.update(proj([task({ stage: 'decision', attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), []);
+      const ev = m.update(proj([task({ stage: 'decision', attempt: 3, gate: gate('r2', 'block'), gates: [gate('r2', 'block'), gate('r1', 'block')] })]), []);
+      assert.deepStrictEqual(types(ev), ['decision-reviewing', 'decision-reopen']);
+    });
+
+    test('[4b-alerts] expired tasks never alert and never stay open', () => {
+      clock = T0;
+      const m = mk();
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'decision', expired: true })]), []), []);
+      assert.strictEqual(m.open().length, 0);
+      m.update(proj([task({ stage: 'decision' })]), []);
+      assert.strictEqual(m.open().length, 1);
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'decision', expired: true })]), []), []);
+      assert.strictEqual(m.open().length, 0);
+      // stalled-looking but expired
+      clock = T0 + 60 * MIN;
+      const att = [{ attempt: 2, outcome: 'running', started_at: new Date(T0).toISOString() }];
+      assert.deepStrictEqual(m.update(proj([task({ expired: true, gate: gate('r1', 'block'), attempts: att })]), []), []);
+    });
+
+    test('[4b-alerts] stalled: fires after 10 min with no builder in the repo, clears on builder activity or when the attempt ends', () => {
+      clock = T0;
+      const m = mk();
+      const att = [{ attempt: 2, outcome: 'running', started_at: new Date(T0).toISOString() }];
+      const stalledTask = () => proj([task({ attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')], attempts: att })]);
+      assert.deepStrictEqual(m.update(stalledTask(), []), []);
+      clock = T0 + 9 * MIN;
+      assert.deepStrictEqual(m.update(stalledTask(), []), []);
+      clock = T0 + 10 * MIN;
+      const ev = m.update(stalledTask(), []);
+      assert.deepStrictEqual(types(ev), ['stalled']);
+      assert.strictEqual(ev[0].task, 'demo');
+      assert.strictEqual(ev[0].kind, 'repair');
+      clock = T0 + 12 * MIN;
+      assert.deepStrictEqual(m.update(stalledTask(), []), [], 'once per episode');
+      assert.strictEqual(m.stalled().length, 1);
+      // a builder in a session inside the repo clears it
+      assert.deepStrictEqual(types(m.update(stalledTask(), [{ cwd: REPO + '\\sub' }])), ['stalled-clear']);
+      assert.strictEqual(m.stalled().length, 0);
+      // a builder elsewhere does not count, and the 10 minute quiet window restarts from the last activity
+      clock = T0 + 23 * MIN;
+      assert.deepStrictEqual(types(m.update(stalledTask(), [{ cwd: 'C:\\work\\other' }])), ['stalled']);
+      // the attempt ends
+      const ended = proj([task({ attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')], attempts: [{ attempt: 2, outcome: 'built', started_at: att[0].started_at }] })]);
+      assert.deepStrictEqual(types(m.update(ended, [])), ['stalled-clear']);
+    });
+
+    test('[4b-alerts] stalled needs a running attempt and 10 minutes from its start; kind is repair after a block, else build', () => {
+      clock = T0;
+      const m = mk();
+      clock = T0 + 60 * MIN;
+      const old = new Date(T0).toISOString();
+      const fresh = new Date(clock - 2 * MIN).toISOString();
+      const run = (started) => [{ attempt: 2, outcome: 'running', started_at: started }];
+      assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'block'), attempts: run(fresh) })]), []), [], 'attempt only 2 min old');
+      assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'block'), attempts: [{ attempt: 2, outcome: 'built', started_at: old }] })]), []), [], 'not running');
+      assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'block'), attempts: [] })]), []), []);
+      const ev = m.update(proj([task({ gate: gate('r1', 'pass'), attempts: run(old) })]), []);
+      assert.deepStrictEqual([types(ev), ev[0].kind], [['stalled'], 'build'], 'no block gate: a stalled build');
+      assert.deepStrictEqual(m.stalled().map((x) => x.kind), ['build']);
+    });
+
+    test('[4b-alerts] toInput joins the registry with the poller snapshot and skips hidden or pipeline-less projects', () => {
+      const reg = [{ id: 'a', name: 'A', repoPath: 'C:\\a' }, { id: 'b', name: 'B', repoPath: 'C:\\b', hidden: true }, { id: 'c', name: 'C', repoPath: 'C:\\c' }];
+      const snap = { a: { worktrees: [{ path: 'C:\\a-wt' }], pipeline: { tasks: [{ task: 't' }] } }, b: { pipeline: { tasks: [] } }, c: { pipeline: null } };
+      const out = pa.toInput(reg, snap);
+      assert.strictEqual(out.length, 1);
+      assert.deepStrictEqual(out[0].paths, ['C:\\a', 'C:\\a-wt']);
+    });
+
+    test('[4b-fix] a builder inside one long tool call (no hooks for 15 min) still counts; once stopped it does not, and a stall follows', () => {
+      const s = new Store();
+      const hook = (ev, p) => s.applyHook(ev, Object.assign({ session_id: 's1', cwd: REPO }, p));
+      hook('PreToolUse', { agent_id: 'a1', agent_type: 'sereno:builder', tool_name: 'Bash', tool_input: { command: 'x' } });
+      s.sessions.get('s1').lastSeen = Date.now() - 15 * MIN;
+      assert.strictEqual(s.liveBuilders().length, 1);
+      clock = T0;
+      const m = mk();
+      const att = [{ attempt: 1, outcome: 'running', started_at: new Date(T0 - 30 * MIN).toISOString() }];
+      const tasks = () => proj([task({ attempt: 1, attempts: att })]);
+      m.update(tasks(), s.liveBuilders());
+      clock = T0 + 15 * MIN;
+      assert.deepStrictEqual(m.update(tasks(), s.liveBuilders()), [], 'long tool call is not a stall');
+      hook('SubagentStop', { agent_id: 'a1', agent_type: 'sereno:builder' });
+      assert.strictEqual(s.liveBuilders().length, 0);
+      m.update(tasks(), s.liveBuilders());
+      clock = T0 + 26 * MIN;
+      assert.deepStrictEqual(types(m.update(tasks(), s.liveBuilders())), ['stalled']);
+    });
+
+    test('[4b-alerts] store.liveBuilders: only live sereno:builder* subagents, with the session cwd', () => {
+      const s = new Store();
+      const hook = (sid, aid, type, cwd) => s.applyHook('PreToolUse', { session_id: sid, cwd, agent_id: aid, agent_type: type, tool_name: 'Read', tool_input: { file_path: 'x' } });
+      hook('s1', 'a1', 'sereno:builder-haiku', 'C:\\work\\demo');
+      hook('s1', 'a2', 'sereno:red-team', 'C:\\work\\demo');
+      hook('s2', 'a3', 'sereno:builder', 'C:\\work\\old');
+      s.sessions.get('s2').lastSeen = Date.now() - 60 * MIN;
+      const b = s.liveBuilders();
+      assert.strictEqual(b.length, 1);
+      assert.deepStrictEqual([b[0].cwd, b[0].type], ['C:\\work\\demo', 'sereno:builder-haiku']);
+      assert.deepStrictEqual(Object.keys(b[0]).sort(), ['cwd', 'lastSeen', 'type']);
+    });
+
+    await atest('[4b-alerts] /state carries open decisions from an explicit key list, with sessionId only when a live session is in the repo', async () => {
+      const st = new Store();
+      st.applyHook('SessionStart', { session_id: 'sess-in', cwd: REPO + '\\src' });
+      const machine = {
+        open: () => [
+          { projectId: 'p0', project: 'demo-proj', task: 'demo', reason: 'retry_limit\u0007' + 'x'.repeat(400), attempt: 3, paths: [REPO], command: 'SECRET-CMD', prompt: 'SECRET-PROMPT' },
+          { projectId: 'p1', project: 'other', task: 'zzz', reason: null, attempt: null, paths: ['C:\\elsewhere'], repoPath: 'C:\\secret' },
+        ],
+        stalled: () => [{ projectId: 'p0', project: 'demo-proj', task: 'demo', attempt: 2, kind: 'repair', paths: [REPO] }],
+      };
+      const c = createCollector(st, 0, { pipelineAlerts: machine });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      try {
+        const text = await new Promise((resolve, reject) => {
+          http.get({ host: '127.0.0.1', port: c.port, path: '/state', agent: false }, (r) => {
+            let t = ''; r.setEncoding('utf8'); r.on('data', (x) => { t += x; }); r.on('end', () => resolve(t));
+          }).on('error', reject);
+        });
+        const b = JSON.parse(text);
+        assert.ok(!text.includes('SECRET') && !text.includes('secret') && !text.includes('elsewhere'));
+        assert.strictEqual(b.decisions.length, 2);
+        assert.deepStrictEqual(Object.keys(b.decisions[0]).sort(), ['attempt', 'project', 'projectId', 'reason', 'sessionId', 'task']);
+        assert.strictEqual(b.decisions[0].sessionId, 'sess-in');
+        assert.ok(b.decisions[0].reason.length <= 200 && !/[\u0000-\u001f]/.test(b.decisions[0].reason));
+        assert.deepStrictEqual(Object.keys(b.decisions[1]).sort(), ['attempt', 'project', 'projectId', 'reason', 'task']);
+        assert.deepStrictEqual(b.stalled, [{ project: 'demo-proj', task: 'demo', kind: 'repair' }]);
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+    });
+
+    {
+      const cjs = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+      const names = ['esc', 'projectLabel', 'pillText', 'attentionState', 'waitLabel', 'ringIcon', 'waitWhat', 'reviewControl', 'attentionHtml'];
+      const A = new Function(names.map((n) => cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]).join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+      const dec = (o) => Object.assign({ project: 'demo-proj', task: 'demo', reason: 'retry_limit', attempt: 2 }, o);
+
+      test('[4b-alerts] attention: a decision is amber; with a live session it offers Review in terminal, without one it does not', () => {
+        const withS = A.attentionState({ sessions: [], decisions: [dec({ sessionId: 'sess-in' })] });
+        assert.strictEqual(withS.amber, true);
+        assert.strictEqual(withS.count, 1);
+        const h = A.attentionHtml(withS, T0, { review: true, na: false, msgs: {} });
+        assert.match(h, /attn-amber/);
+        assert.match(h, /demo-proj: review needs a decision\./);
+        assert.match(h, /data-sid="sess-in"/);
+        assert.match(h, /Review in terminal/);
+        const noS = A.attentionHtml(A.attentionState({ sessions: [], decisions: [dec()] }), T0, { review: true, na: false, msgs: {} });
+        assert.match(noS, /attn-amber/);
+        assert.ok(!/<button|Review in terminal/.test(noS), noS);
+      });
+
+      test('[4b-alerts] attention: stalled rows are never amber and never counted', () => {
+        const st = A.attentionState({ sessions: [], stalled: [{ project: 'demo-proj', task: 'demo', kind: 'repair' }, { project: 'demo-proj', task: 'first', kind: 'build' }] });
+        assert.deepStrictEqual([st.amber, st.count], [false, 0]);
+        const h = A.attentionHtml(st, T0, { review: true });
+        assert.ok(!/attn-amber|NEEDS YOUR/.test(h), h);
+        assert.match(h, /Repair stalled/);
+        assert.match(h, /Build stalled/);
+        assert.match(h, /demo/);
+        assert.ok(!/<button/.test(h));
+      });
+
+      test('[4b-alerts] attention: decisions and blocked sessions together, and API strings are escaped', () => {
+        const evil = '<img src=x onerror=alert(1)>';
+        const st = A.attentionState({ sessions: [{ projectName: 'api', state: 'blocked', stateTool: 'Bash', stateArgShort: 'ls', stateSince: 1, id: 's9' }], decisions: [dec({ project: evil, task: evil, reason: evil })] });
+        assert.strictEqual(st.count, 2);
+        const h = A.attentionHtml(st, T0, { review: true });
+        assert.match(h, /2 things need you/);
+        assert.ok(!h.includes(evil));
+        // no decisions: the old shape is untouched
+        assert.deepStrictEqual(Object.keys(A.attentionState({ sessions: [] })).sort(), ['amber', 'count', 'items']);
+      });
+    }
+  }
+
+  /* ---- 4b step 6: console Pipeline tab ---- */
+  {
+    const cj = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'index.html'), 'utf8');
+    const consts = ['PIPE_STEPS', 'OUTCOME_LABEL', 'ROLE_LABEL', 'IDLE_LABEL', 'INSTALL_CMDS'].map((n) => cj.match(new RegExp('^const ' + n + ' = .*;$', 'm'))[0]);
+    const fnames = ['estMoney', 'esc', 'largestRemainder', 'relTime', 'pillText', 'ringIcon', 'pillHtml', 'parseRoute', 'initialRoute',
+      'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'pipelineSteps', 'outcomeShape', 'stepShape', 'findingsHtml', 'taskBrief', 'taskCardHtml',
+      'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'installHtml', 'pipelineHasData', 'pipelineBody'];
+    const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
+    const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
+    const NOW = 1_800_000_000_000;
+    const gate = (o) => ({ review_run_id: 'r1', outcome: o, tests_passed: true, reviewed_at: '2026-10-01T00:00:00Z', model: 'm' });
+    const task = (stage, over) => Object.assign({ task: 'demo', stage, step: 'x', reason: null, attempt: 1, gate: gate('pass'), findings: [], startedAt: NOW - 8 * 60000, updatedAt: NOW - 60000, reviewRuns: 2, expired: false }, over || {});
+    const body = (tasks, over) => Object.assign({
+      projects: [{ id: 'p1', name: 'alpha', tasks, idle: tasks.length ? null : 'no-task' }],
+      signals: { days: 30, projects: [{ id: 'p1', gate: { outcome: 'pass', task: 'demo', ageMs: 3600000 } }],
+        outcomes: { n: 10, pass: 6, block: 2, needs_context: 1, error: 1, skipped: 0 }, rework: { n: 4, median: 1, max: 3, excluded: 1 }, runsThisWeek: 5 },
+      roleSpend: { enabled: true, days: 30, roles: { builder: { costUsd: 3, explicit: 2, inferred: 1, unattributed: 0 }, 'red-team': { costUsd: 1, explicit: 0, inferred: 0, unattributed: 1 }, scribe: { costUsd: 0 }, main: { costUsd: 0 }, auxiliary: { costUsd: 0 }, unattributed: { costUsd: 0 } } },
+      redTeamPerMerge: { mean: 0.5, n: 3, excluded: 1 },
+      routing: { models: [{ agent: 'builder', role: 'builder', model: 'sonnet' }], projects: [{ id: 'p1', redTeam: { agent: 'red-team', fallback: 'red-team-lite', onFallback: 'warn' } }] },
+      plugin: { installed: true, version: '0.1.0' },
+    }, over || {});
+    const states = (t) => T.pipelineSteps(t).map((s) => s.state).join(',');
+
+    test('[4b-tab] #pipeline parses; unknown hashes still fall back to projects; saved tab is honoured', () => {
+      assert.strictEqual(T.parseRoute('#pipeline'), 'pipeline');
+      assert.strictEqual(T.parseRoute('#/Pipeline'), 'pipeline');
+      assert.strictEqual(T.parseRoute('#spend'), 'spend');
+      for (const j of ['', '#nope', '#pipeline/x', null, undefined]) assert.strictEqual(T.parseRoute(j), 'projects', String(j));
+      assert.strictEqual(T.initialRoute('', 'pipeline'), 'pipeline');
+      assert.strictEqual(T.initialRoute('#spend', 'pipeline'), 'spend');
+      assert.strictEqual(T.initialRoute('', 'bogus'), 'projects');
+    });
+
+    test('[4b-tab] nav order is Projects, Spend, Pipeline and the tab is registered', () => {
+      const order = [...html.matchAll(/data-route="(\w+)"/g)].map((m) => m[1]);
+      assert.deepStrictEqual(order, ['projects', 'spend', 'pipeline']);
+      assert.match(cj, /const TABS = \{ projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline' \}/);
+      assert.match(cj, /getJson\('\/api\/pipeline'\)/);
+    });
+
+    test('[4b-tab] every stage renders the right track state', () => {
+      assert.strictEqual(states(task('architect')), 'current,pending,pending,pending');
+      assert.strictEqual(states(task('builder')), 'done,current,pending,pending');
+      assert.strictEqual(states(task('red-team')), 'done,done,current,pending');
+      assert.strictEqual(states(task('decision')), 'done,done,decision,pending');
+      assert.strictEqual(states(task('ready')), 'done,done,done,current');
+      assert.strictEqual(states(task('unknown')), 'pending,pending,pending,pending');
+      assert.deepStrictEqual(T.pipelineSteps(task('architect')).map((s) => s.label), ['Architect', 'Builder', 'Red team', 'Merge']);
+      assert.strictEqual(T.pipelineSteps(task('builder', { step: 'Fixing 2 findings' }))[1].status, 'Fixing 2 findings');
+      assert.strictEqual(T.pipelineSteps(task('ready', { step: 'Ready: run /sereno:merge' }))[3].status, 'Ready: run /sereno:merge');
+      assert.strictEqual(T.pipelineSteps(task('decision', { step: 'Needs a decision' }))[2].status, 'Needs a decision');
+    });
+
+    test('[4b-tab] repair marker only when a repair happened; header counts', () => {
+      const rep = T.taskCardHtml('alpha', task('builder', { step: 'Fixing 2 findings', attempt: 2 }), null, NOW);
+      assert.match(rep, /Repair loop/);
+      assert.match(rep, /attempt 2/);
+      assert.ok(!/Repair loop/.test(T.taskCardHtml('alpha', task('red-team'), null, NOW)));
+      const b = body([task('builder', { step: 'Fixing 1 finding', attempt: 2 }), task('decision', { task: 'd2' }), task('ready', { task: 'r3' })]);
+      assert.deepStrictEqual(T.pipelineCounts(b), { active: 3, repairs: 1, decisions: 1, runs: 5 });
+      assert.match(T.pipelineBody(b, [], NOW), /3 active tasks · 1 repair · 1 decision · 5 runs this week/);
+    });
+
+    test('[4b-tab] amber only on a pending decision: the pill and the decision step, never expired or other stages', () => {
+      assert.match(T.pillHtml(T.pipelineCounts(body([task('decision')])).decisions), /1 decision needs you/);
+      assert.strictEqual(T.pillHtml(T.pipelineCounts(body([task('ready')])).decisions), '');
+      for (const s of ['architect', 'builder', 'red-team', 'ready', 'unknown']) {
+        assert.ok(!/tstep-decision|ptask[^"]*decision/.test(T.taskCardHtml('alpha', task(s), null, NOW)), s);
+      }
+      const dec = T.taskCardHtml('alpha', task('decision'), null, NOW);
+      assert.match(dec, /tstep-decision/);
+      assert.match(dec, /class="ptask decision"/);
+      const exp = T.taskCardHtml('alpha', task('decision', { expired: true }), null, NOW);
+      assert.ok(!/decision/.test(exp.replace(/Needs a decision/g, '')), exp);
+      assert.match(exp, /class="ptask expired"/);
+      assert.match(exp, /Expired/);
+      assert.strictEqual(T.pipelineCounts(body([task('decision', { expired: true })])).decisions, 0);
+      assert.ok(!/pill-amber/.test(T.pipelineBody(body([task('decision', { expired: true })]), [], NOW)));
+    });
+
+    test('[4b-tab] outcome shapes are distinct and every one carries a text label', () => {
+      const shapes = ['pass', 'block', 'needs_context', 'error', 'skipped'].map((k) => T.outcomeShape(k));
+      assert.strictEqual(new Set(shapes).size, 5);
+      assert.match(shapes[1], /M3\.8 12\.2L12\.2 3\.8/);   // slash
+      assert.match(shapes[3], /M8 2\.5L14 13H2z/);          // triangle
+      const h = T.outcomesHtml({ n: 10, pass: 6, block: 2, needs_context: 1, error: 1, skipped: 0 });
+      for (const l of ['Pass', 'Block', 'Needs context', 'Error', 'Skipped']) assert.ok(h.includes('>' + l + '<'), l);
+    });
+
+    test('[4b-tab] every rate carries n; every dollar figure carries est.', () => {
+      const h = T.outcomesHtml({ n: 10, pass: 6, block: 2, needs_context: 1, error: 1, skipped: 0 });
+      assert.strictEqual((h.match(/n=10/g) || []).length, 5);
+      assert.match(h, /60% · n=10/);
+      assert.match(T.outcomesHtml({ n: 0 }), /n=0/);
+      assert.strictEqual(T.reworkLine({ n: 4, median: 1, max: 3, excluded: 1 }), 'Rework: median 1 · max 3 reruns before a pass (n=4, 1 excluded (no pass yet))');
+      assert.match(T.reworkLine({ n: 0, median: null, max: null, excluded: 2 }), /^Rework: — \(n=0, 2 excluded/);
+      assert.strictEqual(T.perMergeLine({ mean: 0.5, n: 3, excluded: 1 }), 'Red team per merge: $0.50 est. (n=3, 1 excluded)');
+      assert.strictEqual(T.perMergeLine({ mean: null, n: 0, excluded: 2 }), 'Red team per merge: — (n=0, 2 excluded)');
+      const rs = T.roleSpendHtml(body([]).roleSpend);
+      assert.match(rs, /\$3\.00 est\./);
+      assert.match(rs, /75% of spend/);
+      assert.match(rs, /67% explicit · 33% inferred · 0% unattributed/);
+      assert.strictEqual(T.roleSpendHtml({ enabled: false }), '<p class="empty-note">Spend history is off</p>');
+      const card = T.taskCardHtml('alpha', task('red-team', { costUsd: 1.234 }), null, NOW);
+      assert.match(card, /\$1\.23 est\. · 2 review runs/);
+      const noMoney = T.taskCardHtml('alpha', task('red-team'), null, NOW);
+      assert.ok(!/\$/.test(noMoney.replace(/<[^>]*>/g, '')), 'no figure, no $');
+      assert.match(noMoney, /2 review runs/);
+      const full = T.pipelineBody(body([task('red-team', { costUsd: 2 })]), [], NOW).replace(/<[^>]*>/g, ' ');
+      let seen = 0;
+      for (const m of full.matchAll(/\$[\d.]+/g)) { seen++; assert.ok(full.slice(m.index + m[0].length).startsWith(' est.'), m[0]); }
+      assert.ok(seen >= 4);
+    });
+
+    test('[4b-tab] idle repos, gate state, routing and the Scribe line', () => {
+      const idle = (k) => T.pipelineBody(body([], { projects: [{ id: 'p1', name: 'alpha', tasks: [], idle: k }] }), [], NOW);
+      assert.match(idle('no-task'), /No active task/);
+      assert.match(idle('gate-off'), /Gate off/);
+      assert.match(idle('latest-pass'), /Latest review passed/);
+      const full = T.pipelineBody(body([task('red-team')]), [], NOW);
+      assert.match(full, /oshape-pass/);
+      assert.match(full, /<strong>alpha<\/strong><span>Pass<\/span><span class="mono">demo<\/span><span class="quiet-text">1 hour ago/);
+      assert.match(full, /red-team-lite/);
+      assert.match(full, /sonnet/);
+      assert.ok(!/Scribe ·/.test(full), 'no brief, no Scribe line');
+      const withBrief = T.taskCardHtml('alpha', task('red-team'), { branches: [{ name: 'task/demo', freshness: 'fresh', generatedAt: NOW - 5 * 60000 }] }, NOW);
+      assert.match(withBrief, /Scribe · brief updated 5 min ago/);
+      assert.ok(!/Scribe ·/.test(T.taskCardHtml('alpha', task('red-team'), { branches: [{ name: 'task/demo', freshness: 'none' }] }, NOW)));
+      assert.match(T.taskCardHtml('alpha', task('red-team'), null, NOW), /Started 8 min ago/);
+    });
+
+    test('[4b-tab] findings are collapsible, text-escaped and show file:line', () => {
+      const h = T.taskCardHtml('alpha', task('builder', { findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'Wrong thing' }] }), null, NOW);
+      assert.match(h, /<details class="pfind"><summary>1 finding<\/summary>/);
+      assert.match(h, /src\/a\.js:12/);
+      assert.match(h, /Wrong thing/);
+      assert.strictEqual(T.findingsHtml([]), '');
+    });
+
+    test('[4b-tab] install empty state: two commands with copy buttons; data keeps the tab normal', () => {
+      const empty = body([], { projects: [{ id: 'p1', name: 'alpha', tasks: [], idle: 'no-task' }], plugin: null,
+        signals: { days: 30, projects: [], outcomes: { n: 0 }, rework: { n: 0 }, runsThisWeek: 0 }, routing: { models: [], projects: [{ id: 'p1', redTeam: null }] } });
+      const h = T.pipelineBody(empty, [], NOW);
+      assert.match(h, /\/plugin marketplace add homestockr\/sereno/);
+      assert.match(h, /\/plugin install sereno@sereno/);
+      assert.strictEqual((h.match(/data-act="copy"/g) || []).length, 2);
+      assert.match(h, /data-text="\/plugin install sereno@sereno"/);
+      const withData = T.pipelineBody(body([task('builder')], { plugin: null }), [], NOW);
+      assert.ok(!/data-act="copy"/.test(withData));
+      assert.match(withData, /Active tasks/);
+      assert.match(T.pipelineBody(null, [], NOW), /unavailable/);
+    });
+
+    test('[4b-tab] hostile strings from the API are escaped everywhere', () => {
+      const evil = '<img src=x onerror=alert(1)>"\'&';
+      const hostile = () => task('decision', { task: evil, step: evil, findings: [{ severity: evil, kind: evil, file: evil, line: 3, summary: evil }], gate: gate(evil) });
+      const b = body([], {
+        projects: [{ id: 'p1', name: evil, tasks: [hostile()], idle: null }, { id: 'p2', name: evil, tasks: [], idle: evil }],
+        signals: { days: 30, projects: [{ id: 'p1', gate: { outcome: evil, task: evil, ageMs: 5 } }, { id: evil, gate: null }], outcomes: { n: 1, pass: 1 }, rework: { n: 0 }, runsThisWeek: 0 },
+        routing: { models: [{ agent: evil, role: evil, model: evil }], projects: [{ id: 'p1', redTeam: { agent: evil, fallback: evil, onFallback: evil } }] },
+      });
+      const h = T.pipelineBody(b, [{ id: 'p1', branches: [{ name: 'task/' + evil, freshness: 'fresh' }] }], NOW);
+      assert.ok(!h.includes('<img'), h);
+      assert.match(h, /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
+      assert.ok(!h.includes('data-text="' + evil));
+    });
+
+    test('[4b-tab] source: one innerHTML write, no inline styles, 11px minimum, the tab posts nothing', () => {
+      assert.strictEqual((cj.match(/\.innerHTML\s*=/g) || []).length, 1);
+      const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
+      const tab = css.slice(css.indexOf('Pipeline tab (Phase 4b step 6)'));
+      for (const m of tab.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+      assert.ok(!/style=/.test(cj.slice(cj.indexOf('Pipeline tab: pure helpers'), cj.indexOf('/* ---------- state ---------- */'))));
+      assert.match(cj, /async function refreshPipeline/);
+      assert.ok(!/postAction\([^)]*pipeline/i.test(cj));
+      assert.ok(!/\r|[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(cj + css + html));
+    });
+  }
+
+  /* ---- 4b step 7: offer the plugin, retire /brief ---- */
+  {
+    const mkHome = (body) => {
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-plug-')));
+      const dir = path.join(home, '.claude', 'plugins');
+      fs.mkdirSync(dir, { recursive: true });
+      if (body !== undefined) fs.writeFileSync(path.join(dir, 'installed_plugins.json'), typeof body === 'string' ? body : JSON.stringify(body));
+      return { home, file: path.join(dir, 'installed_plugins.json'), done() { fs.rmSync(home, { recursive: true, force: true }); } };
+    };
+    const entry = (v) => [{ scope: 'user', installPath: 'X:\\synthetic', version: v, installedAt: '2026-10-01T00:00:00Z' }];
+
+    test('[4b-plugin] pluginStatus: installed (array entry), installed (object entry, no version), absent', () => {
+      let h = mkHome({ version: 2, plugins: { 'other@market': entry('9.9.9'), 'sereno@sereno': entry('0.1.0') } });
+      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: true, version: '0.1.0' }); } finally { h.done(); }
+      h = mkHome({ version: 2, plugins: { 'sereno@sereno': { scope: 'user' } } });
+      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: true, version: null }); } finally { h.done(); }
+      h = mkHome({ version: 2, plugins: { 'other@market': entry('1.0.0') } });
+      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: false, detected: true }); } finally { h.done(); }
+      h = mkHome({ version: 2, plugins: {} });
+      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: false, detected: true }); } finally { h.done(); }
+    });
+
+    test('[4b-plugin] pluginStatus: missing, corrupt, wrong-shaped and oversized files are not detected, never throw', () => {
+      const none = { installed: false, detected: false };
+      let h = mkHome();
+      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), none, 'no file'); } finally { h.done(); }
+      assert.deepStrictEqual(wiring.pluginStatus(path.join(os.tmpdir(), 'sereno-no-such-home-' + process.pid)), none, 'no dir');
+      for (const body of ['{ not json', '', 'null', '[]', JSON.stringify({ plugins: [] }), JSON.stringify({ plugins: 'x' }), JSON.stringify({ version: 2 })]) {
+        h = mkHome(body);
+        try { assert.deepStrictEqual(wiring.pluginStatus(h.home), none, JSON.stringify(body)); } finally { h.done(); }
+      }
+      h = mkHome('{"plugins":{"sereno@sereno":[{}]},"pad":"' + 'x'.repeat(1100 * 1024) + '"}');
+      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), none, 'over the size bound'); } finally { h.done(); }
+      // A directory where the file should be.
+      h = mkHome();
+      try { fs.mkdirSync(h.file); assert.deepStrictEqual(wiring.pluginStatus(h.home), none); } finally { h.done(); }
+    });
+
+    test('[4b-plugin] pluginStatus: a linked installed_plugins.json is refused (exit 6)', () => {
+      const h = mkHome();
+      const real = path.join(h.home, 'real.json');
+      try {
+        fs.writeFileSync(real, JSON.stringify({ plugins: { 'sereno@sereno': entry('0.1.0') } }));
+        try { fs.symlinkSync(real, h.file, 'file'); } catch (e) {
+          if (e && (e.code === 'EPERM' || e.code === 'EACCES')) return;   // no symlink privilege on this machine
+          throw e;
+        }
+        assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: false, detected: false });
+      } finally { h.done(); }
+    });
+
+    test('[4b-plugin] pluginStatus is read-only: the file is byte- and mtime-identical afterwards', () => {
+      const h = mkHome({ version: 2, plugins: { 'sereno@sereno': entry('0.1.0') } });
+      try {
+        const before = fs.readFileSync(h.file); const m = fs.statSync(h.file).mtimeMs;
+        wiring.pluginStatus(h.home);
+        assert.ok(fs.readFileSync(h.file).equals(before)); assert.strictEqual(fs.statSync(h.file).mtimeMs, m);
+        assert.deepStrictEqual(fs.readdirSync(path.dirname(h.file)), ['installed_plugins.json']);
+      } finally { h.done(); }
+    });
+
+    test('[4b-plugin] pluginStatus source: no write, no link-following call', () => {
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'wiring.js'), 'utf8');
+      const from = src.indexOf('function pluginStatus');
+      const seg = src.slice(from, src.indexOf('\n}\n', from));
+      assert.ok(!/writeFile|appendFile|unlink|rename|mkdir|rmSync|copyFile/.test(seg));
+      assert.ok(/lstatSync/.test(seg) && !/\bstatSync\(|realpath/.test(seg.replace(/lstatSync/g, '')));
+    });
+
+    test('[4b-plugin] /brief removed only on a hash match; conflict stays (exit 7)', () => {
+      const sha = (b) => require('node:crypto').createHash('sha256').update(b).digest('hex');
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-brief7-'));
+      const prev = { c: process.env.CLAUDE_CONFIG_DIR, h: process.env.SERENO_HOME };
+      process.env.CLAUDE_CONFIG_DIR = tmp; process.env.SERENO_HOME = tmp;
+      try {
+        const target = path.join(tmp, 'commands', 'brief.md');
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, 'ours\n');
+        fs.writeFileSync(path.join(tmp, 'wired.json'), JSON.stringify({ commands: { 'commands/brief.md': sha(Buffer.from('ours\n')) } }));
+        assert.strictEqual(wiring.commandsStatus(), 'installed');
+        assert.deepStrictEqual(wiring.uninstallCommands().removed, ['commands/brief.md']);
+        assert.ok(!fs.existsSync(target));
+        // edited since: stays, whatever the record says
+        fs.writeFileSync(target, 'ours\nedited\n');
+        fs.writeFileSync(path.join(tmp, 'wired.json'), JSON.stringify({ commands: { 'commands/brief.md': sha(Buffer.from('ours\n')) } }));
+        assert.strictEqual(wiring.commandsStatus(), 'conflict');
+        const r = wiring.uninstallCommands();
+        assert.deepStrictEqual([r.removed, r.kept], [[], ['commands/brief.md']]);
+        assert.strictEqual(fs.readFileSync(target, 'utf8'), 'ours\nedited\n');
+        // someone else's file with no record at all
+        fs.rmSync(path.join(tmp, 'wired.json'));
+        assert.strictEqual(wiring.commandsStatus(), 'conflict');
+        assert.deepStrictEqual(wiring.uninstallCommands().removed, []);
+        assert.strictEqual(fs.readFileSync(target, 'utf8'), 'ours\nedited\n');
+      } finally {
+        if (prev.c === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev.c;
+        if (prev.h === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev.h;
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    test('[4b-plugin] the install IPC, preload hook, template and install code are gone; removal confirms first', () => {
+      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const pre = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+      const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+      const wsrc = fs.readFileSync(path.join(ROOT, 'src', 'wiring.js'), 'utf8');
+      assert.ok(!main.includes('sereno:commands-toggle') && !pre.includes('sereno:commands-toggle') && !pre.includes('toggleBriefCommand'));
+      assert.ok(!/\binstallCommands\b/.test(main) && !app.includes('toggleBriefCommand'));
+      assert.strictEqual(typeof wiring.installCommands, 'undefined');
+      assert.strictEqual(typeof wiring.commandTemplatePath, 'undefined');
+      assert.ok(!/function installCommands|commandTemplatePath/.test(wsrc));
+      assert.ok(!fs.existsSync(path.join(ROOT, 'templates', 'commands', 'brief.md')));
+      assert.ok(pre.includes('sereno:plugin-status') && pre.includes('sereno:commands-remove'));
+      const i = main.indexOf("'sereno:commands-remove'");
+      const seg = main.slice(i, i + 1400);
+      assert.ok(/defaultId: 1/.test(seg) && /Cancel/.test(seg));
+      assert.ok(seg.indexOf('showMessageBox') < seg.indexOf('uninstallCommands'));
+      assert.ok(seg.includes("cur !== 'installed'"), 'only a hash-matched copy reaches the dialog');
+    });
+
+    test('[4b-plugin] widget row states: not installed shows both commands; installed shows the version; /brief offered only on a match', () => {
+      const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+      const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+      const model = new Function(app.match(/const PLUGIN_CMDS = [^\n]*\n/)[0] + app.match(/function pluginRowModel[\s\S]*?\n}\n/)[0] + '\nreturn pluginRowModel;')();
+      const none = model({ installed: false, detected: true }, 'not-installed');
+      assert.deepStrictEqual(none.cmds, ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno']);
+      assert.strictEqual(none.brief, 'none');
+      assert.deepStrictEqual(model(null, 'not-installed').cmds, none.cmds, 'not detected still offers the commands');
+      const on = model({ installed: true, version: '0.1.0' }, 'installed');
+      assert.strictEqual(on.pluginText, 'Pipeline plugin 0.1.0 installed');
+      assert.deepStrictEqual(on.cmds, []);
+      assert.strictEqual(on.brief, 'remove');
+      assert.strictEqual(model({ installed: true, version: null }, 'not-installed').pluginText, 'Pipeline plugin installed');
+      const cf = model({ installed: true, version: '0.1.0' }, 'conflict');
+      assert.strictEqual(cf.brief, 'conflict');
+      assert.ok(/Left as it is/.test(cf.briefText));
+      assert.ok(html.includes('id="plugin-row"') && /id="plugin-row"[^>]*hidden/.test(html) && /id="brief-row"[^>]*hidden/.test(html));
+      assert.ok(html.includes('Remove /brief'));
+      assert.ok(/if \(!api \|\| !api\.pluginStatus\) \{ ui\.pluginRow\.hidden = true; ui\.briefRow\.hidden = true/.test(app));
+      assert.ok(/textContent = c;/.test(app) && !/innerHTML/.test(app.slice(app.indexOf('async function refreshBrief'), app.indexOf("ui.settingsToggle.addEventListener"))));
+    });
+
+    await atest('[4b-plugin] /api/pipeline: plugin is the status through an explicit key list, junk and extra keys dropped', async () => {
+      const mk = (ps) => {
+        const c = createCollector(new Store(), 0, { now: () => 1, pluginStatus: ps });
+        return new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res(c)))));
+      };
+      const get = (port) => new Promise((resolve, reject) => {
+        http.get({ host: '127.0.0.1', port, path: '/api/pipeline', agent: false }, (r) => {
+          let x = ''; r.setEncoding('utf8'); r.on('data', (d) => { x += d; }); r.on('end', () => resolve(JSON.parse(x).plugin));
+        }).on('error', reject);
+      });
+      const cases = [
+        [() => ({ installed: true, version: '0.1.0', installPath: 'C:\\secret', gitCommitSha: 'abc' }), { installed: true, detected: true, version: '0.1.0' }],
+        [() => ({ installed: true, version: 7 }), { installed: true, detected: true, version: null }],
+        [() => ({ installed: false, detected: true, version: '9' }), { installed: false, detected: true, version: null }],
+        [() => ({ installed: false, detected: false }), { installed: false, detected: false, version: null }],
+        [() => { throw new Error('boom'); }, { installed: false, detected: false, version: null }],
+        [() => null, { installed: false, detected: false, version: null }],
+      ];
+      for (const [fn, want] of cases) {
+        const c = await mk(fn);
+        try { assert.deepStrictEqual(await get(c.port), want); } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+      }
+    });
+  }
+
+  /* ---- [pipeline exit] Phase 4b exit criteria, end to end through the real modules ---- */
+  {
+    const pl = require('../src/pipeline.js');
+    const repos = require('../src/repos.js');
+    const pa = require('../src/pipeline-alerts.js');
+    const rec = require('../plugin/bin/lib/records.js');
+    const recovery = require('../plugin/bin/lib/recovery.js');
+    const { openLedger } = require('../src/ledger.js');
+    const NOW = Date.parse('2026-10-15T12:00:00.000Z');
+    const genv = Object.assign({}, process.env, { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' });
+    const g = (cwd, ...a) => execFileSync('git', a, { cwd, env: genv, stdio: 'pipe', windowsHide: true }).toString().trim();
+    const tmps = [];
+    const mkd = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-px-'))); tmps.push(d); return d; };
+    const sub = (r, s) => { const d = path.join(r, '.sereno', s); fs.mkdirSync(d, { recursive: true }); return d; };
+    const wj = (d, n, o) => fs.writeFileSync(path.join(d, n), typeof o === 'string' ? o : JSON.stringify(o));
+    const link = (target, at) => { try { fs.symlinkSync(target, at, process.platform === 'win32' ? 'junction' : 'dir'); return true; } catch (_) { return false; } };
+    const SPEC = (task) => '---\ntask: "' + task + '"\nbuilder: sonnet\nkind: feature\nreason: "r"\nfixes: null\nbase_branch: "main"\nspec_revision: 1\ncreated_at: "2026-10-15T09:00:00.000Z"\n---\n\nbody\n';
+    const mkrepo = () => { const r = mkd(); g(r, 'init', '-q', '-b', 'main'); g(r, 'commit', '-q', '--allow-empty', '-m', 'init'); return r; };
+    const mkTask = (r, task) => { g(r, 'checkout', '-q', '-b', 'task/' + task); g(r, 'commit', '-q', '--allow-empty', '-m', 'work ' + task); const t = g(r, 'rev-parse', 'HEAD'); g(r, 'checkout', '-q', 'main'); return t; };
+    const putSpec = (r, task) => { wj(sub(r, 'specs'), task + '.md', SPEC(task)); return rec.sha256(fs.readFileSync(path.join(r, '.sereno', 'specs', task + '.md'))); };
+    let rn = 0;
+    const rid = () => { rn++; return 'rr_20261015T11' + String(10 + (rn % 40)) + '00Z_a' + String(rn).padStart(6, '0'); };
+    const putGate = (r, task, id, extra) => wj(sub(r, 'gates'), id + '.json', Object.assign({ review_run_id: id, task_id: task, spec: '.sereno/specs/' + task + '.md', spec_hash: 'sha256:' + 'b'.repeat(64),
+      branch: 'task/' + task, base_commit: 'abcdef1', head_commit: 'abcdef2', session_id: 's-1', agent_id: 'a_2', model: 'claude-fable-5-1',
+      outcome: 'block', tests_passed: true, findings: [], context_requests: [], reviewed_at: '2026-10-15T11:00:00.000Z', config_hash: 'sha256:' + 'a'.repeat(64) }, extra || {}));
+    const putAtt = (r, task, n, extra) => wj(sub(r, 'attempts'), task + '-' + n + '.json', Object.assign({ project_id: 'p1', task_id: task, spec_revision: 1, attempt: n, builder_requested: 'sonnet', agent_id: 'a_1',
+      config_hash: 'sha256:' + 'a'.repeat(64), kind: 'feature', fixes: null, diagnosis: 'none', outcome: 'pass', review_run_id: null,
+      started_at: '2026-10-15T10:00:00.000Z', ended_at: '2026-10-15T10:05:00.000Z' }, extra || {}));
+    const passTask = (r, task) => {
+      const tip = mkTask(r, task); const sh = putSpec(r, task); const id = rid();
+      putGate(r, task, id, { outcome: 'pass', tests_passed: true, head_commit: tip, spec_hash: sh });
+      putAtt(r, task, 1, { outcome: 'pass', review_run_id: id, spec_hash: sh, head_commit: tip });
+    };
+    const poller = (r, opts) => { const list = () => [{ id: 'p0', name: 'demo-proj', repoPath: r, hidden: false }]; return { list, p: repos.createPoller(Object.assign({ registry: { list }, now: () => NOW }, opts || {})) }; };
+    const boot = async (opts) => {
+      const c = createCollector(new Store(), 0, Object.assign({ now: () => NOW, pluginStatus: () => ({ installed: false, detected: false }) }, opts));
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      return c;
+    };
+    const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const getText = (port) => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: '/api/pipeline', agent: false }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (x) => { t += x; }); r.on('end', () => resolve(t));
+      }).on('error', reject);
+    });
+
+    await atest('[pipeline exit 1] a fixture repo with a task in each state yields the right card stage for each', async () => {
+      const r = mkrepo();
+      // running: a Builder working right now
+      mkTask(r, 'running'); putSpec(r, 'running'); putAtt(r, 'running', 1, { outcome: 'running', ended_at: null });
+      // retrying: an environment failure that will be retried
+      mkTask(r, 'retrying'); putSpec(r, 'retrying'); putAtt(r, 'retrying', 1, { outcome: 'error', diagnosis: 'environment' });
+      // repairing: a running attempt after a block with two non-low findings
+      mkTask(r, 'repairing'); putSpec(r, 'repairing'); const gid = rid();
+      putGate(r, 'repairing', gid, { findings: [{ severity: 'high', kind: 'bug', file: 'a.js', line: 1, summary: 'x' }, { severity: 'medium', kind: 'bug', file: 'b.js', line: 2, summary: 'y' }] });
+      putAtt(r, 'repairing', 1, { outcome: 'block', diagnosis: 'defect', review_run_id: gid });
+      putAtt(r, 'repairing', 2, { outcome: 'running', ended_at: null });
+      // built: waiting for the red team
+      mkTask(r, 'built'); putSpec(r, 'built'); putAtt(r, 'built', 1, { outcome: 'built' });
+      // decide: a genuine decision outcome
+      mkTask(r, 'decide'); putSpec(r, 'decide'); putAtt(r, 'decide', 1, { outcome: 'needs_context' });
+      // ready to merge, merged, stopped, expired
+      passTask(r, 'ready');
+      passTask(r, 'merged'); g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/merged');
+      mkTask(r, 'stopped'); putSpec(r, 'stopped'); putAtt(r, 'stopped', 1, { outcome: 'stopped' });
+      mkTask(r, 'expired'); putSpec(r, 'expired'); putAtt(r, 'expired', 1, { outcome: 'built', started_at: '2026-10-01T10:00:00.000Z', ended_at: '2026-10-01T10:05:00.000Z' });
+      const { p } = poller(r);
+      await p.pollNow();
+      const view = p.snapshot().p0.pipeline;
+      assert.strictEqual(view.error, false);
+      const by = Object.fromEntries(view.tasks.map((t) => [t.task, t]));
+      assert.deepStrictEqual(Object.keys(by).sort(), ['built', 'decide', 'expired', 'merged', 'ready', 'repairing', 'retrying', 'running', 'stopped']);
+      assert.deepStrictEqual(Object.fromEntries(Object.entries(by).map(([k, t]) => [k, t.stage])),
+        { running: 'builder', retrying: 'builder', repairing: 'builder', built: 'red-team', decide: 'decision', ready: 'ready', merged: 'merged', stopped: 'stopped', expired: 'red-team' });
+      assert.strictEqual(by.running.step, 'Building');
+      assert.match(by.retrying.step, /retry/i);
+      assert.strictEqual(by.repairing.step, 'Fixing 2 findings');
+      assert.strictEqual(by.ready.step, 'Ready: run /sereno:merge');
+      assert.deepStrictEqual(Object.entries(by).filter(([, t]) => t.expired).map(([k]) => k), ['expired']);
+    });
+
+    await atest('[pipeline exit 2] a decide raises one decision; a newer attempt moves it to reviewing; a second decide reopens it; nothing re-fires without a new episode', async () => {
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      putAtt(r, 'demo', 1, { outcome: 'needs_context' });
+      const { list, p } = poller(r);
+      const m = pa.createPipelineAlerts({ now: () => NOW });
+      const step = async () => { await p.pollNow(); return m.update(pa.toInput(list(), p.snapshot()), []).map((e) => e.type); };
+      assert.deepStrictEqual(await step(), ['decision-open']);
+      assert.strictEqual(m.open().length, 1);
+      assert.strictEqual(m.open()[0].task, 'demo');
+      for (let i = 0; i < 3; i++) assert.deepStrictEqual(await step(), [], 'no re-fire while the same decision stands');
+      putAtt(r, 'demo', 2, { outcome: 'built' });
+      assert.deepStrictEqual(await step(), ['decision-reviewing']);
+      assert.strictEqual(m.open().length, 0);
+      assert.deepStrictEqual(await step(), []);
+      putAtt(r, 'demo', 3, { outcome: 'needs_context' });
+      assert.deepStrictEqual(await step(), ['decision-reopen']);
+      assert.strictEqual(m.open().length, 1);
+      for (let i = 0; i < 3; i++) assert.deepStrictEqual(await step(), []);
+    });
+
+    await atest('[pipeline exit 2] a running attempt never raises a decision event', async () => {
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      putAtt(r, 'demo', 1, { outcome: 'running', ended_at: null });
+      const { list, p } = poller(r);
+      const m = pa.createPipelineAlerts({ now: () => NOW });
+      for (let i = 0; i < 3; i++) {
+        await p.pollNow();
+        assert.deepStrictEqual(m.update(pa.toInput(list(), p.snapshot()), []), []);
+      }
+      assert.strictEqual(p.snapshot().p0.pipeline.tasks[0].stage, 'builder');
+      assert.strictEqual(m.open().length, 0);
+    });
+
+    await atest('[pipeline exit 2] a first build running 10 min with no live builder fires stalled with kind build, then clears', async () => {
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      putAtt(r, 'demo', 1, { outcome: 'running', ended_at: null, started_at: '2026-10-15T10:00:00.000Z' });
+      const { list, p } = poller(r);
+      let clock = Date.parse('2026-10-15T10:00:00.000Z');
+      const m = pa.createPipelineAlerts({ now: () => clock });
+      await p.pollNow();
+      const feed = () => m.update(pa.toInput(list(), p.snapshot()), []);
+      assert.deepStrictEqual(feed(), []);
+      clock = Date.parse('2026-10-15T10:10:00.000Z');
+      const ev = feed();
+      assert.deepStrictEqual(ev.map((e) => [e.type, e.kind, e.task]), [['stalled', 'build', 'demo']]);
+      assert.deepStrictEqual(m.stalled().map((x) => x.kind), ['build']);
+      assert.strictEqual(m.open().length, 0, 'never a decision');
+      putAtt(r, 'demo', 1, { outcome: 'built' });
+      await p.pollNow();
+      assert.deepStrictEqual(feed().map((e) => e.type), ['stalled-clear']);
+    });
+
+    await atest('[pipeline exit 3] a symlinked .sereno/attempts is refused before any plugin code reads it', async () => {
+      const outside = mkd(); wj(outside, 'demo-1.json', { task_id: 'demo', attempt: 1, outcome: 'built', started_at: '2026-10-15T10:00:00.000Z', ended_at: '2026-10-15T10:05:00.000Z' });
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      if (!link(outside, path.join(r, '.sereno', 'attempts'))) { console.log('    (link not permitted here; case not exercised)'); return; }
+      const orig = recovery.decide; let calls = 0;
+      recovery.decide = function () { calls++; return orig.apply(this, arguments); };
+      try {
+        assert.strictEqual(await pl.readRepo(r), null);
+        assert.strictEqual(await pl.listAttempts(r), null);
+        const { p } = poller(r);
+        await p.pollNow();
+        assert.deepStrictEqual(p.snapshot().p0.pipeline.tasks, []);
+        assert.strictEqual(calls, 0, 'recovery.decide never ran');
+      } finally { recovery.decide = orig; }
+    });
+
+    await atest('[pipeline exit 4] /api/pipeline responses contain no field outside the allowlist', async () => {
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      wj(path.join(r, '.sereno'), 'pipeline.json', { tests: { command: 'SECRET-CMD', setup: 'SECRET-SETUP' } });
+      const id = rid();
+      putGate(r, 'demo', id, { prompt: 'SECRET-PROMPT', command: 'SECRET-CMD', findings: [{ severity: 'high', kind: 'bug', file: 'a.js', line: 3, summary: 'boom', prompt: 'SECRET-PROMPT', command: 'SECRET-CMD' }] });
+      putAtt(r, 'demo', 1, { outcome: 'block', diagnosis: 'defect', review_run_id: id, prompt: 'SECRET-PROMPT', command: 'SECRET-CMD' });
+      const { list, p } = poller(r);
+      await p.pollNow();
+      const l = openLedger({ file: ':memory:' });
+      const c = await boot({ projects: { list }, repos: p, ledger: l });
+      try {
+        const text = await getText(c.port);
+        const b = JSON.parse(text);
+        const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin',
+          'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd',
+          'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'severity', 'kind', 'file', 'line', 'summary',
+          'days', 'outcomes', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
+          'enabled', 'roles', 'builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed', 'explicit', 'inferred', 'mean',
+          'models', 'agent', 'role', 'redTeam', 'fallback', 'onFallback', 'installed', 'detected', 'version']);
+        const strays = [];
+        const walk = (v, at) => {
+          if (Array.isArray(v)) v.forEach((x, i) => walk(x, at + '[' + i + ']'));
+          else if (v && typeof v === 'object') for (const k of Object.keys(v)) { if (!ALLOWED.has(k)) strays.push(at + '.' + k); walk(v[k], at + '.' + k); }
+        };
+        walk(b, '$');
+        assert.deepStrictEqual(strays, []);
+        assert.strictEqual(b.projects[0].tasks.length, 1, 'the fixture task is really in the body');
+        assert.strictEqual(b.projects[0].tasks[0].findings.length, 1);
+        assert.ok(!/SECRET|spec_hash|head_commit|agent_id|session_id|config_hash/.test(text) && !text.includes(r.replace(/\\/g, '\\\\')));
+      } finally { await halt(c); l.close(); }
+    });
+
+    await atest('[pipeline exit 5] role spend splits explicit / inferred / unattributed, and Sonnet is never inferred', async () => {
+      const l = openLedger({ file: ':memory:' });
+      const rq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's1', promptId: null, ts: NOW, model: 'claude-sonnet-5-5', querySource: null, source: 'subagent',
+        agentName: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 1000000, durationMs: 0 }, o);
+      const agent = (sid, aid, type) => l._db.prepare('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,NULL)').run(sid, aid, type, NOW);
+      agent('s1', 'ag-b', 'sereno:builder'); agent('s1', 'ag-r', 'sereno:red-team');
+      l.ingestRequests([
+        rq({ requestKey: '1', requestId: 'r1' }),                                                       // Sonnet, span-linked to the builder: explicit
+        rq({ requestKey: '2', requestId: 'r2', model: 'claude-fable-5-1', costMicros: 2000000 }),         // Fable, span-linked to the red team: explicit
+        rq({ requestKey: '3', requestId: 'r3', model: 'claude-fable-5-1', costMicros: 500000 }),          // Fable, no link: inferred red team
+        rq({ requestKey: '4', requestId: 'r4', costMicros: 250000 }),                                    // Sonnet, no link: unattributed
+        rq({ requestKey: '5', requestId: 'r5', model: 'claude-opus-5-5', costMicros: 250000 }),          // Opus, no link: unattributed
+        rq({ requestKey: '6', requestId: 'r6', model: 'claude-haiku-4-5-20251001', costMicros: 250000 }),
+      ]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag-b', ts: NOW }, { requestId: 'r2', sessionId: 's1', agentId: 'ag-r', ts: NOW }]);
+      const c = await boot({ projects: { list: () => [] }, repos: { snapshot: () => ({}) }, ledger: l });
+      try {
+        const roles = JSON.parse(await getText(c.port)).roleSpend.roles;
+        assert.deepStrictEqual(roles.builder, { costUsd: 1, explicit: 1, inferred: 0, unattributed: 0 });
+        assert.deepStrictEqual(roles['red-team'], { costUsd: 2.5, explicit: 2, inferred: 0.5, unattributed: 0 });
+        assert.strictEqual(roles.scribe.costUsd, 0);
+        assert.deepStrictEqual(roles.unattributed, { costUsd: 0.75, explicit: 0, inferred: 0, unattributed: 0.75 });
+      } finally { await halt(c); l.close(); }
+    });
+
+    await atest('[pipeline exit 6] plugin detection reports installed / not installed / not detected (corrupt file)', async () => {
+      const mkHome = (body) => {
+        const home = mkd(); const dir = path.join(home, '.claude', 'plugins'); fs.mkdirSync(dir, { recursive: true });
+        if (body !== undefined) fs.writeFileSync(path.join(dir, 'installed_plugins.json'), body);
+        return home;
+      };
+      const homes = {
+        installed: mkHome(JSON.stringify({ version: 2, plugins: { 'sereno@sereno': [{ scope: 'user', version: '0.2.0' }] } })),
+        absent: mkHome(JSON.stringify({ version: 2, plugins: { 'other@market': [{ version: '1.0.0' }] } })),
+        corrupt: mkHome('{ not json'),
+      };
+      const want = { installed: { installed: true, detected: true, version: '0.2.0' }, absent: { installed: false, detected: true, version: null }, corrupt: { installed: false, detected: false, version: null } };
+      for (const k of Object.keys(homes)) {
+        const c = await boot({ projects: { list: () => [] }, repos: { snapshot: () => ({}) }, pluginStatus: () => wiring.pluginStatus(homes[k]) });
+        try { assert.deepStrictEqual(JSON.parse(await getText(c.port)).plugin, want[k], k); } finally { await halt(c); }
+      }
+    });
+
+    test('[pipeline exit 7] the app brief command is removed only when its hash matches; a conflict stays', () => {
+      const sha = (b) => require('node:crypto').createHash('sha256').update(b).digest('hex');
+      const tmp = mkd();
+      const prev = { c: process.env.CLAUDE_CONFIG_DIR, h: process.env.SERENO_HOME };
+      process.env.CLAUDE_CONFIG_DIR = tmp; process.env.SERENO_HOME = tmp;
+      try {
+        const target = path.join(tmp, 'commands', 'brief.md');
+        const sibling = path.join(tmp, 'commands', 'mine.md');
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(sibling, 'not ours\n');
+        const record = () => fs.writeFileSync(path.join(tmp, 'wired.json'), JSON.stringify({ commands: { 'commands/brief.md': sha(Buffer.from('ours\n')) } }));
+        fs.writeFileSync(target, 'ours\n'); record();
+        assert.strictEqual(wiring.commandsStatus(), 'installed');
+        assert.deepStrictEqual(wiring.uninstallCommands().removed, ['commands/brief.md']);
+        assert.ok(!fs.existsSync(target));
+        fs.writeFileSync(target, 'ours\nedited\n'); record();
+        assert.strictEqual(wiring.commandsStatus(), 'conflict');
+        const res = wiring.uninstallCommands();
+        assert.deepStrictEqual([res.removed, res.kept], [[], ['commands/brief.md']]);
+        assert.strictEqual(fs.readFileSync(target, 'utf8'), 'ours\nedited\n');
+        assert.strictEqual(fs.readFileSync(sibling, 'utf8'), 'not ours\n');
+      } finally {
+        if (prev.c === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev.c;
+        if (prev.h === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev.h;
+      }
+    });
+
+    await atest('[pipeline exit] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

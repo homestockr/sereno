@@ -10,7 +10,7 @@
  *   POST /v1/logs, /v1/traces <- OTLP/JSON (only with a ledger; else 200 and drop)
  *   GET  /ledger/summary -> ledger totals
  *   GET  /api/spend/{today,series,projects,top-prompts} -> spend views (ledger only)
- *   GET  /api/projects, /api/token; POST /api/review, /api/projects/<id>/hide (guarded)
+ *   GET  /api/projects, /api/pipeline, /api/token; POST /api/review, /api/projects/<id>/hide (guarded)
  *   GET  /console[/*] -> the console pages (src/renderer/console)
  *   GET  /        -> the widget page (also works in a plain browser tab)
  *
@@ -25,6 +25,9 @@ const zlib = require('node:zlib');
 const crypto = require('node:crypto');
 const otlp = require('./otlp.js');
 const spendtime = require('./spendtime.js');
+const pipelineLib = require('./pipeline.js');
+const wiring = require('./wiring.js');
+const { emptyRoleSpend } = require('./ledger.js');
 const { normalizePath } = require('./projects.js');
 
 const RENDERER_DIR = path.join(__dirname, 'renderer');
@@ -125,6 +128,8 @@ function createCollector(store, port, opts) {
   const now = (opts && typeof opts.now === 'function') ? opts.now : Date.now;
   const projects = (opts && opts.projects) || null;   // project registry (src/projects.js)
   const repos = (opts && opts.repos) || null;   // repo poller (src/repos.js)
+  const pipelineAlerts = (opts && opts.pipelineAlerts && typeof opts.pipelineAlerts.open === 'function') ? opts.pipelineAlerts : null;   // src/pipeline-alerts.js machine (absent under npm run serve)
+  const pluginStatusFn = (opts && typeof opts.pluginStatus === 'function') ? opts.pluginStatus : () => wiring.pluginStatus();   // tests inject; reads installed_plugins.json read-only
   const onReview = (opts && typeof opts.onReview === 'function') ? opts.onReview : null;   // absent under npm run serve
   // Per-launch secret for the console's POST actions; handed out by GET /api/token.
   const token = crypto.randomBytes(24).toString('base64url');
@@ -160,7 +165,42 @@ function createCollector(store, port, opts) {
     if (!spendCache) computeSpend();
     return spendCache;
   }
-  function snapshot() { return Object.assign(store.snapshot(), { spend: spendState() }); }
+  /**
+   * Open pipeline decisions for the attention panel, from an explicit key list: no repo path
+   * leaves here. sessionId (the only thing "Review in terminal" sends) is present only when a
+   * live session sits inside the repo, most recently seen first.
+   */
+  function decisionList() {
+    if (!pipelineAlerts) return [];
+    let open = [];
+    try { open = pipelineAlerts.open(); } catch (_) { return []; }
+    const norm = (p) => String(p == null ? '' : p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    const live = [];
+    for (const s of store.sessions.values()) {
+      const pub = store.publicSession(s);
+      if (!pub.stale && pub.cwd && pub.id) live.push(pub);
+    }
+    live.sort((a, b) => b.lastSeen - a.lastSeen);
+    return open.slice(0, 50).map((d) => {
+      const roots = (Array.isArray(d.paths) ? d.paths : []).map(norm).filter(Boolean);
+      const hit = live.find((s) => { const c = norm(s.cwd); return roots.some((r) => c === r || c.startsWith(r + '/')); });
+      return Object.assign({
+        projectId: String(d.projectId).slice(0, 128),
+        project: String(d.project).slice(0, 128),
+        task: String(d.task).slice(0, 128),
+        reason: typeof d.reason === 'string' ? d.reason.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 200) : null,
+        attempt: typeof d.attempt === 'number' && Number.isFinite(d.attempt) ? d.attempt : null,
+      }, hit ? { sessionId: hit.id } : {});
+    });
+  }
+  /** Stalled repairs, informational only: project and task names. */
+  function stalledList() {
+    if (!pipelineAlerts || typeof pipelineAlerts.stalled !== 'function') return [];
+    try {
+      return pipelineAlerts.stalled().slice(0, 50).map((d) => ({ project: String(d.project).slice(0, 128), task: String(d.task).slice(0, 128), kind: d.kind === 'repair' ? 'repair' : 'build' }));
+    } catch (_) { return []; }
+  }
+  function snapshot() { return Object.assign(store.snapshot(), { spend: spendState(), decisions: decisionList(), stalled: stalledList() }); }
   function refreshSpend() { computeSpend(); broadcast(); }
   function tickSpend() {
     if (spendCache === null) return;   // nobody has asked yet; first use computes
@@ -233,6 +273,7 @@ function createCollector(store, port, opts) {
   // Every response is built from an explicit key list: nothing the ledger returns
   // can leak into the API by accident.
   function handleApi(req, res, url) {
+    if (url === '/api/pipeline') { sendJson(res, 200, buildPipeline()); return; }
     const m = /^\/api\/spend\/(today|series|projects|top-prompts)$/.exec(url);
     if (!m) { res.writeHead(404, { 'content-type': 'text/plain' }).end('not found'); return; }
     if (!ledger) { sendJson(res, 200, { enabled: false }); return; }
@@ -342,6 +383,7 @@ function createCollector(store, port, opts) {
       } catch (_) { spend = null; }
     }
     const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const briefTime = (v) => { const t = typeof v === 'string' ? Date.parse(v) : NaN; return Number.isFinite(t) ? t : null; };
     const normsOf = new Map(meta.map((m) => [m.p.id, pathsOf(m.p, m.st)]));
     const owns = (cwd, id) => {
       const mine = depth(cwd, normsOf.get(id) || []);
@@ -380,7 +422,7 @@ function createCollector(store, port, opts) {
         },
         prs: st ? num(st.prs) : null,
         branches: st && Array.isArray(st.branches)
-          ? st.branches.map((x) => ({ name: x.name, freshness: x.freshness || 'none', now: x.brief ? (x.brief.now ?? null) : null, behindSince: num(x.behindSince) }))
+          ? st.branches.map((x) => ({ name: x.name, freshness: x.freshness || 'none', now: x.brief ? (x.brief.now ?? null) : null, generatedAt: x.brief ? briefTime(x.brief.generatedAt) : null, behindSince: num(x.behindSince) }))
           : [],
         spend14: sp ? { costMicros: sp.costMicros, trend: sp.trend.slice() } : null,
         lastActivity: last,
@@ -390,6 +432,124 @@ function createCollector(store, port, opts) {
       };
     });
     return { asOf, projects: out };
+  }
+
+  /*
+   * GET /api/pipeline. Built from the poller's in-memory snapshot (never runs git) and
+   * from explicit key lists: no command, prompt, spec body, hash, session or agent id,
+   * or repo path leaves here. Findings are the one place a file name appears.
+   */
+  const PIPE_ROLES = ['builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed'];
+  const PIPE_DAYS = 30;
+  const pStr = (v, max) => (typeof v === 'string' ? v.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max) : null);
+  const pNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const pBool = (v) => v === true;
+  function pipeGate(g) {
+    if (!g || typeof g !== 'object') return null;
+    return { review_run_id: pStr(g.review_run_id, 64), outcome: pStr(g.outcome, 32), tests_passed: pBool(g.tests_passed), reviewed_at: pStr(g.reviewed_at, 40), model: pStr(g.model, 128) };
+  }
+  function pipeFinding(f) {
+    f = f && typeof f === 'object' ? f : {};
+    return { severity: pStr(f.severity, 16), kind: pStr(f.kind, 32), file: pStr(f.file, 260), line: pNum(f.line), summary: pStr(f.summary, 300) };
+  }
+  /** Ledger spend (USD, an estimate) over a task's runs: each gate's agent and each attempt's agent; null when nothing was measured. */
+  function taskCost(t) {
+    if (!ledger || typeof ledger.spendForAgentId !== 'function') return null;
+    let sum = 0, any = false;
+    const seen = new Set();
+    const add = (c) => { if (Number.isFinite(c) && c > 0) { sum += c; any = true; } };
+    try {
+      for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+        if (!g || typeof g.agent_id !== 'string' || !g.agent_id || seen.has(g.agent_id)) continue;
+        seen.add(g.agent_id);
+        add(typeof g.session_id === 'string' && g.session_id ? ledger.spendForAgent(g.session_id, g.agent_id) : ledger.spendForAgentId(g.agent_id));
+      }
+      for (const a of (Array.isArray(t.attempts) ? t.attempts : [])) {
+        if (!a || typeof a.agent_id !== 'string' || !a.agent_id || seen.has(a.agent_id)) continue;
+        seen.add(a.agent_id);
+        add(ledger.spendForAgentId(a.agent_id));
+      }
+    } catch (_) { return null; }
+    return any ? sum : null;
+  }
+  function pipeTask(t) {
+    return {
+      task: pStr(t.task, 128), stage: pStr(t.stage, 32), step: pStr(t.step, 120), reason: pStr(t.reason, 64), attempt: pNum(t.attempt),
+      gate: pipeGate(t.gate),
+      findings: Array.isArray(t.findings) ? t.findings.slice(0, 50).map(pipeFinding) : [],
+      startedAt: pNum(t.startedAt), updatedAt: pNum(t.updatedAt), reviewRuns: pNum(t.reviewRuns) || 0, expired: pBool(t.expired),
+      costUsd: taskCost(t),
+    };
+  }
+  function pipeRedTeam(r) {
+    if (!r || typeof r !== 'object') return null;
+    return { agent: pStr(r.agent, 128), fallback: pStr(r.fallback, 128), onFallback: pStr(r.onFallback, 16) };
+  }
+  function buildPipeline() {
+    const asOf = now();
+    const reg = projects ? projects.list() : [];
+    let snap = {};
+    try { snap = repos ? repos.snapshot() : {}; } catch (_) { snap = {}; }
+    const outProjects = [];
+    const sigIn = [];
+    const routingProjects = [];
+    for (const p of reg) {
+      if (p.hidden) continue;
+      const st = snap[p.id];
+      const pv = st && st.pipeline && typeof st.pipeline === 'object' ? st.pipeline : null;
+      const all = pv && Array.isArray(pv.tasks) ? pv.tasks : [];
+      const active = all.filter((t) => t && t.stage !== 'merged' && t.stage !== 'stopped');
+      const rt = pv ? pv.redTeam : null;
+      let idle = null;
+      if (!active.length) {
+        let latest = null;
+        for (const t of all) for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+          const at = g && typeof g.reviewed_at === 'string' ? Date.parse(g.reviewed_at) : NaN;
+          if (Number.isFinite(at) && (!latest || at > latest.at)) latest = { at, outcome: g.outcome };
+        }
+        idle = rt && rt.enabled === false ? 'gate-off' : (latest && latest.outcome === 'pass' ? 'latest-pass' : 'no-task');
+      }
+      outProjects.push({ id: p.id, name: p.name, tasks: active.map(pipeTask), idle });
+      sigIn.push({ id: p.id, tasks: all.map((t) => ({ task: t.task, stage: t.stage, gates: Array.isArray(t.gates) ? t.gates : [] })) });
+      routingProjects.push({ id: p.id, redTeam: pipeRedTeam(rt) });
+    }
+    const sg = pipelineLib.signals(sigIn, asOf);
+    const signals = {
+      days: sg.days,
+      projects: sg.projects.map((x) => ({ id: x.id, gate: x.gate ? { outcome: pStr(x.gate.outcome, 32), task: pStr(x.gate.task, 128), ageMs: pNum(x.gate.ageMs) } : null })),
+      outcomes: { n: sg.outcomes.n, pass: sg.outcomes.pass, block: sg.outcomes.block, needs_context: sg.outcomes.needs_context, error: sg.outcomes.error, skipped: sg.outcomes.skipped },
+      rework: { n: sg.rework.n, median: sg.rework.median, max: sg.rework.max, excluded: sg.rework.excluded },
+      runsThisWeek: sg.runsThisWeek,
+    };
+    let rs = null;
+    if (ledger) {
+      try { rs = ledger.roleSpend(asOf - PIPE_DAYS * 24 * 3600 * 1000, pipelineLib.roleMap(), pipelineLib.inferModels()); } catch (_) { rs = null; }
+    }
+    const src = (rs || emptyRoleSpend()).roles;
+    const roles = {};
+    for (const k of PIPE_ROLES) {
+      const r = src[k] || {};
+      roles[k] = { costUsd: pNum(r.costUsd) || 0, explicit: pNum(r.explicit) || 0, inferred: pNum(r.inferred) || 0, unattributed: pNum(r.unattributed) || 0 };
+    }
+    let rpm;
+    try { rpm = pipelineLib.redTeamPerMerge(sigIn, ledger && rs ? ledger.spendForAgent : null); } catch (_) { rpm = { mean: null, n: 0, excluded: 0 }; }
+    return {
+      projects: outProjects,
+      signals,
+      roleSpend: { enabled: !!rs, days: PIPE_DAYS, roles },
+      redTeamPerMerge: { mean: pNum(rpm.mean), n: rpm.n, excluded: rpm.excluded },
+      routing: {
+        models: pipelineLib.agentModels().map((m) => ({ agent: m.agent, role: m.role, model: m.model })),
+        projects: routingProjects,
+      },
+      plugin: (() => {
+        let ps = null;
+        try { ps = pluginStatusFn(); } catch (_) { ps = null; }
+        ps = ps && typeof ps === 'object' ? ps : {};
+        const installed = ps.installed === true;
+        return { installed, detected: installed || ps.detected === true, version: installed && typeof ps.version === 'string' ? pStr(ps.version, 32) : null };
+      })(),
+    };
   }
 
   // The POST guard for console actions; localOnly (Host/Origin) has already run.

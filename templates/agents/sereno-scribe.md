@@ -22,6 +22,6 @@ When asked to write or refresh the brief, do exactly what the `/brief` command d
 the same rules: same path (`.sereno/briefs/<branch percent-encoded>.md`), same front matter
 (`branch`, `worktree`, `version`, `source_commit`, `task`, `generated_at`), same three lines
 (`Now:`, `Next:`, `Blocked:`, each under 120 characters), same version rule (previous
-version plus 1, else 1), and the same re-read before writing. If the `/brief` command is
-installed, its file is `~/.claude/commands/brief.md`; read it and follow it. Otherwise use
+version plus 1, else 1), and the same re-read before writing. If the Sereno plugin is
+installed, its `/sereno:brief` skill holds the same rules; read it and follow it. Otherwise use
 the format above. Write that one file only. Do not commit and do not stage.
