@@ -713,6 +713,7 @@ function createCollector(store, port, opts) {
       days: sg.days,
       projects: sg.projects.map((x) => ({ id: x.id, gate: x.gate ? { outcome: pStr(x.gate.outcome, 32), task: pStr(x.gate.task, 128), ageMs: pNum(x.gate.ageMs) } : null })),
       outcomes: { n: sg.outcomes.n, pass: sg.outcomes.pass, block: sg.outcomes.block, needs_context: sg.outcomes.needs_context, error: sg.outcomes.error, skipped: sg.outcomes.skipped },
+      seq: Array.isArray(sg.seq) ? sg.seq.slice(-60).map((k) => pStr(k, 32)) : [],
       rework: { n: sg.rework.n, median: sg.rework.median, max: sg.rework.max, excluded: sg.rework.excluded },
       runsThisWeek: sg.runsThisWeek,
     };

@@ -241,10 +241,6 @@ td.proj { font-weight: 500; }
 .body.pipe .attn-col { width: 340px; }
 .body.pipe .main { max-width: none; padding-top: 16px; }
 @media (max-width: 1359px) { .body.pipe .attn-col { width: auto; } }
-.subtabs { display: flex; gap: 20px; margin-top: 10px; border-bottom: 1px solid var(--line); }
-.subtabs a { color: var(--quiet); text-decoration: none; font-size: 13px; padding: 6px 0 7px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-.subtabs a.on { color: var(--text); font-weight: 600; border-bottom-color: var(--muted); }
-.subtabs a:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 .pfilters { display: flex; gap: 18px; margin: 10px 0 6px; font-size: 12px; color: var(--quiet); }
 .pfilters select { font: inherit; font-size: 12px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; margin-left: 6px; }
 .pfilters select:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
@@ -256,13 +252,13 @@ td.proj { font-weight: 500; }
 .pcell-cost { text-align: right; font-size: 12px; color: var(--muted); }
 .prow { --rowbg: var(--bg); height: 34px; border-bottom: 1px solid var(--grid); background: var(--rowbg); cursor: pointer; }
 .prow:hover { --rowbg: var(--panel); }
-.prow.sel { --rowbg: var(--selected); box-shadow: inset 2px 0 0 var(--accent); }
+.prow.sel { --rowbg: var(--selected); box-shadow: inset 2px 0 0 var(--accent); outline: 1px solid var(--accent); outline-offset: -1px; }
 .prow.decision { --rowbg: var(--amberbg); box-shadow: inset 2px 0 0 var(--amber); }
 .prow.sel.decision { --rowbg: var(--amberbg); box-shadow: inset 2px 0 0 var(--amber); outline: 1px solid var(--muted); outline-offset: -1px; }
 .prow:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.pcell-task { display: flex; flex-direction: column; min-width: 0; line-height: 15px; }
-.ptname { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ptproj { font-size: 11px; color: var(--quiet); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pcell-task { display: flex; flex-direction: column; min-width: 0; line-height: 16px; }
+.ptname { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ptproj { font-size: 12px; line-height: 14px; color: var(--quiet); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pcell-branch { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tcell { position: relative; display: flex; align-items: center; justify-content: center; height: 100%; min-width: 0; }
 .prow .tcell::before { content: ''; position: absolute; left: -4px; right: -4px; top: 50%; height: 1px; background: var(--line); }
@@ -270,6 +266,7 @@ td.proj { font-weight: 500; }
 .prow .tc-merge::before { right: 50%; }
 .tmark { position: relative; display: inline-flex; align-items: center; gap: 5px; background: var(--rowbg); padding: 0 4px; white-space: nowrap; }
 .tlabel { font-size: 11px; color: var(--muted); }
+.tchip { border: 1px solid var(--muted); border-radius: 9px; padding: 0 7px; line-height: 15px; background: transparent; }
 .mk { width: 16px; height: 16px; flex: none; color: var(--quiet); }
 .mk .bg { fill: var(--rowbg); }
 .mk .chk { stroke: var(--rowbg); }
@@ -286,6 +283,9 @@ td.proj { font-weight: 500; }
 .pidle .idle { padding: 4px 0 4px 14px; }
 .pstrip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 22px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
 .sgroup { display: inline-flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; }
+.odots { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; max-width: 100%; }
+.odot { display: inline-flex; }
+.odot .oshape { width: 14px; height: 14px; }
 .soc { display: inline-flex; align-items: center; gap: 4px; }
 .soc strong { color: var(--text); font-weight: 600; }
 .slink { margin-left: auto; color: var(--muted); text-underline-offset: 3px; }

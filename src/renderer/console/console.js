@@ -1063,7 +1063,7 @@ function rowHtml(r, selKey) {
   const cells = trackMarks(t).map((m) => {
     const what = m.dec ? 'needs a decision' : (MARK_TEXT[m.mark] || m.mark);
     return '<div class="tcell tc-' + m.key + '" role="gridcell"><span class="tmark" role="img" aria-label="' + esc(m.label + ': ' + what + (m.tag ? ', ' + m.tag : '')) + '">'
-      + markSvg(m.mark, m.key, m.dec) + (m.tag ? '<span class="tlabel">' + esc(m.tag) + '</span>' : '') + '</span></div>';
+      + markSvg(m.mark, m.key, m.dec) + (m.tag ? '<span class="tlabel' + (m.key === 'build' ? ' tchip' : '') + '">' + esc(m.tag) + '</span>' : '') + '</span></div>';
   }).join('');
   const money = usdEst(t.costUsd);
   const on = r.key === selKey;
@@ -1092,6 +1092,15 @@ function idleHtml(body, ui) {
     + idle.map((p) => '<li><strong>' + esc(p.name) + '</strong><span class="quiet-text">' + esc(IDLE_LABEL[p.idle] || IDLE_LABEL['no-task']) + '</span></li>').join('') + '</ul></details>';
 }
 
+/** One outcome shape per review in the window, oldest first so the newest is last. '' with none. Unknown outcomes are skipped. */
+function outcomeDotsHtml(seq) {
+  const ok = ['pass', 'block', 'needs_context', 'error', 'skipped'];
+  const list = (Array.isArray(seq) ? seq : []).filter((k) => ok.includes(k)).slice(-60);
+  if (!list.length) return '';
+  return '<span class="odots" role="img" aria-label="Last ' + list.length + ' reviews, newest last">'
+    + list.map((k) => '<span class="odot" title="' + esc(OUTCOME_LABEL[k] || k) + '">' + outcomeShape(k) + '</span>').join('') + '</span>';
+}
+
 /** Bottom strip: outcome shapes with n, rework (n), red-team cost per merge (est., n, excluded), link to Signals. */
 function stripHtml(body) {
   const sg = body && body.signals ? body.signals : {};
@@ -1103,7 +1112,7 @@ function stripHtml(body) {
       return '<span class="soc">' + outcomeShape(k) + esc(OUTCOME_LABEL[k]) + ' <strong class="num">' + c + '</strong></span>';
     }).join('') + '<span class="quiet-text num">n=' + n + '</span>'
     : '<span class="quiet-text num">No review runs in 30 days (n=0)</span>';
-  return '<div class="pstrip"><span class="sgroup">' + outs + '</span><span class="sgroup">' + esc(reworkLine(sg.rework)) + '</span>'
+  return '<div class="pstrip">' + outcomeDotsHtml(sg.seq) + '<span class="sgroup">' + outs + '</span><span class="sgroup">' + esc(reworkLine(sg.rework)) + '</span>'
     + '<span class="sgroup">' + esc(perMergeLine(body ? body.redTeamPerMerge : null)) + '</span>'
     + '<a class="slink" href="#pipeline/signals">Signals</a></div>';
 }
@@ -1146,7 +1155,7 @@ function routingTabHtml(body) {
 
 /** Sub-tab links, kept in the route. */
 function subtabsHtml(sub) {
-  return '<nav class="subtabs" aria-label="Pipeline views">' + PIPE_SUBS.map((s) => '<a href="#pipeline' + (s[0] === 'work' ? '' : '/' + s[0]) + '" class="' + (s[0] === sub ? 'on' : '')
+  return '<nav class="spills" aria-label="Pipeline views">' + PIPE_SUBS.map((s) => '<a class="spill' + (s[0] === sub ? ' on' : '') + '" href="#pipeline' + (s[0] === 'work' ? '' : '/' + s[0])
     + '"' + (s[0] === sub ? ' aria-current="page"' : '') + '>' + esc(s[1]) + '</a>').join('') + '</nav>';
 }
 

@@ -10642,7 +10642,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       attempt: ['attempt', 'outcome', 'startedAt', 'endedAt'], activity: ['at', 'kind', 'outcome'],
       gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model'],
       finding: ['severity', 'kind', 'file', 'line', 'summary'],
-      signals: ['days', 'projects', 'outcomes', 'rework', 'runsThisWeek'],
+      signals: ['days', 'projects', 'outcomes', 'seq', 'rework', 'runsThisWeek'],
       sigProject: ['id', 'gate'], sigGate: ['outcome', 'task', 'ageMs'],
       outcomes: ['n', 'pass', 'block', 'needs_context', 'error', 'skipped'], rework: ['n', 'median', 'max', 'excluded'],
       roleSpend: ['enabled', 'days', 'roles'], role: ['costUsd', 'explicit', 'inferred', 'unattributed'],
@@ -11218,7 +11218,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
       'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'cmdRow', 'installHtml', 'pipelineHasData',
       'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
-      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
+      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
     const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -11261,7 +11261,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const h of ['#pipeline/nope', '#spend', '', null, undefined]) assert.strictEqual(T.parsePipeSub(h), 'work', String(h));
       assert.strictEqual(T.initialRoute('#pipeline/signals', 'spend'), 'pipeline');
       const tabs = T.pipelineBody(body([task('builder')]), [], { sub: 'signals' }, NOW);
-      assert.match(tabs, /<a href="#pipeline" class="">Work<\/a><a href="#pipeline\/signals" class="on" aria-current="page">Signals<\/a><a href="#pipeline\/routing" class="">Routing<\/a>/);
+      assert.match(tabs, /<a class="spill" href="#pipeline">Work<\/a><a class="spill on" href="#pipeline\/signals" aria-current="page">Signals<\/a><a class="spill" href="#pipeline\/routing">Routing<\/a>/);
     });
 
     test('[4b-tab] nav order is Projects, Spend, Pipeline and the tab is registered', () => {
@@ -11306,14 +11306,14 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(tag(task('red-team'), 3), '');
       assert.strictEqual(tag(task('red-team'), 2), '');
       const h = T.rowHtml(row(task('builder', { step: 'Fixing 2 findings', attempt: 2 })), null);
-      assert.match(h, /<span class="tlabel">Fixing 2<\/span>/);
-      assert.strictEqual((h.match(/class="tlabel"/g) || []).length, 1);
+      assert.match(h, /<span class="tlabel tchip">Fixing 2<\/span>/);
+      assert.strictEqual((h.match(/class="tlabel[ "]/g) || []).length, 1);
     });
 
     test('[4b-layout] retry and stall labels are neutral: never green, never amber', () => {
       for (const step of ['Fixing 2 findings', 'Retrying after an environment failure', 'Building']) {
         const h = T.rowHtml(row(task('builder', { step, attempt: 2, gate: gate('block') })), 'p1/demo');
-        const label = h.match(/<span class="tlabel">[^<]*<\/span>/)[0];
+        const label = h.match(/<span class="tlabel[^"]*">[^<]*<\/span>/)[0];
         assert.ok(!/amber|green|ok|pass|dec/i.test(label.replace(/Building/, '')), label);
         assert.ok(!/mk-dec|decision|pill-amber/.test(h), h);
       }
@@ -11669,6 +11669,67 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[4b-layout-fix] a selected decision row keeps the amber tint and gets a non-amber selection outline', () => {
       assert.match(css, /\.prow\.sel\.decision \{[^}]*--rowbg: var\(--amberbg\)[^}]*inset 2px 0 0 var\(--amber\)[^}]*outline: 1px solid var\(--muted\)/);
       assert.ok(css.indexOf('.prow.sel.decision') > css.indexOf('.prow.decision {'));
+    });
+
+    // ---- [alpha6-pipeline] P1: Pipeline restyle (look only) ----
+    test('[alpha6-pipeline] sub-tabs reuse the Spend pill classes; no third style is left', () => {
+      const h = T.subtabsHtml('routing');
+      assert.match(h, /^<nav class="spills"/);
+      assert.strictEqual((h.match(/class="spill( on)?"/g) || []).length, 3);
+      assert.match(h, /class="spill on" href="#pipeline\/routing" aria-current="page"/);
+      assert.ok(!/\.subtabs/.test(css));
+      assert.match(css, /\.spill\.on \{[^}]*--accent/);
+    });
+
+    test('[alpha6-pipeline] selected row has an accent outline; a selected decision keeps amber tint and the muted outline', () => {
+      assert.match(css, /\.prow\.sel \{[^}]*outline: 1px solid var\(--accent\)/);
+      assert.match(css, /\.prow\.sel\.decision \{[^}]*outline: 1px solid var\(--muted\)/);
+      assert.ok(css.indexOf('.prow.sel.decision') > css.indexOf('.prow.sel {'));
+    });
+
+    test('[alpha6-pipeline] build label is an outlined neutral chip: no fill, never green or amber; only the Build cell gets it', () => {
+      const m = css.match(/\.tchip \{([^}]*)\}/);
+      assert.ok(m, 'tchip rule');
+      assert.match(m[1], /border: 1px solid var\(--(muted|line)\)/);
+      assert.match(m[1], /background: transparent/);
+      assert.ok(!/amber|green|--src-|#[0-9a-f]{3,6}/i.test(m[1]), m[1]);
+      for (const step of ['Building', 'Fixing 2 findings', 'Retrying after an environment failure']) {
+        const h = T.rowHtml(row(task('builder', { step })), null);
+        assert.strictEqual((h.match(/class="tlabel tchip"/g) || []).length, 1, step);
+      }
+      assert.ok(!/tchip/.test(T.rowHtml(row(task('ready')), null)), 'Ready is not the build chip');
+    });
+
+    test('[alpha6-pipeline] outcome dots: one shape per review, newest last, unknown outcomes dropped, hostile text escaped', () => {
+      const seq = ['pass', 'block', 'needs_context', 'error', 'skipped', 'pass', '<img src=x>', 'bogus'];
+      const h = T.stripHtml(body([], { signals: { days: 30, projects: [], outcomes: { n: 6, pass: 2, block: 1, needs_context: 1, error: 1, skipped: 1 }, seq, rework: { n: 0 }, runsThisWeek: 0 } }));
+      const dots = h.match(/<span class="odots"[^>]*>([\s\S]*?)<\/span><span class="sgroup">/)[1];
+      assert.strictEqual((dots.match(/class="odot"/g) || []).length, 6);
+      assert.ok(dots.endsWith('</svg></span>') && /oshape-pass/.test(dots.slice(dots.lastIndexOf('class="odot"'))), 'newest (a pass) is last');
+      assert.ok(!/<img|bogus/.test(h));
+      assert.match(h, /aria-label="Last 6 reviews, newest last"/);
+      assert.strictEqual(T.outcomeDotsHtml([]), '');
+      assert.strictEqual(T.outcomeDotsHtml(undefined), '');
+      assert.strictEqual((T.outcomeDotsHtml(new Array(100).fill('pass')).match(/class="odot"/g) || []).length, 60);
+      // counts and n stay beside the dots
+      assert.match(strip(h), /n=6/);
+    });
+
+    test('[alpha6-pipeline] API: signals.seq lists reviews oldest to newest inside the window, capped', () => {
+      const pl = require('../src/pipeline');
+      const now = Date.parse('2026-10-16T12:00:00Z');
+      const g = (o, d) => ({ outcome: o, reviewed_at: new Date(now - d * 86400000).toISOString() });
+      const s = pl.signals([{ id: 'p', tasks: [{ task: 't', gates: [g('pass', 1), g('block', 5), g('error', 40), g('weird', 2)] }, { task: 'u', gates: [g('skipped', 3)] }] }], now);
+      assert.deepStrictEqual(s.seq, ['block', 'skipped', 'pass']);
+    });
+
+    test('[alpha6-pipeline] type: Work row names 14px and project 12px; nothing in the pipeline CSS is under 11px', () => {
+      assert.match(css, /\.ptname \{ font-size: 14px/);
+      assert.match(css, /\.ptproj \{ font-size: 12px/);
+      assert.match(css, /\.prow \{[^}]*height: 34px/);
+      const tab = css.slice(css.indexOf('Pipeline tab shared parts'), css.indexOf('Spend tab (alpha.6 S2)'));
+      for (const m of tab.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+      assert.match(css, /\.odot \.oshape \{ width: 14px/);
     });
 
     test('[4b-layout-fix] role spend says "of pipeline spend"', () => {
@@ -12076,7 +12137,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin',
           'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt', 'endedAt', 'at',
           'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'severity', 'kind', 'file', 'line', 'summary',
-          'days', 'outcomes', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
+          'days', 'outcomes', 'seq', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
           'enabled', 'roles', 'builder', 'red-team', 'scribe', 'unattributed', 'explicit', 'inferred', 'mean',
           'models', 'agent', 'role', 'redTeam', 'fallback', 'onFallback', 'installed', 'detected', 'version']);
         const strays = [];
