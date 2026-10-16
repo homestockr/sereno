@@ -257,9 +257,14 @@ async function readRepo(root, opts) {
 
     /** @type {any} */
     let cfg = null;
+    let repoConfig = false;   // this repo has its own pipeline.json (even one that fails to load), not just the user-level default
+    try { await fsp.lstat(path.join(root, '.sereno', 'pipeline.json')); repoConfig = true; } catch (_) { /* absent */ }
+    const repoFile = repoConfig;
     try {
       if (!(await configFileOk(root, fsp))) throw new Error('config file refused');
-      cfg = JSON.parse(JSON.stringify(config.loadConfig(root).config));
+      const lc = config.loadConfig(root);
+      repoConfig = repoFile || lc.source === path.join(root, '.sereno', 'pipeline.json');
+      cfg = JSON.parse(JSON.stringify(lc.config));
       if (isObj(cfg.tests)) { delete cfg.tests.command; delete cfg.tests.setup; }
     } catch (_) { cfg = null; skipped++; }
 
@@ -309,7 +314,7 @@ async function readRepo(root, opts) {
       }
     }
 
-    return { config: cfg, tasks: [...tasks.values()].sort((a, b) => (a.task < b.task ? -1 : 1)), skipped };
+    return { config: cfg, repoConfig, configError: repoFile && cfg === null, tasks: [...tasks.values()].sort((a, b) => (a.task < b.task ? -1 : 1)), skipped };
   } catch (_) { return null; }
 }
 

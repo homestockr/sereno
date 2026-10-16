@@ -66,7 +66,7 @@ function ghExecDefault(args, o) {
  *   dirty: boolean | null, lastCommitAt: number | null, worktrees: Worktree[], branches: Branch[],
  *   polledAt: number | null, error: boolean, brief: any, freshness: string, behindSince?: number | null, briefsMalformed: number,
  *   prs?: number | null,
- *   pipeline?: { tasks: any[], skipped: number, error: boolean, redTeam?: { agent: any, fallback: any, onFallback: any, enabled: any } | null }
+ *   pipeline?: { tasks: any[], skipped: number, error: boolean, redTeam?: { agent: any, fallback: any, onFallback: any, enabled: any } | null, hasData?: boolean }
  * }} RepoState
  */
 
@@ -284,6 +284,16 @@ function createPoller(opts) {
     return (Array.isArray(list) ? list : []).slice(0, 20).map((a) => ({ attempt: a.attempt, agent_id: a.agent_id, outcome: a.outcome, started_at: a.started_at, ended_at: a.ended_at }));
   }
 
+  /** Earliest attempt start (epoch ms) over every attempt the reader returned, or null. @param {any} list */
+  function firstStart(list) {
+    let min = null;
+    for (const a of (Array.isArray(list) ? list : [])) {
+      const n = a && typeof a.started_at === 'string' ? Date.parse(a.started_at) : NaN;
+      if (Number.isFinite(n) && (min === null || n < min)) min = n;
+    }
+    return min;
+  }
+
   /**
    * The project's pipeline view: recomputed only when the record stamp or any branch tip
    * changed. The main worktree only (the plugin writes .sereno there). A git failure keeps
@@ -313,10 +323,10 @@ function createPoller(opts) {
       const t = now();
       const tasks = [];
       // gates (cleaned) ride along server-side for the signals; the API never returns them raw.
-      for (const entry of repo.tasks) tasks.push(Object.assign(await pipelineLib.taskView(root, entry, repo.config, git, t, { fsp }), { gates: entry.gates, attempts: slimAttempts(entry.attempts) }));
+      for (const entry of repo.tasks) tasks.push(Object.assign(await pipelineLib.taskView(root, entry, repo.config, git, t, { fsp }), { gates: entry.gates, attempts: slimAttempts(entry.attempts), firstStartedAt: firstStart(entry.attempts), specBuilder: entry.spec ? entry.spec.builder : null, specCreatedAt: entry.spec ? entry.spec.created_at : null }));
       const rt = repo.config && repo.config.roles && repo.config.roles.redTeam;
       const redTeam = rt && typeof rt === 'object' ? { agent: rt.agent, fallback: rt.fallback, onFallback: rt.onFallback, enabled: rt.enabled } : null;
-      const view = { tasks, skipped: repo.skipped, error: false, redTeam };
+      const view = { tasks, skipped: repo.skipped, error: false, redTeam, hasData: tasks.length > 0 || repo.repoConfig === true, configError: repo.configError === true };
       pipeGood.set(id, { fp, view });
       return view;
     } catch (_) {

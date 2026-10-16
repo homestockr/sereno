@@ -195,6 +195,67 @@ In `src/pipeline.js`:
   and toggle.
 - `package.json` version `2.0.0-alpha.5`.
 
+## Addendum: one-screen layout (Robe, 2026-10-16)
+
+Branch `feat/pipeline-layout` (on top of `fix/pipeline-idle`). Ships in `2.0.0-alpha.5`.
+
+Why: on real data the step-6 tab was about 9,600 px tall. There were 15 full-width cards,
+the right attention column sat empty, and the signals were stacked below. Robe picked a
+concept, shared as an image (GPT-generated): a task table whose stage track runs through
+the columns, Work / Signals / Routing sub-tabs, and a selected-task panel in the right column.
+
+Layout:
+- Header: title, the summary line (active · repairs · decisions · runs this week), the amber
+  pill only when a decision is open. Sub-tabs **Work** (default), **Signals**, **Routing**,
+  kept in the route (`#pipeline`, `#pipeline/signals`, `#pipeline/routing`).
+- **Work**: filters for project and stage (no search), then one row per active task, about
+  34 px high. Columns: task and project, branch (`task/<task>`), then a stage track across
+  four columns: **Plan** (Architect), **Build** (Builder), **Review** (Red team), **Merge**.
+  The last column is cost (`$X est.`, or blank).
+  - Track marks: done = filled check; current = filled node; waiting = empty ring; review
+    block = slashed ring; needs_context = question ring; error = triangle. The current Build
+    step shows a small neutral label ("Building", "Fixing N", "Env. retry"). Merge shows
+    "Ready" when ready.
+  - Colour: amber only for an open decision (row tint + node). Done and current nodes use
+    the role colours already in `console.css` (`--src-*`). A retry or stall is never green,
+    and never amber.
+  - Expired rows are greyed, after the active ones. Under the table, a collapsed "Idle
+    repositories (N)" row expands to the idle lines.
+  - Bottom strip: review outcomes as shapes with n, rework median / max with n, red-team
+    cost per merge (est., n, excluded), and a link to Signals.
+- **Right column = selected-task panel.** It replaces the empty attention column. A
+  decision, when one is open, is pinned at the top as today. With nothing selected it shows
+  the first decision or the first row. It holds:
+  - the task, branch and a status pill (neutral, or amber for a decision);
+  - a vertical stage timeline with times;
+  - cost (est.), review runs, started, the Builder model requested in the spec, and the brief age;
+  - "Review in terminal" only when a live session exists in that repo (the existing
+    mechanism; no other button);
+  - the latest findings (severity, kind, file:line, summary);
+  - the attempt list (n, outcome, started/ended);
+  - recent activity: up to 6 events derived from attempt and gate timestamps (spec
+    written, attempt started/ended with outcome, gate outcome).
+- **Signals**: gate state per project, 30-day outcome shapes with n, rework, red-team cost
+  per merge, and role spend.
+- **Routing**: the role → model table, and each project's red-team policy.
+- Role spend on this tab counts only the pipeline roles: Builder, Red team, Scribe, each
+  with its explicit / inferred / unattributed mix. Main session, auxiliary and unattributed
+  spend move out of this tab (they stay in the Spend tab).
+
+API additions (explicit key lists): per task `builderModel` (the spec's `builder`
+mapped to its agent's model) and `activity: [{ at, kind, outcome? }]` (newest first, at most 6).
+Per task `attempts: [{ attempt, outcome, startedAt, endedAt }]`. Per task `runningSince` is
+not needed.
+
+Steps:
+- **L1, API:** `builderModel`, `activity`, `attempts` on tasks; role spend limited to the
+  pipeline roles; tests on the allowlist and derivation.
+- **L2, renderer:** sub-tabs and routes, the Work table with the track, filters, the idle
+  collapse, the bottom strip, the selected-task panel, Signals, Routing. Keyboard: arrow keys
+  move the selection. Tests: render functions on fixture bodies (track marks per stage,
+  amber only on a decision, `est.` on every $, n on every rate, escaping, routes).
+- Then the red team on `main...feat/pipeline-layout`.
+
 ## Known limits
 
 - A Builder whose session dies without `SubagentStop` or `SessionEnd` keeps counting as
