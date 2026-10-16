@@ -44,7 +44,8 @@ carry state, rates carry n, every $ labelled `est.`, no prompt text, 11 px minim
 - **Attribution.**
   - `explicit`: the request's `agent_id` (from a trace span) joins `agents.agent_type`
     for the same session, and that type is in the role map.
-  - `inferred`: no span link, the request is a subagent request, and its model belongs
+  - `inferred`: no `agents` join (no span link, or a span-linked agent whose type was
+    never recorded; decided 2026-10-15), the request is a subagent request, and its model belongs
     to exactly one role among the bundled `plugin/agents/*.md` models. Today that is only
     Fable → Red team; Opus, Sonnet and Haiku are each used by two or more roles and never
     infer. The rule is computed from the agent files, not hard-coded.
@@ -193,6 +194,12 @@ In `src/pipeline.js`:
   roadmap: 4b status. `docs/design/console/README.md`: note the dropped preset comparison
   and toggle.
 - `package.json` version `2.0.0-alpha.5`.
+
+## Known limits
+
+- A Builder whose session dies without `SubagentStop` or `SessionEnd` keeps counting as
+  present for 30 minutes, so its "Build stalled" alert can take about 40 minutes.
+  Better: match the running attempt's `agent_id` to the live agent.
 
 ## Out of scope for 4b
 
