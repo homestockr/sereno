@@ -10672,6 +10672,201 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- [4b-alerts] step 5: pipeline alerts ---- */
+  {
+    const pa = require('../src/pipeline-alerts.js');
+    const MIN = 60 * 1000;
+    const T0 = Date.parse('2026-10-14T12:00:00.000Z');
+    const REPO = 'C:\\work\\demo';
+    let clock = T0;
+    const mk = () => pa.createPipelineAlerts({ now: () => clock });
+    const gate = (run, outcome) => ({ review_run_id: run, outcome });
+    const task = (o) => Object.assign({ task: 'demo', stage: 'builder', attempt: 1, reason: null, expired: false, gate: null, gates: [], attempts: [] }, o);
+    const proj = (tasks) => [{ id: 'p0', name: 'demo-proj', paths: [REPO], tasks }];
+    const types = (ev) => ev.map((e) => e.type);
+
+    test('[4b-alerts] decision: one open event per episode, reviewing on a newer attempt, reopen on the next decision', () => {
+      clock = T0;
+      const m = mk();
+      assert.deepStrictEqual(types(m.update(proj([task({ stage: 'decision', attempt: 2, reason: 'retry_limit', gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), [])), ['decision-open']);
+      assert.strictEqual(m.open().length, 1);
+      assert.strictEqual(m.open()[0].project, 'demo-proj');
+      // polled again, nothing new: silent
+      for (let i = 0; i < 3; i++) assert.deepStrictEqual(m.update(proj([task({ stage: 'decision', attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), []), []);
+      // a newer attempt starts: reviewing, no longer open
+      assert.deepStrictEqual(types(m.update(proj([task({ stage: 'builder', attempt: 3, gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), [])), ['decision-reviewing']);
+      assert.strictEqual(m.open().length, 0);
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'red-team', attempt: 3, gates: [gate('r1', 'block')] })]), []), []);
+      // the second decision reopens, exactly once
+      const again = m.update(proj([task({ stage: 'decision', attempt: 3, gate: gate('r2', 'block'), gates: [gate('r2', 'block'), gate('r1', 'block')] })]), []);
+      assert.deepStrictEqual(types(again), ['decision-reopen']);
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'decision', attempt: 3, gate: gate('r2', 'block'), gates: [gate('r2', 'block'), gate('r1', 'block')] })]), []), []);
+      assert.strictEqual(m.open().length, 1);
+    });
+
+    test('[4b-alerts] decision: a new gate alone moves it to reviewing; an unreadable status keeps the episode', () => {
+      const m = mk();
+      m.update(proj([task({ stage: 'decision', attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), []);
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'unknown', attempt: 2, gates: [gate('r1', 'block')] })]), []), []);
+      assert.strictEqual(m.open().length, 1);
+      assert.deepStrictEqual(types(m.update(proj([task({ stage: 'red-team', attempt: 2, gate: gate('r2', 'pass'), gates: [gate('r2', 'pass'), gate('r1', 'block')] })]), [])), ['decision-reviewing']);
+      assert.strictEqual(m.open().length, 0);
+    });
+
+    test('[4b-alerts] decision: review and next decision between two polls give reviewing then reopen', () => {
+      const m = mk();
+      m.update(proj([task({ stage: 'decision', attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')] })]), []);
+      const ev = m.update(proj([task({ stage: 'decision', attempt: 3, gate: gate('r2', 'block'), gates: [gate('r2', 'block'), gate('r1', 'block')] })]), []);
+      assert.deepStrictEqual(types(ev), ['decision-reviewing', 'decision-reopen']);
+    });
+
+    test('[4b-alerts] expired tasks never alert and never stay open', () => {
+      clock = T0;
+      const m = mk();
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'decision', expired: true })]), []), []);
+      assert.strictEqual(m.open().length, 0);
+      m.update(proj([task({ stage: 'decision' })]), []);
+      assert.strictEqual(m.open().length, 1);
+      assert.deepStrictEqual(m.update(proj([task({ stage: 'decision', expired: true })]), []), []);
+      assert.strictEqual(m.open().length, 0);
+      // stalled-looking but expired
+      clock = T0 + 60 * MIN;
+      const att = [{ attempt: 2, outcome: 'running', started_at: new Date(T0).toISOString() }];
+      assert.deepStrictEqual(m.update(proj([task({ expired: true, gate: gate('r1', 'block'), attempts: att })]), []), []);
+    });
+
+    test('[4b-alerts] stalled: fires after 10 min with no builder in the repo, clears on builder activity or when the attempt ends', () => {
+      clock = T0;
+      const m = mk();
+      const att = [{ attempt: 2, outcome: 'running', started_at: new Date(T0).toISOString() }];
+      const stalledTask = () => proj([task({ attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')], attempts: att })]);
+      assert.deepStrictEqual(m.update(stalledTask(), []), []);
+      clock = T0 + 9 * MIN;
+      assert.deepStrictEqual(m.update(stalledTask(), []), []);
+      clock = T0 + 10 * MIN;
+      const ev = m.update(stalledTask(), []);
+      assert.deepStrictEqual(types(ev), ['stalled']);
+      assert.strictEqual(ev[0].task, 'demo');
+      clock = T0 + 12 * MIN;
+      assert.deepStrictEqual(m.update(stalledTask(), []), [], 'once per episode');
+      assert.strictEqual(m.stalled().length, 1);
+      // a builder in a session inside the repo clears it
+      assert.deepStrictEqual(types(m.update(stalledTask(), [{ cwd: REPO + '\\sub' }])), ['stalled-clear']);
+      assert.strictEqual(m.stalled().length, 0);
+      // a builder elsewhere does not count, and the 10 minute quiet window restarts from the last activity
+      clock = T0 + 23 * MIN;
+      assert.deepStrictEqual(types(m.update(stalledTask(), [{ cwd: 'C:\\work\\other' }])), ['stalled']);
+      // the attempt ends
+      const ended = proj([task({ attempt: 2, gate: gate('r1', 'block'), gates: [gate('r1', 'block')], attempts: [{ attempt: 2, outcome: 'built', started_at: att[0].started_at }] })]);
+      assert.deepStrictEqual(types(m.update(ended, [])), ['stalled-clear']);
+    });
+
+    test('[4b-alerts] stalled needs a block gate, a running attempt and 10 minutes from its start', () => {
+      clock = T0;
+      const m = mk();
+      clock = T0 + 60 * MIN;
+      const old = new Date(T0).toISOString();
+      const fresh = new Date(clock - 2 * MIN).toISOString();
+      const run = (started) => [{ attempt: 2, outcome: 'running', started_at: started }];
+      assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'pass'), attempts: run(old) })]), []), [], 'gate pass');
+      assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'block'), attempts: run(fresh) })]), []), [], 'attempt only 2 min old');
+      assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'block'), attempts: [{ attempt: 2, outcome: 'built', started_at: old }] })]), []), [], 'not running');
+      assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'block'), attempts: [] })]), []), []);
+    });
+
+    test('[4b-alerts] toInput joins the registry with the poller snapshot and skips hidden or pipeline-less projects', () => {
+      const reg = [{ id: 'a', name: 'A', repoPath: 'C:\\a' }, { id: 'b', name: 'B', repoPath: 'C:\\b', hidden: true }, { id: 'c', name: 'C', repoPath: 'C:\\c' }];
+      const snap = { a: { worktrees: [{ path: 'C:\\a-wt' }], pipeline: { tasks: [{ task: 't' }] } }, b: { pipeline: { tasks: [] } }, c: { pipeline: null } };
+      const out = pa.toInput(reg, snap);
+      assert.strictEqual(out.length, 1);
+      assert.deepStrictEqual(out[0].paths, ['C:\\a', 'C:\\a-wt']);
+    });
+
+    test('[4b-alerts] store.liveBuilders: only live sereno:builder* subagents, with the session cwd', () => {
+      const s = new Store();
+      const hook = (sid, aid, type, cwd) => s.applyHook('PreToolUse', { session_id: sid, cwd, agent_id: aid, agent_type: type, tool_name: 'Read', tool_input: { file_path: 'x' } });
+      hook('s1', 'a1', 'sereno:builder-haiku', 'C:\\work\\demo');
+      hook('s1', 'a2', 'sereno:red-team', 'C:\\work\\demo');
+      hook('s2', 'a3', 'sereno:builder', 'C:\\work\\old');
+      s.sessions.get('s2').lastSeen = Date.now() - 60 * MIN;
+      const b = s.liveBuilders();
+      assert.strictEqual(b.length, 1);
+      assert.deepStrictEqual([b[0].cwd, b[0].type], ['C:\\work\\demo', 'sereno:builder-haiku']);
+      assert.deepStrictEqual(Object.keys(b[0]).sort(), ['cwd', 'lastSeen', 'type']);
+    });
+
+    await atest('[4b-alerts] /state carries open decisions from an explicit key list, with sessionId only when a live session is in the repo', async () => {
+      const st = new Store();
+      st.applyHook('SessionStart', { session_id: 'sess-in', cwd: REPO + '\\src' });
+      const machine = {
+        open: () => [
+          { projectId: 'p0', project: 'demo-proj', task: 'demo', reason: 'retry_limit\u0007' + 'x'.repeat(400), attempt: 3, paths: [REPO], command: 'SECRET-CMD', prompt: 'SECRET-PROMPT' },
+          { projectId: 'p1', project: 'other', task: 'zzz', reason: null, attempt: null, paths: ['C:\\elsewhere'], repoPath: 'C:\\secret' },
+        ],
+        stalled: () => [{ projectId: 'p0', project: 'demo-proj', task: 'demo', attempt: 2, paths: [REPO] }],
+      };
+      const c = createCollector(st, 0, { pipelineAlerts: machine });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      try {
+        const text = await new Promise((resolve, reject) => {
+          http.get({ host: '127.0.0.1', port: c.port, path: '/state', agent: false }, (r) => {
+            let t = ''; r.setEncoding('utf8'); r.on('data', (x) => { t += x; }); r.on('end', () => resolve(t));
+          }).on('error', reject);
+        });
+        const b = JSON.parse(text);
+        assert.ok(!text.includes('SECRET') && !text.includes('secret') && !text.includes('elsewhere'));
+        assert.strictEqual(b.decisions.length, 2);
+        assert.deepStrictEqual(Object.keys(b.decisions[0]).sort(), ['attempt', 'project', 'projectId', 'reason', 'sessionId', 'task']);
+        assert.strictEqual(b.decisions[0].sessionId, 'sess-in');
+        assert.ok(b.decisions[0].reason.length <= 200 && !/[\u0000-\u001f]/.test(b.decisions[0].reason));
+        assert.deepStrictEqual(Object.keys(b.decisions[1]).sort(), ['attempt', 'project', 'projectId', 'reason', 'task']);
+        assert.deepStrictEqual(b.stalled, [{ project: 'demo-proj', task: 'demo' }]);
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
+    });
+
+    {
+      const cjs = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+      const names = ['esc', 'projectLabel', 'pillText', 'attentionState', 'waitLabel', 'ringIcon', 'waitWhat', 'reviewControl', 'attentionHtml'];
+      const A = new Function(names.map((n) => cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]).join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+      const dec = (o) => Object.assign({ project: 'demo-proj', task: 'demo', reason: 'retry_limit', attempt: 2 }, o);
+
+      test('[4b-alerts] attention: a decision is amber; with a live session it offers Review in terminal, without one it does not', () => {
+        const withS = A.attentionState({ sessions: [], decisions: [dec({ sessionId: 'sess-in' })] });
+        assert.strictEqual(withS.amber, true);
+        assert.strictEqual(withS.count, 1);
+        const h = A.attentionHtml(withS, T0, { review: true, na: false, msgs: {} });
+        assert.match(h, /attn-amber/);
+        assert.match(h, /demo-proj: review needs a decision\./);
+        assert.match(h, /data-sid="sess-in"/);
+        assert.match(h, /Review in terminal/);
+        const noS = A.attentionHtml(A.attentionState({ sessions: [], decisions: [dec()] }), T0, { review: true, na: false, msgs: {} });
+        assert.match(noS, /attn-amber/);
+        assert.ok(!/<button|Review in terminal/.test(noS), noS);
+      });
+
+      test('[4b-alerts] attention: stalled rows are never amber and never counted', () => {
+        const st = A.attentionState({ sessions: [], stalled: [{ project: 'demo-proj', task: 'demo' }] });
+        assert.deepStrictEqual([st.amber, st.count], [false, 0]);
+        const h = A.attentionHtml(st, T0, { review: true });
+        assert.ok(!/attn-amber|NEEDS YOUR/.test(h), h);
+        assert.match(h, /repair looks stalled/);
+        assert.match(h, /demo/);
+        assert.ok(!/<button/.test(h));
+      });
+
+      test('[4b-alerts] attention: decisions and blocked sessions together, and API strings are escaped', () => {
+        const evil = '<img src=x onerror=alert(1)>';
+        const st = A.attentionState({ sessions: [{ projectName: 'api', state: 'blocked', stateTool: 'Bash', stateArgShort: 'ls', stateSince: 1, id: 's9' }], decisions: [dec({ project: evil, task: evil, reason: evil })] });
+        assert.strictEqual(st.count, 2);
+        const h = A.attentionHtml(st, T0, { review: true });
+        assert.match(h, /2 things need you/);
+        assert.ok(!h.includes(evil));
+        // no decisions: the old shape is untouched
+        assert.deepStrictEqual(Object.keys(A.attentionState({ sessions: [] })).sort(), ['amber', 'count', 'items']);
+      });
+    }
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

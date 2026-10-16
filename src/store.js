@@ -425,6 +425,23 @@ class Store {
     };
   }
 
+  /**
+   * Live Sereno builder subagents with the cwd of the session they run in. Read-only, for the
+   * pipeline stall check: stale sessions are ignored and nothing else about the agent leaves.
+   * @returns {Array<{ cwd: string, type: string, lastSeen: number }>}
+   */
+  liveBuilders() {
+    const out = [];
+    const now = Date.now();
+    for (const s of this.sessions.values()) {
+      if (!s.cwd || now - s.lastSeen > STALE_MS) continue;
+      for (const a of s._agents.values()) {
+        if (typeof a.type === 'string' && /^sereno:builder/.test(a.type)) out.push({ cwd: s.cwd, type: a.type, lastSeen: a.lastSeen });
+      }
+    }
+    return out;
+  }
+
   /** Drops dead sessions. Returns true if anything was removed. */
   sweep() {
     const now = Date.now();

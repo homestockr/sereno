@@ -18,14 +18,16 @@ const config = require('./config.js');
 const ledgerLife = require('./ledger-life.js');
 const projectsLib = require('./projects.js');
 const reposLib = require('./repos.js');
+const pipelineAlertsLib = require('./pipeline-alerts.js');
 
 const PORT = Number(process.env.CLAUDE_HUD_PORT) || 8787;
 
 const isWebUrl = (u) => { try { return /^https?:$/.test(new URL(u).protocol); } catch (_) { return false; } };
 
 /** The console is a browser tab. The URL is built here from PORT; no renderer chooses it. */
-function openConsole() {
-  const url = `http://127.0.0.1:${PORT}/console`;
+function openConsole(route) {
+  // The route is one of our own constants, never a renderer or API string.
+  const url = `http://127.0.0.1:${PORT}/console` + (route === 'pipeline' ? '#pipeline' : '');
   if (isWebUrl(url)) shell.openExternal(url);
 }
 
@@ -53,6 +55,7 @@ const SCREEN_MARGIN = 48;
 // area below is - just a guard against a nonsense value over IPC.
 const MAX_REQUESTED_HEIGHT = 20000;
 const SWEEP_MS = 30 * 1000;
+const ALERT_FEED_MS = 15 * 1000;
 
 // Discrete steps beat free-form zoom: every stop stays on a crisp pixel grid.
 const ZOOM_STEPS = [0.8, 0.9, 1, 1.15, 1.3, 1.5, 1.75, 2, 2.5];
@@ -68,7 +71,8 @@ let ui = { x: null, y: null, width: DEFAULT_WIDTH, zoom: 1, collapsed: false, tr
 let tray = null;
 let trayState = null;      // '<state>/<theme>', so a theme flip repaints too
 let trayTip = null;
-let trayCounts = { total: 0, blocked: 0, active: 0, quiet: 0 };
+let trayCounts = { total: 0, blocked: 0, active: 0, quiet: 0, decisions: 0 };
+let openDecisionCount = 0;   // pipeline decisions open right now (src/pipeline-alerts.js)
 let trayTimer = null;
 let ledger = null;               // open spend ledger, or null when off / unavailable
 let trayMenu = null;
@@ -309,12 +313,18 @@ function trayIcon(state) {
 }
 
 function trayStateFor(counts) {
-  if (counts.blocked > 0) return 'needs';
+  if (counts.blocked > 0 || counts.decisions > 0) return 'needs';
   if (counts.active > 0) return 'busy';
   return 'quiet';
 }
 
 function trayTooltip(counts) {
+  if (counts.decisions > 0) {
+    const d = counts.decisions + (counts.decisions === 1 ? ' pipeline decision needs you' : ' pipeline decisions need you');
+    return counts.blocked > 0
+      ? 'Sereno — ' + counts.blocked + (counts.blocked === 1 ? ' session' : ' sessions') + ' and ' + d
+      : 'Sereno — ' + d;
+  }
   if (counts.blocked > 0) {
     return 'Sereno — ' + counts.blocked +
       (counts.blocked === 1 ? ' session needs you' : ' sessions need you');
@@ -388,7 +398,7 @@ function paintTray() {
  * every subagent - to read four integers off it is work nobody asked for.
  */
 function updateTray(counts) {
-  trayCounts = counts;
+  trayCounts = Object.assign({}, counts, { decisions: openDecisionCount });
   if (trayTimer) return;
   trayTimer = setTimeout(() => { trayTimer = null; paintTray(); }, BROADCAST_COALESCE_MS);
   if (trayTimer.unref) trayTimer.unref();
@@ -429,7 +439,7 @@ function rebuildTrayMenu() {
       enabled: ledgerOn,
       click: () => (wiring.telemetryWired() ? offerTelemetryUnwiring() : offerTelemetryWiring()),
     },
-    { label: 'Open console', click: openConsole },
+    { label: 'Open console', click: () => openConsole() },
     { type: 'separator' },
     { label: 'Quit Sereno', click: () => app.quit() },
   ]);
@@ -548,6 +558,41 @@ function toastBlocked(session) {
   } catch (_) { /* a failed toast must never take the HUD down */ }
 }
 
+/** A decision never times out; a click opens the console on the Pipeline route. */
+function toastDecision(ev) {
+  if (!Notification.isSupported()) return;
+  try {
+    const n = new Notification({
+      title: ev.project + ': review needs a decision',
+      body: ev.task + (ev.reason ? ' · ' + ev.reason : ''),
+      urgency: 'critical',
+      timeoutType: 'never',
+    });
+    n.on('click', () => openConsole('pipeline'));
+    n.show();
+  } catch (_) { /* a failed toast must never take the HUD down */ }
+}
+
+function toastStalled(ev) {
+  if (!Notification.isSupported()) return;
+  try {
+    const n = new Notification({
+      title: ev.project + ': repair looks stalled',
+      body: ev.task + ' has a repair attempt running but no builder is active',
+    });
+    n.on('click', () => openConsole('pipeline'));
+    n.show();
+  } catch (_) { /* a failed toast must never take the HUD down */ }
+}
+
+/** Routes machine events to toasts. Reviewing and clear events only change state. @param {Array<{ type: string }>} events */
+function actOnPipelineEvents(events) {
+  for (const ev of events) {
+    if (ev.type === 'decision-open' || ev.type === 'decision-reopen') toastDecision(/** @type {any} */ (ev));
+    else if (ev.type === 'stalled') toastStalled(/** @type {any} */ (ev));
+  }
+}
+
 /* ---------- boot ---------- */
 
 /* The shim paths this build owns. Wiring identity is path-based, so these are
@@ -649,8 +694,9 @@ if (CLI_UNWIRE) {
         Array.from(store.sessions.values()).map((x) => store.publicSession(x)).filter((x) => !x.stale).map((x) => x.cwd),
         registry.list(), poller ? poller.snapshot() : {}),
     });
+    const alerts = pipelineAlertsLib.createPipelineAlerts();
     collector = createCollector(store, PORT, {
-      ledger, projects: registry, repos: poller,
+      ledger, projects: registry, repos: poller, pipelineAlerts: alerts,
       // The pid comes from the store's own record, never from the request.
       onReview: (session) => raiseTerminal(session.pid),
     });
@@ -659,6 +705,20 @@ if (CLI_UNWIRE) {
     // rather than replacing it, so both stay in step with every event.
     const broadcast = store.onChange;
     store.onChange = () => { broadcast(); updateTray(store.snapshot().counts); };
+    // Pipeline alerts: fed from the poller's in-memory snapshot, never from git. A timer, because
+    // the stall check is time-based and nothing else wakes it.
+    const feedAlerts = () => {
+      try {
+        const events = alerts.update(pipelineAlertsLib.toInput(registry.list(), poller.snapshot()), store.liveBuilders());
+        const n = alerts.open().length;
+        const changed = n !== openDecisionCount || events.length > 0;
+        openDecisionCount = n;
+        actOnPipelineEvents(events);
+        if (changed) { collector.broadcast(); updateTray(store.snapshot().counts); }
+      } catch (_) { /* alerts must never take the app down */ }
+    };
+    const alertTimer = setInterval(feedAlerts, ALERT_FEED_MS);
+    alertTimer.unref();
     collector.listen((err, addr) => {
       if (err) {
         console.error('[sereno] cannot listen on ' + PORT + ': ' + err.code);

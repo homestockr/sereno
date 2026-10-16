@@ -279,6 +279,11 @@ function createPoller(opts) {
   /** Last good pipeline view per project with the fingerprint it was built under. @type {Map<string, { fp: string, view: { tasks: any[], skipped: number, error: boolean, redTeam?: any } }>} */
   const pipeGood = new Map();
 
+  /** Attempt fields the stall check reads; server-side only, newest first as the reader sorts them. @param {any} list */
+  function slimAttempts(list) {
+    return (Array.isArray(list) ? list : []).slice(0, 20).map((a) => ({ attempt: a.attempt, outcome: a.outcome, started_at: a.started_at, ended_at: a.ended_at }));
+  }
+
   /**
    * The project's pipeline view: recomputed only when the record stamp or any branch tip
    * changed. The main worktree only (the plugin writes .sereno there). A git failure keeps
@@ -301,7 +306,7 @@ function createPoller(opts) {
       const t = now();
       const tasks = [];
       // gates (cleaned) ride along server-side for the signals; the API never returns them raw.
-      for (const entry of repo.tasks) tasks.push(Object.assign(await pipelineLib.taskView(root, entry, repo.config, git, t, { fsp }), { gates: entry.gates }));
+      for (const entry of repo.tasks) tasks.push(Object.assign(await pipelineLib.taskView(root, entry, repo.config, git, t, { fsp }), { gates: entry.gates, attempts: slimAttempts(entry.attempts) }));
       const rt = repo.config && repo.config.roles && repo.config.roles.redTeam;
       const redTeam = rt && typeof rt === 'object' ? { agent: rt.agent, fallback: rt.fallback, onFallback: rt.onFallback, enabled: rt.enabled } : null;
       const view = { tasks, skipped: repo.skipped, error: false, redTeam };

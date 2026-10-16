@@ -206,7 +206,24 @@ function attentionState(snapshot) {
       since: Number.isFinite(Number(s.stateSince)) && Number(s.stateSince) > 0 ? Number(s.stateSince) : null,
       ...(typeof s.id === 'string' && s.id ? { sessionId: s.id } : {}),
     }));
-  return { amber: items.length > 0, count: items.length, items };
+  // Pipeline decisions (amber) and stalled repairs (informational, never amber) ride along on /state.
+  const decs = (snapshot && Array.isArray(snapshot.decisions) ? snapshot.decisions : [])
+    .filter((d) => d && typeof d === 'object' && typeof d.task === 'string')
+    .map((d) => ({
+      project: projectLabel(d.project),
+      task: d.task,
+      reason: typeof d.reason === 'string' ? d.reason : '',
+      attempt: Number.isFinite(Number(d.attempt)) && d.attempt !== null ? Number(d.attempt) : null,
+      ...(typeof d.sessionId === 'string' && d.sessionId ? { sessionId: d.sessionId } : {}),
+    }));
+  const stalled = (snapshot && Array.isArray(snapshot.stalled) ? snapshot.stalled : [])
+    .filter((d) => d && typeof d === 'object' && typeof d.task === 'string')
+    .map((d) => ({ project: projectLabel(d.project), task: d.task }));
+  return {
+    amber: items.length + decs.length > 0, count: items.length + decs.length, items,
+    ...(decs.length ? { decisions: decs } : {}),
+    ...(stalled.length ? { stalled } : {}),
+  };
 }
 
 /** 'waiting 3m' / 'waiting 45s'; '' when the start time is unknown. */
@@ -254,15 +271,37 @@ function reviewControl(it, opts) {
  * opts (optional) adds the review controls, see reviewControl().
  */
 function attentionHtml(st, nowMs, opts) {
+  const stalledNote = (x) => {
+    const rows = x && Array.isArray(x.stalled) ? x.stalled : [];
+    if (!rows.length) return '';
+    return '<ul class="attn-stalled">' + rows.map((r) => '<li><strong>' + esc(r.project) + '</strong><span class="mono">' + esc(r.task)
+      + '</span><span class="wait">repair looks stalled</span></li>').join('') + '</ul>';
+  };
   if (!st || st.unavailable) {
     return '<div class="attn attn-off"><div class="attn-head"><span>LIVE STATUS</span></div>'
       + '<h2 class="attn-title">Live status unavailable</h2></div>';
   }
   if (!st.amber) {
     return '<div class="attn attn-calm"><div class="attn-head"><i class="dot" aria-hidden="true"></i><span>ALL CLEAR</span></div>'
-      + '<p class="attn-body">Nothing needs you right now.</p></div>';
+      + '<p class="attn-body">Nothing needs you right now.</p>' + stalledNote(st) + '</div>';
   }
   const items = Array.isArray(st.items) ? st.items : [];
+  const decs = Array.isArray(st.decisions) ? st.decisions : [];
+  if (decs.length) {
+    const rows = '<ul class="attn-list">' + items.map((it) => {
+      const what = waitWhat(it);
+      const w = waitLabel(it.since, nowMs);
+      return '<li><strong>' + esc(it.project) + '</strong>' + (what ? '<span class="mono">' + what + '</span>' : '')
+        + (w ? '<span class="wait">' + esc(w) + '</span>' : '') + reviewControl(it, opts) + '</li>';
+    }).join('') + decs.map((d) => '<li class="attn-decision"><strong>' + esc(d.project) + '</strong><span class="mono">' + esc(d.task) + '</span>'
+      + (d.reason ? '<span class="wait">' + esc(d.reason) + '</span>' : '') + reviewControl(d, opts) + '</li>').join('') + '</ul>';
+    const head = items.length === 0 && decs.length === 1
+      ? esc(decs[0].project) + ': review needs a decision.'
+      : st.count + ' things need you.';
+    return '<div class="attn attn-amber"><div class="attn-head">' + ringIcon() + '<span>NEEDS YOUR ATTENTION</span></div>'
+      + '<h2 class="attn-title">' + head + '</h2>' + rows + stalledNote(st)
+      + '<p class="attn-body">Answer it in the terminal. Sereno only points you there.</p></div>';
+  }
   const title = items.length === 1
     ? esc(items[0].project) + ' is waiting for permission.'
     : st.count + ' sessions are waiting for permission.';

@@ -125,6 +125,8 @@ td.proj { font-weight: 500; }
 .attn .wait { font-size: 11px; color: var(--quiet); }
 .attn-what + .wait { margin-top: 4px; }
 .attn-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 12px; }
+.attn-stalled { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted, inherit); }
+.attn-stalled li { display: flex; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
 .attn-list li { display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
 .attn-amber .attn-head { color: var(--amber); }
 .attn-off .attn-title { color: var(--muted); font-size: 15px; font-weight: 500; }

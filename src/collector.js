@@ -127,6 +127,7 @@ function createCollector(store, port, opts) {
   const now = (opts && typeof opts.now === 'function') ? opts.now : Date.now;
   const projects = (opts && opts.projects) || null;   // project registry (src/projects.js)
   const repos = (opts && opts.repos) || null;   // repo poller (src/repos.js)
+  const pipelineAlerts = (opts && opts.pipelineAlerts && typeof opts.pipelineAlerts.open === 'function') ? opts.pipelineAlerts : null;   // src/pipeline-alerts.js machine (absent under npm run serve)
   const onReview = (opts && typeof opts.onReview === 'function') ? opts.onReview : null;   // absent under npm run serve
   // Per-launch secret for the console's POST actions; handed out by GET /api/token.
   const token = crypto.randomBytes(24).toString('base64url');
@@ -162,7 +163,42 @@ function createCollector(store, port, opts) {
     if (!spendCache) computeSpend();
     return spendCache;
   }
-  function snapshot() { return Object.assign(store.snapshot(), { spend: spendState() }); }
+  /**
+   * Open pipeline decisions for the attention panel, from an explicit key list: no repo path
+   * leaves here. sessionId (the only thing "Review in terminal" sends) is present only when a
+   * live session sits inside the repo, most recently seen first.
+   */
+  function decisionList() {
+    if (!pipelineAlerts) return [];
+    let open = [];
+    try { open = pipelineAlerts.open(); } catch (_) { return []; }
+    const norm = (p) => String(p == null ? '' : p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    const live = [];
+    for (const s of store.sessions.values()) {
+      const pub = store.publicSession(s);
+      if (!pub.stale && pub.cwd && pub.id) live.push(pub);
+    }
+    live.sort((a, b) => b.lastSeen - a.lastSeen);
+    return open.slice(0, 50).map((d) => {
+      const roots = (Array.isArray(d.paths) ? d.paths : []).map(norm).filter(Boolean);
+      const hit = live.find((s) => { const c = norm(s.cwd); return roots.some((r) => c === r || c.startsWith(r + '/')); });
+      return Object.assign({
+        projectId: String(d.projectId).slice(0, 128),
+        project: String(d.project).slice(0, 128),
+        task: String(d.task).slice(0, 128),
+        reason: typeof d.reason === 'string' ? d.reason.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 200) : null,
+        attempt: typeof d.attempt === 'number' && Number.isFinite(d.attempt) ? d.attempt : null,
+      }, hit ? { sessionId: hit.id } : {});
+    });
+  }
+  /** Stalled repairs, informational only: project and task names. */
+  function stalledList() {
+    if (!pipelineAlerts || typeof pipelineAlerts.stalled !== 'function') return [];
+    try {
+      return pipelineAlerts.stalled().slice(0, 50).map((d) => ({ project: String(d.project).slice(0, 128), task: String(d.task).slice(0, 128) }));
+    } catch (_) { return []; }
+  }
+  function snapshot() { return Object.assign(store.snapshot(), { spend: spendState(), decisions: decisionList(), stalled: stalledList() }); }
   function refreshSpend() { computeSpend(); broadcast(); }
   function tickSpend() {
     if (spendCache === null) return;   // nobody has asked yet; first use computes
