@@ -371,12 +371,6 @@ function freshnessChip(freshness, staleDays) {
   }
 }
 
-/** A headline brief with a Blocked line that is neither empty nor "None". */
-function hasBlocker(p) {
-  const b = p && p.brief && typeof p.brief.blocked === 'string' ? p.brief.blocked.trim() : '';
-  return b !== '' && !/^none\.?$/i.test(b);
-}
-
 /** Top-level live sessions of /state (tagged subagent rows never count). */
 function topSessions(snapshot) {
   const list = snapshot && Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
@@ -655,7 +649,7 @@ function navBriefHtml(p, c) {
   const gen = b && typeof b.generatedAt === 'number' ? relTime(b.generatedAt, c.nowMs) : (b && typeof b.generatedAt === 'string' ? relTime(Date.parse(b.generatedAt), c.nowMs) : '');
   let body;
   if (b) {
-    body = kv('Now', b.now) + kv('Next', b.next) + kv('Blocked', b.blocked, hasBlocker(p) ? 'blocked-line' : '');
+    body = kv('Now', b.now) + kv('Next', b.next) + kv('Blocked', b.blocked, p.blockers === true ? 'blocked-line' : '');
   } else {
     body = '<p class="nobrief">No brief yet</p>' + cmdRow('/sereno:brief')
       + (c.pluginMissing === true ? '<p class="nobrief">The Sereno plugin is not detected. Install it in Claude Code first:</p>' + INSTALL_CMDS.map(cmdRow).join('') : '');

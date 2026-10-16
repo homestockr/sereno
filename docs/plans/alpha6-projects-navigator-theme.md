@@ -79,7 +79,7 @@ invariants and `docs/design/console/README.md`.
     "Manage projects", which opens the hide/unhide view.
 - **Left list:**
   - filter chips All / Active (default) / With blockers, each with a count;
-  - a search box over name and path, filtering in the client only;
+  - a search box over the project name only (repo paths are not on the API), filtering in the client only;
   - a sort menu (Pinned first, Recent, Name);
   - a **Pinned** group, then **Projects**, then a collapsed **Inactive (N)** group;
   - each row shows the name, a status line (Running / Idle · N branches, or the brief

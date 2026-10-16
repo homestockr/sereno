@@ -252,7 +252,7 @@ Claude Code session runs in appears there by itself. A worktree counts as its re
 a second project. Hidden projects are not polled.
 
 **The navigator.** A list on the left, the selected project in detail on the right. Filter chips
-(**All**, **Active**, **With blockers**, each with a count) sit above a search box (name and path)
+(**All**, **Active**, **With blockers**, each with a count) sit above a search box (project name)
 and a sort menu (Pinned first, Recent, Name). Active is the default: a project is active when it
 has a live session, a commit in the last 14 days, or a pipeline task that has not expired.
 The rest fold into a collapsed **Inactive** group, so 90 repos stay usable. Pin a project with the

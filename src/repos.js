@@ -443,8 +443,8 @@ function createPoller(opts) {
       if (m) { ahead = Number(m[1]); behind = Number(m[2]); }
     }
 
-    // Commit subjects for the Projects activity feed: memory only, bounded, same timeouts as the rest.
-    const commits = def ? parseCommits(await gitOrNull(['log', '-n', String(MAX_COMMITS), '--no-color', '--format=%ct%x09%s', '--end-of-options', def], cwd)) : [];
+    // Commit subjects for the Projects activity feed (refs/heads/ so a root file named like the branch is not ambiguous): memory only, bounded, same timeouts as the rest.
+    const commits = def ? parseCommits(await gitOrNull(['log', '-n', String(MAX_COMMITS), '--no-color', '--format=%ct%x09%s', '--end-of-options', 'refs/heads/' + def], cwd)) : [];
 
     /** @type {Worktree[]} */
     const worktrees = [];

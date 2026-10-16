@@ -4080,7 +4080,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const cdir = path.join(ROOT, 'src', 'renderer', 'console');
     const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
     const names = ['estMoney', 'esc', 'sparkPoints', 'projectLabel', 'pillText', 'attentionState', 'waitLabel', 'ringIcon', 'pillHtml',
-      'waitWhat', 'reviewControl', 'attentionHtml', 'parseRoute', 'initialRoute', 'relTime', 'staleDaysOf', 'freshnessChip', 'hasBlocker',
+      'waitWhat', 'reviewControl', 'attentionHtml', 'parseRoute', 'initialRoute', 'relTime', 'staleDaysOf', 'freshnessChip',
       'topSessions', 'visibleProjects', 'gitLine', 'sparkSvg',
       'isLiveSession', 'liveState', 'liveShape', 'actionRequest', 'reviewRequest'];
     const lifted = names.map((n) => cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
@@ -6074,7 +6074,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         await poller.pollNow();
         assert.strictEqual(logs.length, 1);
         assert.deepStrictEqual(logs[0].slice(0, 3), ['log', '-n', '10']);
-        assert.ok(logs[0].includes('--format=%ct%x09%s') && logs[0].includes('--end-of-options') && logs[0][logs[0].length - 1] === 'main');
+        assert.ok(logs[0].includes('--format=%ct%x09%s') && logs[0].includes('--end-of-options') && logs[0][logs[0].length - 1] === 'refs/heads/main');
         const st = Object.values(poller.snapshot())[0];
         assert.strictEqual(st.commits.length, 10);
         assert.strictEqual(st.commits[0].subject, 'step 11', 'newest first');
@@ -6083,6 +6083,21 @@ test('missing rate_limits degrades instead of throwing', () => {
         await poller.pollNow();   // unchanged repo: the earlier read is reused, no second log
         assert.strictEqual(logs.length, 1);
         assert.strictEqual(Object.values(poller.snapshot())[0].commits.length, 10);
+      });
+    });
+
+    await atest('[alpha6-projects-api] a root file named like the default branch does not hide the commits', async () => {
+      await withHome(async () => {
+        const d = mkRepo();
+        fs.writeFileSync(path.join(d, 'main'), 'x');
+        gitAt(d, Date.now() - day, 'add', 'main');
+        gitAt(d, Date.now() - day, 'commit', '-q', '-m', 'ambiguous one');
+        const reg = projects.createRegistry();
+        reg.register(d);
+        const poller = repos.createPoller({ registry: reg, ghExec: () => Promise.reject(Object.assign(new Error('x'), { code: 'ENOENT' })) });
+        await poller.pollNow();
+        const st = Object.values(poller.snapshot())[0];
+        assert.ok(st.commits.length >= 1 && st.commits.some((c) => c.subject === 'ambiguous one'), 'commits are read');
       });
     });
 
@@ -7322,7 +7337,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     {
       const cj = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
       const names = ['esc', 'projectLabel', 'pillText', 'ringIcon', 'pillHtml', 'attentionState', 'topSessions', 'isLiveSession', 'deriveLiveStates', 'liveDiff', 'withLive',
-        'unknownSessionIds', 'hasBlocker', 'visibleProjects'];
+        'unknownSessionIds', 'visibleProjects'];
       const lifted = names.map((n) => cj.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
       const S = new Function("const LIVE_RANK = ['idle', 'thinking', 'running', 'blocked'];\n" + lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
       const proj = [{ id: 'pa', name: 'alpha', live: { state: 'idle', sessionIds: ['s1'] } }, { id: 'pb', name: 'beta', live: { state: null, sessionIds: [] } }];
@@ -12300,7 +12315,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const cdir = path.join(ROOT, 'src', 'renderer', 'console');
     const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
     const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
-    const fnNames = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'hasBlocker', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
+    const fnNames = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
       'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'parseRoute', 'initialRoute', 'parseProjectSel', 'navCounts', 'navFilter',
       'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navMove', 'navBranches', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
       'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
@@ -12446,6 +12461,16 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(cjs, /a === 'pin'\) \{ setPinned\(act\.getAttribute\('data-id'\), act\.getAttribute\('data-pinned'\) !== 'true'\)/);
     });
 
+    test('[alpha6-nav] the bold Blocked line follows the server blockers flag, not a client guess', () => {
+      const dctx = { nowMs: NOW, sid: null, opts: { review: true }, tab: 'branches', pluginMissing: false, sessions: [] };
+      const brief = (blocked) => ({ now: 'a', next: 'b', blocked, generatedAt: NOW - DAY, behindSince: null });
+      const na = N.navDetailHtml(mk({ blockers: false, brief: brief('N/A') }), dctx);
+      assert.ok(na.includes("Blocked</span><span class=\"v\">N/A"));
+      assert.ok(!/blocked-line/.test(na), 'N/A is not a blocker');
+      const real = N.navDetailHtml(mk({ blockers: true, brief: brief('Waiting on keys') }), dctx);
+      assert.match(real, /blocked-line">Waiting on keys/);
+    });
+
     test('[alpha6-nav] detail by brief state: fresh, behind, stale, none', () => {
       const dctx = { nowMs: NOW, sid: null, opts: { review: true }, tab: 'branches', pluginMissing: false, sessions: [] };
       const fresh = N.navDetailHtml(mk({ name: 'alpha' }), dctx);
@@ -12458,7 +12483,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(fresh, /14-day spend/);
       assert.match(fresh, /\$68\.20 est\./);
       assert.ok(!/blocked-line/.test(fresh));
-      const behind = N.navDetailHtml(mk({ freshness: 'behind', brief: { now: 'a', next: 'b', blocked: 'Waiting on keys', generatedAt: NOW - 30 * DAY, behindSince: NOW - 2 * 3600000 } }), dctx);
+      const behind = N.navDetailHtml(mk({ freshness: 'behind', brief: { now: 'a', next: 'b', blocked: 'Waiting on keys', generatedAt: NOW - 30 * DAY, behindSince: NOW - 2 * 3600000 }, blockers: true }), dctx);
       assert.match(behind, /chip-behind">behind</);
       assert.match(behind, /blocked-line">Waiting on keys/);
       const stale = N.navDetailHtml(mk({ freshness: 'stale', brief: { now: 'a', next: 'b', blocked: 'c', generatedAt: NOW - 30 * DAY, behindSince: NOW - 9 * DAY - MIN } }), dctx);
@@ -13333,7 +13358,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
     const ccss = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
     const wcss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
-    const names = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'hasBlocker', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
+    const names = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
       'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'navCounts', 'navFilter', 'navBranches',
       'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
       'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
