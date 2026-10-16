@@ -3853,7 +3853,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
     const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
     const names = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry',
-      'summaryLine', 'attributionSplit', 'formatTime', 'projectLabel', 'syncLabel', 'sparkPoints', 'pageState', 'noSpendYet'];
+      'attributionSplit', 'formatTime', 'projectLabel', 'syncLabel', 'sparkPoints', 'pageState', 'noSpendYet'];
     const lifted = (src) => names.filter((n) => new RegExp('function ' + n + '\\(').test(src))
       .map((n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
     const C = new Function(lifted(cjs).join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
@@ -3910,16 +3910,6 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const s of z[0].segs) for (const k of ['x', 'y', 'w', 'h']) assert.ok(Number.isFinite(s[k]), k);
     });
 
-    test('summaryLine: exact string with est. and n', () => {
-      const today = { costMicros: 27400000 };
-      const projects = { rows: [{ costMicros: 300e6 }, { costMicros: 112e6 }], unattributed: { costMicros: 24720000, requests: 742 } };
-      assert.strictEqual(C.summaryLine(today, projects),
-        '$27.40 est. today · $412.00 est. this month · 6% unattributed (n=742)');
-      assert.strictEqual(C.summaryLine({ costMicros: 0 }, { rows: [], unattributed: { costMicros: 0, requests: 0 } }),
-        '$0.00 est. today · $0.00 est. this month · 0% unattributed (n=0)');
-      assert.match(C.summaryLine(null, null), /est\. today · .* est\. this month/);
-    });
-
     test('attributionSplit sums to 100 and carries n', () => {
       const s = C.attributionSplit({ explicit: 1, unknown: 1 }, 3);
       assert.strictEqual(s.explicitPct + s.unattributedPct, 100);
@@ -3960,11 +3950,10 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(cjs, /Wire telemetry/);
       assert.match(cjs, /No spend in this range/);
       assert.match(cjs, /Spend history is unavailable right now/);
-      assert.match(cjs, /No subagent could be confirmed for these requests\./);
       assert.ok(!/first tool/i.test(cjs));
       assert.match(cjs, /location\.host \+ '\/console'/);
       // API strings that reach markup are escaped
-      for (const f of ['esc(projectLabel(r.project))', 'esc(r.sessionShort)', "esc((r.models || []).join(', '))", 'esc(formatTime(r.ts))']) {
+      for (const f of ['esc(projectLabel(r.project))', 'esc(r.sessionShort)', "esc(ids.join(', '))", 'esc(formatTime(r.ts))']) {
         assert.ok(cjs.includes(f), f);
       }
     });
@@ -4288,13 +4277,18 @@ test('missing rate_limits degrades instead of throwing', () => {
     const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
     const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
     const W = new Function(['estMoney', 'spendMode'].map((n) => lf(appSrc, n)).join('\n') + '\nreturn { estMoney, spendMode };')();
-    const CN = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry', 'summaryLine',
-      'attributionSplit', 'formatTime', 'projectLabel', 'sparkPoints', 'sw', 'dayLabel', 'chartSvg', 'legendHtml', 'chartTitle',
-      'chartSection', 'projectsSection', 'promptsSection'];
-    const mkCon = (state) => new Function('state', "const RANGES = ['24h', '7d', '30d'];\n"
+    const CN = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry',
+      'attributionSplit', 'formatTime', 'projectLabel', 'sparkPoints', 'sparkSvg', 'sw', 'dayLabel', 'chartSvg', 'legendHtml', 'chartTitle',
+      'chartBlock', 'modelName', 'pillText', 'ringIcon', 'pillHtml', 'nz', 'spendHash', 'spendRows', 'wherePreview', 'modelsHtml', 'fmtTokens', 'mixBar',
+      'spendHeaderHtml', 'spendTabsHtml', 'wherePreviewHtml', 'turnsTableHtml', 'projectsTableHtml', 'cacheCardHtml', 'spendCacheHtml',
+      'spendSideHtml', 'spendPageHtml'];
+    const mkCon = () => new Function("const RANGES = ['24h', '7d', '30d'];\n"
       + "const SRC_LABEL = { main: 'Main', subagent: 'Subagent', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };\n"
       + "const ATTR_LABEL = { explicit: 'Explicit', unknown: 'Unattributed', mixed: 'Mixed' };\n"
-      + CN.map((n) => lf(conSrc, n)).join('\n') + '\nreturn { ' + CN.join(', ') + ' };')(state);
+      + "const SPEND_SUBS = ['overview', 'projects', 'turns', 'cache'];\n"
+      + "const SPEND_SUB_LABEL = { overview: 'Overview', projects: 'Projects', turns: 'Turns', cache: 'Cache' };\n"
+      + "const CACHE_WINDOWS = [['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];\n"
+      + CN.map((n) => lf(conSrc, n)).join('\n') + '\nreturn { ' + CN.join(', ') + ' };')();
     const WN = ['estMoney', 'esc', 'largestRemainder', 'sourceSegments', 'barAriaLabel', 'cumulativePoints', 'segmentWidths',
       'nowPosition', 'nowMarkerX', 'spendHtml'];
     const widget = new Function('const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;\n'
@@ -4369,12 +4363,13 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual((await postLogs(8802, fixtureAt((i) => T0 - (i + 1) * 60000))).status, 200);
         const st = await jsonX(8802, '/state');
         const today = await jsonX(8802, '/api/spend/today');
-        const projects = await jsonX(8802, '/api/spend/projects');
+        const ov = await jsonX(8802, '/api/spend/overview');
         assert.ok(today.costMicros > 0, 'fixture should produce spend');
         assert.strictEqual(st.spend.todayMicros, today.costMicros);
-        const CN1 = mkCon({});
-        const line = CN1.summaryLine(today, projects);
-        assert.ok(line.startsWith(CN1.estMoney(st.spend.todayMicros) + ' today'), line);
+        assert.strictEqual(ov.today.costMicros, today.costMicros);
+        const CN1 = mkCon();
+        const head = CN1.spendHeaderHtml(ov, 0);
+        assert.ok(head.includes('<dt>Today</dt><dd class="num">' + CN1.estMoney(st.spend.todayMicros) + '</dd>'), head);
         assert.strictEqual(CN1.estMoney(st.spend.todayMicros), W.estMoney(st.spend.todayMicros));
         assert.ok(widget.spendHtml(st.spend, null).includes(W.estMoney(today.costMicros)));
       } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
@@ -4471,19 +4466,19 @@ test('missing rate_limits degrades instead of throwing', () => {
         await postLogs(8807, fixtureAt((i) => T0 - (i + 1) * 60000));
         const st = await jsonX(8807, '/state');
         const h24 = await jsonX(8807, '/api/spend/series?range=24h');
-        const state = { range: '7d', series: await jsonX(8807, '/api/spend/series?range=7d'),
-          today: await jsonX(8807, '/api/spend/today'), projects: await jsonX(8807, '/api/spend/projects'),
-          top: await jsonX(8807, '/api/spend/top-prompts') };
-        const CN6 = mkCon(state);
+        const series7 = await jsonX(8807, '/api/spend/series?range=7d');
+        const today6 = await jsonX(8807, '/api/spend/today');
+        const pd = { ov: await jsonX(8807, '/api/spend/overview'), series: series7, where: await jsonX(8807, '/api/spend/where'),
+          top: await jsonX(8807, '/api/spend/top-prompts'),
+          caches: { '24h': await jsonX(8807, '/api/spend/cache?range=24h'), '7d': await jsonX(8807, '/api/spend/cache?range=7d'), '30d': await jsonX(8807, '/api/spend/cache?range=30d') } };
+        const CN6 = mkCon();
         const markups = {
           widget: widget.spendHtml(st.spend, h24),
-          'console summary': CN6.summaryLine(state.today, state.projects),
-          'console sidebar': CN6.estMoney(state.today.costMicros) + ' today',
-          'console chart 7d': CN6.chartSvg(state.series, 640),
+          'console sidebar': CN6.estMoney(today6.costMicros) + ' today',
+          'console chart 7d': CN6.chartSvg(series7, 640),
           'console chart 24h': CN6.chartSvg(h24, 640),
-          'console projects': CN6.projectsSection(),
-          'console prompts': CN6.promptsSection(),
         };
+        for (const sub of ['overview', 'projects', 'turns', 'cache']) markups['console ' + sub] = CN6.spendPageHtml(pd, { sub, sel: null, range: '7d', q: '', pill: 0 });
         // The one exception: y-axis tick labels are bare dollar amounts ("$10") inside <text ... text-anchor="end">
         // elements in the chart svg; the chart caption says "USD · estimated" and tooltips carry est. figures.
         const TICK = /<text [^>]*text-anchor="end">\$[0-9][0-9.]*<\/text>/g;
@@ -12874,6 +12869,397 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.deepStrictEqual(l.breakdown({ since: at(1, 0), until: at(1, 1) }), { costMicros: 0, requests: 0, unattributedMicros: 0, unattributedN: 0 });
         assert.strictEqual(l.projectDetail({ project: 'p03', since: at(1, 0), until: at(21, 0) }).costMicros, 10000);
       } finally { l.close(); }
+    });
+  }
+
+  // ---- [alpha6-spend] Spend redesign renderer: sub-tabs, Overview, Projects, Turns, Cache, selected-project panel ----
+  {
+    const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const conCss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
+    const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
+    const SP_NAMES = ['parseRoute', 'initialRoute', 'parseSpendHash', 'spendHash', 'projectIdFor', 'spendResolveSel', 'spendRows', 'navMove',
+      'nz', 'esc', 'estMoney', 'modelName', 'modelsHtml', 'projectLabel', 'formatTime', 'largestRemainder', 'attributionSplit', 'sparkPoints', 'sparkSvg',
+      'fmtTokens', 'mixBar', 'wherePreview', 'wherePreviewHtml', 'turnsTableHtml', 'projectsTableHtml', 'cacheCardHtml', 'spendCacheHtml',
+      'spendSideHtml', 'spendHeaderHtml', 'spendTabsHtml', 'spendPageHtml', 'pillText', 'ringIcon', 'pillHtml', 'chartBlock', 'chartTitle', 'legendHtml', 'sw'];
+    const S = new Function("const RANGES = ['24h', '7d', '30d'];\n"
+      + "const SRC_LABEL = { main: 'Main', subagent: 'Subagent', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };\n"
+      + "const ATTR_LABEL = { explicit: 'Explicit', unknown: 'Unattributed', mixed: 'Mixed' };\n"
+      + "const SPEND_SUBS = ['overview', 'projects', 'turns', 'cache'];\n"
+      + "const SPEND_SUB_LABEL = { overview: 'Overview', projects: 'Projects', turns: 'Turns', cache: 'Cache' };\n"
+      + "const CACHE_WINDOWS = [['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];\n"
+      + SP_NAMES.map((n) => lf(conSrc, n)).join('\n') + '\nreturn { ' + SP_NAMES.join(', ') + ' };')();
+
+    const HOSTILE = '<img src=x onerror=alert(1)>"\'&';
+    const trend = (n) => Array.from({ length: 14 }, (_, i) => (i + 1) * n);
+    const row = (project, cost, req, o) => Object.assign({ project, costMicros: cost, requests: req,
+      bySource: { main: Math.round(cost * 0.6), subagent: Math.round(cost * 0.3), auxiliary: cost - Math.round(cost * 0.6) - Math.round(cost * 0.3) }, trend: trend(1000) }, o || {});
+    const WHERE = { enabled: true, range: 'month', rows: [
+      row('delta', 1e6, 10), row('alpha', 5e6, 40), row('beta', 3e6, 30), row('gamma', 2e6, 20), row(null, 1e5, 2), row('epsilon', 5e5, 5),
+    ], other: row(undefined, 4e5, 7, { count: 2 }), total: { costMicros: 12.4e6, requests: 114 }, unattributed: { costMicros: 1e6, requests: 9 } };
+    const OV = { enabled: true, today: { costMicros: 1230000, requests: 11, unattributedMicros: 1000, unattributedN: 1 },
+      month: { costMicros: 12.4e6, requests: 114, unattributedMicros: 1.5e6, unattributedN: 9 } };
+    const TOP = { enabled: true, rows: [
+      { ts: new Date(2026, 5, 10, 9, 4).getTime(), project: 'alpha', sessionShort: 'abc12345', costMicros: 900000, models: ['claude-haiku-4-5-20251001', 'claude-sonnet-5'], attribution: 'explicit' },
+      { ts: new Date(2026, 5, 10, 8, 4).getTime(), project: 'beta', sessionShort: 'def67890', costMicros: 700000, models: ['claude-opus-4'], attribution: 'unknown' },
+      { ts: new Date(2026, 5, 9, 8, 4).getTime(), project: 'gamma', sessionShort: 'aaaa1111', costMicros: 600000, models: ['fable-1'], attribution: 'mixed' },
+      { ts: new Date(2026, 5, 8, 8, 4).getTime(), project: 'delta', sessionShort: 'bbbb2222', costMicros: 500000, models: ['some-other-model'], attribution: 'explicit' },
+    ] };
+    const cacheBody = (r, c, i, n) => ({ enabled: true, range: '7d', requests: n, cacheReadTokens: r, cacheCreationTokens: c, inputTokens: i,
+      cacheReadSharePct: r + c + i > 0 ? Math.round(r / (r + c + i) * 1000) / 10 : null });
+    const CACHES = { '24h': cacheBody(900000, 60000, 40000, 12), '7d': cacheBody(0, 0, 0, 0), '30d': cacheBody(5400000, 300000, 300000, 210) };
+    const DETAIL = { enabled: true, project: 'alpha', costMicros: 5e6, requests: 40, bySource: { main: 3e6, subagent: 1.5e6, auxiliary: 5e5 },
+      byAttribution: { explicit: 4.5e6, unknown: 5e5 }, byAttributionN: { explicit: 36, unknown: 4 }, trend: trend(1000) };
+    const DATA = { ov: OV, series: { range: '7d', buckets: [] }, where: WHERE, top: TOP, caches: CACHES };
+    const PAGES = ['overview', 'projects', 'turns', 'cache'].map((sub) => [sub, S.spendPageHtml(DATA, { sub, sel: 'alpha', range: '7d', q: '', pill: 0 })]);
+    const SIDE = S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: DETAIL, link: 'p-alpha' });
+
+    test('[alpha6-spend] routes: sub-tabs and the selected project parse strictly', () => {
+      for (const [h, sub] of [['#spend', 'overview'], ['#spend/projects', 'projects'], ['#spend/turns', 'turns'], ['#spend/cache', 'cache'], ['#/Spend/Projects', 'projects']]) {
+        assert.strictEqual(S.parseRoute(h), 'spend', h);
+        assert.deepStrictEqual(S.parseSpendHash(h), { sub, sel: null }, h);
+      }
+      assert.deepStrictEqual(S.parseSpendHash('#spend/projects?p=my%20proj'), { sub: 'projects', sel: 'my proj' });
+      assert.deepStrictEqual(S.parseSpendHash('#spend?p=alpha'), { sub: 'overview', sel: 'alpha' });
+      assert.strictEqual(S.parseRoute('#spend/turns?p=alpha'), 'spend');
+      // anything else is not a spend route, and a spend-looking hash never yields a half-parsed selection
+      for (const h of ['#spend/', '#spend/nope', '#spend/projects/alpha', '#spend/../x', '#spend/projects?x=1', '#spend/projects?p=a&q=b', '#spend/projects?p=', '#spendx', '#spend/cache/', null, undefined]) {
+        assert.notStrictEqual(S.parseRoute(h), 'spend', String(h));
+        assert.deepStrictEqual(S.parseSpendHash(h), { sub: 'overview', sel: null }, String(h));
+      }
+      for (const bad of ['%00', '%1f', '%E0%A4%A', '%20', 'x'.repeat(201)]) assert.strictEqual(S.parseSpendHash('#spend/projects?p=' + bad).sel, null, bad);
+      assert.strictEqual(S.parseSpendHash('#spend?p=' + 'x'.repeat(200)).sel, 'x'.repeat(200));
+      assert.strictEqual(S.initialRoute('#spend/cache', 'projects'), 'spend');
+      assert.strictEqual(S.initialRoute('', 'spend'), 'spend');
+      assert.strictEqual(S.parseRoute('#projects/p1'), 'projects');
+    });
+
+    test('[alpha6-spend] spendHash round-trips every sub-tab and hostile names', () => {
+      assert.strictEqual(S.spendHash('overview', null), '#spend');
+      assert.strictEqual(S.spendHash('turns', null), '#spend/turns');
+      assert.strictEqual(S.spendHash('bogus', 'a'), '#spend?p=a');
+      for (const name of ['alpha', 'my proj/x?p=1&q=#', HOSTILE, 'ünï', '😀'.repeat(100), 'x'.repeat(200)]) {
+        for (const sub of ['overview', 'projects', 'turns', 'cache']) {
+          const h = S.spendHash(sub, name);
+          assert.strictEqual(S.parseRoute(h), 'spend', h.slice(0, 60));
+          assert.deepStrictEqual(S.parseSpendHash(h), { sub, sel: name }, sub);
+        }
+      }
+      assert.strictEqual(S.spendHash('projects', 'x'.repeat(201)), '#spend/projects');
+    });
+
+    test('[alpha6-spend] sub-tab render functions on fixture bodies', () => {
+      const [ov, pr, tu, ca] = PAGES.map((p) => p[1]);
+      for (const [sub, html] of PAGES) {
+        assert.match(html, /<h1>Spend<\/h1>/, sub);
+        assert.strictEqual((html.match(/class="spill[ "]/g) || []).length, 4, sub);
+        assert.match(html, new RegExp('class="spill on" href="#spend' + (sub === 'overview' ? '' : '/' + sub) + '\\?p=alpha" aria-current="page"'), sub);
+      }
+      // Overview: the chart (with the range switch), top 3 + Other, the top 3 turns, each preview linking to its sub-tab
+      assert.match(ov, /id="chart-box"/);
+      assert.strictEqual((ov.match(/data-range="/g) || []).length, 3);
+      assert.match(ov, /USD|Daily usage cost/);
+      assert.deepStrictEqual((ov.match(/data-ssel="[^"]*"/g) || []), ['data-ssel="alpha"', 'data-ssel="beta"', 'data-ssel="gamma"']);
+      assert.match(ov, /<span class="sp-name">Other<\/span><span class="quiet-text">5 projects<\/span><span class="num sp-cost">\$2\.00 est\.<\/span>/);   // delta 1.00 + epsilon 0.50 + unnamed 0.10 + API other 0.40, over 3 + 2 projects
+      assert.match(ov, /href="#spend\/projects\?p=alpha">All projects/);
+      assert.match(ov, /href="#spend\/turns\?p=alpha">All turns/);
+      assert.strictEqual((ov.match(/<tbody>[\s\S]*?<\/tbody>/)[0].match(/<tr>/g) || []).length, 3);
+      assert.match(ov, /class="sprev sel" data-ssel="alpha" aria-pressed="true"/);
+      // Projects: every row, the Other roll-up and a total, a sparkline per row, search box
+      assert.match(pr, /data-sq/);
+      assert.deepStrictEqual((pr.match(/<tr class="srow[^>]*data-ssel="[^"]*"/g) || []).map((m) => m.match(/data-ssel="([^"]*)"/)[1]), ['alpha', 'beta', 'gamma', 'delta', 'epsilon']);
+      assert.match(pr, /<tr class="srow nosel"><td class="proj">Unknown project<\/td>/);
+      assert.match(pr, /<tr class="srow sel" tabindex="0" data-ssel="alpha" aria-current="true">/);
+      assert.match(pr, /Other projects <span class="quiet-text">\(2\)<\/span>/);
+      assert.match(pr, /<tfoot><tr><td class="proj">Total<\/td>[\s\S]*\$12\.40 est\.[\s\S]*n=114/);
+      assert.match(pr, /<th>Main<\/th><th>Subagent<\/th><th>Auxiliary<\/th><th>Total<\/th>/);
+      assert.strictEqual((pr.match(/<svg class="spark"/g) || []).length, 7);   // 5 named + unknown + Other
+      // Turns
+      assert.strictEqual((tu.match(/<td class="mono">/g) || []).length, 4);
+      assert.match(tu, /<th>Session<\/th>/);
+      assert.match(tu, /Metadata only\. Prompt text is never stored\./);
+      assert.match(tu, /<td>Explicit<\/td>/); assert.match(tu, /<td>Mixed<\/td>/); assert.match(tu, /<td>Unattributed<\/td>/);
+      // Cache
+      assert.strictEqual((ca.match(/class="ccard"/g) || []).length, 3);
+      assert.match(ca, /Last 24 hours/); assert.match(ca, /Last 7 days/); assert.match(ca, /Last 30 days/);
+      assert.match(ca, /90\.0% read/);
+      assert.match(ca, /No input-side tokens in this window/);
+      assert.match(ca, /900\.0K tokens/);
+      assert.match(ca, /no savings figure/);
+    });
+
+    test('[alpha6-spend] every dollar figure ends in est. (axis ticks excepted), on every sub-tab and the side panel', () => {
+      const TICK = /<text [^>]*text-anchor="end">\$[0-9][0-9.]*<\/text>/g;
+      const chart = new Function("const SRC_LABEL = { main: 'Main', subagent: 'Subagent', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };\n"
+        + ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry', 'dayLabel', 'chartSvg']
+          .map((n) => lf(conSrc, n)).join('\n') + '\nreturn { chartSvg };')();
+      const day = (d) => ({ key: 'd' + d, since: new Date(2026, 5, d).getTime(), until: new Date(2026, 5, d + 1).getTime(), costMicros: d * 1e6, requests: d,
+        bySource: { main: d * 6e5, subagent: d * 3e5, auxiliary: d * 1e5 }, byAttribution: { explicit: d * 9e5, unknown: d * 1e5 } });
+      const svg = chart.chartSvg({ range: '7d', buckets: [day(1), day(2), day(3)] }, 640);
+      assert.match(svg, /USD · estimated/);
+      let money = 0;
+      for (const [name, html] of PAGES.concat([['side', SIDE], ['svg', svg], ['empty side', S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: null, link: null })]])) {
+        const rest = html.replace(TICK, '');
+        for (const m of rest.matchAll(/\$[0-9][0-9.,]*/g)) {
+          money++;
+          assert.strictEqual(rest.slice(m.index + m[0].length, m.index + m[0].length + 5), ' est.', name + ': ' + rest.slice(Math.max(0, m.index - 20), m.index + 30));
+        }
+      }
+      assert.ok(money >= 60, 'money strings checked: ' + money);
+      assert.match(S.spendHeaderHtml(OV, 0), /<dt>Today<\/dt><dd class="num">\$1\.23 est\.<\/dd>/);
+      assert.match(S.spendHeaderHtml(OV, 0), /<dt>Month to date<\/dt><dd class="num">\$12\.40 est\.<\/dd>/);
+      assert.match(S.spendHeaderHtml(OV, 0), /<dt>Unattributed, month to date<\/dt><dd class="num">\$1\.50 est\.<\/dd><dd class="sstat-sub num">9 requests · 12% of spend \(n=114\)<\/dd>/);
+      assert.match(S.spendHeaderHtml(null, 0), /\$0\.00 est\./);
+    });
+
+    test('[alpha6-spend] every share carries n', () => {
+      const text = (h) => h.replace(/<[^>]*>/g, ' ');
+      // side panel: each attribution percent is followed by its own n
+      for (const m of text(SIDE).matchAll(/\d+%/g)) assert.match(text(SIDE).slice(m.index, m.index + 14), /^\d+% \(n=\d+\)/, m[0]);
+      assert.match(SIDE, /Explicit <span class="num">90% \(n=36\)<\/span>/);
+      assert.match(SIDE, /Unattributed <span class="num">10% \(n=4\)<\/span>/);
+      assert.match(SIDE, /aria-label="90% explicit, 10% unattributed, n=40"/);
+      // cache: the three shares of a card carry the card's request count, and the card header says it too
+      const ca = PAGES[3][1];
+      const cards = ca.split('<section class="ccard">').slice(1);
+      assert.strictEqual(cards.length, 3);
+      for (const c of cards) {
+        assert.match(c, /n=\d+ request/);
+        const pcts = c.match(/\d+% \(n=\d+\)/g) || [];
+        assert.ok(pcts.length === 3 || /No input-side/.test(c), c.slice(0, 80));
+      }
+      assert.match(ca, /aria-label="Cache read 90%, cache creation 6%, uncached input 4% of input-side tokens, n=12"/);
+      // header and preview bars
+      assert.match(S.spendHeaderHtml(OV, 0), /% of spend \(n=114\)/);
+      assert.match(PAGES[0][1], /aria-label="Main 60%, subagent 30%, auxiliary 10% of cost, n=40"/);
+      assert.match(S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: Object.assign({}, DETAIL, { requests: 0 }), link: null }), /No requests this month \(n=0\)/);
+      assert.match(S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: null, link: null }), /Attribution is not available right now/);
+    });
+
+    test('[alpha6-spend] models show as Haiku / Sonnet / Opus / Fable with the raw id in the tooltip', () => {
+      const h = S.modelsHtml(['claude-haiku-4-5-20251001', 'claude-sonnet-5', 'claude-opus-4', 'fable-1', 'some-other-model', 'claude-haiku-3']);
+      assert.match(h, /<span class="mdl" title="claude-haiku-4-5-20251001, claude-haiku-3">Haiku<\/span>/);
+      assert.match(h, /title="claude-sonnet-5">Sonnet</);
+      assert.match(h, /title="claude-opus-4">Opus</);
+      assert.match(h, /title="fable-1">Fable</);
+      assert.match(h, /title="some-other-model">some-other-model</);
+      assert.strictEqual((h.match(/>Haiku</g) || []).length, 1);
+      assert.match(S.modelsHtml([]), /Unknown/);
+      assert.match(S.modelsHtml(null), /Unknown/);
+      assert.ok(!/claude-haiku/.test(S.modelsHtml(['claude-haiku-4-5']).replace(/title="[^"]*"/, '')), 'raw id only in the title');
+      assert.match(PAGES[2][1], /<span class="mdl" title="claude-haiku-4-5-20251001">Haiku<\/span>, <span class="mdl" title="claude-sonnet-5">Sonnet<\/span>/);
+    });
+
+    test('[alpha6-spend] no session links anywhere; session ids are plain text; no Open session history', () => {
+      for (const [name, html] of PAGES.concat([['side', SIDE]])) {
+        for (const a of html.match(/<a [^>]*>/g) || []) assert.ok(!/session/i.test(a), name + ': ' + a);
+        assert.ok(!/Open session|session history/i.test(html), name);
+      }
+      assert.match(PAGES[2][1], /<td class="mono">abc12345<\/td>/);
+      assert.ok(!/<a /.test(PAGES[2][1].replace(/<nav[\s\S]*?<\/nav>/, '')), 'Turns table has no links');
+      assert.ok(!/Open session history|\/session|sessions\//.test(conSrc.slice(conSrc.indexOf('Spend tab: pure helpers'), conSrc.indexOf('/* ---------- state ---------- */'))));
+    });
+
+    test('[alpha6-spend] View project links to #projects/<id> only when the name maps to one visible project', () => {
+      assert.match(SIDE, /<a class="btn-copy sview" href="#projects\/p-alpha">View project<\/a>/);
+      for (const link of [null, undefined, '', 'bad id', 'x/y', '<b>', 'a'.repeat(65)]) {
+        assert.ok(!/View project|#projects/.test(S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: DETAIL, link })), String(link));
+      }
+      const list = [{ id: 'p-alpha', name: 'alpha' }, { id: 'p-beta', name: 'beta', hidden: true }, { id: 'p-g1', name: 'gamma' }, { id: 'p-g2', name: 'gamma' },
+        { id: 'p-same', name: 'dup' }, { id: 'p-same', name: 'dup' }, { id: 'bad id', name: 'weird' }, { id: 'p-case', name: 'Case' }, null, 5];
+      assert.strictEqual(S.projectIdFor(list, 'alpha'), 'p-alpha');
+      assert.strictEqual(S.projectIdFor(list, 'beta'), null);      // hidden
+      assert.strictEqual(S.projectIdFor(list, 'gamma'), null);     // two different projects share the name: no guess
+      assert.strictEqual(S.projectIdFor(list, 'dup'), 'p-same');   // the same project listed twice
+      assert.strictEqual(S.projectIdFor(list, 'weird'), null);     // an id the Projects route would not accept
+      assert.strictEqual(S.projectIdFor(list, 'case'), null);      // exact match only
+      assert.strictEqual(S.projectIdFor(list, 'nope'), null);
+      for (const bad of [null, undefined, '', 5]) assert.strictEqual(S.projectIdFor(list, bad), null);
+      for (const bad of [null, undefined, 'x', {}]) assert.strictEqual(S.projectIdFor(bad, 'alpha'), null);
+      assert.strictEqual(S.parseRoute('#projects/p-alpha'), 'projects');
+    });
+
+    test('[alpha6-spend] hostile strings are escaped in every sub-tab and the side panel', () => {
+      const where = { enabled: true, rows: [row(HOSTILE, 5e6, 5), row('ok', 1e6, 1)], other: row(undefined, 0, 0, { count: 0 }), total: { costMicros: 6e6, requests: 6 } };
+      const top = { rows: [{ ts: 1, project: HOSTILE, sessionShort: HOSTILE, costMicros: 1, models: [HOSTILE], attribution: HOSTILE }] };
+      const d = { ov: OV, where, top, caches: CACHES };
+      const out = ['overview', 'projects', 'turns'].map((sub) => S.spendPageHtml(d, { sub, sel: HOSTILE, range: '7d', q: HOSTILE, pill: 0 }));
+      out.push(S.spendSideHtml(HOSTILE, { row: where.rows[0], detail: null, link: 'p1' }));
+      out.push(S.projectsTableHtml(where, 'zz' + HOSTILE, null));
+      out.push(S.wherePreviewHtml(where, HOSTILE));
+      for (const h of out) {
+        assert.ok(!/<img/.test(h), h.slice(0, 200));
+        assert.ok(!/onerror=alert\(1\)>/.test(h.replace(/&lt;img src=x onerror=alert\(1\)&gt;/g, '')), 'raw handler');
+      }
+      assert.match(out[2], /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
+      assert.match(out[0], /data-ssel="&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;"/);
+      assert.match(out[1], /value="&lt;img/);
+      assert.match(out[4], /No project matches/);
+      assert.match(out[4], /&lt;img/);
+      assert.match(out[3], /<h2>&lt;img/);
+      // the hash in a link is percent-encoded, then attribute-escaped
+      assert.ok(!/href="[^"<>']*[<>']/.test(out[0]));
+    });
+
+    test('[alpha6-spend] Projects search filters named rows only; Other and Total hide while a filter is active', () => {
+      const all = S.projectsTableHtml(WHERE, '', 'alpha');
+      const f = S.projectsTableHtml(WHERE, '  ALP ', 'alpha');
+      assert.match(all, /sother/); assert.match(all, /<tfoot>/);
+      assert.deepStrictEqual((f.match(/data-ssel="[^"]*"/g) || []), ['data-ssel="alpha"']);
+      assert.ok(!/sother|<tfoot>/.test(f));
+      assert.match(S.projectsTableHtml(WHERE, 'zzz', null), /No project matches \S*zzz\S*/);
+      assert.match(S.projectsTableHtml({ enabled: true, rows: [], other: null }, '', null), /No project spend this month/);
+      assert.match(S.projectsTableHtml(WHERE, 'unknown', null), /nosel/);   // the unnamed row is findable but never selectable
+    });
+
+    test('[alpha6-spend] Overview preview: top 3 plus Other sums everything else', () => {
+      const pv = S.wherePreview(WHERE, 3);
+      assert.deepStrictEqual(pv.rows.map((r) => r.project), ['alpha', 'beta', 'gamma']);
+      assert.deepStrictEqual(pv.other, { count: 5 - 3 + 1 + 2 - 0, costMicros: 1e6 + 5e5 + 1e5 + 4e5, requests: 10 + 5 + 2 + 7 });
+      assert.deepStrictEqual(S.wherePreview(null, 3), { rows: [], other: { count: 0, costMicros: 0, requests: 0 } });
+      assert.match(S.wherePreviewHtml({ enabled: true, rows: [], other: null }, null), /No project spend this month/);
+      assert.ok(!/Other/.test(S.wherePreviewHtml({ enabled: true, rows: [row('only', 1e6, 1)], other: null }, 'only')));
+    });
+
+    test('[alpha6-spend] selection: the requested named project, else the top one; arrows move through the rows', () => {
+      assert.strictEqual(S.spendResolveSel(WHERE, 'gamma'), 'gamma');
+      assert.strictEqual(S.spendResolveSel(WHERE, null), 'alpha');
+      assert.strictEqual(S.spendResolveSel(WHERE, 'not-there'), 'alpha');
+      assert.strictEqual(S.spendResolveSel({ rows: [row(null, 5, 1)] }, 'x'), null);
+      assert.strictEqual(S.spendResolveSel(null, 'x'), null);
+      const ids = S.spendRows(WHERE).map((r) => r.project).filter((p) => typeof p === 'string');
+      assert.deepStrictEqual(ids, ['alpha', 'beta', 'gamma', 'delta', 'epsilon']);
+      assert.strictEqual(S.navMove(ids, 'alpha', 'ArrowDown'), 'beta');
+      assert.strictEqual(S.navMove(ids, 'alpha', 'ArrowUp'), 'alpha');
+      assert.strictEqual(S.navMove(ids, 'epsilon', 'ArrowDown'), 'epsilon');
+      assert.strictEqual(S.navMove(ids, 'gamma', 'Home'), 'alpha');
+      assert.strictEqual(S.navMove(ids, 'gamma', 'End'), 'epsilon');
+      assert.strictEqual(S.navMove([], 'x', 'Home'), null);
+      // wiring: Enter / Space / arrows / Home / End act from a project row, a click on a row or preview selects, the choice goes into the hash
+      const keys = conSrc.slice(conSrc.indexOf("if (state.route === 'spend') {\n      const row ="));
+      assert.match(keys, /closest\('tr\.srow\[data-ssel\]'\)/);
+      assert.match(keys, /e\.key === 'Enter' \|\| e\.key === ' '/);
+      assert.match(keys, /'ArrowDown' && e\.key !== 'ArrowUp' && e\.key !== 'Home' && e\.key !== 'End'/);
+      assert.match(keys, /selectSpendProject\(next, true\)/);
+      assert.match(conSrc, /closest\('\[data-ssel\]'\)/);
+      assert.match(conSrc, /history\.replaceState\(null, '', spendHash\(state\.spend\.sub, name\)\)/);
+      assert.match(conSrc, /input\[data-sq\]/);
+    });
+
+    // The whole script on a fake DOM: render(), selectSpendProject() and the right column, end to end.
+    const mkApp = (fetchBody) => {
+      const els = {};
+      for (const id of ['view', 'side-today', 'attn-live', 'ptask', 'pill-slot', 'sync']) {
+        els[id] = { id, innerHTML: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+          querySelectorAll() { return []; }, contains() { return false; }, clientWidth: 600, textContent: '' };
+      }
+      const doc = { getElementById: (id) => els[id] || null, activeElement: null, querySelectorAll: () => [], querySelector: () => null };
+      const hashes = [];
+      const hist = { replaceState: (a, b, h) => hashes.push(h) };
+      const src = conSrc.replace("if (typeof document !== 'undefined') boot();", '');
+      const names = ['state', 'render', 'renderAttention', 'selectSpendProject', 'refreshSpendDetail', 'spendPanelNow', 'attentionState', 'renderSpendTable'];
+      const fetchStub = async (url) => ({ ok: true, status: 200, json: async () => (typeof fetchBody === 'function' ? fetchBody(url) : fetchBody) });
+      const app = new Function('document', 'history', 'fetch', 'location', 'localStorage', src + '\nreturn { ' + names.join(', ') + ' };')(doc, hist, fetchStub, { hash: '#spend', host: 'x' }, {});
+      app.els = els; app.hashes = hashes;
+      app.state.route = 'spend'; app.state.mode = 'data';
+      app.state.today = { enabled: true, hasTelemetry: true, costMicros: 1230000, requests: 11 };
+      app.state.series = { range: '30d', buckets: [{ requests: 3 }] };
+      Object.assign(app.state.spend, { ov: OV, where: WHERE, top: TOP, caches: CACHES });
+      app.state.proj.list = [{ id: 'p-alpha', name: 'alpha' }, { id: 'p-beta', name: 'beta' }];
+      return app;
+    };
+
+    test('[alpha6-spend] states: ledger off, unavailable, loading and empty never show data or a project panel', () => {
+      const app = mkApp(null);
+      app.state.mode = 'off'; app.render();
+      assert.match(app.els.view.innerHTML, /Spend history is off/);
+      assert.match(app.els.view.innerHTML, /Turn it on from the Sereno tray: Keep spend history\./);
+      assert.strictEqual(app.els.ptask.innerHTML, '');
+      assert.match(app.els['attn-live'].innerHTML, /ALL CLEAR/);
+      app.state.mode = 'unavailable'; app.render();
+      assert.match(app.els.view.innerHTML, /Spend history is unavailable right now/);
+      assert.strictEqual(app.els.ptask.innerHTML, '');
+      app.state.mode = 'loading'; app.render();
+      assert.strictEqual(app.els.view.innerHTML, '');
+      assert.strictEqual(app.els.view.attrs['aria-busy'], 'true');
+      app.state.mode = 'data';
+      app.state.today = { enabled: true, hasTelemetry: false, costMicros: 0, requests: 0 };
+      app.state.series = { range: '30d', buckets: [{ requests: 0 }] };
+      app.state.spend.where = { enabled: true, rows: [], other: { count: 0, costMicros: 0, requests: 0 }, total: { costMicros: 0, requests: 0 } };
+      app.render();
+      assert.match(app.els.view.innerHTML, /No spend recorded yet/);
+      assert.match(app.els.view.innerHTML, /Wire telemetry/);
+      assert.strictEqual(app.els.ptask.innerHTML, '');
+    });
+
+    await atest('[alpha6-spend] default selection is the top project; selecting updates the panel, the hash and the detail', async () => {
+      const app = mkApp((url) => (url.indexOf('/api/spend/project?name=beta') >= 0
+        ? Object.assign({}, DETAIL, { project: 'beta', costMicros: 3e6, requests: 30, byAttributionN: { explicit: 25, unknown: 5 }, byAttribution: { explicit: 2e6, unknown: 1e6 }, bySource: { main: 2e6, subagent: 1e6, auxiliary: 0 } })
+        : Object.assign({}, DETAIL)));
+      app.render();
+      assert.match(app.els.view.innerHTML, /class="spill on" href="#spend\?p=alpha"/);
+      assert.match(app.els.ptask.innerHTML, /<h2>alpha<\/h2>/);
+      assert.match(app.els.ptask.innerHTML, /href="#projects\/p-alpha">View project/);
+      assert.match(app.els.ptask.innerHTML, /\$5\.00 est\./);
+      assert.strictEqual(app.els['attn-live'].innerHTML, '');   // nothing pinned: the panel owns the column
+      app.state.spend.sub = 'projects';
+      app.selectSpendProject('beta', false);
+      assert.strictEqual(app.state.spend.sel, 'beta');
+      assert.deepStrictEqual(app.hashes, ['#spend/projects?p=beta']);
+      assert.match(app.els.view.innerHTML, /<tr class="srow sel" tabindex="0" data-ssel="beta" aria-current="true">/);
+      assert.match(app.els.ptask.innerHTML, /<h2>beta<\/h2>/);
+      assert.match(app.els.ptask.innerHTML, /href="#projects\/p-beta">View project/);
+      await new Promise((r) => setTimeout(r, 20));
+      assert.strictEqual(app.state.spend.detailFor, 'beta');
+      assert.match(app.els.ptask.innerHTML, /Explicit <span class="num">67% \(n=25\)<\/span>/);
+      assert.match(app.els.ptask.innerHTML, /Unattributed <span class="num">33% \(n=5\)<\/span>/);
+      // a name the table does not have falls back to the top project; a project with no Projects entry gets no link
+      app.state.spend.sel = 'zzz-gone'; app.render();
+      assert.match(app.els.ptask.innerHTML, /<h2>alpha<\/h2>/);
+      app.state.proj.list = [];
+      app.render();
+      assert.ok(!/View project/.test(app.els.ptask.innerHTML));
+    });
+
+    test('[alpha6-spend] amber rule: the Spend page and project panel never use amber; only a needs-you or decision block does, pinned above the panel', () => {
+      const app = mkApp(null);
+      app.state.attn = app.attentionState({ sessions: [] });
+      app.render();
+      for (const el of ['view', 'ptask', 'attn-live']) assert.ok(!/amber|NEEDS YOUR/i.test(app.els[el].innerHTML), el);
+      assert.match(app.els.ptask.innerHTML, /<h2>alpha<\/h2>/);
+      // a pending decision: amber in the live region only, the panel stays below it and neutral
+      app.state.attn = app.attentionState({ sessions: [], decisions: [{ project: 'alpha', task: 't1', reason: 'retry_limit', attempt: 2 }] });
+      app.render();
+      assert.match(app.els['attn-live'].innerHTML, /attn-amber/);
+      assert.match(app.els['pill-slot'].innerHTML, /1 decision needs you/);
+      assert.match(app.els.ptask.innerHTML, /<h2>alpha<\/h2>/);
+      assert.ok(!/amber/i.test(app.els.ptask.innerHTML));
+      assert.ok(!/amber/i.test(app.els.view.innerHTML.replace(/<span id="pill-slot">[\s\S]*?<\/span><\/div>/, '')));
+      // a stalled repair is informational: pinned, not amber
+      app.state.attn = app.attentionState({ sessions: [], stalled: [{ project: 'alpha', task: 't1', kind: 'repair' }] });
+      app.render();
+      assert.match(app.els['attn-live'].innerHTML, /Repair stalled/);
+      assert.ok(!/attn-amber/.test(app.els['attn-live'].innerHTML));
+      // the new Spend CSS has no amber at all
+      const css = conCss.slice(conCss.indexOf('Spend tab (alpha.6 S2)'));
+      assert.ok(css.length > 1500);
+      assert.ok(!/amber/.test(css), 'amber in the Spend CSS');
+      for (const m of css.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+    });
+
+    test('[alpha6-spend] source: old Spend render code is gone, one innerHTML write, no inline styles, no text-field reads, LF only', () => {
+      for (const gone of ['summaryLine', 'chartSection', 'projectsSection', 'promptsSection', 'unattr-row', 'proj-table', 'Top 10 costliest', 'state.projects', 'state.top']) {
+        assert.ok(!conSrc.includes(gone), gone + ' should be gone');
+      }
+      for (const gone of ['.unattr-row', '.proj-table', '.attr-line', '.prompts ', '.summary']) assert.ok(!conCss.includes(gone), gone + ' should be gone from the CSS');
+      assert.strictEqual((conSrc.match(/\.innerHTML\s*=/g) || []).length, 1);
+      assert.ok(!/style=/.test(conSrc.replace(/el\.style\./g, '')));
+      assert.ok(!/\.text\b|\{\s*text\s*[:,}]/.test(conSrc), 'the console never reads a text field');
+      assert.ok(!/\r|[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(conSrc + conCss));
+      assert.match(conSrc, /getJson\('\/api\/spend\/overview'\)/);
+      assert.match(conSrc, /getJson\('\/api\/spend\/where\?range=month'\)/);
+      assert.match(conSrc, /'\/api\/spend\/cache\?range=' \+ w\[0\]/);
+      assert.match(conSrc, /'\/api\/spend\/project\?name=' \+ encodeURIComponent\(name\)/);
+      assert.match(conSrc, /classList\.toggle\('spend', route === 'spend'\)/);
     });
   }
 

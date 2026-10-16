@@ -112,18 +112,6 @@ function barGeometry(buckets, w, h, maxMicros) {
   });
 }
 
-/** `$X est. today · $Y est. this month · Z% unattributed (n=N)` */
-function summaryLine(today, projects) {
-  const rows = (projects && Array.isArray(projects.rows)) ? projects.rows : [];
-  const month = rows.reduce((a, r) => a + (Number(r.costMicros) > 0 ? Number(r.costMicros) : 0), 0);
-  const un = (projects && projects.unattributed) || {};
-  const unCost = Number(un.costMicros) > 0 ? Number(un.costMicros) : 0;
-  const n = Number(un.requests) > 0 ? Number(un.requests) : 0;
-  const pct = month > 0 ? Math.round((unCost / month) * 100) : 0;
-  return estMoney(today && today.costMicros) + ' today · ' + estMoney(month) + ' this month · '
-    + pct + '% unattributed (n=' + n + ')';
-}
-
 /** Explicit vs unattributed share of one project's spend, summing to 100. */
 function attributionSplit(byAttribution, requests) {
   const a = byAttribution || {};
@@ -327,10 +315,10 @@ function attentionHtml(st, nowMs, opts) {
 
 /* ---------- Projects tab: pure helpers (Phase 3 step 5) ---------- */
 
-/** '#spend' -> 'spend'; '#projects', '', and anything else -> 'projects'. */
+/** '#spend', '#spend/projects', '#spend/turns?p=x' -> 'spend'; '#projects', '', and anything else -> 'projects'. */
 function parseRoute(hash) {
   const h = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim().toLowerCase();
-  if (h === 'spend') return 'spend';
+  if (/^spend(\/(projects|turns|cache))?(\?p=[^&#?]{1,1800})?$/.test(h)) return 'spend';
   return h === 'pipeline' || /^pipeline\/(work|signals|routing)$/.test(h) ? 'pipeline' : 'projects';
 }
 
@@ -1305,6 +1293,297 @@ function pipelineSideParts(st, body, ui, ctx) {
   return pinned || panel ? { attn: pinned, panel } : { attn: attentionHtml(st || { amber: false, count: 0, items: [] }, c.nowMs, c.opts), panel: '' };
 }
 
+/* ---------- Spend tab: pure helpers (alpha.6 S2) ---------- */
+
+const SPEND_SUBS = ['overview', 'projects', 'turns', 'cache'];
+const SPEND_SUB_LABEL = { overview: 'Overview', projects: 'Projects', turns: 'Turns', cache: 'Cache' };
+const CACHE_WINDOWS = [['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
+
+/** Non-negative finite number, else 0. */
+function nz(x) {
+  const n = Number(x);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * '#spend', '#spend/projects', '#spend/turns?p=name' -> { sub, sel }. Strict: anything that is not exactly
+ * one of those (extra segments, a second parameter, control characters, an over-long or bad-escape name)
+ * gives the Overview and no selection, never a guess.
+ */
+function parseSpendHash(hash) {
+  const raw = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim();
+  const m = /^spend(?:\/(projects|turns|cache))?(?:\?p=([^&#?]{1,1800}))?$/i.exec(raw);
+  if (!m) return { sub: 'overview', sel: null };
+  let sel = null;
+  if (m[2]) {
+    try { sel = decodeURIComponent(m[2]); } catch (_) { sel = null; }
+    if (sel !== null && (sel.trim() === '' || sel.length > 200 || /[\u0000-\u001f\u007f]/.test(sel))) sel = null;
+  }
+  return { sub: m[1] ? m[1].toLowerCase() : 'overview', sel };
+}
+
+/** The hash for a sub-tab and an optional selected project (the inverse of parseSpendHash). */
+function spendHash(sub, sel) {
+  const s = SPEND_SUBS.indexOf(sub) > 0 ? '/' + sub : '';
+  return '#spend' + s + (typeof sel === 'string' && sel !== '' && sel.length <= 200 ? '?p=' + encodeURIComponent(sel) : '');
+}
+
+/** The API's project rows, biggest spend first (stable for ties). */
+function spendRows(where) {
+  const rows = where && Array.isArray(where.rows) ? where.rows.filter((r) => r && typeof r === 'object') : [];
+  return rows.slice().sort((a, b) => nz(b.costMicros) - nz(a.costMicros));
+}
+
+/** Top n projects plus an Other roll-up of everything else (the rest of the rows and the API's own Other). */
+function wherePreview(where, n) {
+  const rows = spendRows(where);
+  const rest = rows.slice(n);
+  const o = where && where.other && typeof where.other === 'object' ? where.other : {};
+  return {
+    rows: rows.slice(0, n),
+    other: {
+      count: rest.length + Math.floor(nz(o.count)),
+      costMicros: rest.reduce((a, r) => a + nz(r.costMicros), 0) + nz(o.costMicros),
+      requests: rest.reduce((a, r) => a + nz(r.requests), 0) + nz(o.requests),
+    },
+  };
+}
+
+/** Selected project name: the requested one if it is a named project in the rows, else the top named project, else null. */
+function spendResolveSel(where, sel) {
+  const names = spendRows(where).map((r) => r.project).filter((p) => typeof p === 'string' && p !== '');
+  return typeof sel === 'string' && names.indexOf(sel) >= 0 ? sel : (names.length ? names[0] : null);
+}
+
+/** The /api/projects id for a spend project name, only when exactly one visible project has that name. */
+function projectIdFor(list, name) {
+  if (typeof name !== 'string' || name === '' || !Array.isArray(list)) return null;
+  const ids = new Set();
+  for (const p of list) {
+    if (p && typeof p === 'object' && p.hidden !== true && p.name === name && typeof p.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(p.id)) ids.add(p.id);
+  }
+  return ids.size === 1 ? Array.from(ids)[0] : null;
+}
+
+/** Models cell: friendly family names (Haiku, Sonnet, Opus, Fable), each with its raw ids in the tooltip. */
+function modelsHtml(models) {
+  const list = (Array.isArray(models) ? models : []).filter((x) => typeof x === 'string' && x.trim() !== '');
+  if (!list.length) return '<span class="quiet-text">Unknown</span>';
+  const groups = new Map();
+  for (const id of list) {
+    const k = modelName(id);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(id.trim());
+  }
+  return Array.from(groups.entries()).map(([label, ids]) => '<span class="mdl" title="' + esc(ids.join(', ')) + '">' + esc(label) + '</span>').join(', ');
+}
+
+/** 1234 -> '1.2K', 2500000 -> '2.5M'. */
+function fmtTokens(n) {
+  const v = nz(n);
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return String(Math.round(v));
+}
+
+/** Three source shares as a small bar (widths set from data-w); the label carries n. */
+function mixBar(r) {
+  const s = (r && r.bySource) || {};
+  const p = largestRemainder([s.main, s.subagent, s.auxiliary]);
+  const n = Math.floor(nz(r && r.requests));
+  const aria = 'Main ' + p[0] + '%, subagent ' + p[1] + '%, auxiliary ' + p[2] + '% of cost, n=' + n;
+  return '<span class="mixbar" role="img" aria-label="' + esc(aria) + '"><span class="seg-main" data-w="' + p[0] + '"></span>'
+    + '<span class="seg-subagent" data-w="' + p[1] + '"></span><span class="seg-auxiliary" data-w="' + p[2] + '"></span></span>';
+}
+
+/** Header: title, the decision pill, and today, month-to-date and unattributed figures. */
+function spendHeaderHtml(ov, pillCount) {
+  const o = ov && typeof ov === 'object' ? ov : {};
+  const t = o.today || {};
+  const m = o.month || {};
+  const month = nz(m.costMicros);
+  const un = nz(m.unattributedMicros);
+  const n = Math.floor(nz(m.unattributedN));
+  const reqs = Math.floor(nz(m.requests));
+  const pct = month > 0 ? Math.round((un / month) * 100) : 0;
+  const stat = (k, v, sub) => '<div class="sstat"><dt>' + esc(k) + '</dt><dd class="num">' + esc(v) + '</dd>' + (sub ? '<dd class="sstat-sub num">' + esc(sub) + '</dd>' : '') + '</div>';
+  return '<div class="title-row"><h1>Spend</h1><span id="pill-slot">' + pillHtml(pillCount) + '</span></div>'
+    + '<dl class="sstats">' + stat('Today', estMoney(t.costMicros), '')
+    + stat('Month to date', estMoney(m.costMicros), '')
+    + stat('Unattributed, month to date', estMoney(un), n + (n === 1 ? ' request' : ' requests') + ' · ' + pct + '% of spend (n=' + reqs + ')')
+    + '</dl>';
+}
+
+/** Pill sub-tabs; each link keeps the selected project in the hash. */
+function spendTabsHtml(sub, sel) {
+  return '<nav class="spills" aria-label="Spend views">' + SPEND_SUBS.map((k) => '<a class="spill' + (k === sub ? ' on' : '') + '" href="' + esc(spendHash(k, sel)) + '"'
+    + (k === sub ? ' aria-current="page"' : '') + '>' + SPEND_SUB_LABEL[k] + '</a>').join('') + '</nav>';
+}
+
+/** "Where the spend goes" preview: top 3 plus Other, each named row selectable. */
+function wherePreviewHtml(where, sel) {
+  const pv = wherePreview(where, 3);
+  const head = '<div class="section-top"><h2>Where the spend goes<span class="sub">Month to date</span></h2>'
+    + '<a class="sall" href="' + esc(spendHash('projects', sel)) + '">All projects</a></div>';
+  if (!pv.rows.length) return head + '<p class="empty-note">No project spend this month</p>';
+  const items = pv.rows.map((r) => {
+    const named = typeof r.project === 'string' && r.project !== '';
+    const inner = '<span class="sp-name">' + esc(projectLabel(r.project)) + '</span>' + mixBar(r) + '<span class="num sp-cost">' + esc(estMoney(r.costMicros)) + '</span>';
+    return '<li>' + (named
+      ? '<button type="button" class="sprev' + (sel === r.project ? ' sel' : '') + '" data-ssel="' + esc(r.project) + '" aria-pressed="' + (sel === r.project) + '">' + inner + '</button>'
+      : '<div class="sprev">' + inner + '</div>') + '</li>';
+  });
+  if (pv.other.count > 0 || pv.other.costMicros > 0) {
+    items.push('<li><div class="sprev sp-other"><span class="sp-name">Other</span><span class="quiet-text">' + pv.other.count + (pv.other.count === 1 ? ' project' : ' projects') + '</span>'
+      + '<span class="num sp-cost">' + esc(estMoney(pv.other.costMicros)) + '</span></div></li>');
+  }
+  return head + '<ul class="splist">' + items.join('') + '</ul>';
+}
+
+/** Costliest turns, metadata only. opts: { limit, compact } (compact is the Overview preview). */
+function turnsTableHtml(rows, opts) {
+  const o = opts || {};
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && typeof r === 'object').slice(0, o.limit > 0 ? o.limit : 10);
+  if (!list.length) return '<p class="empty-note">No turns recorded this month</p>';
+  const body = list.map((r, i) => '<tr>' + (o.compact ? '' : '<td class="rank">' + String(i + 1).padStart(2, '0') + '</td>')
+    + '<td class="num">' + esc(formatTime(r.ts)) + '</td>'
+    + '<td>' + esc(projectLabel(r.project)) + '</td>'
+    + (o.compact ? '' : '<td class="mono">' + esc(r.sessionShort) + '</td>')
+    + '<td class="num">' + esc(estMoney(r.costMicros)) + '</td>'
+    + '<td>' + modelsHtml(r.models) + '</td>'
+    + (o.compact ? '' : '<td>' + esc(ATTR_LABEL[r.attribution] || 'Unattributed') + '</td>') + '</tr>').join('');
+  const head = o.compact
+    ? '<tr><th>Time</th><th>Project</th><th>Cost</th><th>Model</th></tr>'
+    : '<tr><th>#</th><th>Time</th><th>Project</th><th>Session</th><th>Estimated cost</th><th>Model</th><th>Attribution</th></tr>';
+  return '<div class="table-wrap"><table class="turns' + (o.compact ? ' turns-compact' : '') + '"><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>';
+}
+
+/** The Projects table (project x source, 14-day trend, Other roll-up, total); q filters named projects. */
+function projectsTableHtml(where, q, sel) {
+  const rows = spendRows(where);
+  const qn = String(q == null ? '' : q).trim().toLowerCase();
+  const shown = qn ? rows.filter((r) => projectLabel(r.project).toLowerCase().indexOf(qn) >= 0) : rows;
+  const o = where && where.other && typeof where.other === 'object' ? where.other : null;
+  const showOther = !qn && o && (Number(o.count) > 0 || nz(o.costMicros) > 0);
+  if (!shown.length && !showOther) {
+    return '<p class="empty-note">' + (qn ? 'No project matches “' + esc(String(q).trim().slice(0, 80)) + '”' : 'No project spend this month') + '</p>';
+  }
+  const money = (x) => '<td class="num">' + esc(estMoney(x)) + '</td>';
+  const cells = (r) => money((r.bySource || {}).main) + money((r.bySource || {}).subagent) + money((r.bySource || {}).auxiliary)
+    + '<td><strong class="num">' + esc(estMoney(r.costMicros)) + '</strong></td><td class="num">n=' + Math.floor(nz(r.requests)) + '</td><td>' + sparkSvg(r.trend) + '</td>';
+  let body = shown.map((r) => {
+    const named = typeof r.project === 'string' && r.project !== '';
+    const on = named && r.project === sel;
+    return '<tr class="srow' + (on ? ' sel' : '') + (named ? '' : ' nosel') + '"' + (named ? ' tabindex="0" data-ssel="' + esc(r.project) + '"' + (on ? ' aria-current="true"' : '') : '') + '>'
+      + '<td class="proj">' + esc(projectLabel(r.project)) + '</td>' + cells(r) + '</tr>';
+  }).join('');
+  if (showOther) {
+    body += '<tr class="sother"><td class="proj">Other projects <span class="quiet-text">(' + Math.floor(nz(o.count)) + ')</span></td>' + cells(o) + '</tr>';
+  }
+  const tot = where && where.total ? where.total : {};
+  const foot = !qn ? '<tfoot><tr><td class="proj">Total</td><td></td><td></td><td></td><td><strong class="num">' + esc(estMoney(tot.costMicros)) + '</strong></td><td class="num">n=' + Math.floor(nz(tot.requests)) + '</td><td></td></tr></tfoot>' : '';
+  return '<div class="table-wrap"><table class="stable"><thead><tr><th>Project</th><th>Main</th><th>Subagent</th><th>Auxiliary</th><th>Total</th><th>Requests</th><th>14 days</th></tr></thead>'
+    + '<tbody>' + body + '</tbody>' + foot + '</table></div>';
+}
+
+/** One window of cache figures: a bar of read / creation / uncached input, with token counts and the read share (n requests). */
+function cacheCardHtml(label, b) {
+  const head = '<h3>' + esc(label) + '</h3>';
+  if (!b || typeof b !== 'object' || b.enabled === false) return '<section class="ccard">' + head + '<p class="empty-note">Not available right now</p></section>';
+  const read = nz(b.cacheReadTokens), creation = nz(b.cacheCreationTokens), input = nz(b.inputTokens);
+  const n = Math.floor(nz(b.requests));
+  const sub = '<span class="sub num">n=' + n + (n === 1 ? ' request' : ' requests') + '</span>';
+  if (read + creation + input <= 0) return '<section class="ccard"><div class="chead">' + head + sub + '</div><p class="empty-note">No input-side tokens in this window</p></section>';
+  const p = largestRemainder([read, creation, input]);
+  const share = b.cacheReadSharePct == null || !Number.isFinite(Number(b.cacheReadSharePct)) ? 'No share' : Number(b.cacheReadSharePct).toFixed(1) + '% read';
+  const aria = 'Cache read ' + p[0] + '%, cache creation ' + p[1] + '%, uncached input ' + p[2] + '% of input-side tokens, n=' + n;
+  const line = (cls, name, tok, pct) => '<li><i class="swatch ' + cls + '"></i><span>' + esc(name) + '</span><span class="num">' + esc(fmtTokens(tok)) + ' tokens</span><span class="num quiet-text">' + pct + '% (n=' + n + ')</span></li>';
+  return '<section class="ccard"><div class="chead">' + head + sub + '</div>'
+    + '<div class="cshare num">' + esc(share) + '</div>'
+    + '<div class="cbar" role="img" aria-label="' + esc(aria) + '"><span class="cseg-read" data-w="' + p[0] + '"></span><span class="cseg-creation" data-w="' + p[1] + '"></span><span class="cseg-input" data-w="' + p[2] + '"></span></div>'
+    + '<ul class="clist">' + line('cseg-read', 'Cache read', read, p[0]) + line('cseg-creation', 'Cache creation', creation, p[1]) + line('cseg-input', 'Uncached input', input, p[2]) + '</ul></section>';
+}
+
+function spendCacheHtml(caches) {
+  const c = caches && typeof caches === 'object' ? caches : {};
+  return '<div class="section-top"><h2>Cache<span class="sub">Token counts from the local ledger</span></h2></div>'
+    + '<div class="cgrid">' + CACHE_WINDOWS.map((w) => cacheCardHtml(w[1], c[w[0]])).join('') + '</div>'
+    + '<p class="quiet-text cnote">Read share is cache read over all input-side tokens (read, creation and uncached input). Token counts only; Sereno shows no savings figure.</p>';
+}
+
+/** Right column, selected project: month-to-date total, source bars, attribution mix with n, 14-day trend, View project. */
+function spendSideHtml(sel, ctx) {
+  if (typeof sel !== 'string' || sel === '') return '';
+  const c = ctx || {};
+  const d = c.detail && typeof c.detail === 'object' ? c.detail : null;
+  const row = c.row && typeof c.row === 'object' ? c.row : null;
+  const src = (d && d.bySource) || (row && row.bySource) || {};
+  const cost = d ? nz(d.costMicros) : nz(row && row.costMicros);
+  const trend = (d && Array.isArray(d.trend) ? d.trend : null) || (row && Array.isArray(row.trend) ? row.trend : []);
+  const link = typeof c.link === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(c.link)
+    ? '<a class="btn-copy sview" href="#projects/' + esc(c.link) + '">View project</a>' : '';
+  const bars = [['main', nz(src.main)], ['subagent', nz(src.subagent)], ['auxiliary', nz(src.auxiliary)]].map(([k, v]) => {
+    const w = cost > 0 ? Math.min(100, Math.round((v / cost) * 100)) : 0;
+    return '<li><span class="sb-k"><i class="swatch seg-' + k + '"></i>' + esc(SRC_LABEL[k]) + '</span><span class="num sb-v">' + esc(estMoney(v)) + '</span>'
+      + '<span class="sb-bar"><span class="seg-' + k + '" data-w="' + w + '"></span></span></li>';
+  }).join('');
+  let attr = '<p class="quiet-text">Attribution is not available right now.</p>';
+  if (d) {
+    const n = Math.floor(nz(d.requests));
+    if (n === 0) attr = '<p class="quiet-text">No requests this month (n=0)</p>';
+    else {
+      const a = attributionSplit(d.byAttribution, d.requests);
+      const nn = d.byAttributionN || {};
+      attr = '<div class="attr-bar2" role="img" aria-label="' + esc(a.explicitPct + '% explicit, ' + a.unattributedPct + '% unattributed, n=' + a.n) + '"><span class="seg-main" data-w="' + a.explicitPct + '"></span>'
+        + '<span class="seg-unattributed" data-w="' + a.unattributedPct + '"></span></div>'
+        + '<ul class="sattr"><li><i class="swatch seg-main"></i>Explicit <span class="num">' + a.explicitPct + '% (n=' + Math.floor(nz(nn.explicit)) + ')</span></li>'
+        + '<li><i class="swatch seg-unattributed"></i>Unattributed <span class="num">' + a.unattributedPct + '% (n=' + Math.floor(nz(nn.unknown)) + ')</span></li></ul>';
+    }
+  }
+  const t14 = trend.reduce((s, x) => s + nz(x), 0);
+  return '<section class="ppanel spanel" aria-label="Selected project"><div class="ppanel-head"><h2>' + esc(sel) + '</h2>' + link + '</div>'
+    + '<div class="ppanel-sub">Month to date</div><div class="stotal num">' + esc(estMoney(cost)) + '</div>'
+    + '<h4>By source</h4><ul class="sbars">' + bars + '</ul>'
+    + '<h4>Attribution</h4>' + attr
+    + '<h4>Last 14 days</h4><div class="strend">' + sparkSvg(trend) + '<span class="num quiet-text">' + esc(estMoney(t14)) + '</span></div></section>';
+}
+
+/**
+ * The right column on the Spend tab: the pinned attention block (a decision, or a stalled note) and the
+ * selected-project panel. Same live / non-live split as the Pipeline tab. ctx: { nowMs, opts }.
+ */
+function spendSideParts(st, panelMarkup, ctx) {
+  const c = ctx || {};
+  const pinned = st && !st.unavailable && (st.amber || (Array.isArray(st.stalled) && st.stalled.length)) ? attentionHtml(st, c.nowMs, c.opts) : '';
+  const panel = typeof panelMarkup === 'string' ? panelMarkup : '';
+  return pinned || panel ? { attn: pinned, panel } : { attn: attentionHtml(st || { amber: false, count: 0, items: [] }, c.nowMs, c.opts), panel: '' };
+}
+
+/** The whole page body for one sub-tab. d: { ov, series, where, top, caches }; ui: { sub, sel, range, q, pill }. */
+function spendPageHtml(d, ui) {
+  const data = d || {};
+  const u = ui || {};
+  const sub = SPEND_SUBS.indexOf(u.sub) >= 0 ? u.sub : 'overview';
+  let body;
+  if (sub === 'projects') {
+    body = '<div class="section-top"><h2>Where the spend goes<span class="sub">Month to date</span></h2>'
+      + '<input type="search" class="nsearch ssearch" data-sq maxlength="80" placeholder="Search projects" aria-label="Search projects" value="' + esc(u.q || '') + '"></div>'
+      + '<div id="sproj-body">' + projectsTableHtml(data.where, u.q, u.sel) + '</div>';
+  } else if (sub === 'turns') {
+    body = '<div class="section-top"><h2>Costliest turns<span class="sub">Month to date</span></h2><span class="sub">Metadata only. Prompt text is never stored.</span></div>'
+      + turnsTableHtml(data.top && data.top.rows, { limit: 10 });
+  } else if (sub === 'cache') {
+    body = spendCacheHtml(data.caches);
+  } else {
+    body = chartBlock(u.range) + '<div class="sgrid"><section class="scol" aria-label="Where the spend goes">' + wherePreviewHtml(data.where, u.sel) + '</section>'
+      + '<section class="scol" aria-label="Costliest turns"><div class="section-top"><h2>Costliest turns<span class="sub">Month to date</span></h2>'
+      + '<a class="sall" href="' + esc(spendHash('turns', u.sel)) + '">All turns</a></div>'
+      + turnsTableHtml(data.top && data.top.rows, { limit: 3, compact: true }) + '</section></div>';
+  }
+  return spendHeaderHtml(data.ov, u.pill) + spendTabsHtml(sub, u.sel) + '<div class="sbody">' + body + '</div>';
+}
+
 /* ---------- state ---------- */
 
 const RANGES = ['24h', '7d', '30d'];
@@ -1312,7 +1591,8 @@ const SRC_LABEL = { main: 'Main', subagent: 'Subagent', auxiliary: 'Auxiliary', 
 const ATTR_LABEL = { explicit: 'Explicit', unknown: 'Unattributed', mixed: 'Mixed' };
 
 const state = {
-  range: '30d', today: null, series: null, projects: null, top: null,
+  range: '30d', today: null, series: null,
+  spend: { sub: 'overview', sel: null, q: '', ov: null, where: null, top: null, caches: null, detail: null, detailFor: null, token: 0 },
   mode: 'loading', lastOk: null, token: 0,
   attn: null, attnToken: 0,   // attn: attentionState() output, { unavailable: true }, or null before the first read
   route: 'projects',
@@ -1362,7 +1642,7 @@ function chartSvg(series, width) {
   const buckets = (series && series.buckets) || [];
   const hourly = series && series.range === '24h';
   const W = Math.max(320, Math.floor(width) || 640);
-  const padL = 46, padR = 6, padT = 22, padB = 22, plotH = 170;
+  const padL = 46, padR = 6, padT = 22, padB = 22, plotH = 150;
   const plotW = W - padL - padR;
   const totals = buckets.map((b) => segmentsOf(b).reduce((a, s) => a + s.micros, 0));
   const maxData = totals.length ? Math.max.apply(null, totals) : 0;
@@ -1413,63 +1693,19 @@ function chartTitle(range) {
   return { title: hourly ? 'Hourly usage cost' : 'Daily usage cost', sub: (hourly ? 'hourly' : 'daily') + ' · estimated' };
 }
 
-function chartSection() {
-  const toggle = RANGES.map((r) => '<button type="button" data-range="' + r + '" class="' + (r === state.range ? 'on' : '')
-    + '" aria-pressed="' + (r === state.range) + '">' + r + '</button>').join('');
-  const t = chartTitle(state.range);
-  return '<div class="section-top"><h2><span id="chart-title">' + t.title + '</span><span class="sub" id="chart-sub">' + t.sub + '</span></h2>'
+function chartBlock(range) {
+  const toggle = RANGES.map((r) => '<button type="button" data-range="' + r + '" class="' + (r === range ? 'on' : '')
+    + '" aria-pressed="' + (r === range) + '">' + r + '</button>').join('');
+  const t = chartTitle(range);
+  return '<section class="schart" aria-label="Usage by source"><div class="section-top"><h2><span id="chart-title">' + t.title + '</span><span class="sub" id="chart-sub">' + t.sub + '</span></h2>'
     + '<div class="legend">' + legendHtml() + '</div><div class="range" role="group" aria-label="Range">' + toggle + '</div></div>'
-    + '<div class="chart-box" id="chart-box"></div>';
+    + '<div class="chart-box" id="chart-box"></div></section>';
 }
 
 function drawChart() {
   const box = document.getElementById('chart-box');
   if (!box || !state.series) return;
   setHtml(box, chartSvg(state.series, box.clientWidth));
-}
-
-function projectsSection() {
-  const p = state.projects;
-  const rows = (p.rows || []).slice().sort((a, b) => b.costMicros - a.costMicros);
-  const month = rows.reduce((a, r) => a + (Number(r.costMicros) > 0 ? Number(r.costMicros) : 0), 0);
-  const un = p.unattributed || { costMicros: 0, requests: 0 };
-  const money = (x) => '<span class="num">' + esc(estMoney(x)) + '</span>';
-  const body = rows.map((r) => {
-    const s = r.bySource || {};
-    const a = attributionSplit(r.byAttribution, r.requests);
-    const aria = a.explicitPct + '% explicit, ' + a.unattributedPct + '% unattributed, n=' + a.n;
-    return '<tr><td class="proj">' + esc(projectLabel(r.project)) + '</td>'
-      + '<td>' + money(s.main) + '</td><td>' + money(s.subagent) + '</td><td>' + money(s.auxiliary) + '</td>'
-      + '<td><strong class="num">' + esc(estMoney(r.costMicros)) + '</strong></td>'
-      + '<td><div class="attr" role="img" aria-label="' + esc(aria) + '"><div class="attr-bar">'
-      + '<span class="seg-main" data-w="' + a.explicitPct + '"></span>'
-      + '<span class="seg-unattributed" data-w="' + a.unattributedPct + '"></span></div>'
-      + '<div class="attr-line">' + a.explicitPct + '% / ' + a.unattributedPct + '% · n=' + a.n + '</div></div></td>'
-      + '<td><svg class="spark" viewBox="0 0 110 25" aria-hidden="true"><polyline points="' + sparkPoints(r.trend, 110, 25) + '"></polyline></svg></td></tr>';
-  }).join('');
-  const unPct = month > 0 ? Math.round((Number(un.costMicros) / month) * 100) : 0;
-  return '<div class="section-top"><h2>Projects × source<span class="sub">Month to date</span></h2>'
-    + '<div class="legend"><span class="item"><i class="swatch seg-main"></i>Explicit</span><span class="item">' + sw('unattributed') + 'Unattributed</span></div></div>'
-    + '<div class="table-wrap"><table class="proj-table"><thead><tr><th>Project</th><th>Main</th><th>Subagent</th><th>Auxiliary</th><th>Total</th><th>Attribution</th><th>14d trend</th></tr></thead>'
-    + '<tbody>' + body + '</tbody></table></div>'
-    + '<div class="unattr-row">' + sw('unattributed') + '<strong>Unattributed</strong>' + money(un.costMicros)
-    + '<span>No subagent could be confirmed for these requests.</span>'
-    + '<span class="right">Included in project totals · ' + unPct + '% (n=' + (Number(un.requests) || 0) + ' requests)</span></div>';
-}
-
-function promptsSection() {
-  const rows = (state.top && state.top.rows) || [];
-  const body = rows.map((r, i) => '<tr><td class="rank">' + String(i + 1).padStart(2, '0') + '</td>'
-    + '<td class="num">' + esc(formatTime(r.ts)) + '</td>'
-    + '<td>' + esc(projectLabel(r.project)) + '</td>'
-    + '<td class="mono">' + esc(r.sessionShort) + '</td>'
-    + '<td class="num">' + esc(estMoney(r.costMicros)) + '</td>'
-    + '<td>' + esc((r.models || []).join(', ')) + '</td>'
-    + '<td>' + esc(ATTR_LABEL[r.attribution] || 'Unattributed') + '</td></tr>').join('');
-  return '<div class="section-top prompts-head"><h2>Top 10 costliest prompts<span class="sub">Month to date</span></h2>'
-    + '<span class="sub">Prompt text is never stored</span></div>'
-    + '<div class="table-wrap prompts"><table><thead><tr><th>#</th><th>Time</th><th>Project</th><th>Session</th><th>Estimated cost</th><th>Model</th><th>Attribution</th></tr></thead>'
-    + '<tbody>' + body + '</tbody></table></div>';
 }
 
 function titleRow() {
@@ -1485,6 +1721,10 @@ function renderAttention() {
       const parts = pipelineSideParts(state.attn, state.pipe.mode === 'data' ? state.pipe.body : null, pipeUiOf(), { sessions: state.sessions, projectsList: state.proj.list, opts, nowMs: Date.now() });
       setHtml(box, parts.attn);
       if (ptask) setHtml(ptask, parts.panel);
+    } else if (state.route === 'spend') {
+      const parts = spendSideParts(state.attn, spendPanelNow(), { opts, nowMs: Date.now() });
+      setHtml(box, parts.attn);
+      if (ptask) { setHtml(ptask, parts.panel); applyWidths(ptask); }
     } else {
       setHtml(box, attentionHtml(state.attn || { amber: false, count: 0, items: [] }, Date.now(), opts));
       if (ptask) setHtml(ptask, '');
@@ -1498,31 +1738,87 @@ function panel(title, text) {
   return titleRow() + '<div class="state-panel"><h2>' + esc(title) + '</h2><p>' + esc(text) + '</p></div>';
 }
 
+/** The selected-project panel for the right column, from what the page already holds. '' when there is nothing to show. */
+function spendPanelNow() {
+  if (state.mode !== 'data') return '';
+  const sp = state.spend;
+  if (noSpendYet(state.today, state.series, sp.where)) return '';
+  const sel = spendResolveSel(sp.where, sp.sel);
+  if (!sel) return '';
+  return spendSideHtml(sel, {
+    row: spendRows(sp.where).find((r) => r.project === sel) || null,
+    detail: sp.detailFor === sel ? sp.detail : null,
+    link: projectIdFor(state.proj.list, sel),
+  });
+}
+
+/** The element that holds focus (a project row or the search box), as a way to find its twin after a re-render. */
+function spendFocusKey(view) {
+  const ae = document.activeElement;
+  if (!ae || !ae.getAttribute || !view.contains(ae)) return null;
+  if (ae.getAttribute('data-ssel') !== null) return ['data-ssel', ae.getAttribute('data-ssel')];
+  if (ae.getAttribute('data-sq') !== null) return ['data-sq', ''];
+  return null;
+}
+
+function spendRestoreFocus(view, key) {
+  if (!key) return;
+  const el = Array.from(view.querySelectorAll('[' + key[0] + ']')).find((x) => key[0] === 'data-sq' || x.getAttribute('data-ssel') === key[1]);
+  if (!el) return;
+  el.focus();
+  if (key[0] === 'data-sq' && typeof el.setSelectionRange === 'function') { try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) { /* not a text input */ } }
+}
+
 function render() {
   if (state.route !== 'spend') return;
   const view = document.getElementById('view');
   const side = document.getElementById('side-today');
   view.setAttribute('aria-busy', state.mode === 'loading' ? 'true' : 'false');
-  if (state.mode === 'loading') { setHtml(view, ''); setHtml(side, ''); return; }
+  if (state.mode === 'loading') { setHtml(view, ''); setHtml(side, ''); renderAttention(); return; }
   if (state.mode === 'off') {
     setHtml(side, '');
     setHtml(view, panel('Spend history is off', 'Turn it on from the Sereno tray: Keep spend history.'));
+    renderAttention();
     return;
   }
   if (state.mode === 'unavailable') {
     setHtml(side, '');
     setHtml(view, panel('Spend history is unavailable right now', 'Sereno will try again on the next refresh.'));
+    renderAttention();
     return;
   }
+  const sp = state.spend;
   setHtml(side, esc(estMoney(state.today.costMicros)) + ' today');
-  if (noSpendYet(state.today, state.series, state.projects)) {
+  if (noSpendYet(state.today, state.series, sp.where)) {
     setHtml(view, panel('No spend recorded yet', 'Spend appears once Claude Code sessions send telemetry. Wire it from the tray: Wire telemetry…'));
+    renderAttention();
     return;
   }
-  setHtml(view, titleRow() + '<p class="summary">' + esc(summaryLine(state.today, state.projects)) + '</p>'
-    + chartSection() + projectsSection() + promptsSection());
+  const key = spendFocusKey(view);
+  setHtml(view, spendPageHtml({ ov: sp.ov, series: state.series, where: sp.where, top: sp.top, caches: sp.caches },
+    { sub: sp.sub, sel: spendResolveSel(sp.where, sp.sel), range: state.range, q: sp.q, pill: state.attn && state.attn.amber ? state.attn.count : 0 }));
   applyWidths(view);
   drawChart();
+  spendRestoreFocus(view, key);
+  renderAttention();
+}
+
+/** Select a project on the Spend tab: keep it in the hash without adding history entries, then load its detail. */
+function selectSpendProject(name, focus) {
+  state.spend.sel = name;
+  try { history.replaceState(null, '', spendHash(state.spend.sub, name)); } catch (_) { /* file:// or sandboxed: the route just stays */ }
+  render();
+  if (focus) {
+    const on = Array.from(document.querySelectorAll('tr.srow')).find((x) => x.getAttribute('data-ssel') === name);
+    if (on) on.focus();
+  }
+  refreshSpendDetail();
+}
+
+/** Re-render only the Projects table (typing in the search box must not move focus). */
+function renderSpendTable() {
+  const box = document.getElementById('sproj-body');
+  if (box) setHtml(box, projectsTableHtml(state.spend.where, state.spend.q, spendResolveSel(state.spend.where, state.spend.sel)));
 }
 
 /* ---------- Projects tab: rendering ---------- */
@@ -1763,20 +2059,47 @@ async function setPinned(id, pinned) {
 async function refresh() {
   refreshAttention();
   const token = ++state.token;
-  const [today, series, projects, top] = await Promise.all([
+  const sp = state.spend;
+  const wantCache = sp.sub === 'cache';
+  const reqs = [
     getJson('/api/spend/today'),
+    getJson('/api/spend/overview'),
     getJson('/api/spend/series?range=' + state.range),
-    getJson('/api/spend/projects?range=month'),
-    getJson('/api/spend/top-prompts?range=month'),
-  ]);
+    getJson('/api/spend/where?range=month'),
+    getJson('/api/spend/top-prompts?range=month&limit=10'),
+    getJson('/api/projects'),   // only to map a spend project name to its Projects id for "View project"
+  ];
+  if (wantCache) for (const w of CACHE_WINDOWS) reqs.push(getJson('/api/spend/cache?range=' + w[0]));
+  const res = await Promise.all(reqs);
   if (token !== state.token) return;   // a newer refresh superseded this one
-  const bad = pageState([today, series, projects, top]);
+  const [today, ov, series, where, top, pl] = res;
+  const bad = pageState([today, ov, series, where, top]);
   if (bad) { state.mode = bad; render(); return; }
-  state.today = today.body; state.series = series.body; state.projects = projects.body; state.top = top.body;
+  if (pl.body && Array.isArray(pl.body.projects)) state.proj.list = pl.body.projects;
+  state.today = today.body; state.series = series.body;
+  sp.ov = ov.body; sp.where = where.body; sp.top = top.body;
+  if (wantCache) {
+    sp.caches = {};
+    CACHE_WINDOWS.forEach((w, i) => { sp.caches[w[0]] = res[6 + i].body; });
+  }
   state.mode = 'data';
   state.lastOk = Date.now();
   render();
   tickSync();
+  refreshSpendDetail();
+}
+
+/** The selected project's detail (month-to-date breakdown, attribution n, trend). A failure leaves the panel on the table row's figures. */
+async function refreshSpendDetail() {
+  const sp = state.spend;
+  const name = spendResolveSel(sp.where, sp.sel);
+  if (!name) { sp.detail = null; sp.detailFor = null; return; }
+  const token = ++sp.token;
+  const r = await getJson('/api/spend/project?name=' + encodeURIComponent(name));
+  if (token !== sp.token || state.route !== 'spend') return;
+  sp.detail = r.body && r.body.enabled === true ? r.body : null;
+  sp.detailFor = name;
+  renderAttention();
 }
 
 /** Refresh whatever the current tab shows. */
@@ -1790,8 +2113,9 @@ function applyRoute(route, first) {
   state.route = route;
   if (route === 'pipeline') state.pipe.sub = parsePipeSub(location.hash);
   if (route === 'projects') state.proj.sel = parseProjectSel(location.hash);
+  if (route === 'spend') { const h = parseSpendHash(location.hash); state.spend.sub = h.sub; if (h.sel) state.spend.sel = h.sel; }
   const bodyEl = document.querySelector('.body');
-  if (bodyEl) { bodyEl.classList.toggle('pipe', route === 'pipeline'); bodyEl.classList.toggle('mode-projects', route === 'projects'); }
+  if (bodyEl) { bodyEl.classList.toggle('pipe', route === 'pipeline'); bodyEl.classList.toggle('mode-projects', route === 'projects'); bodyEl.classList.toggle('spend', route === 'spend'); }
   renderAttention();   // the right column differs per tab
   document.querySelectorAll('.nav-item').forEach((a) => {
     const on = a.getAttribute('data-route') === route;
@@ -1853,6 +2177,8 @@ function boot() {
     if (g && !String(state.proj.q).trim()) state.proj.open.inactive = g.open === true;   // while searching the group is forced open: not the user's choice
   }, true);
   viewEl.addEventListener('input', (e) => {
+    const sq = e.target && e.target.closest ? e.target.closest('input[data-sq]') : null;
+    if (sq) { state.spend.q = sq.value.slice(0, 80); renderSpendTable(); return; }
     const q = e.target && e.target.closest ? e.target.closest('input[data-nq]') : null;
     if (!q) return;
     state.proj.q = q.value.slice(0, 80);
@@ -1876,6 +2202,17 @@ function boot() {
       selectProject(next);
       renderNavPanes();
       focusNavRow(viewEl, next);
+      return;
+    }
+    if (state.route === 'spend') {
+      const row = e.target && e.target.closest ? e.target.closest('tr.srow[data-ssel]') : null;
+      if (!row || state.mode !== 'data') return;   // keys act only from the project rows
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectSpendProject(row.getAttribute('data-ssel'), true); return; }
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+      e.preventDefault();
+      const ids = Array.from(viewEl.querySelectorAll('tr.srow[data-ssel]')).map((x) => x.getAttribute('data-ssel'));
+      const next = navMove(ids, row.getAttribute('data-ssel'), e.key);
+      if (next !== null) selectSpendProject(next, true);
       return;
     }
     if (state.route !== 'pipeline' || state.pipe.sub !== 'work' || state.pipe.mode !== 'data') return;
@@ -1907,6 +2244,8 @@ function boot() {
     if (tb) { state.proj.tab = tb.getAttribute('data-ntab'); renderNavPanes(); const again = Array.from(viewEl.querySelectorAll('[data-ntab]')).find((x) => x.getAttribute('data-ntab') === state.proj.tab); if (again) again.focus(); return; }
     const nr = tgt ? tgt.closest('.nrow[data-nsel]') : null;
     if (nr) { selectProject(nr.getAttribute('data-nsel')); renderNavPanes(); focusNavRow(viewEl, nr.getAttribute('data-nsel')); return; }
+    const ss = tgt && state.route === 'spend' ? tgt.closest('[data-ssel]') : null;
+    if (ss) { selectSpendProject(ss.getAttribute('data-ssel'), ss.tagName === 'TR'); return; }
     const b = tgt ? tgt.closest('button[data-range]') : null;
     if (!b) return;
     const r = b.getAttribute('data-range');
@@ -1931,6 +2270,14 @@ function boot() {
     if (r !== state.route) applyRoute(r, false);
     else if (r === 'pipeline') { state.pipe.sub = parsePipeSub(location.hash); renderPipeline(); }
     else if (r === 'projects') { state.proj.sel = parseProjectSel(location.hash); renderProjects(); }
+    else if (r === 'spend') {
+      const h = parseSpendHash(location.hash);
+      const changed = h.sub !== state.spend.sub;
+      state.spend.sub = h.sub;
+      if (h.sel) state.spend.sel = h.sel;
+      render();
+      if (changed) refresh(); else refreshSpendDetail();
+    }
   });
   window.addEventListener('focus', () => { if (state.route === 'projects') refreshProjects(); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshActive(); });
