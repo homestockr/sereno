@@ -650,7 +650,7 @@ const ROLE_LABEL = { builder: 'Builder', 'red-team': 'Red team', scribe: 'Scribe
 const PIPE_ROLE_KEYS = ['builder', 'red-team', 'scribe'];
 const PIPE_COLS = [['plan', 'Plan', 'Architect'], ['build', 'Build', 'Builder'], ['review', 'Review', 'Red team'], ['merge', 'Merge', '']];
 const PIPE_SUBS = [['work', 'Work'], ['signals', 'Signals'], ['routing', 'Routing']];
-const IDLE_LABEL = { 'no-task': 'No active task', 'gate-off': 'Gate off', 'latest-pass': 'Latest review passed' };
+const IDLE_LABEL = { 'no-task': 'No active task', 'gate-off': 'Gate off', 'latest-pass': 'Latest review passed', 'config-error': 'Config unreadable' };
 const INSTALL_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];
 
 /** Dollars (a number) as '$1.23 est.'; '' when there is no figure. */
@@ -769,7 +769,7 @@ function roleSpendHtml(rs) {
     const r = roles[k];
     const mix = [Number(r.explicit) || 0, Number(r.inferred) || 0, Number(r.unattributed) || 0];
     const mp = largestRemainder(mix);
-    return '<li><strong>' + esc(ROLE_LABEL[k]) + '</strong><span class="num">' + esc(usdEst(costs[i])) + '</span><span class="num">' + pct[i] + '% of spend</span>'
+    return '<li><strong>' + esc(ROLE_LABEL[k]) + '</strong><span class="num">' + esc(usdEst(costs[i])) + '</span><span class="num">' + pct[i] + '% of pipeline spend</span>'
       + (mix[0] + mix[1] + mix[2] > 0 ? '<span class="quiet-text num">' + mp[0] + '% explicit · ' + mp[1] + '% inferred · ' + mp[2] + '% unattributed</span>' : '') + '</li>';
   }).join('') + '</ul><p class="quiet-text rnote">Last ' + days + ' days · estimates from the local ledger</p>';
 }
@@ -915,16 +915,16 @@ function rowHtml(r, selKey) {
   const exp = t.expired === true;
   const cells = trackMarks(t).map((m) => {
     const what = m.dec ? 'needs a decision' : (MARK_TEXT[m.mark] || m.mark);
-    return '<div class="tcell tc-' + m.key + '"><span class="tmark" role="img" aria-label="' + esc(m.label + ': ' + what + (m.tag ? ', ' + m.tag : '')) + '">'
+    return '<div class="tcell tc-' + m.key + '" role="gridcell"><span class="tmark" role="img" aria-label="' + esc(m.label + ': ' + what + (m.tag ? ', ' + m.tag : '')) + '">'
       + markSvg(m.mark, m.key, m.dec) + (m.tag ? '<span class="tlabel">' + esc(m.tag) + '</span>' : '') + '</span></div>';
   }).join('');
   const money = usdEst(t.costUsd);
   const on = r.key === selKey;
   return '<div class="prow' + (on ? ' sel' : '') + (open ? ' decision' : '') + (exp ? ' expired' : '') + '" role="row" tabindex="0" data-sel="' + esc(r.key)
     + '" aria-selected="' + on + '">'
-    + '<div class="pcell-task"><span class="ptname">' + esc(t.task) + '</span><span class="ptproj">' + esc(r.project.name) + (exp ? ' · expired' : '') + '</span></div>'
-    + '<div class="pcell-branch mono">task/' + esc(t.task) + '</div>' + cells
-    + '<div class="pcell-cost num">' + (money ? esc(money) : '') + '</div></div>';
+    + '<div class="pcell-task" role="gridcell"><span class="ptname">' + esc(t.task) + '</span><span class="ptproj">' + esc(r.project.name) + (exp ? ' · expired' : '') + '</span></div>'
+    + '<div class="pcell-branch mono" role="gridcell">task/' + esc(t.task) + '</div>' + cells
+    + '<div class="pcell-cost num" role="gridcell">' + (money ? esc(money) : '') + '</div></div>';
 }
 
 /** Project and stage filters (no search). */
@@ -941,7 +941,7 @@ function idleHtml(body, ui) {
   const idle = (body && Array.isArray(body.projects) ? body.projects : [])
     .filter((p) => p && p.idle && !(Array.isArray(p.tasks) && p.tasks.length) && (ui.project === 'all' || p.id === ui.project));
   if (!idle.length) return '';
-  return '<details class="pidle"><summary>Idle repositories (' + idle.length + ')</summary><ul class="idle">'
+  return '<details class="pidle"' + (ui.open && ui.open.idle ? ' open' : '') + '><summary>Idle repositories (' + idle.length + ')</summary><ul class="idle">'
     + idle.map((p) => '<li><strong>' + esc(p.name) + '</strong><span class="quiet-text">' + esc(IDLE_LABEL[p.idle] || IDLE_LABEL['no-task']) + '</span></li>').join('') + '</ul></details>';
 }
 
@@ -966,16 +966,16 @@ function workHtml(body, ui) {
   const all = pipeRows(body, { project: 'all', stage: 'all' });
   const rows = pipeRows(body, ui);
   const sel = resolveSel(rows, ui.sel);
-  const head = '<div class="phead-row" role="row"><div>Task</div><div>Branch</div>'
-    + PIPE_COLS.map((c) => '<div class="tcell">' + esc(c[1]) + (c[2] ? '<span class="trole">' + esc(c[2]) + '</span>' : '') + '</div>').join('') + '<div class="pcell-cost">Cost</div></div>';
+  const head = '<div class="phead-row" role="row"><div role="columnheader">Task</div><div role="columnheader">Branch</div>'
+    + PIPE_COLS.map((c) => '<div class="tcell" role="columnheader">' + esc(c[1]) + (c[2] ? '<span class="trole">' + esc(c[2]) + '</span>' : '') + '</div>').join('') + '<div class="pcell-cost" role="columnheader">Cost</div></div>';
   const table = rows.length
-    ? '<div class="ptable" role="table" aria-label="Active tasks">' + head + rows.map((r) => rowHtml(r, sel ? sel.key : null)).join('') + '</div>'
+    ? '<div class="ptable" role="grid" aria-label="Active tasks">' + head + rows.map((r) => rowHtml(r, sel ? sel.key : null)).join('') + '</div>'
     : '<p class="empty-note">' + (all.length ? 'No tasks match these filters' : 'No active tasks') + '</p>';
   return pipeFiltersHtml(body, ui) + table + idleHtml(body, ui) + stripHtml(body);
 }
 
 /** Signals sub-tab: gate state per project, 30-day outcomes, rework, red-team cost per merge, role spend. */
-function signalsHtml(body, nowMs) {
+function signalsHtml(body, nowMs, open) {
   const names = {};
   for (const p of (body && Array.isArray(body.projects) ? body.projects : [])) if (p) names[p.id] = p.name;
   const sg = body.signals || {};
@@ -984,7 +984,7 @@ function signalsHtml(body, nowMs) {
   const quiet = gp.filter((g) => g && !g.gate).map((g) => '<li>' + esc(names[g.id] || g.id || 'Unknown project') + '</li>');
   const days = Number(sg.days) || 30;
   const gateBox = (gates.length ? '<ul class="glist ggrid">' + gates.join('') + '</ul>' : '')
-    + (quiet.length ? '<details class="pidle"><summary>' + quiet.length + (quiet.length === 1 ? ' project' : ' projects') + ' with no review in ' + days + ' days</summary><ul class="idle quiet-list">' + quiet.join('') + '</ul></details>' : '')
+    + (quiet.length ? '<details class="pidle"' + (open && open.quiet ? ' open' : '') + '><summary>' + quiet.length + (quiet.length === 1 ? ' project' : ' projects') + ' with no review in ' + days + ' days</summary><ul class="idle quiet-list">' + quiet.join('') + '</ul></details>' : '')
     + (gp.length ? '' : '<p class="empty-note">No projects</p>');
   return '<div class="sig"><h3>Gate state</h3>' + gateBox + '</div>'
     + '<div class="sig"><h3>Review outcomes<span class="sub"> Last ' + (Number(sg.days) || 30) + ' days</span></h3>' + outcomesHtml(sg.outcomes) + '</div>'
@@ -1003,14 +1003,18 @@ function subtabsHtml(sub) {
     + '"' + (s[0] === sub ? ' aria-current="page"' : '') + '>' + esc(s[1]) + '</a>').join('') + '</nav>';
 }
 
-/** Normalised UI state: sub, project, stage, sel. */
-function pipeUi(ui) {
+/** Normalised UI state: sub, project, stage, sel, open. A project or stage no longer in the data falls back to 'all'. */
+function pipeUi(ui, body) {
   const u = ui && typeof ui === 'object' ? ui : {};
+  let project = typeof u.project === 'string' && u.project ? u.project : 'all';
+  let stage = typeof u.stage === 'string' && u.stage ? u.stage : 'all';
+  if (project !== 'all' && body && Array.isArray(body.projects) && !body.projects.some((p) => p && p.id === project)) project = 'all';
+  if (stage !== 'all' && !STAGE_FILTERS.some((s) => s[0] === stage)) stage = 'all';
   return {
     sub: u.sub === 'signals' || u.sub === 'routing' ? u.sub : 'work',
-    project: typeof u.project === 'string' && u.project ? u.project : 'all',
-    stage: typeof u.stage === 'string' && u.stage ? u.stage : 'all',
+    project, stage,
     sel: typeof u.sel === 'string' ? u.sel : null,
+    open: u.open && typeof u.open === 'object' ? { idle: u.open.idle === true, quiet: u.open.quiet === true } : { idle: false, quiet: false },
   };
 }
 
@@ -1020,11 +1024,11 @@ function pipelineBody(body, projectsList, ui, nowMs) {
   const plugin = body.plugin;
   const installed = !!plugin && plugin.installed !== false;
   if (!pipelineHasData(body) && !installed) return installHtml();
-  const u = pipeUi(ui);
+  const u = pipeUi(ui, body);
   const c = pipelineCounts(body);
   const summary = c.active + (c.active === 1 ? ' active task' : ' active tasks') + ' · ' + c.repairs + (c.repairs === 1 ? ' repair' : ' repairs') + ' · '
     + c.decisions + (c.decisions === 1 ? ' decision' : ' decisions') + ' · ' + c.runs + (c.runs === 1 ? ' run' : ' runs') + ' this week';
-  const content = u.sub === 'signals' ? signalsHtml(body, nowMs) : u.sub === 'routing' ? routingTabHtml(body) : workHtml(body, u);
+  const content = u.sub === 'signals' ? signalsHtml(body, nowMs, u.open) : u.sub === 'routing' ? routingTabHtml(body) : workHtml(body, u);
   return '<p class="summary">' + esc(summary) + '</p>' + subtabsHtml(u.sub) + content;
 }
 
@@ -1074,8 +1078,9 @@ function panelHtml(row, ctx) {
   const acts = Array.isArray(t.activity) ? t.activity : [];
   const specAt = acts.find((e) => e && e.kind === 'spec');
   const starts = (Array.isArray(t.attempts) ? t.attempts : []).map((a) => Number(a && a.startedAt)).filter(Number.isFinite);
+  const firstStart = typeof t.firstStartedAt === 'number' && Number.isFinite(t.firstStartedAt) ? t.firstStartedAt : (starts.length ? Math.min.apply(null, starts) : null);   // attempts is capped; firstStartedAt covers all of them
   const gateAt = t.gate && t.gate.reviewed_at ? Date.parse(t.gate.reviewed_at) : NaN;
-  const times = { plan: specAt ? specAt.at : null, build: starts.length ? Math.min.apply(null, starts) : null, review: Number.isFinite(gateAt) ? gateAt : null, merge: null };
+  const times = { plan: specAt ? specAt.at : null, build: firstStart, review: Number.isFinite(gateAt) ? gateAt : null, merge: null };
   const pill = open
     ? '<span class="pill-amber">' + ringIcon() + 'Needs a decision</span>'
     : '<span class="pill-neutral">' + esc(exp ? 'Expired' : (t.step || 'Status unavailable')) + '</span>';
@@ -1119,8 +1124,14 @@ function panelHtml(row, ctx) {
  * on the Work sub-tab, the selected-task panel. ctx: { sessions, projectsList, opts, nowMs }.
  */
 function pipelineSideHtml(st, body, ui, ctx) {
+  const p = pipelineSideParts(st, body, ui, ctx);
+  return p.panel ? p.attn + p.panel : p.attn;
+}
+
+/** The two halves of the right column: attn (the live-region block) and panel (the selected task, outside the live region). */
+function pipelineSideParts(st, body, ui, ctx) {
   const c = ctx || {};
-  const u = pipeUi(ui);
+  const u = pipeUi(ui, body);
   const pinned = st && !st.unavailable && (st.amber || (Array.isArray(st.stalled) && st.stalled.length)) ? attentionHtml(st, c.nowMs, c.opts) : '';
   let panel = '';
   if (body && u.sub === 'work' && (pipelineHasData(body) || (body.plugin && body.plugin.installed !== false))) {
@@ -1132,7 +1143,7 @@ function pipelineSideHtml(st, body, ui, ctx) {
         sid: liveSessionId(row.project.id, c.projectsList, c.sessions), pinned: sids, opts: c.opts, nowMs: c.nowMs });
     }
   }
-  return pinned || panel ? pinned + panel : attentionHtml(st || { amber: false, count: 0, items: [] }, c.nowMs, c.opts);
+  return pinned || panel ? { attn: pinned, panel } : { attn: attentionHtml(st || { amber: false, count: 0, items: [] }, c.nowMs, c.opts), panel: '' };
 }
 
 /* ---------- state ---------- */
@@ -1147,7 +1158,7 @@ const state = {
   attn: null, attnToken: 0,   // attn: attentionState() output, { unavailable: true }, or null before the first read
   route: 'projects',
   proj: { mode: 'loading', list: [], filter: 'all', showHidden: false, token: 0, lastOk: null },
-  pipe: { mode: 'loading', body: null, token: 0, lastOk: null, sub: 'work', project: 'all', stage: 'all', sel: null },
+  pipe: { mode: 'loading', body: null, token: 0, lastOk: null, sub: 'work', project: 'all', stage: 'all', sel: null, open: { idle: false, quiet: false } },
   sessions: [],               // /state sessions, for the Projects summary, filters and live strip
   liveMap: {}, liveSig: '', seenIds: new Set(),   // client-side live states from the SSE stream
   apiToken: null, reviewNA: false, reviewMsgs: {},
@@ -1307,13 +1318,17 @@ function titleRow() {
 }
 
 function renderAttention() {
-  const box = document.getElementById('attn');
+  const box = document.getElementById('attn-live');
+  const ptask = document.getElementById('ptask');
   if (box) {
     const opts = { review: true, na: state.reviewNA, msgs: state.reviewMsgs };
     if (state.route === 'pipeline') {
-      setHtml(box, pipelineSideHtml(state.attn, state.pipe.mode === 'data' ? state.pipe.body : null, pipeUiOf(), { sessions: state.sessions, projectsList: state.proj.list, opts, nowMs: Date.now() }));
+      const parts = pipelineSideParts(state.attn, state.pipe.mode === 'data' ? state.pipe.body : null, pipeUiOf(), { sessions: state.sessions, projectsList: state.proj.list, opts, nowMs: Date.now() });
+      setHtml(box, parts.attn);
+      if (ptask) setHtml(ptask, parts.panel);
     } else {
       setHtml(box, attentionHtml(state.attn || { amber: false, count: 0, items: [] }, Date.now(), opts));
+      if (ptask) setHtml(ptask, '');
     }
   }
   const slot = document.getElementById('pill-slot');
@@ -1377,7 +1392,7 @@ function pipelineTitle() {
 
 function pipeUiOf() {
   const p = state.pipe;
-  return { sub: p.sub, project: p.project, stage: p.stage, sel: p.sel };
+  return pipeUi({ sub: p.sub, project: p.project, stage: p.stage, sel: p.sel, open: p.open }, p.mode === 'data' ? p.body : null);
 }
 
 function renderPipeline() {
@@ -1607,10 +1622,14 @@ function boot() {
     state.pipe[sel.getAttribute('data-pf') === 'stage' ? 'stage' : 'project'] = sel.value;
     renderPipeline();
   });
+  viewEl.addEventListener('toggle', (e) => {   // toggle does not bubble: capture it, so a refresh keeps disclosures open
+    const d = e.target && e.target.closest ? e.target.closest('details.pidle') : null;
+    if (d) state.pipe.open[d.querySelector('.quiet-list') ? 'quiet' : 'idle'] = d.open === true;
+  }, true);
   viewEl.addEventListener('keydown', (e) => {
     if (state.route !== 'pipeline' || state.pipe.sub !== 'work' || state.pipe.mode !== 'data') return;
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    if (e.target && e.target.tagName === 'SELECT') return;
+    if (!(e.target && e.target.closest && e.target.closest('.ptable'))) return;   // arrows move the selection only from the table
     e.preventDefault();
     const key = moveSel(pipeRows(state.pipe.body, pipeUiOf()), state.pipe.sel, e.key === 'ArrowUp' ? -1 : 1);
     if (key === null) return;

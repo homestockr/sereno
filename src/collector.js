@@ -480,6 +480,15 @@ function createCollector(store, port, opts) {
       return { attempt: pNum(a.attempt), outcome: pStr(a.outcome, 32), startedAt: pTime(a.started_at), endedAt: pTime(a.ended_at) };
     });
   }
+  /** Earliest attempt start (epoch ms) over every attempt the server holds; the API's attempts list is capped, this is not. */
+  function pipeFirstStart(t) {
+    let min = pNum(t.firstStartedAt);
+    for (const a of (Array.isArray(t.attempts) ? t.attempts : [])) {
+      const n = a && typeof a === 'object' ? pTime(a.started_at) : null;
+      if (n !== null && (min === null || n < min)) min = n;
+    }
+    return min;
+  }
   /** Newest-first events from timestamps already read: no free text. */
   function pipeActivity(t) {
     const ev = [];
@@ -507,6 +516,7 @@ function createCollector(store, port, opts) {
       costUsd: taskCost(t),
       builderModel: bm ? pStr(bm.model, 128) : null,
       attempts: pipeAttempts(t),
+      firstStartedAt: pipeFirstStart(t),
       activity: pipeActivity(t),
     };
   }
@@ -533,7 +543,9 @@ function createCollector(store, port, opts) {
       const active = all.filter((t) => t && t.stage !== 'merged' && t.stage !== 'stopped');
       const rt = pv ? pv.redTeam : null;
       let idle = null;
-      if (!active.length) {
+      if (!active.length && pv.configError === true) {
+        idle = 'config-error';
+      } else if (!active.length) {
         let latest = null;
         for (const t of all) for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
           const at = g && typeof g.reviewed_at === 'string' ? Date.parse(g.reviewed_at) : NaN;

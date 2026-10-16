@@ -10448,7 +10448,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const KEYS = {
       body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin'],
       project: ['id', 'name', 'tasks', 'idle'],
-      task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity'],
+      task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt'],
       attempt: ['attempt', 'outcome', 'startedAt', 'endedAt'], activity: ['at', 'kind', 'outcome'],
       gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model'],
       finding: ['severity', 'kind', 'file', 'line', 'summary'],
@@ -10743,6 +10743,55 @@ test('missing rate_limits degrades instead of throwing', () => {
       } finally { await haltP(c); }
     });
 
+    // --- [4b-layout-fix]: red-team low findings, API side ---
+    await atest('[4b-layout-fix] firstStartedAt: the earliest start over every attempt, even past the 10 the API lists', async () => {
+      const atts = [];
+      for (let n = 14; n >= 1; n--) atts.push({ attempt: n, outcome: 'block', agent_id: 'a' + n, started_at: iso(NOW - n * 3600000), ended_at: null });
+      const snap = () => ({ p1: { pipeline: { tasks: [tview('t1', 'builder', { attempts: atts }), tview('t2', 'architect'), tview('t3', 'builder', { attempts: atts.slice(0, 2), firstStartedAt: NOW - 40 * 3600000 })], skipped: 0, error: false, hasData: true } } });
+      const c = await bootP({ projects: reg(), repos: { snapshot: snap } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        const [t1, t2, t3] = b.projects[0].tasks;
+        assert.strictEqual(t1.attempts.length, 10);
+        assert.strictEqual(t1.firstStartedAt, NOW - 14 * 3600000, 'older than every listed attempt');
+        assert.strictEqual(t2.firstStartedAt, null);
+        assert.strictEqual(t3.firstStartedAt, NOW - 40 * 3600000);
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-layout-fix] a repo whose own pipeline.json will not load is listed as idle "config-error", not omitted', async () => {
+      const repos = require('../src/repos.js');
+      const dirs = [];
+      const mk = (cfg) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4bcfg-'));
+        dirs.push(dir);
+        const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't'); g('commit', '-q', '--allow-empty', '-m', 'init');
+        fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), cfg);
+        return dir;
+      };
+      try {
+        const bad = mk('{ not json');
+        const good = mk(JSON.stringify({ roles: { redTeam: { enabled: false } } }));
+        const list = () => [{ id: 'x', name: 'broken', repoPath: bad, hidden: false }, { id: 'g', name: 'fine', repoPath: good, hidden: false }];
+        const p = repos.createPoller({ registry: { list }, now: () => NOW });
+        await p.pollNow();
+        const c = await bootP({ projects: { list }, repos: p });
+        try {
+          const text = (await getP(c.port, '/api/pipeline')).text;
+          const b = JSON.parse(text);
+          checkBody(b);
+          const byId = Object.fromEntries(b.projects.map((x) => [x.id, x]));
+          assert.deepStrictEqual(Object.keys(byId).sort(), ['g', 'x']);
+          assert.strictEqual(byId.x.idle, 'config-error');
+          assert.strictEqual(byId.g.idle, 'gate-off');
+          assert.ok(!text.includes('not json'));
+        } finally { await haltP(c); }
+      } finally { for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold the temp dir briefly */ } } }
+    });
+
     test('[4b-api] agentModels: bundled agents with their models; missing dir is empty', () => {
       const m = pl.agentModels();
       assert.deepStrictEqual(m.map((x) => x.agent).sort(), ['sereno:builder', 'sereno:builder-haiku', 'sereno:builder-opus', 'sereno:red-team', 'sereno:red-team-lean', 'sereno:scribe']);
@@ -10979,7 +11028,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
       'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'installHtml', 'pipelineHasData',
       'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
-      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml'];
+      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
     const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -11138,13 +11187,13 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(T.perMergeLine({ mean: null, n: 0, excluded: 2 }), 'Red team per merge: — (n=0, 2 excluded)');
       const rs = T.roleSpendHtml(body([]).roleSpend);
       assert.match(rs, /\$3\.00 est\./);
-      assert.match(rs, /75% of spend/);
+      assert.match(rs, /75% of pipeline spend/);
       assert.match(rs, /67% explicit · 33% inferred · 0% unattributed/);
       assert.strictEqual(T.roleSpendHtml({ enabled: false }), '<p class="empty-note">Spend history is off</p>');
       // the table: cost cell is "$X est." or blank
-      assert.match(T.rowHtml(row(task('red-team', { costUsd: 1.234 })), null), /<div class="pcell-cost num">\$1\.23 est\.<\/div>/);
+      assert.match(T.rowHtml(row(task('red-team', { costUsd: 1.234 })), null), /<div class="pcell-cost num" role="gridcell">\$1\.23 est\.<\/div>/);
       const noMoney = T.rowHtml(row(task('red-team')), null);
-      assert.match(noMoney, /<div class="pcell-cost num"><\/div>/);
+      assert.match(noMoney, /<div class="pcell-cost num" role="gridcell"><\/div>/);
       assert.ok(!/\$/.test(strip(noMoney)));
       // every $ on every sub-tab and in the panel is followed by est.; every % is followed by n=
       const b = body([task('red-team', { costUsd: 2 })]);
@@ -11315,7 +11364,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(sig, /Red team<\/strong>/);
       assert.ok(!/<strong>(Main|Auxiliary|Unattributed)<\/strong>/.test(sig), 'main, auxiliary and unattributed spend stay in the Spend tab');
       assert.ok(!/ptable|prow/.test(sig));
-      assert.match(sig, /75% of spend/);   // 3 of 4: the other roles' spend is not in the denominator
+      assert.match(sig, /75% of pipeline spend/);   // 3 of 4: the other roles' spend is not in the denominator
       const rt = T.pipelineBody(b, [], { sub: 'routing' }, NOW);
       assert.match(rt, /<td class="mono">builder<\/td><td>Builder<\/td><td>Sonnet<\/td>/);
       assert.match(rt, /<td>alpha<\/td><td class="mono">red-team<\/td><td class="mono">red-team-lite<\/td><td>warn<\/td>/);
@@ -11367,7 +11416,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const h = T.pipelineBody(body([task('builder')]), [], WORK, NOW);
       const head = strip(h.match(/<div class="phead-row"[\s\S]*?<\/div><\/div>/)[0]).replace(/\s+/g, ' ');
       assert.match(head, /Task Branch Plan Architect Build Builder Review Red team Merge Cost/);
-      assert.match(h, /<div class="pcell-branch mono">task\/demo<\/div>/);
+      assert.match(h, /<div class="pcell-branch mono" role="gridcell">task\/demo<\/div>/);
       assert.strictEqual((h.match(/class="tcell tc-/g) || []).length, 4);
     });
 
@@ -11425,6 +11474,83 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!/\r|[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(cj + css + html));
       // row height budget: ~34px rows keep 15 tasks on one 1080p screen
       assert.match(css, /\.prow \{[^}]*height: 34px/);
+    });
+
+    test('[4b-layout-fix] a selected decision row keeps the amber tint and gets a non-amber selection outline', () => {
+      assert.match(css, /\.prow\.sel\.decision \{[^}]*--rowbg: var\(--amberbg\)[^}]*inset 2px 0 0 var\(--amber\)[^}]*outline: 1px solid var\(--muted\)/);
+      assert.ok(css.indexOf('.prow.sel.decision') > css.indexOf('.prow.decision {'));
+    });
+
+    test('[4b-layout-fix] role spend says "of pipeline spend"', () => {
+      const h = T.roleSpendHtml(body([]).roleSpend);
+      assert.match(h, /75% of pipeline spend/);
+      assert.ok(!/% of spend/.test(h));
+    });
+
+    test('[4b-layout-fix] a project or stage that is not in the data falls back to All', () => {
+      const b = body([task('builder')]);
+      const u = T.pipeUi({ project: 'gone', stage: 'nope' }, b);
+      assert.strictEqual(u.project, 'all'); assert.strictEqual(u.stage, 'all');
+      assert.strictEqual(T.pipeUi({ project: 'p1', stage: 'build' }, b).project, 'p1');
+      assert.strictEqual(T.pipeUi({ project: 'p1', stage: 'build' }, b).stage, 'build');
+      const h = T.pipelineBody(b, [], { project: 'gone', stage: 'nope' }, NOW);
+      assert.match(h, /<option value="all" selected>All projects<\/option>/);
+      assert.match(h, /data-sel="p1\/demo"/, 'the task is still listed');
+      assert.ok(!/<option value="gone"/.test(h));
+    });
+
+    test('[4b-layout-fix] open disclosures stay open across a refresh, closed ones stay closed', () => {
+      const idle = body([], { projects: [{ id: 'p1', name: 'alpha', tasks: [], idle: 'no-task' }] });
+      assert.match(T.pipelineBody(idle, [], { open: { idle: true } }, NOW), /<details class="pidle" open><summary>Idle repositories \(1\)/);
+      assert.match(T.pipelineBody(idle, [], { open: { idle: false } }, NOW), /<details class="pidle"><summary>Idle repositories/);
+      const sig = body([task('builder')], { signals: { days: 30, projects: [{ id: 'p1', gate: null }], outcomes: { n: 0 }, rework: { n: 0 }, runsThisWeek: 0 } });
+      assert.match(T.pipelineBody(sig, [], { sub: 'signals', open: { quiet: true } }, NOW), /<details class="pidle" open><summary>1 project with no review/);
+      assert.match(T.pipelineBody(sig, [], { sub: 'signals' }, NOW), /<details class="pidle"><summary>1 project with no review/);
+      assert.match(cj, /addEventListener\('toggle'[\s\S]*?\}, true\)/);
+      assert.match(cj, /state\.pipe\.open\[/);
+    });
+
+    test('[4b-layout-fix] the selected-task panel is outside the aria-live region', () => {
+      assert.match(html, /<div id="attn-live" aria-live="polite"><\/div>\s*<div id="ptask"><\/div>/);
+      assert.ok(!/<aside[^>]*aria-live/.test(html));
+      const b = body([task('builder', { task: 'b1' })]);
+      const st = T.attentionState({ sessions: [], decisions: [{ project: 'alpha', task: 'd1', reason: 'retry_limit', attempt: 2 }] });
+      const ctx = { sessions: [], projectsList: [], opts: { review: true }, nowMs: NOW };
+      const parts = T.pipelineSideParts(st, b, WORK, ctx);
+      assert.ok(/attn-amber/.test(parts.attn) && !/ppanel/.test(parts.attn));
+      assert.match(parts.panel, /<section class="ppanel/);
+      assert.ok(!/attn-amber/.test(parts.panel));
+      assert.strictEqual(T.pipelineSideHtml(st, b, WORK, ctx), parts.attn + parts.panel);
+      assert.match(cj, /getElementById\('attn-live'\)/);
+      assert.match(css, /#attn-live:not\(:empty\) \+ #ptask \.ppanel/);
+    });
+
+    test('[4b-layout-fix] arrow keys move the selection only from inside the table', () => {
+      assert.match(cj, /e\.target\.closest\('\.ptable'\)\)\) return;/);
+    });
+
+    test('[4b-layout-fix] Build time uses firstStartedAt, not the capped attempts list', () => {
+      const t = task('builder', { firstStartedAt: NOW - 5 * 3600000, attempts: [{ attempt: 11, outcome: 'running', startedAt: NOW - MIN, endedAt: null }] });
+      assert.match(strip(T.panelHtml(row(t), { nowMs: NOW })), /Build[\s\S]*5 hours ago/);
+      const fb = task('builder', { attempts: [{ attempt: 1, outcome: 'running', startedAt: NOW - 3 * 3600000, endedAt: null }] });
+      assert.match(strip(T.panelHtml(row(fb), { nowMs: NOW })), /Build[\s\S]*3 hours ago/);
+    });
+
+    test('[4b-layout-fix] idle "config-error" reads "Config unreadable", in neutral text', () => {
+      const h = T.pipelineBody(body([], { projects: [{ id: 'p1', name: 'alpha', tasks: [], idle: 'config-error' }] }), [], { open: { idle: true } }, NOW);
+      assert.match(h, /<strong>alpha<\/strong><span class="quiet-text">Config unreadable<\/span>/);
+      assert.ok(!/amber/.test(h.slice(h.indexOf('pidle'))));
+    });
+
+    test('[4b-layout-fix] the task table is a grid: rows, columnheaders and gridcells, aria-selected only on rows', () => {
+      const b = body([task('builder', { task: 'b1' }), task('ready', { task: 'm1' })]);
+      const h = T.pipelineBody(b, [], WORK, NOW);
+      assert.match(h, /<div class="ptable" role="grid"/);
+      assert.ok(!/role="table"/.test(h));
+      assert.strictEqual((h.match(/role="columnheader"/g) || []).length, 7);
+      const r = T.rowHtml(row(task('builder')), 'p1/demo');
+      assert.match(r, /role="row"[^>]*aria-selected="true"/);
+      assert.strictEqual((r.match(/role="gridcell"/g) || []).length, 7);
     });
   }
 
@@ -11758,7 +11884,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const text = await getText(c.port);
         const b = JSON.parse(text);
         const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin',
-          'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'endedAt', 'at',
+          'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt', 'endedAt', 'at',
           'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'severity', 'kind', 'file', 'line', 'summary',
           'days', 'outcomes', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
           'enabled', 'roles', 'builder', 'red-team', 'scribe', 'unattributed', 'explicit', 'inferred', 'mean',
