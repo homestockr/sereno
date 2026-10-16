@@ -438,6 +438,52 @@ const SKILLS_DIR = path.join(__dirname, '..', 'plugin', 'skills');
 /** agent_type -> role (a fresh copy). @returns {Record<string, string>} */
 function roleMap() { return Object.assign({}, ROLE_MAP); }
 
+/** Bounded head of a plugin file; links and non-files read as empty. @param {string} file @returns {string} */
+function headOf(file) {
+  const st = nodeFs.lstatSync(file);
+  if (st.isSymbolicLink() || !st.isFile()) return '';
+  const fd = nodeFs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(AGENT_HEAD_BYTES);
+    return buf.toString('utf8', 0, nodeFs.readSync(fd, buf, 0, AGENT_HEAD_BYTES, 0));
+  } finally { nodeFs.closeSync(fd); }
+}
+
+/** `name:` and `model:` from an agent file's front matter, or null. @param {string} text @returns {{ name: string, model: string } | null} */
+function parseAgent(text) {
+  const lines = text.replace(/^﻿/, '').split(/\r?\n/);
+  if (lines[0].trim() !== '---') return null;
+  let name = null, model = null;
+  for (let i = 1; i < lines.length && lines[i].trim() !== '---'; i++) {
+    const m = /^(name|model):\s*(\S+)\s*$/.exec(lines[i]);
+    if (m && m[1] === 'name' && name === null) name = m[2];
+    else if (m && m[1] === 'model' && model === null) model = m[2];
+  }
+  return name && model && idStr(model) ? { name, model } : null;
+}
+
+/**
+ * The bundled agents and the model each runs on, for the routing view: one entry per
+ * agent file whose name maps to a role. Same bounded reads as inferModels. Never throws.
+ * @param {string} [dir] defaults to the bundled plugin/agents
+ * @returns {Array<{ agent: string, role: string, model: string }>}
+ */
+function agentModels(dir) {
+  const d = dir || AGENTS_DIR;
+  /** @type {Array<{ agent: string, role: string, model: string }>} */
+  const out = [];
+  try {
+    for (const n of nodeFs.readdirSync(d).filter((x) => x.endsWith('.md')).sort().slice(0, MAX_AGENT_FILES)) {
+      try {
+        const a = parseAgent(headOf(path.join(d, n)));
+        const role = a ? ROLE_MAP['sereno:' + a.name] : null;
+        if (a && role) out.push({ agent: 'sereno:' + a.name, role, model: a.model });
+      } catch (_) { /* skip this file */ }
+    }
+  } catch (_) { /* no directory */ }
+  return out;
+}
+
 /** @type {Map<string, Record<string, string>>} */
 const inferCache = new Map();
 
@@ -459,16 +505,7 @@ function inferModels(dir, skillsDir) {
   if (hit) return Object.assign({}, hit);
   /** @type {Map<string, Set<string>>} */
   const byModel = new Map();
-  /** @param {string} file @returns {string} */
-  const head = (file) => {
-    const st = nodeFs.lstatSync(file);
-    if (st.isSymbolicLink() || !st.isFile()) return '';
-    const fd = nodeFs.openSync(file, 'r');
-    try {
-      const buf = Buffer.alloc(AGENT_HEAD_BYTES);
-      return buf.toString('utf8', 0, nodeFs.readSync(fd, buf, 0, AGENT_HEAD_BYTES, 0));
-    } finally { nodeFs.closeSync(fd); }
-  };
+  const head = headOf;
   const addRole = (/** @type {string} */ model, /** @type {string} */ role) => {
     let set = byModel.get(model);
     if (!set) { set = new Set(); byModel.set(model, set); }
@@ -492,19 +529,10 @@ function inferModels(dir, skillsDir) {
     const names = nodeFs.readdirSync(d).filter((n) => n.endsWith('.md')).sort().slice(0, MAX_AGENT_FILES);
     for (const n of names) {
       try {
-        const file = path.join(d, n);
-        const text = head(file);
-        const lines = text.replace(/^﻿/, '').split(/\r?\n/);
-        if (lines[0].trim() !== '---') continue;
-        let name = null, model = null;
-        for (let i = 1; i < lines.length && lines[i].trim() !== '---'; i++) {
-          const m = /^(name|model):\s*(\S+)\s*$/.exec(lines[i]);
-          if (m && m[1] === 'name' && name === null) name = m[2];
-          else if (m && m[1] === 'model' && model === null) model = m[2];
-        }
-        const role = name ? ROLE_MAP['sereno:' + name] : null;
-        if (!role || !model || !idStr(model)) continue;
-        addRole(model, role);
+        const ag = parseAgent(head(path.join(d, n)));
+        const role = ag ? ROLE_MAP['sereno:' + ag.name] : null;
+        if (!ag || !role) continue;
+        addRole(ag.model, role);
       } catch (_) { /* skip this file */ }
     }
   } catch (_) { /* no directory */ }
@@ -583,11 +611,15 @@ function redTeamPerMerge(projects, spendForAgent) {
       for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
         if (!g || g.outcome !== 'pass') continue;
         if (!g.agent_id || !g.session_id || typeof spendForAgent !== 'function') { excluded++; continue; }
-        try { sum += Number(spendForAgent(g.session_id, g.agent_id)) || 0; n++; } catch (_) { excluded++; }
+        try {
+          // 0 means no ledger rows carry this agent_id (spans off): unmeasured, not free.
+          const c = Number(spendForAgent(g.session_id, g.agent_id)) || 0;
+          if (c > 0) { sum += c; n++; } else excluded++;
+        } catch (_) { excluded++; }
       }
     }
   }
   return { mean: n ? sum / n : null, n, excluded };
 }
 
-module.exports = { roleMap, inferModels, signals, redTeamPerMerge, recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView };
+module.exports = { roleMap, inferModels, agentModels, signals, redTeamPerMerge, recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView };

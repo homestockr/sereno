@@ -10,7 +10,7 @@
  *   POST /v1/logs, /v1/traces <- OTLP/JSON (only with a ledger; else 200 and drop)
  *   GET  /ledger/summary -> ledger totals
  *   GET  /api/spend/{today,series,projects,top-prompts} -> spend views (ledger only)
- *   GET  /api/projects, /api/token; POST /api/review, /api/projects/<id>/hide (guarded)
+ *   GET  /api/projects, /api/pipeline, /api/token; POST /api/review, /api/projects/<id>/hide (guarded)
  *   GET  /console[/*] -> the console pages (src/renderer/console)
  *   GET  /        -> the widget page (also works in a plain browser tab)
  *
@@ -25,6 +25,8 @@ const zlib = require('node:zlib');
 const crypto = require('node:crypto');
 const otlp = require('./otlp.js');
 const spendtime = require('./spendtime.js');
+const pipelineLib = require('./pipeline.js');
+const { emptyRoleSpend } = require('./ledger.js');
 const { normalizePath } = require('./projects.js');
 
 const RENDERER_DIR = path.join(__dirname, 'renderer');
@@ -233,6 +235,7 @@ function createCollector(store, port, opts) {
   // Every response is built from an explicit key list: nothing the ledger returns
   // can leak into the API by accident.
   function handleApi(req, res, url) {
+    if (url === '/api/pipeline') { sendJson(res, 200, buildPipeline()); return; }
     const m = /^\/api\/spend\/(today|series|projects|top-prompts)$/.exec(url);
     if (!m) { res.writeHead(404, { 'content-type': 'text/plain' }).end('not found'); return; }
     if (!ledger) { sendJson(res, 200, { enabled: false }); return; }
@@ -390,6 +393,97 @@ function createCollector(store, port, opts) {
       };
     });
     return { asOf, projects: out };
+  }
+
+  /*
+   * GET /api/pipeline. Built from the poller's in-memory snapshot (never runs git) and
+   * from explicit key lists: no command, prompt, spec body, hash, session or agent id,
+   * or repo path leaves here. Findings are the one place a file name appears.
+   */
+  const PIPE_ROLES = ['builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed'];
+  const PIPE_DAYS = 30;
+  const pStr = (v, max) => (typeof v === 'string' ? v.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max) : null);
+  const pNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const pBool = (v) => v === true;
+  function pipeGate(g) {
+    if (!g || typeof g !== 'object') return null;
+    return { review_run_id: pStr(g.review_run_id, 64), outcome: pStr(g.outcome, 32), tests_passed: pBool(g.tests_passed), reviewed_at: pStr(g.reviewed_at, 40), model: pStr(g.model, 128) };
+  }
+  function pipeFinding(f) {
+    f = f && typeof f === 'object' ? f : {};
+    return { severity: pStr(f.severity, 16), kind: pStr(f.kind, 32), file: pStr(f.file, 260), line: pNum(f.line), summary: pStr(f.summary, 300) };
+  }
+  function pipeTask(t) {
+    return {
+      task: pStr(t.task, 128), stage: pStr(t.stage, 32), step: pStr(t.step, 120), reason: pStr(t.reason, 64), attempt: pNum(t.attempt),
+      gate: pipeGate(t.gate),
+      findings: Array.isArray(t.findings) ? t.findings.slice(0, 50).map(pipeFinding) : [],
+      startedAt: pNum(t.startedAt), updatedAt: pNum(t.updatedAt), reviewRuns: pNum(t.reviewRuns) || 0, expired: pBool(t.expired),
+    };
+  }
+  function pipeRedTeam(r) {
+    if (!r || typeof r !== 'object') return null;
+    return { agent: pStr(r.agent, 128), fallback: pStr(r.fallback, 128), onFallback: pStr(r.onFallback, 16) };
+  }
+  function buildPipeline() {
+    const asOf = now();
+    const reg = projects ? projects.list() : [];
+    let snap = {};
+    try { snap = repos ? repos.snapshot() : {}; } catch (_) { snap = {}; }
+    const outProjects = [];
+    const sigIn = [];
+    const routingProjects = [];
+    for (const p of reg) {
+      if (p.hidden) continue;
+      const st = snap[p.id];
+      const pv = st && st.pipeline && typeof st.pipeline === 'object' ? st.pipeline : null;
+      const all = pv && Array.isArray(pv.tasks) ? pv.tasks : [];
+      const active = all.filter((t) => t && t.stage !== 'merged' && t.stage !== 'stopped');
+      const rt = pv ? pv.redTeam : null;
+      let idle = null;
+      if (!active.length) {
+        let latest = null;
+        for (const t of all) for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+          const at = g && typeof g.reviewed_at === 'string' ? Date.parse(g.reviewed_at) : NaN;
+          if (Number.isFinite(at) && (!latest || at > latest.at)) latest = { at, outcome: g.outcome };
+        }
+        idle = rt && rt.enabled === false ? 'gate-off' : (latest && latest.outcome === 'pass' ? 'latest-pass' : 'no-task');
+      }
+      outProjects.push({ id: p.id, name: p.name, tasks: active.map(pipeTask), idle });
+      sigIn.push({ id: p.id, tasks: all.map((t) => ({ task: t.task, stage: t.stage, gates: Array.isArray(t.gates) ? t.gates : [] })) });
+      routingProjects.push({ id: p.id, redTeam: pipeRedTeam(rt) });
+    }
+    const sg = pipelineLib.signals(sigIn, asOf);
+    const signals = {
+      days: sg.days,
+      projects: sg.projects.map((x) => ({ id: x.id, gate: x.gate ? { outcome: pStr(x.gate.outcome, 32), task: pStr(x.gate.task, 128), ageMs: pNum(x.gate.ageMs) } : null })),
+      outcomes: { n: sg.outcomes.n, pass: sg.outcomes.pass, block: sg.outcomes.block, needs_context: sg.outcomes.needs_context, error: sg.outcomes.error, skipped: sg.outcomes.skipped },
+      rework: { n: sg.rework.n, median: sg.rework.median, max: sg.rework.max, excluded: sg.rework.excluded },
+      runsThisWeek: sg.runsThisWeek,
+    };
+    let rs = null;
+    if (ledger) {
+      try { rs = ledger.roleSpend(asOf - PIPE_DAYS * 24 * 3600 * 1000, pipelineLib.roleMap(), pipelineLib.inferModels()); } catch (_) { rs = null; }
+    }
+    const src = (rs || emptyRoleSpend()).roles;
+    const roles = {};
+    for (const k of PIPE_ROLES) {
+      const r = src[k] || {};
+      roles[k] = { costUsd: pNum(r.costUsd) || 0, explicit: pNum(r.explicit) || 0, inferred: pNum(r.inferred) || 0, unattributed: pNum(r.unattributed) || 0 };
+    }
+    let rpm;
+    try { rpm = pipelineLib.redTeamPerMerge(sigIn, ledger && rs ? ledger.spendForAgent : null); } catch (_) { rpm = { mean: null, n: 0, excluded: 0 }; }
+    return {
+      projects: outProjects,
+      signals,
+      roleSpend: { enabled: !!rs, days: PIPE_DAYS, roles },
+      redTeamPerMerge: { mean: pNum(rpm.mean), n: rpm.n, excluded: rpm.excluded },
+      routing: {
+        models: pipelineLib.agentModels().map((m) => ({ agent: m.agent, role: m.role, model: m.model })),
+        projects: routingProjects,
+      },
+      plugin: null,
+    };
   }
 
   // The POST guard for console actions; localOnly (Host/Origin) has already run.

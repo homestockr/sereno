@@ -10471,7 +10471,204 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual(pl.redTeamPerMerge(projects, l.spendForAgent), { mean: 3, n: 2, excluded: 1 });
       assert.deepStrictEqual(pl.redTeamPerMerge(projects, null), { mean: null, n: 0, excluded: 3 });
       assert.deepStrictEqual(pl.redTeamPerMerge([], l.spendForAgent), { mean: null, n: 0, excluded: 0 });
+      // rows exist for the session but none with this agent_id (spans off): excluded, never averaged as $0
+      const none = [{ tasks: [{ task: 'z', stage: 'merged', gates: [G('z', 'pass', NOW, { agent_id: 'a-unlinked' })] }] }];
+      assert.deepStrictEqual(pl.redTeamPerMerge(none, l.spendForAgent), { mean: null, n: 0, excluded: 1 });
+      assert.deepStrictEqual(pl.redTeamPerMerge(projects.concat(none), l.spendForAgent), { mean: 3, n: 2, excluded: 2 });
       l.close();
+    });
+  }
+
+  /* ---- Step 4: GET /api/pipeline ---- */
+  {
+    const pl = require('../src/pipeline.js');
+    const { openLedger } = require('../src/ledger.js');
+    const NOW = Date.parse('2026-10-15T12:00:00.000Z');
+    const DAY = 86400000;
+    const iso = (ms) => new Date(ms).toISOString();
+    const bootP = async (opts) => {
+      const c = createCollector(new Store(), 0, Object.assign({ now: () => NOW }, opts));
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      return c;
+    };
+    const haltP = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const getP = (port, p, headers) => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: p, headers: headers || {}, agent: false }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (x) => { t += x; }); r.on('end', () => resolve({ status: r.statusCode, text: t }));
+      }).on('error', reject);
+    });
+    // Poller snapshots are hand-built here and carry extra fields on purpose (command, prompt, paths).
+    const gate = (task, outcome, at, extra) => Object.assign({ review_run_id: 'rr-' + task + '-' + at, task_id: task, spec: '.sereno/specs/' + task + '.md', spec_hash: 'sha256:' + 'a'.repeat(64),
+      branch: 'task/' + task, base_commit: 'b'.repeat(40), head_commit: 'c'.repeat(40), session_id: 's1', agent_id: 'a-' + task, model: 'claude-fable-5-1',
+      outcome, tests_passed: true, findings: [], context_requests: [], reviewed_at: iso(at), config_hash: 'sha256:' + 'd'.repeat(64),
+      command: 'SECRET-CMD', prompt: 'SECRET-PROMPT' }, extra || {});
+    const tview = (task, stage, extra) => Object.assign({ task, stage, step: 'Step ' + stage, reason: null, attempt: 1, gate: null, findings: [], startedAt: NOW - DAY, updatedAt: NOW - 3600000,
+      reviewRuns: 1, expired: false, gates: [], command: 'SECRET-CMD', prompt: 'SECRET-PROMPT', specBody: 'SECRET-BODY', repoPath: 'C:\\secret\\repo' }, extra || {});
+    const mkSnap = () => ({
+      p1: { pipeline: { tasks: [
+        tview('t-run', 'builder', { gates: [gate('t-run', 'block', NOW - 2 * DAY)], gate: gate('t-run', 'block', NOW - 2 * DAY),
+          findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'boom', command: 'SECRET-CMD', prompt: 'SECRET-PROMPT', extra: 1 }] }),
+        tview('t-old', 'red-team', { expired: true, updatedAt: NOW - 9 * DAY }),
+        tview('t-done', 'merged', { gates: [gate('t-done', 'pass', NOW - DAY)] }),
+        tview('t-stop', 'stopped'),
+      ], skipped: 0, error: false, redTeam: { agent: 'red-team', fallback: 'red-team-lean', onFallback: 'ask', enabled: true, command: 'SECRET-CMD' } } },
+      p2: { pipeline: { tasks: [], skipped: 0, error: false, redTeam: { agent: 'red-team-lean', fallback: null, onFallback: 'never', enabled: false } } },
+      p3: { pipeline: { tasks: [tview('t-pass', 'merged', { gates: [gate('t-pass', 'pass', NOW - 2 * DAY)] })], skipped: 0, error: false, redTeam: { agent: 'red-team', fallback: null, onFallback: 'ask', enabled: true } } },
+      p4: { pipeline: { tasks: [], skipped: 0, error: false } },
+      p5: {},
+    });
+    const reg = () => ({ list: () => [
+      { id: 'p1', name: 'one', repoPath: 'C:\\secret\\one', hidden: false }, { id: 'p2', name: 'two', repoPath: 'C:\\secret\\two', hidden: false },
+      { id: 'p3', name: 'three', repoPath: 'C:\\secret\\three', hidden: false }, { id: 'p4', name: 'four', repoPath: 'C:\\secret\\four', hidden: false },
+      { id: 'p5', name: 'five', repoPath: 'C:\\secret\\five', hidden: false }, { id: 'ph', name: 'hidden', repoPath: 'C:\\secret\\h', hidden: true },
+    ] });
+    const rqL = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's1', promptId: null, ts: NOW, model: 'claude-fable-5-1', querySource: null, source: 'subagent',
+      agentName: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 2000000, durationMs: 0 }, o);
+
+    // Expected key sets, walked recursively against the real body.
+    const KEYS = {
+      body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin'],
+      project: ['id', 'name', 'tasks', 'idle'],
+      task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired'],
+      gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model'],
+      finding: ['severity', 'kind', 'file', 'line', 'summary'],
+      signals: ['days', 'projects', 'outcomes', 'rework', 'runsThisWeek'],
+      sigProject: ['id', 'gate'], sigGate: ['outcome', 'task', 'ageMs'],
+      outcomes: ['n', 'pass', 'block', 'needs_context', 'error', 'skipped'], rework: ['n', 'median', 'max', 'excluded'],
+      roleSpend: ['enabled', 'days', 'roles'], role: ['costUsd', 'explicit', 'inferred', 'unattributed'],
+      rpm: ['mean', 'n', 'excluded'], routing: ['models', 'projects'], model: ['agent', 'role', 'model'], routeProject: ['id', 'redTeam'], redTeam: ['agent', 'fallback', 'onFallback'],
+    };
+    const ROLES = ['builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed'];
+    const same = (o, keys, where) => assert.deepStrictEqual(Object.keys(o).sort(), keys.slice().sort(), where);
+    const checkBody = (b) => {
+      same(b, KEYS.body, 'body');
+      for (const p of b.projects) { same(p, KEYS.project, 'project'); for (const t of p.tasks) { same(t, KEYS.task, 'task'); if (t.gate) same(t.gate, KEYS.gate, 'gate'); for (const f of t.findings) same(f, KEYS.finding, 'finding'); } }
+      same(b.signals, KEYS.signals, 'signals'); same(b.signals.outcomes, KEYS.outcomes, 'outcomes'); same(b.signals.rework, KEYS.rework, 'rework');
+      for (const p of b.signals.projects) { same(p, KEYS.sigProject, 'sigProject'); if (p.gate) same(p.gate, KEYS.sigGate, 'sigGate'); }
+      same(b.roleSpend, KEYS.roleSpend, 'roleSpend'); same(b.roleSpend.roles, ROLES, 'roles'); for (const k of ROLES) same(b.roleSpend.roles[k], KEYS.role, 'role ' + k);
+      same(b.redTeamPerMerge, KEYS.rpm, 'rpm'); same(b.routing, KEYS.routing, 'routing');
+      for (const m of b.routing.models) same(m, KEYS.model, 'model');
+      for (const p of b.routing.projects) { same(p, KEYS.routeProject, 'routeProject'); if (p.redTeam) same(p.redTeam, KEYS.redTeam, 'redTeam'); }
+    };
+
+    await atest('[4b-api] /api/pipeline: every key in the body is on the allowlist, recursively (exit criterion 4)', async () => {
+      const l = openLedger({ file: ':memory:' });
+      l.ingestRequests([rqL({ requestKey: '1', requestId: 'r1' })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a-t-done', ts: NOW }]);
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap }, ledger: l });
+      try {
+        const r = await getP(c.port, '/api/pipeline');
+        assert.strictEqual(r.status, 200);
+        const b = JSON.parse(r.text);
+        checkBody(b);
+        assert.strictEqual(b.plugin, null);
+        assert.deepStrictEqual(b.projects.map((p) => p.id), ['p1', 'p2', 'p3', 'p4', 'p5'], 'hidden projects are left out');
+        assert.strictEqual(b.projects[0].tasks.length, 2, 'merged and stopped leave the cards');
+        assert.deepStrictEqual(b.projects[0].tasks[0].findings, [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'boom' }]);
+        assert.strictEqual(b.projects[0].tasks[1].expired, true, 'expired tasks are included, flagged');
+        assert.strictEqual(b.projects[0].tasks[0].gate.outcome, 'block');
+        assert.deepStrictEqual(b.redTeamPerMerge, { mean: 2, n: 1, excluded: 1 });
+        assert.strictEqual(b.roleSpend.enabled, true);
+        assert.strictEqual(b.roleSpend.roles['red-team'].costUsd, 2);
+        assert.strictEqual(b.roleSpend.roles['red-team'].explicit, 0);
+        assert.deepStrictEqual(b.signals.projects.find((p) => p.id === 'p1').gate, { outcome: 'pass', task: 't-done', ageMs: DAY });
+        assert.strictEqual(b.signals.outcomes.n, 3);
+        // routing: bundled models, plus only the red-team fields per project
+        assert.deepStrictEqual(b.routing.models, pl.agentModels());
+        assert.ok(b.routing.models.some((m) => m.agent === 'sereno:red-team' && m.model === 'claude-fable-5-1'));
+        assert.deepStrictEqual(b.routing.projects.find((p) => p.id === 'p1').redTeam, { agent: 'red-team', fallback: 'red-team-lean', onFallback: 'ask' });
+        assert.deepStrictEqual(b.routing.projects.find((p) => p.id === 'p2').redTeam, { agent: 'red-team-lean', fallback: null, onFallback: 'never' });
+        assert.strictEqual(b.routing.projects.find((p) => p.id === 'p4').redTeam, null);
+      } finally { await haltP(c); l.close(); }
+    });
+
+    await atest('[4b-api] /api/pipeline: no command, prompt, spec body, path, hash or id text even when records carry extra fields', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap } });
+      try {
+        const text = (await getP(c.port, '/api/pipeline')).text;
+        for (const bad of ['SECRET', 'C:\\\\secret', '"command"', '"prompt"', '"specBody"', 'sha256:', 'session_id', 'agent_id', 'head_commit', '.sereno/specs', 'spec_hash', 'a-t-run'])
+          assert.ok(!text.includes(bad), 'leaked ' + bad);
+        assert.ok(text.includes('src/a.js'), 'finding file names stay');
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-api] /api/pipeline: ledger off gives zero role spend and no red-team $/merge', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        assert.strictEqual(b.roleSpend.enabled, false);
+        for (const k of ROLES) assert.deepStrictEqual(b.roleSpend.roles[k], { costUsd: 0, explicit: 0, inferred: 0, unattributed: 0 });
+        assert.deepStrictEqual(b.redTeamPerMerge, { mean: null, n: 0, excluded: 2 });
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-api] /api/pipeline: no projects, no poller, a throwing poller all give a well-formed empty body', async () => {
+      for (const o of [{}, { projects: { list: () => [] }, repos: { snapshot: mkSnap } }, { projects: reg(), repos: { snapshot: () => { throw new Error('x'); } } }]) {
+        const c = await bootP(o);
+        try {
+          const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+          checkBody(b);
+          assert.ok(b.projects.every((p) => p.tasks.length === 0 && p.idle === 'no-task'));
+          assert.strictEqual(b.signals.outcomes.n, 0);
+        } finally { await haltP(c); }
+      }
+    });
+
+    await atest('[4b-api] /api/pipeline: idle is no-task, gate-off or latest-pass; a project with an active task has none', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        const idle = Object.fromEntries(b.projects.map((p) => [p.id, p.idle]));
+        assert.deepStrictEqual(idle, { p1: null, p2: 'gate-off', p3: 'latest-pass', p4: 'no-task', p5: 'no-task' });
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-api] /api/pipeline: a bad Host or Origin is refused like the other /api routes; POST is not a route', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap } });
+      try {
+        assert.strictEqual((await getP(c.port, '/api/pipeline', { host: 'evil.example' })).status, 403);
+        assert.strictEqual((await getP(c.port, '/api/pipeline', { origin: 'http://evil.example' })).status, 403);
+        assert.strictEqual((await getP(c.port, '/api/pipeline', { host: '127.0.0.1:' + c.port, origin: 'http://127.0.0.1:' + c.port })).status, 200);
+        const post = await new Promise((resolve, reject) => {
+          const q = http.request({ host: '127.0.0.1', port: c.port, path: '/api/pipeline', method: 'POST', agent: false }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode)); });
+          q.on('error', reject); q.end();
+        });
+        assert.notStrictEqual(post, 200);
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-api] the real poller keeps cleaned gates and red-team config server-side for the API', async () => {
+      const repos = require('../src/repos.js');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4bapi-'));
+      try {
+        const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't'); g('commit', '-q', '--allow-empty', '-m', 'init');
+        const sd = path.join(dir, '.sereno');
+        fs.mkdirSync(path.join(sd, 'attempts'), { recursive: true }); fs.mkdirSync(path.join(sd, 'gates')); fs.mkdirSync(path.join(sd, 'specs'));
+        fs.writeFileSync(path.join(sd, 'pipeline.json'), JSON.stringify({ tests: { command: 'SECRET-CMD', setup: 'SECRET-SETUP' }, roles: { redTeam: { onFallback: 'never' } } }));
+        fs.writeFileSync(path.join(sd, 'attempts', 'demo-1.json'), JSON.stringify({ task_id: 'demo', attempt: 1, outcome: 'built', started_at: iso(NOW - 3600000), ended_at: iso(NOW - 3000000), prompt: 'SECRET-PROMPT' }));
+        const list = () => [{ id: 'p0', name: 'demo-proj', repoPath: dir, hidden: false }];
+        const p = repos.createPoller({ registry: { list }, now: () => NOW });
+        await p.pollNow();
+        const c = await bootP({ projects: { list }, repos: p });
+        try {
+          const text = (await getP(c.port, '/api/pipeline')).text;
+          const b = JSON.parse(text);
+          checkBody(b);
+          assert.ok(!text.includes('SECRET') && !text.includes(dir.replace(/\\/g, '\\\\')));
+          assert.strictEqual(b.projects[0].tasks.length, 1);
+          assert.strictEqual(b.projects[0].tasks[0].stage, 'red-team');
+          assert.strictEqual(b.routing.projects[0].redTeam.onFallback, 'never');
+          assert.strictEqual(b.routing.projects[0].redTeam.agent, 'red-team');
+        } finally { await haltP(c); }
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold the temp dir briefly */ } }
+    });
+
+    test('[4b-api] agentModels: bundled agents with their models; missing dir is empty', () => {
+      const m = pl.agentModels();
+      assert.deepStrictEqual(m.map((x) => x.agent).sort(), ['sereno:builder', 'sereno:builder-haiku', 'sereno:builder-opus', 'sereno:red-team', 'sereno:red-team-lean', 'sereno:scribe']);
+      assert.deepStrictEqual(pl.agentModels(path.join(os.tmpdir(), 'sereno-no-such-dir')), []);
     });
   }
 

@@ -66,7 +66,7 @@ function ghExecDefault(args, o) {
  *   dirty: boolean | null, lastCommitAt: number | null, worktrees: Worktree[], branches: Branch[],
  *   polledAt: number | null, error: boolean, brief: any, freshness: string, behindSince?: number | null, briefsMalformed: number,
  *   prs?: number | null,
- *   pipeline?: { tasks: any[], skipped: number, error: boolean }
+ *   pipeline?: { tasks: any[], skipped: number, error: boolean, redTeam?: { agent: any, fallback: any, onFallback: any, enabled: any } | null }
  * }} RepoState
  */
 
@@ -276,7 +276,7 @@ function createPoller(opts) {
     } catch (_) { return '?'; }
   }
 
-  /** Last good pipeline view per project with the fingerprint it was built under. @type {Map<string, { fp: string, view: { tasks: any[], skipped: number, error: boolean } }>} */
+  /** Last good pipeline view per project with the fingerprint it was built under. @type {Map<string, { fp: string, view: { tasks: any[], skipped: number, error: boolean, redTeam?: any } }>} */
   const pipeGood = new Map();
 
   /**
@@ -300,8 +300,11 @@ function createPoller(opts) {
       if (!repo) { const v = { tasks: [], skipped: 0, error: false }; pipeGood.set(id, { fp, view: v }); return v; }
       const t = now();
       const tasks = [];
-      for (const entry of repo.tasks) tasks.push(await pipelineLib.taskView(root, entry, repo.config, git, t, { fsp }));
-      const view = { tasks, skipped: repo.skipped, error: false };
+      // gates (cleaned) ride along server-side for the signals; the API never returns them raw.
+      for (const entry of repo.tasks) tasks.push(Object.assign(await pipelineLib.taskView(root, entry, repo.config, git, t, { fsp }), { gates: entry.gates }));
+      const rt = repo.config && repo.config.roles && repo.config.roles.redTeam;
+      const redTeam = rt && typeof rt === 'object' ? { agent: rt.agent, fallback: rt.fallback, onFallback: rt.onFallback, enabled: rt.enabled } : null;
+      const view = { tasks, skipped: repo.skipped, error: false, redTeam };
       pipeGood.set(id, { fp, view });
       return view;
     } catch (_) {
