@@ -31,6 +31,41 @@ It uses the same compact list-and-detail layout, and the same navy theme, as Pro
 - **Example:** a 47-minute session where 5 minutes were permission waits, the first review
   found two defects, and the second review passed.
 
+### Concept (Robe, 2026-10-16)
+
+A GPT-generated concept, "Sereno Sessions: trace, waits, and repair", is kept locally.
+
+- **Header:** a Today / 7d / 30d switch.
+- **Left list:** search, the filters All / Running / Ended, and rows grouped by day (project,
+  state pill, branch, time range, duration, cost est.).
+- **Detail header:**
+  - project, state, branch, duration, cost (est.), prompt count, time range and the
+    reconciliation chip ("Ledger matches statusline", or the difference);
+  - "View project" (navigation);
+  - sub-tabs **Timeline** / **Requests** / **Reviews (N)**.
+- **Timeline:**
+  - a cumulative cost line (est.) on top, then one lane per run on a shared time axis;
+  - permission waits as amber bands across all lanes, labelled with their duration;
+  - tool names on hover;
+  - review markers carry the outcome shape and the findings count;
+  - the legend shows explicit / inferred / unattributed.
+- **Below the timeline:**
+  - "What held it up": elapsed time, then the event (permission wait, review blocked with N
+    findings, Builder resumed, review passed);
+  - "Session facts": total permission waits, Builder active time over N runs, the review path
+    (block → repair → pass), and the attribution count.
+
+Corrections, so it fits Sereno's rules:
+1. The main thread is labelled **"Main session"**, not "Architect". The spec counts it as
+   Architect only when the config says so.
+2. Lane subtitles never come from Task descriptions, which are tool input. A lane shows the
+   agent type and model, plus derived context only. For example, a Builder attempt whose
+   pipeline record follows a block reads "Repair".
+3. Inferred hatching applies only to subagent requests with no agents join. The main
+   thread is always explicit.
+4. No pagination: the list scrolls, grouped by day.
+5. No "⋯" menu.
+
 ## Cross-links
 
 | From | Sessions opens at |
