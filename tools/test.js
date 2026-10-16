@@ -7358,7 +7358,8 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('Electron build files do not include plugin/ or .claude-plugin/ (except the 4b bundled rules)', () => {
       const files = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files;
-      const bundledRules = ['plugin/bin/lib/**/*', 'plugin/agents/*.md'];
+      const bundledRules = ['plugin/bin/lib/**/*', 'plugin/agents/*.md', 'plugin/skills/*/SKILL.md'];
+      assert.deepStrictEqual(files.filter((f) => /^plugin\//.test(f)).sort(), bundledRules.slice().sort());
       for (const f of files) {
         if (bundledRules.includes(f)) continue;
         assert.ok(!/^!?\.?\/?(plugin|\.claude-plugin)(\/|$)/.test(f) || f.startsWith('!'), 'packages ' + f);
@@ -9896,6 +9897,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(bundled('plugin/bin/lib/recovery.js'));
       assert.ok(bundled('plugin/bin/lib/sub/x.js'));
       assert.ok(bundled('plugin/agents/builder.md'));
+      assert.ok(bundled('plugin/skills/build/SKILL.md'));
+      assert.ok(!bundled('plugin/skills/build/notes.md'));
       assert.ok(!bundled('plugin/bin/sereno.js'));
     });
     test('[4b-bundle] every relative require of recovery.js and config.js (transitively) is bundled', () => {
@@ -9915,6 +9918,10 @@ test('missing rate_limits degrades instead of throwing', () => {
         }
       }
       assert.ok(seen.has('plugin/bin/lib/fsafe.js'), 'walk reached fsafe.js');
+    });
+    test('[4b-bundle] every agent and skill file inferModels reads is covered by build.files', () => {
+      for (const n of fs.readdirSync(path.join(ROOT, 'plugin/agents'))) if (n.endsWith('.md')) assert.ok(bundled('plugin/agents/' + n), n);
+      for (const n of fs.readdirSync(path.join(ROOT, 'plugin/skills'))) if (fs.existsSync(path.join(ROOT, 'plugin/skills', n, 'SKILL.md'))) assert.ok(bundled('plugin/skills/' + n + '/SKILL.md'), n);
     });
     test('[4b-bundle] src/pipeline.js loads and exposes decide', () => {
       const pl = require('../src/pipeline.js');
@@ -10331,6 +10338,141 @@ test('missing rate_limits degrades instead of throwing', () => {
 
       await atest('[4b-reader] cleanup', async () => { for (const d of tmps) fs.rmSync(d, { recursive: true, force: true }); });
     }
+  }
+
+  /* ---- [4b-signals] roles, role spend, signals ---- */
+  {
+    const pl = require('../src/pipeline.js');
+    const { openLedger } = require('../src/ledger.js');
+    const mem = () => openLedger({ file: ':memory:' });
+    const NOW = Date.parse('2026-10-15T12:00:00.000Z');
+    const rq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's1', promptId: null, ts: NOW,
+      model: 'claude-sonnet-5-5', querySource: null, source: 'subagent', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 1000000, durationMs: 0 }, o);
+    const agent = (l, sid, aid, type) => l._db.prepare('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,NULL)').run(sid, aid, type, NOW);
+    const FABLE = 'claude-fable-5-1';
+
+    test('[4b-signals] roleMap covers the plugin agents', () => {
+      const m = pl.roleMap();
+      assert.strictEqual(m['sereno:builder-opus'], 'builder');
+      assert.strictEqual(m['sereno:red-team-lean'], 'red-team');
+      assert.strictEqual(m['sereno:scribe'], 'scribe');
+      m['x'] = 'y'; assert.strictEqual(pl.roleMap()['x'], undefined);
+    });
+
+    test('[4b-signals] inferModels from a temp agents dir: only a single-role model infers', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4bs-'));
+      const w = (n, name, model) => fs.writeFileSync(path.join(d, n), '---\nname: ' + name + '\nmodel: ' + model + '\n---\nbody text\n');
+      w('a.md', 'builder', 'm-shared'); w('b.md', 'red-team', 'm-rt'); w('c.md', 'red-team-lean', 'm-shared');
+      w('d.md', 'scribe', 'm-scribe'); w('e.md', 'unknown-agent', 'm-x'); w('f.md', 'red-team-lean', 'm-rt');
+      fs.writeFileSync(path.join(d, 'g.md'), 'no front matter\n');
+      assert.deepStrictEqual(pl.inferModels(d), { 'm-rt': 'red-team', 'm-scribe': 'scribe' });
+      assert.deepStrictEqual(pl.inferModels(path.join(d, 'missing')), {});
+      fs.rmSync(d, { recursive: true, force: true });
+    });
+
+    test('[4b-signals] inferModels on the bundled files is exactly Fable -> red-team', () => {
+      assert.deepStrictEqual(pl.inferModels(), { [FABLE]: 'red-team' });
+    });
+
+    test('[4b-signals] inferModels: a skill sharing a model with an agent removes it; an orchestration-only model is not a role', () => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4bs-'));
+      fs.mkdirSync(path.join(d, 'agents')); fs.mkdirSync(path.join(d, 'skills', 's1'), { recursive: true }); fs.mkdirSync(path.join(d, 'skills', 's2'), { recursive: true });
+      const ag = (n, name, model) => fs.writeFileSync(path.join(d, 'agents', n), '---\nname: ' + name + '\nmodel: ' + model + '\n---\n');
+      ag('a.md', 'builder', 'm-shared'); ag('b.md', 'red-team', 'm-rt');
+      fs.writeFileSync(path.join(d, 'skills', 's1', 'SKILL.md'), '---\nmodel: m-shared\n---\nbody\n');
+      fs.writeFileSync(path.join(d, 'skills', 's2', 'SKILL.md'), '---\nmodel: m-orch\n---\nbody\n');
+      assert.deepStrictEqual(pl.inferModels(path.join(d, 'agents')), { 'm-shared': 'builder', 'm-rt': 'red-team' });
+      assert.deepStrictEqual(pl.inferModels(path.join(d, 'agents'), path.join(d, 'skills')), { 'm-rt': 'red-team' });
+      fs.rmSync(d, { recursive: true, force: true });
+    });
+
+    test('[4b-signals] roleSpend: explicit join, inferred only for Fable, others unattributed, buckets, stored rows unchanged', () => {
+      const l = mem();
+      agent(l, 's1', 'ag-b', 'sereno:builder'); agent(l, 's1', 'ag-r', 'sereno:red-team'); agent(l, 's1', 'ag-x', 'general-purpose');
+      l.ingestRequests([
+        rq({ requestKey: '1', requestId: 'r1', model: 'claude-sonnet-5-5' }),                      // explicit builder (via span)
+        rq({ requestKey: '2', requestId: 'r2', model: FABLE }),                                    // explicit red-team
+        rq({ requestKey: '3', requestId: 'r3', model: FABLE, costMicros: 500000 }),                // no join, Fable -> inferred
+        rq({ requestKey: '4', requestId: 'r4', model: 'claude-sonnet-5-5', costMicros: 250000 }),  // no join, Sonnet -> unattributed
+        rq({ requestKey: '5', requestId: 'r5', model: 'claude-opus-5-5', costMicros: 250000 }),
+        rq({ requestKey: '6', requestId: 'r6', model: 'claude-haiku-4-5-20251001', costMicros: 250000 }),
+        rq({ requestKey: '7', requestId: 'r7', model: 'claude-sonnet-5-5', costMicros: 100000 }),  // joined, type not in map
+        rq({ requestKey: '8', requestId: 'r8', source: 'main', costMicros: 2000000 }),
+        rq({ requestKey: '9', requestId: 'r9', source: 'auxiliary', costMicros: 300000 }),
+        rq({ requestKey: '10', requestId: 'r10', model: FABLE, ts: NOW - 10 * 86400000, costMicros: 9000000 }), // before since
+      ]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag-b', ts: NOW }, { requestId: 'r2', sessionId: 's1', agentId: 'ag-r', ts: NOW },
+        { requestId: 'r7', sessionId: 's1', agentId: 'ag-x', ts: NOW }]);
+      const snap = () => JSON.stringify(l._db.prepare('SELECT request_id, attribution, agent_id FROM requests ORDER BY request_id').all());
+      const before = snap();
+      const r = l.roleSpend(NOW - 86400000, pl.roleMap(), { [FABLE]: 'red-team' }).roles;
+      assert.deepStrictEqual(r.builder, { costUsd: 1, explicit: 1, inferred: 0, unattributed: 0 });
+      assert.deepStrictEqual(r['red-team'], { costUsd: 1.5, explicit: 1, inferred: 0.5, unattributed: 0 });
+      assert.strictEqual(r.scribe.costUsd, 0);
+      assert.strictEqual(r.main.costUsd, 2);
+      assert.strictEqual(r.auxiliary.costUsd, 0.3);
+      assert.strictEqual(r.unattributed.costUsd, 0.85);
+      assert.strictEqual(r.unattributed.unattributed, 0.85);
+      assert.strictEqual(snap(), before);
+      assert.strictEqual(l.roleSpend(NOW - 20 * 86400000, pl.roleMap(), { [FABLE]: 'red-team' }).roles['red-team'].inferred, 9.5);
+      l.close();
+    });
+
+    test('[4b-signals] roleSpend: an agent_id in another session does not join; empty ledger is all zeros', () => {
+      const l = mem();
+      const z = l.roleSpend(0, pl.roleMap(), { [FABLE]: 'red-team' });
+      assert.deepStrictEqual(Object.keys(z.roles).sort(), ['auxiliary', 'builder', 'main', 'red-team', 'scribe', 'unattributed']);
+      for (const k of Object.keys(z.roles)) assert.deepStrictEqual(z.roles[k], { costUsd: 0, explicit: 0, inferred: 0, unattributed: 0 });
+      agent(l, 'other', 'ag1', 'sereno:builder');
+      l.ingestRequests([rq({ requestKey: '1', requestId: 'r1', sessionId: 's1' })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag1', ts: NOW }]);
+      const r = l.roleSpend(0, pl.roleMap(), { [FABLE]: 'red-team' }).roles;
+      assert.strictEqual(r.builder.costUsd, 0); assert.strictEqual(r.unattributed.costUsd, 1);
+      assert.strictEqual(l.spendForAgent('s1', 'ag1'), 1);
+      assert.strictEqual(l.spendForAgent('s1', 'nope'), 0);
+      l.close();
+    });
+
+    const G = (task, outcome, at, extra) => Object.assign({ task_id: task, outcome, reviewed_at: new Date(at).toISOString(), session_id: 's1', agent_id: 'a-' + task }, extra || {});
+    const D = 86400000;
+
+    test('[4b-signals] signals: outcome counts only inside 30 days, runs this week, gate state', () => {
+      const projects = [{ id: 'p1', tasks: [
+        { task: 'a', stage: 'ready', gates: [G('a', 'block', NOW - 2 * D), G('a', 'pass', NOW - 1 * D), G('a', 'error', NOW - 40 * D)] },
+        { task: 'b', stage: 'builder', gates: [G('b', 'needs_context', NOW - 10 * D), G('b', 'skipped', NOW - 3 * D, { reviewed_at: 'garbage' })] },
+      ] }, { id: 'p2', tasks: [] }];
+      const s = pl.signals(projects, NOW);
+      assert.deepStrictEqual(s.outcomes, { n: 3, pass: 1, block: 1, needs_context: 1, error: 0, skipped: 0 });
+      assert.strictEqual(s.runsThisWeek, 2);
+      assert.deepStrictEqual(s.projects[0], { id: 'p1', gate: { outcome: 'pass', task: 'a', ageMs: D } });
+      assert.deepStrictEqual(s.projects[1], { id: 'p2', gate: null });
+      assert.strictEqual(s.days, 30);
+    });
+
+    test('[4b-signals] signals: rework median/max with n; tasks without a pass are excluded and counted', () => {
+      const t = (task, outs) => ({ task, stage: 'x', gates: outs.map((o, i) => G(task, o, NOW - (20 - i) * D)) });
+      const s = pl.signals([{ id: 'p', tasks: [t('a', ['pass']), t('b', ['block', 'pass']), t('c', ['block', 'block', 'block', 'pass']), t('d', ['block', 'needs_context']), t('e', [])] }], NOW);
+      assert.deepStrictEqual(s.rework, { n: 3, median: 1, max: 3, excluded: 1 });
+      assert.deepStrictEqual(pl.signals([], NOW).rework, { n: 0, median: null, max: null, excluded: 0 });
+      assert.strictEqual(pl.signals(undefined, NOW).outcomes.n, 0);
+    });
+
+    test('[4b-signals] red-team $/merge: merged pass gates only, a gate without agent_id is excluded and counted, no ledger', () => {
+      const l = mem();
+      l.ingestRequests([rq({ requestKey: '1', requestId: 'r1', costMicros: 2000000 }), rq({ requestKey: '2', requestId: 'r2', costMicros: 4000000 })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a-m1', ts: NOW }, { requestId: 'r2', sessionId: 's1', agentId: 'a-m2', ts: NOW }]);
+      const projects = [{ tasks: [
+        { task: 'm1', stage: 'merged', gates: [G('m1', 'pass', NOW)] },
+        { task: 'm2', stage: 'merged', gates: [G('m2', 'pass', NOW), G('m2', 'block', NOW - D)] },
+        { task: 'm3', stage: 'merged', gates: [G('m3', 'pass', NOW, { agent_id: null })] },
+        { task: 'r1', stage: 'ready', gates: [G('r1', 'pass', NOW, { agent_id: 'a-m1' })] },
+      ] }];
+      assert.deepStrictEqual(pl.redTeamPerMerge(projects, l.spendForAgent), { mean: 3, n: 2, excluded: 1 });
+      assert.deepStrictEqual(pl.redTeamPerMerge(projects, null), { mean: null, n: 0, excluded: 3 });
+      assert.deepStrictEqual(pl.redTeamPerMerge([], l.spendForAgent), { mean: null, n: 0, excluded: 0 });
+      l.close();
+    });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

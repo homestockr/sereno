@@ -420,4 +420,174 @@ async function taskView(root, entry, cfg, git, now, opts) {
 /** True when the repo passes the guards (use before handing it to recovery.decide). @param {string} root */
 async function guard(root) { return (await guardRepo(root, nodeFs.promises)) !== null; }
 
-module.exports = { recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView };
+/* ---- Step 3: roles, signals, red-team $/merge ---- */
+
+const DAY_MS = 24 * 3600 * 1000;
+const SIGNAL_DAYS = 30;
+const WEEK_DAYS = 7;
+const ROLE_MAP = Object.freeze({
+  'sereno:builder': 'builder', 'sereno:builder-haiku': 'builder', 'sereno:builder-opus': 'builder',
+  'sereno:red-team': 'red-team', 'sereno:red-team-lean': 'red-team',
+  'sereno:scribe': 'scribe',
+});
+const AGENT_HEAD_BYTES = 4096;
+const MAX_AGENT_FILES = 50;
+const AGENTS_DIR = path.join(__dirname, '..', 'plugin', 'agents');
+const SKILLS_DIR = path.join(__dirname, '..', 'plugin', 'skills');
+
+/** agent_type -> role (a fresh copy). @returns {Record<string, string>} */
+function roleMap() { return Object.assign({}, ROLE_MAP); }
+
+/** @type {Map<string, Record<string, string>>} */
+const inferCache = new Map();
+
+/**
+ * model -> role for models that exactly one role uses, computed from the bundled agent
+ * files' `name:` and `model:` front matter and the skills' `model:` (the orchestration
+ * role: the main-thread commands run on it). A model also used by orchestration, or by
+ * two agent roles, never infers. Bounded reads, no links, cached per directory pair.
+ * Never throws; an unreadable directory contributes nothing.
+ * @param {string} [dir] defaults to the bundled plugin/agents
+ * @param {string | null} [skillsDir] defaults to the bundled plugin/skills (only with the default agents dir)
+ * @returns {Record<string, string>}
+ */
+function inferModels(dir, skillsDir) {
+  const d = dir || AGENTS_DIR;
+  const sd = skillsDir !== undefined ? skillsDir : (dir ? null : SKILLS_DIR);
+  const key = d + '|' + (sd || '');
+  const hit = inferCache.get(key);
+  if (hit) return Object.assign({}, hit);
+  /** @type {Map<string, Set<string>>} */
+  const byModel = new Map();
+  /** @param {string} file @returns {string} */
+  const head = (file) => {
+    const st = nodeFs.lstatSync(file);
+    if (st.isSymbolicLink() || !st.isFile()) return '';
+    const fd = nodeFs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(AGENT_HEAD_BYTES);
+      return buf.toString('utf8', 0, nodeFs.readSync(fd, buf, 0, AGENT_HEAD_BYTES, 0));
+    } finally { nodeFs.closeSync(fd); }
+  };
+  const addRole = (/** @type {string} */ model, /** @type {string} */ role) => {
+    let set = byModel.get(model);
+    if (!set) { set = new Set(); byModel.set(model, set); }
+    set.add(role);
+  };
+  if (sd) {
+    try {
+      for (const n of nodeFs.readdirSync(sd).sort().slice(0, MAX_AGENT_FILES)) {
+        try {
+          const lines = head(path.join(sd, n, 'SKILL.md')).replace(/^﻿/, '').split(/\r?\n/);
+          if (lines[0].trim() !== '---') continue;
+          for (let i = 1; i < lines.length && lines[i].trim() !== '---'; i++) {
+            const m = /^model:\s*(\S+)\s*$/.exec(lines[i]);
+            if (m && idStr(m[1])) { addRole(m[1], 'orchestration'); break; }
+          }
+        } catch (_) { /* skip this skill */ }
+      }
+    } catch (_) { /* no skills directory */ }
+  }
+  try {
+    const names = nodeFs.readdirSync(d).filter((n) => n.endsWith('.md')).sort().slice(0, MAX_AGENT_FILES);
+    for (const n of names) {
+      try {
+        const file = path.join(d, n);
+        const text = head(file);
+        const lines = text.replace(/^﻿/, '').split(/\r?\n/);
+        if (lines[0].trim() !== '---') continue;
+        let name = null, model = null;
+        for (let i = 1; i < lines.length && lines[i].trim() !== '---'; i++) {
+          const m = /^(name|model):\s*(\S+)\s*$/.exec(lines[i]);
+          if (m && m[1] === 'name' && name === null) name = m[2];
+          else if (m && m[1] === 'model' && model === null) model = m[2];
+        }
+        const role = name ? ROLE_MAP['sereno:' + name] : null;
+        if (!role || !model || !idStr(model)) continue;
+        addRole(model, role);
+      } catch (_) { /* skip this file */ }
+    }
+  } catch (_) { /* no directory */ }
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const [model, roles] of byModel) if (roles.size === 1 && !roles.has('orchestration')) out[model] = [...roles][0];
+  inferCache.set(key, out);
+  return Object.assign({}, out);
+}
+
+/** @param {number[]} xs sorted ascending @returns {number} */
+function median(xs) { const m = xs.length >> 1; return xs.length % 2 ? xs[m] : (xs[m - 1] + xs[m]) / 2; }
+
+/**
+ * Pipeline signals over a fixed 30 days. A project is
+ * `{ id, tasks: [{ task, stage, gates }] }` where `gates` are the reader's cleaned gate
+ * records for that task (the task view alone does not carry every run).
+ * @param {Array<{ id?: string, tasks?: Array<{ task: string, stage?: string, gates?: any[] }> }>} projects
+ * @param {number} now
+ */
+function signals(projects, now) {
+  const since = now - SIGNAL_DAYS * DAY_MS;
+  const week = now - WEEK_DAYS * DAY_MS;
+  const outcomes = { pass: 0, block: 0, needs_context: 0, error: 0, skipped: 0 };
+  /** @type {Record<string, number>} */
+  const counts = outcomes;
+  let n = 0, runsThisWeek = 0, noPass = 0;
+  /** @type {number[]} */
+  const rework = [];
+  const perProject = [];
+  for (const p of Array.isArray(projects) ? projects : []) {
+    /** @type {{ outcome: string, task: string, at: number } | null} */
+    let latest = null;
+    for (const t of (p && Array.isArray(p.tasks) ? p.tasks : [])) {
+      /** @type {Array<{ outcome: string, at: number }>} */
+      const runs = [];
+      for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+        const at = g && typeof g.reviewed_at === 'string' ? Date.parse(g.reviewed_at) : NaN;
+        if (!Number.isFinite(at) || at < since || at > now || typeof g.outcome !== 'string') continue;
+        runs.push({ outcome: g.outcome, at });
+        n++;
+        if (Object.prototype.hasOwnProperty.call(counts, g.outcome)) counts[g.outcome]++;
+        if (at >= week) runsThisWeek++;
+        if (!latest || at > latest.at) latest = { outcome: g.outcome, task: t.task, at };
+      }
+      if (!runs.length) continue;
+      runs.sort((a, b) => a.at - b.at);
+      const first = runs.findIndex((r) => r.outcome === 'pass');
+      if (first < 0) noPass++; else rework.push(first);
+    }
+    perProject.push({ id: p && typeof p.id === 'string' ? p.id : null, gate: latest ? { outcome: latest.outcome, task: latest.task, ageMs: Math.max(0, now - latest.at) } : null });
+  }
+  rework.sort((a, b) => a - b);
+  return {
+    days: SIGNAL_DAYS,
+    projects: perProject,
+    outcomes: Object.assign({ n }, outcomes),
+    rework: { n: rework.length, median: rework.length ? median(rework) : null, max: rework.length ? rework[rework.length - 1] : null, excluded: noPass },
+    runsThisWeek,
+  };
+}
+
+/**
+ * Red-team spend per merge (USD, an estimate): for each pass gate of a merged task, the
+ * ledger spend of the gate's own session and agent. Gates without a session or agent id
+ * are excluded and counted. With no ledger (spend history off) nothing is measured.
+ * @param {Array<{ tasks?: Array<{ task: string, stage?: string, gates?: any[] }> }>} projects
+ * @param {((sessionId: string, agentId: string) => number) | null | undefined} spendForAgent
+ * @returns {{ mean: number | null, n: number, excluded: number }}
+ */
+function redTeamPerMerge(projects, spendForAgent) {
+  let sum = 0, n = 0, excluded = 0;
+  for (const p of Array.isArray(projects) ? projects : []) {
+    for (const t of (p && Array.isArray(p.tasks) ? p.tasks : [])) {
+      if (t.stage !== 'merged') continue;
+      for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+        if (!g || g.outcome !== 'pass') continue;
+        if (!g.agent_id || !g.session_id || typeof spendForAgent !== 'function') { excluded++; continue; }
+        try { sum += Number(spendForAgent(g.session_id, g.agent_id)) || 0; n++; } catch (_) { excluded++; }
+      }
+    }
+  }
+  return { mean: n ? sum / n : null, n, excluded };
+}
+
+module.exports = { roleMap, inferModels, signals, redTeamPerMerge, recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView };
