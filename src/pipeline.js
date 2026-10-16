@@ -587,6 +587,8 @@ function signals(projects, now) {
   let n = 0, runsThisWeek = 0, noPass = 0;
   /** @type {number[]} */
   const rework = [];
+  /** @type {Array<{ outcome: string, at: number }>} */
+  const seq = [];
   const perProject = [];
   for (const p of Array.isArray(projects) ? projects : []) {
     /** @type {{ outcome: string, task: string, at: number } | null} */
@@ -598,6 +600,7 @@ function signals(projects, now) {
         const at = g && typeof g.reviewed_at === 'string' ? Date.parse(g.reviewed_at) : NaN;
         if (!Number.isFinite(at) || at < since || at > now || typeof g.outcome !== 'string') continue;
         runs.push({ outcome: g.outcome, at });
+        if (Object.prototype.hasOwnProperty.call(counts, g.outcome)) seq.push({ outcome: g.outcome, at });
         n++;
         if (Object.prototype.hasOwnProperty.call(counts, g.outcome)) counts[g.outcome]++;
         if (at >= week) runsThisWeek++;
@@ -615,6 +618,7 @@ function signals(projects, now) {
     days: SIGNAL_DAYS,
     projects: perProject,
     outcomes: Object.assign({ n }, outcomes),
+    seq: seq.sort((a, b) => a.at - b.at).slice(-60).map((r) => r.outcome),
     rework: { n: rework.length, median: rework.length ? median(rework) : null, max: rework.length ? rework[rework.length - 1] : null, excluded: noPass },
     runsThisWeek,
   };

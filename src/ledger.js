@@ -423,6 +423,51 @@ function openLedger(opts = {}) {
     })).sort((x, y) => y.costMicros - x.costMicros || x.ts - y.ts).slice(0, lim);
   }
 
+  /**
+   * Head figures for one window: total, request count, and the unattributed (attribution
+   * 'unknown') share by cost and by request count.
+   * @param {{ since: number, until: number }} range
+   */
+  function breakdown(range) {
+    live();
+    const r = db.prepare(`SELECT COALESCE(SUM(cost_micros),0) AS c, COUNT(*) AS n,
+      COALESCE(SUM(CASE WHEN attribution='unknown' THEN cost_micros ELSE 0 END),0) AS uc,
+      COALESCE(SUM(attribution='unknown'),0) AS un FROM requests WHERE ts >= ? AND ts < ?`).get(range.since, range.until);
+    return { costMicros: Number(r.c), requests: Number(r.n), unattributedMicros: Number(r.uc), unattributedN: Number(r.un) };
+  }
+
+  /**
+   * Token sums for one window, from stored fields only (no pricing).
+   * @param {{ since: number, until: number }} range
+   */
+  function cacheTotals(range) {
+    live();
+    const r = db.prepare(`SELECT COALESCE(SUM(cache_read_tokens),0) AS cr, COALESCE(SUM(cache_creation_tokens),0) AS cc,
+      COALESCE(SUM(input_tokens),0) AS i, COUNT(*) AS n FROM requests WHERE ts >= ? AND ts < ?`).get(range.since, range.until);
+    return { cacheReadTokens: Number(r.cr), cacheCreationTokens: Number(r.cc), inputTokens: Number(r.i), requests: Number(r.n) };
+  }
+
+  /**
+   * One project over one window: cost and request count by source and by attribution.
+   * @param {{ project: string, since: number, until: number }} o
+   */
+  function projectDetail(o) {
+    live();
+    const rows = db.prepare(`SELECT requests.source AS s, requests.attribution AS a, SUM(requests.cost_micros) AS c, COUNT(*) AS n
+      FROM requests LEFT JOIN sessions ON sessions.session_id = requests.session_id
+      WHERE requests.ts >= ? AND requests.ts < ? AND sessions.project IS ? GROUP BY s, a`).all(o.since, o.until, o.project);
+    const out = { costMicros: 0, requests: 0,
+      /** @type {Record<string, number>} */ bySource: {},
+      /** @type {Record<string, number>} */ byAttribution: {},
+      /** @type {Record<string, number>} */ byAttributionN: {} };
+    for (const r of rows) {
+      const c = Number(r.c), n = Number(r.n);
+      out.costMicros += c; out.requests += n;
+      addTo(out.bySource, r.s, c); addTo(out.byAttribution, r.a, c); addTo(out.byAttributionN, r.a, n);
+    }
+    return out;
+  }
+
   /** @param {number} nowMs */
   function today(nowMs) {
     live();
@@ -524,7 +569,7 @@ function openLedger(opts = {}) {
   }
 
   prune(retentionDays);
-  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, prune, close, _db: db };
+  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, breakdown, cacheTotals, projectDetail, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, prune, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }

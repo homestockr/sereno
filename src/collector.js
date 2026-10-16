@@ -9,8 +9,8 @@
  *   GET  /state   -> one snapshot as JSON
  *   POST /v1/logs, /v1/traces <- OTLP/JSON (only with a ledger; else 200 and drop)
  *   GET  /ledger/summary -> ledger totals
- *   GET  /api/spend/{today,series,projects,top-prompts} -> spend views (ledger only)
- *   GET  /api/projects, /api/pipeline, /api/token; POST /api/review, /api/projects/<id>/hide (guarded)
+ *   GET  /api/spend/{today,series,projects,top-prompts,overview,where,cache,project} -> spend views (ledger only)
+ *   GET  /api/projects, /api/pipeline, /api/token; POST /api/review, /api/projects/<id>/hide|pin (guarded)
  *   GET  /console[/*] -> the console pages (src/renderer/console)
  *   GET  /        -> the widget page (also works in a plain browser tab)
  *
@@ -39,8 +39,18 @@ const MAX_BODY = 1024 * 1024;
 const MAX_OTLP_BODY = 8 * 1024 * 1024;   // /v1/*: raw cap, and the gunzip output cap
 const MAX_SSE_CLIENTS = 16;
 const LIVE_ORDER = ['idle', 'thinking', 'running', 'blocked'];   // worst last
-const MAX_ACTION_BODY = 4 * 1024;   // POST /api/review, /api/projects/<id>/hide
-const HIDE_RE = /^\/api\/projects\/([A-Za-z0-9_-]{1,64})\/hide$/;
+const MAX_ACTION_BODY = 4 * 1024;   // POST /api/review, /api/projects/<id>/hide|pin
+const PROJECT_ACTION_RE = /^\/api\/projects\/([A-Za-z0-9_-]{1,64})\/(hide|pin)$/;   // both behind actionGuard
+const ACTIVE_MS = 14 * 24 * 3600 * 1000;   // a commit this recent makes a project active
+const ACTIVITY_MAX = 20;
+const NO_BLOCKER = new Set(['none', 'nothing', 'no', 'n/a', 'na', '-', String.fromCharCode(0x2014), 'nothing blocked', 'no blockers']);
+/** A Blocked line is a blocker unless it is empty or a "nothing here" answer (case-insensitive, trailing punctuation ignored). */
+function isBlocker(v) {
+  if (typeof v !== 'string') return false;
+  let s = v.trim().toLowerCase();
+  while (s.length && '.,;:!? '.includes(s[s.length - 1])) s = s.slice(0, -1);
+  return s !== '' && !NO_BLOCKER.has(s);
+}
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -121,6 +131,8 @@ function serveStatic(res, dir, rel) {
 
 const SPEND_RANGES_SERIES = ['24h', '7d', '30d'];
 const SPEND_RANGES_PERIOD = ['7d', '30d', 'month'];
+const SPEND_RANGES_CACHE = ['24h', '7d', '30d', 'month'];
+const SPEND_TOP_PROJECTS = 8;
 
 function createCollector(store, port, opts) {
   // Swappable at runtime (setLedger): the tray toggles it without a restart.
@@ -274,7 +286,7 @@ function createCollector(store, port, opts) {
   // can leak into the API by accident.
   function handleApi(req, res, url) {
     if (url === '/api/pipeline') { sendJson(res, 200, buildPipeline()); return; }
-    const m = /^\/api\/spend\/(today|series|projects|top-prompts)$/.exec(url);
+    const m = /^\/api\/spend\/(today|series|projects|top-prompts|overview|where|cache|project)$/.exec(url);
     if (!m) { res.writeHead(404, { 'content-type': 'text/plain' }).end('not found'); return; }
     if (!ledger) { sendJson(res, 200, { enabled: false }); return; }
     let sp;
@@ -302,6 +314,83 @@ function createCollector(store, port, opts) {
             key: r.key, since: spec[i].since, until: spec[i].until, costMicros: r.costMicros, requests: r.requests,
             bySource: pick(r.bySource), byAttribution: pick(r.byAttribution),
           })),
+        });
+        return;
+      }
+      if (m[1] === 'overview') {
+        const td = spendtime.dayBounds(asOf);
+        const mo = spendtime.monthStart(asOf);
+        const t = ledger.breakdown({ since: td.since, until: td.until });
+        const mt = ledger.breakdown({ since: mo, until: td.until });
+        sendJson(res, 200, {
+          enabled: true, asOf,
+          today: { day: td.day, since: td.since, until: td.until, costMicros: t.costMicros, requests: t.requests, unattributedMicros: t.unattributedMicros, unattributedN: t.unattributedN },
+          month: { since: mo, until: td.until, costMicros: mt.costMicros, requests: mt.requests, unattributedMicros: mt.unattributedMicros, unattributedN: mt.unattributedN },
+        });
+        return;
+      }
+      if (m[1] === 'cache') {
+        const range = sp.get('range') === null ? '7d' : sp.get('range');
+        if (!SPEND_RANGES_CACHE.includes(range)) return bad('range must be 24h, 7d, 30d or month');
+        const dEnd = spendtime.dayBounds(asOf).until;
+        let w;
+        if (range === '24h') { const hb = spendtime.hourBuckets(asOf); w = { since: hb[0].since, until: hb[hb.length - 1].until }; }
+        else if (range === 'month') w = { since: spendtime.monthStart(asOf), until: dEnd };
+        else w = { since: spendtime.lastNDays(range === '7d' ? 7 : 30, asOf)[0].since, until: dEnd };
+        const ct = ledger.cacheTotals(w);
+        // read share of all input-side tokens: read / (read + creation + uncached input); null when there are none
+        const denom = ct.cacheReadTokens + ct.cacheCreationTokens + ct.inputTokens;
+        sendJson(res, 200, {
+          enabled: true, asOf, range, since: w.since, until: w.until, requests: ct.requests,
+          cacheReadTokens: ct.cacheReadTokens, cacheCreationTokens: ct.cacheCreationTokens, inputTokens: ct.inputTokens,
+          cacheReadSharePct: denom > 0 ? Math.round(ct.cacheReadTokens / denom * 1000) / 10 : null,
+        });
+        return;
+      }
+      if (m[1] === 'project') {
+        const name = sp.get('name');
+        if (name === null || name === '' || name.length > 200) return bad('name is required (1-200 chars)');
+        const d = spendtime.dayBounds(asOf);
+        const since = spendtime.monthStart(asOf);
+        const days = spendtime.lastNDays(14, asOf);
+        const r = ledger.projectDetail({ project: name, since, until: d.until });
+        sendJson(res, 200, {
+          enabled: true, asOf, project: name, since, until: d.until, costMicros: r.costMicros, requests: r.requests,
+          bySource: pick(r.bySource), byAttribution: pick(r.byAttribution), byAttributionN: pick(r.byAttributionN),
+          trend: ledger.trend({ project: name, buckets: days }),
+        });
+        return;
+      }
+      if (m[1] === 'where') {
+        const range = sp.get('range') === null ? 'month' : sp.get('range');
+        if (!SPEND_RANGES_PERIOD.includes(range)) return bad('range must be 7d, 30d or month');
+        const until = spendtime.dayBounds(asOf).until;
+        const since = range === 'month' ? spendtime.monthStart(asOf) : spendtime.lastNDays(range === '7d' ? 7 : 30, asOf)[0].since;
+        const tv = sp.get('top');
+        const rawTop = tv !== null && tv.trim() !== '' && Number.isFinite(Number(tv)) ? Math.floor(Number(tv)) : SPEND_TOP_PROJECTS;
+        const top = Math.min(50, Math.max(1, rawTop));
+        const p = ledger.projects({ since, until });
+        const days = spendtime.lastNDays(14, asOf);
+        const tr = ledger.trends({ buckets: days });
+        const src = (o) => ({ main: o.main || 0, subagent: o.subagent || 0, auxiliary: o.auxiliary || 0 });
+        const shape = (r) => ({
+          project: r.project, costMicros: r.costMicros, requests: r.requests, bySource: src(r.bySource),
+          trend: (tr.get(r.project ?? null) || days.map(() => 0)).slice(),
+        });
+        const rows = p.rows.slice(0, top).map(shape);
+        const rest = p.rows.slice(top);
+        const other = { count: rest.length, costMicros: 0, requests: 0, bySource: src({}), trend: days.map(() => 0) };
+        for (const r of rest) {
+          other.costMicros += r.costMicros; other.requests += r.requests;
+          for (const k of ['main', 'subagent', 'auxiliary']) other.bySource[k] += r.bySource[k] || 0;
+          (tr.get(r.project ?? null) || []).forEach((v, i) => { other.trend[i] += v; });
+        }
+        let totalCost = other.costMicros, totalReq = other.requests;
+        for (const r of rows) { totalCost += r.costMicros; totalReq += r.requests; }
+        sendJson(res, 200, {
+          enabled: true, asOf, range, since, until, rows, other,
+          total: { costMicros: totalCost, requests: totalReq },
+          unattributed: { costMicros: p.unattributed.costMicros, requests: p.unattributed.requests },
         });
         return;
       }
@@ -407,10 +496,51 @@ function createCollector(store, port, opts) {
         liveRank = Math.max(liveRank, LIVE_ORDER.indexOf(s.state));
       }
       const b = st && st.brief;
+      // Activity: commit subjects (the one free-text field), brief times and pipeline attempt/gate times.
+      const act = [];
+      const actAt = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
+      if (st && Array.isArray(st.commits)) {
+        for (const c of st.commits.slice(0, 10)) {
+          const at = c ? actAt(c.at) : null;
+          if (at !== null) act.push({ at, kind: 'commit', subject: typeof c.subject === 'string' ? pSubject(c.subject) : null });
+        }
+      }
+      const briefAts = new Set();
+      for (const x of [b].concat(st && Array.isArray(st.branches) ? st.branches.map((y) => y && y.brief) : [])) {
+        const at = x ? briefTime(x.generatedAt) : null;
+        if (at !== null && !briefAts.has(at)) { briefAts.add(at); act.push({ at, kind: 'brief', subject: null }); }
+      }
+      const pv = st && st.pipeline && typeof st.pipeline === 'object' ? st.pipeline : null;
+      const ptasks = pv && Array.isArray(pv.tasks) ? pv.tasks : [];
+      for (const t of ptasks) {
+        if (!t || typeof t !== 'object') continue;
+        for (const a of (Array.isArray(t.attempts) ? t.attempts : [])) {
+          if (!a || typeof a !== 'object') continue;
+          const s0 = pTime(a.started_at); if (s0 !== null) act.push({ at: s0, kind: 'pipeline', subject: null, outcome: null });
+          const e0 = pTime(a.ended_at); if (e0 !== null) act.push({ at: e0, kind: 'pipeline', subject: null, outcome: pStr(a.outcome, 32) });
+        }
+        for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+          const g0 = g && typeof g === 'object' ? pTime(g.reviewed_at) : null;
+          if (g0 !== null) act.push({ at: g0, kind: 'pipeline', subject: null, outcome: pStr(g.outcome, 32) });
+        }
+      }
+      act.sort((x, y) => y.at - x.at);
+      const activity = act.slice(0, ACTIVITY_MAX);
+      const commitAt = st ? num(st.lastCommitAt) : null;
+      const active = liveIds.length > 0
+        || (commitAt !== null && asOf - commitAt < ACTIVE_MS)
+        || ptasks.some((t) => t && t.expired !== true && t.stage !== 'merged' && t.stage !== 'stopped');
+      const blockers = !!(b && isBlocker(b.blocked));
+      const lastAct = last;
       return {
         id: p.id,
         name: p.name,
         hidden: p.hidden === true,
+        pinned: p.pinned === true,
+        active,
+        lastActivityAt: lastAct,
+        blockers,
+        activity,
         freshness: st && typeof st.freshness === 'string' ? st.freshness : 'none',
         brief: b ? { now: b.now ?? null, next: b.next ?? null, blocked: b.blocked ?? null, generatedAt: b.generatedAt ?? null, behindSince: st ? num(st.behindSince) : null } : null,
         git: {
@@ -431,7 +561,18 @@ function createCollector(store, port, opts) {
         briefsMalformed: st ? (num(st.briefsMalformed) || 0) : 0,
       };
     });
-    return { asOf, projects: out };
+    // Header counts cover visible projects only. Decisions are the pipeline alerts' open ones.
+    const shown = out.filter((x) => !x.hidden);
+    let decisions = 0;
+    try { decisions = pipelineAlerts ? pipelineAlerts.open().length : 0; } catch (_) { decisions = 0; }
+    const counts = {
+      total: shown.length,
+      active: shown.filter((x) => x.active).length,
+      withBlockers: shown.filter((x) => x.blockers).length,
+      stale: shown.filter((x) => x.freshness === 'stale').length,
+      decisions,
+    };
+    return { asOf, counts, projects: out };
   }
 
   /*
@@ -473,6 +614,16 @@ function createCollector(store, port, opts) {
     } catch (_) { return null; }
     return any ? sum : null;
   }
+  /** A commit subject for the wire: control and bidi characters dropped (by code point), capped at 120. */
+  const pSubject = (v) => {
+    let o = '';
+    for (const ch of String(v)) {
+      const c = /** @type {number} */ (ch.codePointAt(0));
+      if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069)) continue;
+      o += ch;
+    }
+    return o.trim().slice(0, 120);
+  };
   const pTime = (v) => { const n = typeof v === 'string' ? Date.parse(v) : NaN; return Number.isFinite(n) ? n : null; };
   function pipeAttempts(t) {
     return (Array.isArray(t.attempts) ? t.attempts : []).slice(0, 10).map((a) => {
@@ -562,6 +713,7 @@ function createCollector(store, port, opts) {
       days: sg.days,
       projects: sg.projects.map((x) => ({ id: x.id, gate: x.gate ? { outcome: pStr(x.gate.outcome, 32), task: pStr(x.gate.task, 128), ageMs: pNum(x.gate.ageMs) } : null })),
       outcomes: { n: sg.outcomes.n, pass: sg.outcomes.pass, block: sg.outcomes.block, needs_context: sg.outcomes.needs_context, error: sg.outcomes.error, skipped: sg.outcomes.skipped },
+      seq: Array.isArray(sg.seq) ? sg.seq.slice(-60).map((k) => pStr(k, 32)) : [],
       rework: { n: sg.rework.n, median: sg.rework.median, max: sg.rework.max, excluded: sg.rework.excluded },
       runsThisWeek: sg.runsThisWeek,
     };
@@ -621,7 +773,7 @@ function createCollector(store, port, opts) {
       let body;
       try { body = JSON.parse(buf.toString('utf8')); } catch (_) { return bad(); }
       const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : null;
-      const hideM = HIDE_RE.exec(url);
+      const hideM = PROJECT_ACTION_RE.exec(url);
       try {
         if (!hideM) {   // review: the only input is a session id; the pid is the store's, never the request's
           if (!keys || keys.length !== 1 || keys[0] !== 'sessionId' || typeof body.sessionId !== 'string'
@@ -635,12 +787,15 @@ function createCollector(store, port, opts) {
           );
           return;
         }
-        if (!keys || keys.length !== 1 || keys[0] !== 'hidden' || typeof body.hidden !== 'boolean') return bad();
+        const field = hideM[2] === 'pin' ? 'pinned' : 'hidden';
+        if (!keys || keys.length !== 1 || keys[0] !== field || typeof body[field] !== 'boolean') return bad();
         if (!projects) return plain(404, 'not found');
-        const ok = body.hidden ? projects.hide(hideM[1]) : projects.unhide(hideM[1]);
+        const ok = field === 'pinned'
+          ? (body.pinned ? projects.pin(hideM[1]) : projects.unpin(hideM[1]))
+          : (body.hidden ? projects.hide(hideM[1]) : projects.unhide(hideM[1]));
         if (!ok) return plain(404, 'not found');
         res.writeHead(204).end();
-        if (repos && typeof repos.refresh === 'function') { try { Promise.resolve(repos.refresh()).catch(() => {}); } catch (_) {} }
+        if (field === 'hidden' && repos && typeof repos.refresh === 'function') { try { Promise.resolve(repos.refresh()).catch(() => {}); } catch (_) {} }
       } catch (_) {
         try { if (!res.headersSent) plain(500, 'internal error'); } catch (_e) {}
       }
@@ -769,7 +924,7 @@ function createCollector(store, port, opts) {
     // --- console actions ----------------------------------------------
     if (req.method === 'GET' && url === '/api/token') { sendJson(res, 200, { token }); return; }
     if (req.method === 'GET' && url === '/api/projects') { sendJson(res, 200, buildProjects()); return; }
-    if (req.method === 'POST' && (url === '/api/review' || HIDE_RE.test(url))) { handleAction(req, res, url); return; }
+    if (req.method === 'POST' && (url === '/api/review' || PROJECT_ACTION_RE.test(url))) { handleAction(req, res, url); return; }
 
     // --- spend API ----------------------------------------------------
     if (req.method === 'GET' && url.startsWith('/api/')) {

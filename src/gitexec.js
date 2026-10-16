@@ -41,6 +41,7 @@
  *                rev-list --left-right --count A...B@{upstream}  plumbing, counts only
  *                config --get-regexp ^filter.*             reads config, executes nothing
  *                config --get remote.origin.url            reads config, executes nothing
+ *                log -n 10 --format=%ct%x09%s refs/heads/<default>   subjects and times only, no signature display
  *                status --porcelain --ignore-submodules=all  needed for dirty; fsmonitor,
  *                  hooks, untracked cache off, filter drivers blanked per call, no optional locks
  *   briefs.js    cat-file -e <sha>^{commit}                plumbing, existence only

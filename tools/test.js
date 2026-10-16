@@ -3853,7 +3853,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
     const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
     const names = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry',
-      'summaryLine', 'attributionSplit', 'formatTime', 'projectLabel', 'syncLabel', 'sparkPoints', 'pageState', 'noSpendYet'];
+      'attributionSplit', 'formatTime', 'projectLabel', 'syncLabel', 'sparkPoints', 'pageState', 'noSpendYet'];
     const lifted = (src) => names.filter((n) => new RegExp('function ' + n + '\\(').test(src))
       .map((n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
     const C = new Function(lifted(cjs).join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
@@ -3910,16 +3910,6 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const s of z[0].segs) for (const k of ['x', 'y', 'w', 'h']) assert.ok(Number.isFinite(s[k]), k);
     });
 
-    test('summaryLine: exact string with est. and n', () => {
-      const today = { costMicros: 27400000 };
-      const projects = { rows: [{ costMicros: 300e6 }, { costMicros: 112e6 }], unattributed: { costMicros: 24720000, requests: 742 } };
-      assert.strictEqual(C.summaryLine(today, projects),
-        '$27.40 est. today · $412.00 est. this month · 6% unattributed (n=742)');
-      assert.strictEqual(C.summaryLine({ costMicros: 0 }, { rows: [], unattributed: { costMicros: 0, requests: 0 } }),
-        '$0.00 est. today · $0.00 est. this month · 0% unattributed (n=0)');
-      assert.match(C.summaryLine(null, null), /est\. today · .* est\. this month/);
-    });
-
     test('attributionSplit sums to 100 and carries n', () => {
       const s = C.attributionSplit({ explicit: 1, unknown: 1 }, 3);
       assert.strictEqual(s.explicitPct + s.unattributedPct, 100);
@@ -3950,7 +3940,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     test('console.js: no prompt text, one innerHTML write, est. labels, empty-state copy', () => {
-      assert.ok(!/\.prompt\b|\['prompt|prompt_text|promptText|\.text\b|\.body\.text/.test(cjs));
+      assert.ok(!/\.prompt\b|\['prompt|prompt_text|promptText|\.text\b|\.body\.text|\{\s*text\s*[:,}]/.test(cjs));
       assert.strictEqual((cjs.match(/\.innerHTML\s*=/g) || []).length, 1);
       assert.match(cjs, /function setHtml\(el, html\) \{ el\.innerHTML = html; \}/);
       assert.match(cjs, /Prompt text is never stored/);
@@ -3960,11 +3950,10 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(cjs, /Wire telemetry/);
       assert.match(cjs, /No spend in this range/);
       assert.match(cjs, /Spend history is unavailable right now/);
-      assert.match(cjs, /No subagent could be confirmed for these requests\./);
       assert.ok(!/first tool/i.test(cjs));
       assert.match(cjs, /location\.host \+ '\/console'/);
       // API strings that reach markup are escaped
-      for (const f of ['esc(projectLabel(r.project))', 'esc(r.sessionShort)', "esc((r.models || []).join(', '))", 'esc(formatTime(r.ts))']) {
+      for (const f of ['esc(projectLabel(r.project))', 'esc(r.sessionShort)', "esc(ids.join(', '))", 'esc(formatTime(r.ts))']) {
         assert.ok(cjs.includes(f), f);
       }
     });
@@ -4091,9 +4080,9 @@ test('missing rate_limits degrades instead of throwing', () => {
     const cdir = path.join(ROOT, 'src', 'renderer', 'console');
     const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
     const names = ['estMoney', 'esc', 'sparkPoints', 'projectLabel', 'pillText', 'attentionState', 'waitLabel', 'ringIcon', 'pillHtml',
-      'waitWhat', 'reviewControl', 'attentionHtml', 'parseRoute', 'initialRoute', 'relTime', 'staleDaysOf', 'freshnessChip', 'hasBlocker',
-      'topSessions', 'isActive', 'visibleProjects', 'filterCounts', 'selectProjects', 'projectsSummary', 'gitLine', 'sparkSvg',
-      'isLiveSession', 'liveState', 'liveShape', 'branchRows', 'cardHtml', 'liveStrip', 'hiddenSection', 'filterBar', 'projectsBody', 'actionRequest', 'reviewRequest'];
+      'waitWhat', 'reviewControl', 'attentionHtml', 'parseRoute', 'initialRoute', 'relTime', 'staleDaysOf', 'freshnessChip',
+      'topSessions', 'visibleProjects', 'gitLine', 'sparkSvg',
+      'isLiveSession', 'liveState', 'liveShape', 'actionRequest', 'reviewRequest'];
     const lifted = names.map((n) => cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
     const P = new Function(lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -4120,37 +4109,6 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(cjs, /try \{ localStorage\.setItem\('sereno\.console\.tab', r\)/);
     });
 
-    test('projectsSummary: counts and the decision clause', () => {
-      const ps = [mk({}), mk({ id: 'b', brief: { now: 'a', next: 'b', blocked: 'Production key' } }),
-        mk({ id: 'c', freshness: 'stale', brief: { now: 'a', next: 'b', blocked: 'none' } }),
-        mk({ id: 'd', hidden: true, freshness: 'stale', brief: { blocked: 'x' } }), mk({ id: 'e', brief: null, freshness: 'none' })];
-      assert.strictEqual(P.projectsSummary(ps, 0), '4 projects · 1 with blockers · 1 stale · nothing needs a decision');
-      assert.match(P.projectsSummary(ps, 1), /· 1 session needs you$/);
-      assert.match(P.projectsSummary(ps, 3), /· 3 sessions need you$/);
-      assert.match(P.projectsSummary([], 0), /^0 projects · 0 with blockers/);
-      assert.strictEqual(P.hasBlocker({ brief: { blocked: '' } }), false);
-      assert.strictEqual(P.hasBlocker({ brief: null }), false);
-      assert.strictEqual(P.hasBlocker({ brief: { blocked: 'None.' } }), false);
-    });
-
-    test('filterCounts / isActive / selectProjects: live session or commit in 24h, sorted by activity, hidden excluded', () => {
-      const a = mk({ id: 'a', name: 'alpha', git: { lastCommitAt: NOW - 3 * DAY }, lastActivity: NOW - 3 * DAY });
-      const b = mk({ id: 'b', name: 'beta', git: { lastCommitAt: NOW - 2 * 3600000 }, lastActivity: NOW - 2 * 3600000 });
-      const c = mk({ id: 'c', name: 'gamma', git: { lastCommitAt: null }, lastActivity: null });
-      const h = mk({ id: 'h', name: 'hid', hidden: true });
-      const live = [{ projectName: 'gamma', state: 'running' }, { projectName: 'alpha', state: 'idle' }];
-      assert.strictEqual(P.isActive(a, [], NOW), false);
-      assert.strictEqual(P.isActive(a, live, NOW), false, 'an idle session alone does not make a project active');
-      assert.strictEqual(P.isActive(a, [{ projectName: 'alpha', state: 'running', stale: true }], NOW), false);
-      for (const st of ['running', 'thinking', 'blocked']) assert.strictEqual(P.isActive(a, [{ projectName: 'alpha', state: st }], NOW), true, st);
-      assert.strictEqual(P.isActive(b, [], NOW), true);
-      assert.strictEqual(P.isActive(c, live, NOW), true);
-      assert.deepStrictEqual(P.filterCounts([a, b, c, h], live, NOW), { all: 3, active: 2, quiet: 1 });
-      assert.deepStrictEqual(P.selectProjects([a, b, c, h], 'all', live, NOW).map((p) => p.id), ['b', 'a', 'c']);
-      assert.deepStrictEqual(P.selectProjects([a, b, c, h], 'active', live, NOW).map((p) => p.id), ['b', 'c']);
-      assert.deepStrictEqual(P.selectProjects([a, b, c, h], 'quiet', live, NOW).map((p) => p.id), ['a']);
-    });
-
     test('liveState: best non-stale top-level session; shapes per state', () => {
       const a = mk({});
       const S = (state, o) => Object.assign({ projectName: 'alpha', state }, o);
@@ -4165,7 +4123,6 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(P.liveShape('running'), /pshape-live/);
       assert.match(P.liveShape('thinking'), /stroke-dasharray/);
       for (const q of ['idle', null]) assert.ok(!/pshape-live|pshape-need|dasharray/.test(P.liveShape(q)));
-      assert.match(P.cardHtml(a, { now: NOW, state: 'blocked' }), /pshape-need/);
     });
 
     test('freshnessChip: one shape per state, stale wording from the mockup', () => {
@@ -4196,105 +4153,6 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(P.relTime(NOW - 5 * 3600000, NOW), '5 hours ago');
       assert.strictEqual(P.relTime(null, NOW), '');
       assert.ok(!/NaN/.test(P.gitLine({ defaultBranch: 'main', ahead: NaN, behind: 1, lastCommitAt: NaN }, undefined, NOW)));
-    });
-
-    test('cardHtml: escapes the project name and brief lines, no style attribute', () => {
-      const html = P.cardHtml(mk({
-        name: evil, id: evil,
-        brief: { now: evil, next: '<b>x</b>', blocked: '"q" & <i>', generatedAt: NOW },
-        branches: [{ name: evil, freshness: 'fresh', now: evil }],
-      }), { now: NOW, state: 'running' });
-      assert.ok(!html.includes('<img'), html);
-      assert.ok(!html.includes('<b>') && !html.includes('<i>'));
-      assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'));
-      assert.ok(!/style=/.test(html));
-      assert.match(html, /<span class="k">Now<\/span>/);
-      assert.match(html, /Hide project/);
-      assert.match(html, /14-day spend/);
-      assert.match(html, /\$68\.20 est\./);
-      assert.ok(/pshape-live/.test(html));
-      assert.ok(!/pshape-live/.test(P.cardHtml(mk({}), { now: NOW, state: 'idle' })));
-    });
-
-    test('cardHtml: spend via estMoney, column omitted when spend14 is null, dirty marker, no-brief copy', () => {
-      const plain = P.cardHtml(mk({ spend14: null, git: { defaultBranch: 'main', ahead: 0, behind: 0, dirty: true, lastCommitAt: NOW - MIN } }), { now: NOW });
-      assert.ok(!/14-day spend|est\./.test(plain));
-      assert.match(plain, /class="dirty"/);
-      assert.ok(!/class="dirty"/.test(P.cardHtml(mk({}), { now: NOW })));
-      const nb = P.cardHtml(mk({ brief: null, freshness: 'none' }), { now: NOW });
-      assert.match(nb, /No brief yet — run \/brief in a session/);
-      assert.match(nb, /chip-none/);
-      assert.ok(!/class="kv"/.test(nb));
-      assert.match(P.cardHtml(mk({ brief: null, freshness: 'unknown' }), { now: NOW }), /Brief source not found/);
-      const stale = P.cardHtml(mk({ freshness: 'stale', brief: { now: 'a', next: 'b', blocked: 'c', generatedAt: NOW, behindSince: NOW - 9 * DAY - MIN } }), { now: NOW });
-      assert.match(stale, /chip-stale">Brief is 9 days behind</);
-      const beh = P.cardHtml(mk({ freshness: 'behind', brief: { now: 'a', next: 'b', blocked: 'c', generatedAt: NOW - 30 * DAY, behindSince: NOW - 2 * 3600000 } }), { now: NOW });
-      assert.match(beh, /chip-behind">behind</);
-      assert.ok(!/days? behind/.test(beh), 'wording counts from behindSince, not generatedAt');
-      assert.match(cjs, /esc\(estMoney\(p\.spend14\.costMicros\)\)/);
-    });
-
-    test('cardHtml: git error is a quiet line, never amber; calm markup has no amber class', () => {
-      const err = P.cardHtml(mk({ error: true }), { now: NOW });
-      assert.match(err, /Git status unavailable/);
-      assert.ok(!/open PR|Last commit/.test(err));
-      const calm = P.projectsBody([mk({}), mk({ id: 'z', name: 'zed', error: true, freshness: 'none', brief: null })],
-        [{ projectName: 'alpha', state: 'idle', stateSince: NOW - MIN }], 'all', false, NOW);
-      for (const m of [err, calm]) assert.ok(!/amber|pill-amber|attn-amber/i.test(m), m);
-    });
-
-    test('branchRows: chip and brief now, or "No brief"', () => {
-      const h = P.branchRows([{ name: 'feat/a', freshness: 'behind', now: 'Sync queue' }, { name: 'feat/b', freshness: 'none', now: null },
-        { name: 'feat/c', freshness: 'stale', now: 'Last known' }]);
-      assert.match(h, /↳ feat\/a/);
-      assert.match(h, /chip-behind">behind</);
-      assert.match(h, /Sync queue/);
-      assert.match(h, /quiet-text">No brief</);
-      assert.match(h, /chip-stale">stale</);
-      const d = P.branchRows([{ name: 'main', freshness: 'fresh', now: 'dup' }, { name: 'feat/s', freshness: 'stale', now: 'x', behindSince: NOW - 4 * DAY - MIN }], 'main', NOW);
-      assert.ok(!/main|dup/.test(d), 'the default branch is not a branch row');
-      assert.match(d, /chip-stale">Brief is 4 days behind</);
-      assert.ok(!/\u21b3 main/.test(P.cardHtml(mk({ branches: [{ name: 'main', freshness: 'fresh', now: 'dup' }] }), { now: NOW })));
-      assert.strictEqual(P.branchRows(null), '');
-      assert.strictEqual(P.branchRows([]), '');
-      assert.ok(!/<img/.test(P.branchRows([{ name: evil, freshness: 'fresh', now: evil }])));
-    });
-
-    test('liveStrip: project / state with relative time; omitted when none', () => {
-      const h = P.liveStrip([{ projectName: 'alpha', state: 'running', stateSince: NOW - 8 * MIN }, { projectName: evil, state: 'blocked', stateSince: null }], NOW);
-      assert.match(h, /LIVE SESSIONS/);
-      assert.match(h, /alpha \/ running/);
-      assert.match(h, /8 min ago/);
-      assert.ok(!h.includes('<img') && !/style=/.test(h));
-      assert.ok(h.indexOf('alpha') < h.indexOf('&lt;img'), 'newest first');
-      const mkS = (i, o) => Object.assign({ projectName: 'p' + i, state: 'running', stateSince: NOW - i * MIN }, o);
-      const nine = [0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => mkS(i));
-      const capped = P.liveStrip(nine, NOW);
-      assert.strictEqual((capped.match(/class="live-item"/g) || []).length, 6);
-      assert.match(capped, /\+3 more/);
-      assert.ok(!/p6 \//.test(capped));
-      assert.ok(!/more/.test(P.liveStrip(nine.slice(0, 6), NOW)));
-      assert.strictEqual(P.liveStrip([mkS(1, { state: 'idle' }), mkS(2, { stale: true }), mkS(3, { agent_id: 'a' })], NOW), '', 'idle, stale and subagent rows are omitted');
-      assert.match(P.liveStrip([mkS(1, { state: 'thinking' }), mkS(2, { state: 'idle' })], NOW), /p1 \/ thinking/);
-      assert.ok(!/p2/.test(P.liveStrip([mkS(1, { state: 'thinking' }), mkS(2, { state: 'idle' })], NOW)));
-      assert.strictEqual(P.liveStrip([], NOW), '');
-      assert.strictEqual(P.liveStrip(null, NOW), '');
-      assert.ok(!/LIVE SESSIONS/.test(P.projectsBody([mk({})], [], 'all', false, NOW)));
-    });
-
-    test('projectsBody: empty state, filters, hidden toggle with Unhide', () => {
-      assert.match(P.projectsBody([], [], 'all', false, NOW), /Projects appear when a Claude Code session runs in a git repo\./);
-      const ps = [mk({}), mk({ id: 'h1', name: 'secret', hidden: true })];
-      const closed = P.projectsBody(ps, [], 'all', false, NOW);
-      assert.match(closed, /1 hidden · show/);
-      assert.ok(!/Unhide|secret/.test(closed));
-      const open = P.projectsBody(ps, [], 'all', true, NOW);
-      assert.match(open, /1 hidden · hide/);
-      assert.match(open, /data-act="unhide" data-id="h1">Unhide</);
-      assert.match(open, /All 1/);
-      assert.match(open, /Active 1/);
-      assert.match(open, /Quiet 0/);
-      assert.ok(!/hidden/.test(P.projectsBody([mk({})], [], 'all', false, NOW).replace(/aria-hidden/g, '')));
     });
 
     test('attention panel: Review in terminal only when amber, with a session id and opts.review', () => {
@@ -4419,13 +4277,18 @@ test('missing rate_limits degrades instead of throwing', () => {
     const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
     const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
     const W = new Function(['estMoney', 'spendMode'].map((n) => lf(appSrc, n)).join('\n') + '\nreturn { estMoney, spendMode };')();
-    const CN = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry', 'summaryLine',
-      'attributionSplit', 'formatTime', 'projectLabel', 'sparkPoints', 'sw', 'dayLabel', 'chartSvg', 'legendHtml', 'chartTitle',
-      'chartSection', 'projectsSection', 'promptsSection'];
-    const mkCon = (state) => new Function('state', "const RANGES = ['24h', '7d', '30d'];\n"
+    const CN = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry',
+      'attributionSplit', 'formatTime', 'projectLabel', 'sparkPoints', 'sparkSvg', 'sw', 'dayLabel', 'chartSvg', 'legendHtml', 'chartTitle',
+      'chartBlock', 'modelName', 'pillText', 'ringIcon', 'pillHtml', 'nz', 'spendHash', 'spendRows', 'wherePreview', 'modelsHtml', 'fmtTokens', 'mixBar',
+      'spendHeaderHtml', 'spendTabsHtml', 'wherePreviewHtml', 'turnsTableHtml', 'projectsTableHtml', 'cacheCardHtml', 'spendCacheHtml',
+      'spendSideHtml', 'spendPageHtml'];
+    const mkCon = () => new Function("const RANGES = ['24h', '7d', '30d'];\n"
       + "const SRC_LABEL = { main: 'Main', subagent: 'Subagent', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };\n"
       + "const ATTR_LABEL = { explicit: 'Explicit', unknown: 'Unattributed', mixed: 'Mixed' };\n"
-      + CN.map((n) => lf(conSrc, n)).join('\n') + '\nreturn { ' + CN.join(', ') + ' };')(state);
+      + "const SPEND_SUBS = ['overview', 'projects', 'turns', 'cache'];\n"
+      + "const SPEND_SUB_LABEL = { overview: 'Overview', projects: 'Projects', turns: 'Turns', cache: 'Cache' };\n"
+      + "const CACHE_WINDOWS = [['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];\n"
+      + CN.map((n) => lf(conSrc, n)).join('\n') + '\nreturn { ' + CN.join(', ') + ' };')();
     const WN = ['estMoney', 'esc', 'largestRemainder', 'sourceSegments', 'barAriaLabel', 'cumulativePoints', 'segmentWidths',
       'nowPosition', 'nowMarkerX', 'spendHtml'];
     const widget = new Function('const SPEND_W = 324, SPEND_H = 30, SPEND_TOP = 12;\n'
@@ -4500,12 +4363,13 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual((await postLogs(8802, fixtureAt((i) => T0 - (i + 1) * 60000))).status, 200);
         const st = await jsonX(8802, '/state');
         const today = await jsonX(8802, '/api/spend/today');
-        const projects = await jsonX(8802, '/api/spend/projects');
+        const ov = await jsonX(8802, '/api/spend/overview');
         assert.ok(today.costMicros > 0, 'fixture should produce spend');
         assert.strictEqual(st.spend.todayMicros, today.costMicros);
-        const CN1 = mkCon({});
-        const line = CN1.summaryLine(today, projects);
-        assert.ok(line.startsWith(CN1.estMoney(st.spend.todayMicros) + ' today'), line);
+        assert.strictEqual(ov.today.costMicros, today.costMicros);
+        const CN1 = mkCon();
+        const head = CN1.spendHeaderHtml(ov, 0);
+        assert.ok(head.includes('<dt>Today</dt><dd class="num">' + CN1.estMoney(st.spend.todayMicros) + '</dd>'), head);
         assert.strictEqual(CN1.estMoney(st.spend.todayMicros), W.estMoney(st.spend.todayMicros));
         assert.ok(widget.spendHtml(st.spend, null).includes(W.estMoney(today.costMicros)));
       } finally { await halt(c); l.close(); fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
@@ -4602,19 +4466,19 @@ test('missing rate_limits degrades instead of throwing', () => {
         await postLogs(8807, fixtureAt((i) => T0 - (i + 1) * 60000));
         const st = await jsonX(8807, '/state');
         const h24 = await jsonX(8807, '/api/spend/series?range=24h');
-        const state = { range: '7d', series: await jsonX(8807, '/api/spend/series?range=7d'),
-          today: await jsonX(8807, '/api/spend/today'), projects: await jsonX(8807, '/api/spend/projects'),
-          top: await jsonX(8807, '/api/spend/top-prompts') };
-        const CN6 = mkCon(state);
+        const series7 = await jsonX(8807, '/api/spend/series?range=7d');
+        const today6 = await jsonX(8807, '/api/spend/today');
+        const pd = { ov: await jsonX(8807, '/api/spend/overview'), series: series7, where: await jsonX(8807, '/api/spend/where'),
+          top: await jsonX(8807, '/api/spend/top-prompts'),
+          caches: { '24h': await jsonX(8807, '/api/spend/cache?range=24h'), '7d': await jsonX(8807, '/api/spend/cache?range=7d'), '30d': await jsonX(8807, '/api/spend/cache?range=30d') } };
+        const CN6 = mkCon();
         const markups = {
           widget: widget.spendHtml(st.spend, h24),
-          'console summary': CN6.summaryLine(state.today, state.projects),
-          'console sidebar': CN6.estMoney(state.today.costMicros) + ' today',
-          'console chart 7d': CN6.chartSvg(state.series, 640),
+          'console sidebar': CN6.estMoney(today6.costMicros) + ' today',
+          'console chart 7d': CN6.chartSvg(series7, 640),
           'console chart 24h': CN6.chartSvg(h24, 640),
-          'console projects': CN6.projectsSection(),
-          'console prompts': CN6.promptsSection(),
         };
+        for (const sub of ['overview', 'projects', 'turns', 'cache']) markups['console ' + sub] = CN6.spendPageHtml(pd, { sub, sel: null, range: '7d', q: '', pill: 0 });
         // The one exception: y-axis tick labels are bare dollar amounts ("$10") inside <text ... text-anchor="end">
         // elements in the chart svg; the chart caption says "USD · estimated" and tooltips carry est. figures.
         const TICK = /<text [^>]*text-anchor="end">\$[0-9][0-9.]*<\/text>/g;
@@ -5014,7 +4878,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         reg.register(mk());
         const saved = JSON.parse(fs.readFileSync(f, 'utf8'));
         assert.strictEqual(saved.projects.length, 1);
-        assert.deepStrictEqual(Object.keys(saved.projects[0]).sort(), ['firstSeen', 'hidden', 'id', 'name', 'repoPath']);
+        assert.deepStrictEqual(Object.keys(saved.projects[0]).sort(), ['firstSeen', 'hidden', 'id', 'name', 'pinned', 'repoPath']);
         assert.ok(!fs.existsSync(f + '.tmp'));
       });
     });
@@ -5685,7 +5549,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
     const getJson = async (port, p) => JSON.parse((await rq(port, { path: p })).text);
 
-    const PROJECT_KEYS = ['id', 'name', 'hidden', 'freshness', 'brief', 'git', 'prs', 'branches', 'spend14', 'lastActivity', 'live', 'error', 'briefsMalformed'];
+    const PROJECT_KEYS = ['id', 'name', 'hidden', 'pinned', 'active', 'lastActivityAt', 'blockers', 'activity', 'freshness', 'brief', 'git', 'prs', 'branches', 'spend14', 'lastActivity', 'live', 'error', 'briefsMalformed'];
     const FORBIDDEN_KEYS = new Set(['repoPath', 'worktree', 'worktrees', 'worktreePath', 'cwd', 'path', 'head', 'sourceCommit', 'file', 'message']);
     const walk = (o, where, cb) => {
       if (Array.isArray(o)) { o.forEach((x, i) => walk(x, where + '[' + i + ']', cb)); return; }
@@ -5711,7 +5575,8 @@ test('missing rate_limits degrades instead of throwing', () => {
         PORT = c.port;
         try {
           const r = await getJson(PORT, '/api/projects');
-          assert.deepStrictEqual(Object.keys(r).sort(), ['asOf', 'projects']);
+          assert.deepStrictEqual(Object.keys(r).sort(), ['asOf', 'counts', 'projects']);
+          assert.deepStrictEqual(Object.keys(r.counts).sort(), ['active', 'decisions', 'stale', 'total', 'withBlockers']);
           assert.strictEqual(typeof r.asOf, 'number');
           assert.strictEqual(r.projects.length, 2, 'hidden projects are included, flagged');
           const p = r.projects.find((x) => !x.hidden);
@@ -5734,8 +5599,11 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(h.freshness, 'none');
           assert.strictEqual(h.brief, null);
           // exit 6: no path, hash, commit message anywhere in the body
+          // the commit subject is allowed in activity[].subject and nowhere else
+          const strip = (o) => JSON.stringify(o, (k, v) => (k === 'activity' ? undefined : v));
+          assert.ok(!/secret commit message/.test(strip(r)), 'commit subject outside activity');
+          assert.ok(p.activity.some((a) => a.kind === 'commit' && a.subject === 'secret commit message'));
           const body = JSON.stringify(r);
-          assert.ok(!/secret commit message/.test(body));
           assert.ok(!body.includes(sha), 'no commit hash');
           walk(r, '$', (k, v, where) => {
             assert.ok(!FORBIDDEN_KEYS.has(k), 'forbidden key ' + where);
@@ -5928,6 +5796,347 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(/ipcMain\.handle\('sereno:focus', \(_e, pid\) => raiseTerminal\(pid\)\)/.test(main));
       assert.ok(/createRegistry\(\)/.test(serve) && /projects: registry, repos: poller/.test(serve) && /poller\.start\(\)/.test(serve) && /poller\.stop\(\)/.test(serve));
       assert.ok(!/onReview/.test(serve.replace(/\/\/.*$/gm, '')), 'serve passes no onReview');
+    });
+
+    // ---- alpha.6 N1: Projects API (pinned, active, activity, blockers, counts) ----
+    const day = 24 * 3600 * 1000;
+    const isoAt = (ms) => new Date(ms).toISOString();
+    const gitAt = (cwd, at, ...args) => execFileSync('git', args, { cwd, env: Object.assign({}, baseEnv, { GIT_AUTHOR_DATE: isoAt(at), GIT_COMMITTER_DATE: isoAt(at) }), stdio: 'pipe', windowsHide: true }).toString();
+    const stubEntry = (id, repoPath, extra) => Object.assign({ id, name: id, repoPath, hidden: false, pinned: false, firstSeen: 0 }, extra || {});
+    const stubState = (extra) => Object.assign({ id: 'x', worktrees: [], branches: [], error: false, freshness: 'none', brief: null, lastCommitAt: null, commits: [], pipeline: null }, extra || {});
+    const bootStub = async (clock, entries, snap, opts) => boot(opts && opts.store ? opts.store : new Store(), 0,
+      Object.assign({ now: () => clock, projects: { list: () => entries, noteCwd: () => Promise.resolve() }, repos: { snapshot: () => snap } }, (opts && opts.extra) || {}));
+    const listFiles = (dir) => {
+      const out = [];
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const f = path.join(dir, e.name);
+        if (e.isDirectory()) out.push(...listFiles(f)); else out.push(f);
+      }
+      return out;
+    };
+    // True when s holds a C0/C1 control or a bidi control (checked by code point, so no raw bytes live in this file).
+    const hasUnsafe = (s) => {
+      for (const ch of String(s)) {
+        const c = ch.codePointAt(0);
+        if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069)) return true;
+      }
+      return false;
+    };
+    const CH = (n) => String.fromCharCode(n);
+
+    await atest('[alpha6-projects-api] pin and unpin persist; old files read as unpinned; a corrupt file reloads empty and untouched', async () => {
+      await withHome(async (home) => {
+        const reg = projects.createRegistry();
+        const p = reg.register(mk());
+        assert.strictEqual(reg.list()[0].pinned, false, 'default is unpinned');
+        assert.strictEqual(reg.pin(p.id), true);
+        assert.strictEqual(projects.createRegistry().list()[0].pinned, true, 'survives a reload');
+        assert.strictEqual(JSON.parse(fs.readFileSync(path.join(home, 'projects.json'), 'utf8')).projects[0].pinned, true);
+        assert.strictEqual(reg.unpin(p.id), true);
+        assert.strictEqual(projects.createRegistry().list()[0].pinned, false);
+        assert.strictEqual(reg.pin('nope'), false);
+        assert.strictEqual(reg.unpin('nope'), false);
+        assert.ok(!fs.existsSync(path.join(home, 'projects.json.tmp')), 'atomic: no temp file left');
+        // an entry without the key (a pre-alpha.6 file) loads unpinned; a non-boolean is not a pin
+        const f = path.join(home, 'projects.json');
+        fs.writeFileSync(f, JSON.stringify({ projects: [{ id: 'old1', name: 'old', repoPath: 'C:/old', hidden: false, firstSeen: 1 }, { id: 'old2', repoPath: 'C:/old2', pinned: 'yes' }] }));
+        const old = projects.createRegistry().list();
+        assert.deepStrictEqual(old.map((x) => x.pinned), [false, false]);
+        // corrupt: empty, untouched, and a pin works again after a real change
+        fs.writeFileSync(f, '{ not json');
+        const bad = projects.createRegistry();
+        assert.deepStrictEqual(bad.list(), []);
+        assert.strictEqual(bad.pin('old1'), false);
+        assert.strictEqual(fs.readFileSync(f, 'utf8'), '{ not json', 'a failed pin does not rewrite the file');
+        const q = bad.register(mk());
+        bad.pin(q.id);
+        assert.strictEqual(projects.createRegistry().list()[0].pinned, true);
+      });
+    });
+
+    await atest('[alpha6-projects-api] POST /api/projects/<id>/pin sits behind the same guard as hide and changes nothing when refused', async () => {
+      await withHome(async () => {
+        const reg = projects.createRegistry();
+        const pid = reg.register(mk()).id;
+        let refreshes = 0;
+        const c = await boot(new Store(), 0, { projects: reg, repos: { snapshot: () => ({}), refresh: () => { refreshes++; return Promise.resolve(); } } });
+        const PORT = c.port;
+        try {
+          const token = JSON.parse((await rq(PORT, { path: '/api/token' })).text).token;
+          const good = { origin: 'http://127.0.0.1:' + PORT, 'content-type': 'application/json', 'x-sereno-token': token };
+          const hdr = (o) => { const h = Object.assign({}, good, o); for (const k of Object.keys(h)) if (h[k] === null) delete h[k]; return h; };
+          const url = '/api/projects/' + pid + '/pin';
+          const post = (h, b, u) => rq(PORT, { method: 'POST', path: u || url, headers: h, body: b });
+          const expect = async (label, res, code) => assert.strictEqual((await res).status, code, label);
+          const flip = token.slice(0, -1) + (token.endsWith('A') ? 'B' : 'A');
+          await expect('foreign Origin', post(hdr({ origin: 'http://evil.example' }), { pinned: true }), 403);
+          await expect('missing Origin', post(hdr({ origin: null }), { pinned: true }), 403);
+          await expect('bad Host', post(hdr({ host: 'evil.example' }), { pinned: true }), 403);
+          await expect('wrong token', post(hdr({ 'x-sereno-token': flip }), { pinned: true }), 403);
+          await expect('short token', post(hdr({ 'x-sereno-token': 'x' }), { pinned: true }), 403);
+          await expect('missing token', post(hdr({ 'x-sereno-token': null }), { pinned: true }), 403);
+          await expect('text/plain', post(hdr({ 'content-type': 'text/plain' }), { pinned: true }), 403);
+          await expect('oversize body', post(hdr({}), '{"x":"' + 'a'.repeat(5000) + '"}'), 400);
+          await expect('extra key', post(hdr({}), { pinned: true, extra: 1 }), 400);
+          await expect('the hide key on the pin route', post(hdr({}), { hidden: true }), 400);
+          await expect('the pin key on the hide route', post(hdr({}), { pinned: true }, '/api/projects/' + pid + '/hide'), 400);
+          await expect('not a boolean', post(hdr({}), { pinned: 1 }), 400);
+          await expect('not json', post(hdr({}), 'nope'), 400);
+          await expect('array body', post(hdr({}), []), 400);
+          await expect('unknown project', post(good, { pinned: true }, '/api/projects/deadbeef0000/pin'), 404);
+          await expect('GET is not a pin', rq(PORT, { path: url }), 404);
+          assert.strictEqual(reg.list()[0].pinned, false, 'no refused call pinned anything');
+          assert.strictEqual(reg.list()[0].hidden, false);
+          // valid, including the localhost origin
+          await expect('valid pin', post(good, { pinned: true }), 204);
+          assert.strictEqual(reg.list()[0].pinned, true);
+          assert.strictEqual((await getJson(PORT, '/api/projects')).projects[0].pinned, true);
+          await expect('valid pin again (idempotent, localhost origin)', post(hdr({ origin: 'http://localhost:' + PORT }), { pinned: true }), 204);
+          await expect('valid unpin', post(good, { pinned: false }), 204);
+          assert.strictEqual(reg.list()[0].pinned, false);
+          assert.strictEqual(refreshes, 0, 'pinning is Sereno config: no git refresh');
+          assert.strictEqual(projects.createRegistry().list()[0].pinned, false);
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[alpha6-projects-api] active: a live session, a commit inside 14 days, or a non-expired pipeline task; nothing else', async () => {
+      const clock = Date.now();
+      const store = new Store();
+      const dirs = Array.from({ length: 9 }, () => mk());
+      store.applyHook('SessionStart', { session_id: 'live-a', cwd: path.join(dirs[0], 'sub') }, { ppid: 11 });
+      const task = (expired, stage) => ({ task: 't', stage: stage || 'building', expired, attempts: [], gates: [] });
+      const entries = dirs.map((d, i) => stubEntry('p' + i, d));
+      const snap = {
+        p0: stubState({ lastCommitAt: clock - 400 * day }),                                          // live session only
+        p1: stubState({ lastCommitAt: clock - 13 * day }),                                           // recent commit
+        p2: stubState({ lastCommitAt: clock - 15 * day }),                                           // old commit: inactive
+        p3: stubState({ lastCommitAt: clock - 200 * day, pipeline: { tasks: [task(false)] } }),      // live task
+        p4: stubState({ lastCommitAt: clock - 200 * day, pipeline: { tasks: [task(true), task(true)] } }), // expired tasks only
+        p5: stubState({ lastCommitAt: null }),                                                       // nothing
+        p7: stubState({ lastCommitAt: clock - 200 * day, pipeline: { tasks: [task(false, 'merged')] } }),  // merged: not live work
+        p8: stubState({ lastCommitAt: clock - 200 * day, pipeline: { tasks: [task(false, 'stopped'), task(true)] } }), // stopped + expired
+      };                                                                                             // p6 has no state at all
+      const c = await bootStub(clock, entries, snap, { store });
+      try {
+        const r = await getJson(c.port, '/api/projects');
+        const act = Object.fromEntries(r.projects.map((p) => [p.id, p.active]));
+        assert.deepStrictEqual(act, { p0: true, p1: true, p2: false, p3: true, p4: false, p5: false, p6: false, p7: false, p8: false });
+        assert.strictEqual(r.counts.active, 3);
+        assert.strictEqual(r.counts.total, 9);
+        // a session that ended no longer holds the project active
+        store.sessions.clear();
+        const r2 = await getJson(c.port, '/api/projects');
+        assert.strictEqual(r2.projects.find((p) => p.id === 'p0').active, false);
+        // the boundary: exactly 14 days is out, just inside is in
+        snap.p2 = stubState({ lastCommitAt: clock - 14 * day + 5000 });
+        snap.p5 = stubState({ lastCommitAt: clock - 14 * day });
+        const r3 = await getJson(c.port, '/api/projects');
+        assert.strictEqual(r3.projects.find((p) => p.id === 'p2').active, true);
+        assert.strictEqual(r3.projects.find((p) => p.id === 'p5').active, false);
+      } finally { await halt(c); }
+    });
+
+    await atest('[alpha6-projects-api] blockers is true only for a non-empty Blocked line on the headline brief', async () => {
+      const clock = Date.now();
+      const mkBrief = (blocked) => ({ now: 'n', next: 'x', blocked, generatedAt: isoAt(clock - day) });
+      const cases = { a: 'waiting on a review', b: '', c: '   ', d: null, e: undefined };
+      const nots = ['none', 'None.', 'NOTHING', ' no ', 'n/a', 'N/A!', 'na', '-', CH(0x2014), 'Nothing blocked.', 'No Blockers;', 'none...'];
+      nots.forEach((v, i) => { cases['n' + i] = v; });
+      cases.y1 = 'none of the tests pass'; cases.y2 = 'no access to the API';
+      const entries = Object.keys(cases).map((k) => stubEntry(k, mk()));
+      entries.push(stubEntry('f', mk()));   // no brief at all
+      const snap = {};
+      for (const k of Object.keys(cases)) snap[k] = stubState({ brief: mkBrief(cases[k]) });
+      snap.f = stubState({ brief: null });
+      const c = await bootStub(clock, entries, snap);
+      try {
+        const r = await getJson(c.port, '/api/projects');
+        assert.deepStrictEqual(Object.fromEntries(r.projects.map((p) => [p.id, p.blockers])), Object.assign({ a: true, b: false, c: false, d: false, e: false, f: false, y1: true, y2: true }, Object.fromEntries(nots.map((v, i) => ['n' + i, false]))));
+        assert.strictEqual(r.counts.withBlockers, 3);
+      } finally { await halt(c); }
+    });
+
+    await atest('[alpha6-projects-api] activity: newest first, kinds commit / brief / pipeline with exact keys, subjects capped and stripped', async () => {
+      const clock = Date.now();
+      const HOUR = 3600 * 1000;
+      const commits = Array.from({ length: 12 }, (_, i) => ({ at: clock - (i + 1) * HOUR, subject: 'commit number ' + i }));
+      commits[0].subject = 'hostile' + CH(27) + '[31m' + CH(7) + CH(0x202e) + CH(0x85) + ' tail' + 'Z'.repeat(300);
+      const gAt = (n) => isoAt(clock - n * HOUR - 30000);
+      const pv = { tasks: [{
+        task: 't1', stage: 'building', expired: false,
+        attempts: [
+          { attempt: 1, outcome: 'pass', started_at: gAt(20), ended_at: gAt(19) },
+          { attempt: 2, outcome: 'fail', started_at: gAt(5), ended_at: gAt(4) },
+          { attempt: 3, outcome: null, started_at: 'not a date', ended_at: null },
+        ],
+        gates: [{ reviewed_at: gAt(3), outcome: 'block' }, { reviewed_at: 'nope', outcome: 'pass' }],
+      }] };
+      const brief = { now: 'n', next: null, blocked: null, generatedAt: isoAt(clock - 6 * HOUR - 77000) };
+      const branches = [
+        { name: 'main', freshness: 'fresh', brief },
+        { name: 'side', freshness: 'fresh', brief: { now: 'm', next: null, blocked: null, generatedAt: isoAt(clock - 8 * HOUR - 77000) } },
+        { name: 'dupe', freshness: 'fresh', brief: { now: 'm', next: null, blocked: null, generatedAt: brief.generatedAt } },
+        { name: 'none', freshness: 'none', brief: null },
+      ];
+      const c = await bootStub(clock, [stubEntry('a1', mk()), stubEntry('a2', mk())], {
+        a1: stubState({ commits, brief, branches, pipeline: pv, lastCommitAt: commits[0].at }),
+        a2: stubState({ commits: commits.slice(0, 2), pipeline: { tasks: [] } }),
+      });
+      try {
+        const r = await getJson(c.port, '/api/projects');
+        const a = r.projects.find((p) => p.id === 'a1').activity;
+        assert.strictEqual(a.length, 10 + 2 + 5, 'commits capped at 10, 2 distinct brief times, 5 dated pipeline events');
+        for (let i = 1; i < a.length; i++) assert.ok(a[i - 1].at >= a[i].at, 'newest first at ' + i);
+        for (const e of a) {
+          assert.ok(Number.isFinite(e.at));
+          if (e.kind === 'commit') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'subject']); assert.strictEqual(typeof e.subject, 'string'); }
+          else if (e.kind === 'brief') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'subject']); assert.strictEqual(e.subject, null); }
+          else if (e.kind === 'pipeline') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'outcome', 'subject']); assert.strictEqual(e.subject, null); assert.ok(e.outcome === null || typeof e.outcome === 'string'); }
+          else assert.fail('unexpected kind ' + e.kind);
+        }
+        assert.deepStrictEqual(Array.from(new Set(a.map((e) => e.kind))).sort(), ['brief', 'commit', 'pipeline']);
+        assert.strictEqual(a.filter((e) => e.kind === 'brief').length, 2, 'equal brief times collapse to one event');
+        const pOuts = a.filter((e) => e.kind === 'pipeline').map((e) => (e.outcome === null ? 'none' : e.outcome)).sort();
+        assert.deepStrictEqual(pOuts, ['block', 'fail', 'none', 'none', 'pass'], 'undated entries dropped');
+        const first = a.find((e) => e.kind === 'commit');
+        assert.ok(first.subject.startsWith('hostile[31m tail'), JSON.stringify(first.subject.slice(0, 24)));
+        assert.strictEqual(first.subject.length, 120, 'subject capped');
+        for (const e of a.filter((x) => x.kind === 'commit')) assert.ok(!hasUnsafe(e.subject), 'no control or bidi characters');
+        assert.strictEqual(r.projects.find((p) => p.id === 'a1').lastActivityAt, commits[0].at);
+        // the other project: two commits and nothing else
+        assert.deepStrictEqual(r.projects.find((p) => p.id === 'a2').activity.map((e) => e.kind), ['commit', 'commit']);
+      } finally { await halt(c); }
+    });
+
+    await atest('[alpha6-projects-api] activity is capped at 20 even with a long pipeline history', async () => {
+      const clock = Date.now();
+      const attempts = Array.from({ length: 30 }, (_, i) => ({ attempt: i, outcome: 'pass', started_at: isoAt(clock - (i + 1) * 60000), ended_at: isoAt(clock - (i + 1) * 60000 + 1000) }));
+      const c = await bootStub(clock, [stubEntry('z', mk())], { z: stubState({ pipeline: { tasks: [{ task: 't', stage: 'building', expired: false, attempts, gates: [] }] } }) });
+      try {
+        const a = (await getJson(c.port, '/api/projects')).projects[0].activity;
+        assert.strictEqual(a.length, 20);
+        for (let i = 1; i < a.length; i++) assert.ok(a[i - 1].at >= a[i].at);
+      } finally { await halt(c); }
+    });
+
+    await atest('[alpha6-projects-api] counts: visible projects only; stale, blockers, active; decisions from the pipeline alerts', async () => {
+      const clock = Date.now();
+      const entries = ['a', 'b', 'c', 'd'].map((k) => stubEntry(k, mk()));
+      entries[3].hidden = true;
+      const snap = {
+        a: stubState({ freshness: 'stale', lastCommitAt: clock - day, brief: { now: 'n', next: null, blocked: 'stuck', generatedAt: isoAt(clock) } }),
+        b: stubState({ freshness: 'fresh', lastCommitAt: clock - 90 * day }),
+        c: stubState({ freshness: 'stale', lastCommitAt: clock - 90 * day }),
+        d: stubState({ freshness: 'stale', lastCommitAt: clock - day, brief: { now: 'n', next: null, blocked: 'hidden one', generatedAt: isoAt(clock) } }),
+      };
+      const open2 = [{ projectId: 'a', project: 'a', task: 't', reason: null, attempt: 1, paths: [] }, { projectId: 'c', project: 'c', task: 'u', reason: null, attempt: 1, paths: [] }];
+      let c = await bootStub(clock, entries, snap, { extra: { pipelineAlerts: { open: () => open2 } } });
+      try {
+        const r = await getJson(c.port, '/api/projects');
+        assert.deepStrictEqual(r.counts, { total: 3, active: 1, withBlockers: 1, stale: 2, decisions: 2 });
+        assert.strictEqual(r.projects.length, 4, 'hidden projects are still listed, flagged');
+        const hid = r.projects.find((p) => p.hidden);
+        assert.strictEqual(hid.active, false, 'a hidden project is not polled, so it is not active');
+        assert.strictEqual(hid.blockers, false);
+        assert.deepStrictEqual(hid.activity, []);
+      } finally { await halt(c); }
+      c = await bootStub(clock, entries, snap);
+      try { assert.strictEqual((await getJson(c.port, '/api/projects')).counts.decisions, 0, 'no alerts machine: zero'); } finally { await halt(c); }
+      c = await bootStub(clock, entries, snap, { extra: { pipelineAlerts: { open: () => { throw new Error('boom'); } } } });
+      try { assert.strictEqual((await getJson(c.port, '/api/projects')).counts.decisions, 0, 'a throwing machine is zero, not a 500'); } finally { await halt(c); }
+    });
+
+    test('[alpha6-projects-api] parseCommits: capped at 120, control and bidi stripped, at most 10, junk lines skipped', () => {
+      const lines = Array.from({ length: 14 }, (_, i) => (1700000000 + i) + '\tsubject ' + i);
+      lines[0] = '1700000100\ta' + CH(27) + '[1m' + CH(0x202e) + CH(0x2066) + 'b' + 'Q'.repeat(400);
+      lines.splice(3, 0, 'no tab here', '\tmissing time', 'abc\tbad time');
+      const out = repos.parseCommits(lines.join('\n'));
+      assert.strictEqual(out.length, 10);
+      assert.strictEqual(out[0].at, 1700000100 * 1000);
+      assert.ok(out[0].subject.startsWith('a[1mb') && out[0].subject.length === 120);
+      assert.ok(out.every((c) => !hasUnsafe(c.subject)));
+      assert.deepStrictEqual(repos.parseCommits(null), []);
+      assert.deepStrictEqual(repos.parseCommits(''), []);
+    });
+
+    await atest('[alpha6-projects-api] the poller reads at most 10 subjects with one bounded git log on the default branch, and the fast path keeps them', async () => {
+      await withHome(async () => {
+        const d = mkRepo();
+        const t0 = Date.now() - 3 * day;
+        for (let i = 0; i < 12; i++) gitAt(d, t0 + i * 1000, 'commit', '-q', '--allow-empty', '-m', 'step ' + i);
+        const { gitExec } = require('../src/gitexec.js');
+        const logs = [];
+        const reg = projects.createRegistry();
+        reg.register(d);
+        const poller = repos.createPoller({ registry: reg, ghExec: () => Promise.reject(Object.assign(new Error('x'), { code: 'ENOENT' })),
+          exec: (f, args, o) => { if (args[0] === 'log') logs.push(args.slice()); return gitExec(f, args, o); } });
+        await poller.pollNow();
+        assert.strictEqual(logs.length, 1);
+        assert.deepStrictEqual(logs[0].slice(0, 3), ['log', '-n', '10']);
+        assert.ok(logs[0].includes('--format=%ct%x09%s') && logs[0].includes('--end-of-options') && logs[0][logs[0].length - 1] === 'refs/heads/main');
+        const st = Object.values(poller.snapshot())[0];
+        assert.strictEqual(st.commits.length, 10);
+        assert.strictEqual(st.commits[0].subject, 'step 11', 'newest first');
+        assert.strictEqual(st.commits[0].at, Math.floor((t0 + 11000) / 1000) * 1000);
+        assert.deepStrictEqual(Object.keys(st.commits[0]).sort(), ['at', 'subject']);
+        await poller.pollNow();   // unchanged repo: the earlier read is reused, no second log
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(Object.values(poller.snapshot())[0].commits.length, 10);
+      });
+    });
+
+    await atest('[alpha6-projects-api] a root file named like the default branch does not hide the commits', async () => {
+      await withHome(async () => {
+        const d = mkRepo();
+        fs.writeFileSync(path.join(d, 'main'), 'x');
+        gitAt(d, Date.now() - day, 'add', 'main');
+        gitAt(d, Date.now() - day, 'commit', '-q', '-m', 'ambiguous one');
+        const reg = projects.createRegistry();
+        reg.register(d);
+        const poller = repos.createPoller({ registry: reg, ghExec: () => Promise.reject(Object.assign(new Error('x'), { code: 'ENOENT' })) });
+        await poller.pollNow();
+        const st = Object.values(poller.snapshot())[0];
+        assert.ok(st.commits.length >= 1 && st.commits.some((c) => c.subject === 'ambiguous one'), 'commits are read');
+      });
+    });
+
+    await atest('[alpha6-projects-api] end to end: a real repo feeds activity; commit subjects reach the API but never any file under the home', async () => {
+      await withHome(async (home) => {
+        const CANARY = 'ALPHA6-SUBJECT-CANARY';
+        const d = mkRepo();
+        gitAt(d, Date.now() - 2 * 3600 * 1000, 'commit', '-q', '--allow-empty', '-m', CANARY + ' one' + CH(27) + '[0m');
+        gitAt(d, Date.now() - 3600 * 1000, 'commit', '-q', '--allow-empty', '-m', CANARY + ' two ' + 'Y'.repeat(300));
+        const ledger = openLedger({ file: path.join(home, 'ledger.db') });
+        const reg = projects.createRegistry();
+        const pid = reg.register(d).id;
+        const poller = repos.createPoller({ registry: reg, ghExec: () => Promise.reject(Object.assign(new Error('x'), { code: 'ENOENT' })) });
+        await poller.pollNow();
+        const c = await boot(new Store(), 0, { projects: reg, repos: poller, ledger });
+        try {
+          const r = await getJson(c.port, '/api/projects');
+          const p = r.projects[0];
+          assert.strictEqual(p.active, true);
+          const texts = p.activity.filter((e) => e.kind === 'commit').map((e) => e.subject);
+          assert.strictEqual(texts.length, 3, 'two subjects and the initial commit (made now, so newest)');
+          assert.strictEqual(texts[0], 'secret commit message');
+          assert.ok(texts[1].startsWith(CANARY + ' two ') && texts[1].length === 120);
+          assert.strictEqual(texts[2], CANARY + ' one[0m', 'control character stripped');
+          const token = JSON.parse((await rq(c.port, { path: '/api/token' })).text).token;
+          const good = { origin: 'http://127.0.0.1:' + c.port, 'content-type': 'application/json', 'x-sereno-token': token };
+          assert.strictEqual((await rq(c.port, { method: 'POST', path: '/api/projects/' + pid + '/pin', headers: good, body: { pinned: true } })).status, 204);
+          await poller.pollNow();
+          await getJson(c.port, '/api/projects');
+        } finally { await halt(c); ledger.close(); }
+        const files = listFiles(home);
+        const names = files.map((f) => path.relative(home, f).split(path.sep).join('/'));
+        assert.ok(names.includes('projects.json'), 'the registry is on disk: ' + names.join(','));
+        for (const n of names) assert.ok(/^(projects[.]json|ledger[.]db(-wal|-shm)?)$/.test(n) || n.startsWith('claude/'), 'unexpected file under the home: ' + n);
+        for (const f of files) assert.ok(!fs.readFileSync(f).includes(CANARY), 'commit subject written to ' + path.relative(home, f));
+        const saved = JSON.parse(fs.readFileSync(path.join(home, 'projects.json'), 'utf8'));
+        assert.deepStrictEqual(Object.keys(saved.projects[0]).sort(), ['firstSeen', 'hidden', 'id', 'name', 'pinned', 'repoPath']);
+        assert.strictEqual(saved.projects[0].pinned, true);
+      });
     });
 
     // ---- gh PR counts ----
@@ -6285,7 +6494,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.ok(p && p.brief, 'the project and its brief are present');
           assert.ok(!/SERENO-FILE-CANARY/.test(text), 'file content');
           assert.ok(!/SERENO-TASK-CANARY/.test(text), 'brief front matter other than the lines');
-          assert.ok(!/SERENO-COMMIT-CANARY/.test(text), 'commit message');
+          assert.ok(!/SERENO-COMMIT-CANARY/.test(JSON.stringify(r, (k, v) => (k === 'activity' ? undefined : v))), 'commit subject outside activity');
           assert.ok(!/\b[0-9a-f]{40}\b/i.test(text) && !text.includes(sha) && !text.includes(c0), 'no hash');
           assert.ok(!text.toLowerCase().includes(os.tmpdir().toLowerCase().replace(/\\/g, '\\\\')), 'no path');
           assert.ok(!text.includes('somewhere/secret'), 'no brief worktree path');
@@ -6602,16 +6811,14 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     {
       const cjs = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
-      const names = ['esc', 'topSessions', 'liveState', 'isActive', 'visibleProjects', 'filterCounts', 'selectProjects', 'projectsSummary'];
+      const names = ['esc', 'topSessions', 'liveState', 'visibleProjects'];
       const lifted = names.map((n) => cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
       const P = new Function(lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
       test('rt4: the console takes live state from p.live, not from the project name', () => {
         const p = { id: 'a', name: 'alpha', hidden: false, git: { lastCommitAt: null }, lastActivity: null, live: { state: 'blocked', sessionIds: ['x'] } };
         const sessions = [{ id: 'x', projectName: 'packages-app', state: 'blocked' }];   // cwd basename != project name
         assert.strictEqual(P.liveState(p, sessions), 'blocked');
-        assert.strictEqual(P.isActive(p, sessions, 1e12), true);
         assert.strictEqual(P.liveState(Object.assign({}, p, { live: { state: null, sessionIds: [] } }), [{ projectName: 'alpha', state: 'running' }]), null, 'a name match no longer counts when p.live says none');
-        assert.strictEqual(P.isActive(Object.assign({}, p, { live: { state: 'idle', sessionIds: ['x'] } }), sessions, 1e12), false);
       });
     }
 
@@ -7130,7 +7337,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     {
       const cj = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
       const names = ['esc', 'projectLabel', 'pillText', 'ringIcon', 'pillHtml', 'attentionState', 'topSessions', 'isLiveSession', 'deriveLiveStates', 'liveDiff', 'withLive',
-        'unknownSessionIds', 'hasBlocker', 'visibleProjects', 'projectsSummary'];
+        'unknownSessionIds', 'visibleProjects'];
       const lifted = names.map((n) => cj.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
       const S = new Function("const LIVE_RANK = ['idle', 'thinking', 'running', 'blocked'];\n" + lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
       const proj = [{ id: 'pa', name: 'alpha', live: { state: 'idle', sessionIds: ['s1'] } }, { id: 'pb', name: 'beta', live: { state: null, sessionIds: [] } }];
@@ -7146,8 +7353,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(map.pa, 'blocked');
         const live = S.withLive(proj, map);
         assert.strictEqual(live[0].live.state, 'blocked');
-        const blocked = S.topSessions(blockedSnap).filter((s) => s.state === 'blocked' && !s.stale).length;
-        assert.ok(S.projectsSummary(live, blocked).endsWith('1 session needs you'));
+        assert.strictEqual(S.topSessions(blockedSnap).filter((s) => s.state === 'blocked' && !s.stale).length, 1);
         assert.deepStrictEqual(S.unknownSessionIds(proj, blockedSnap.sessions, new Set()), [], 'no new session, so no refetch');
       });
 
@@ -7155,7 +7361,6 @@ test('missing rate_limits degrades instead of throwing', () => {
         const a = S.attentionState(calmSnap);
         assert.strictEqual(a.amber, false);
         assert.strictEqual(a.count, 0);
-        assert.ok(S.projectsSummary(proj, 0).endsWith('nothing needs a decision'));
         assert.strictEqual(S.deriveLiveStates(proj, calmSnap.sessions).pa, 'running');
       });
 
@@ -10452,7 +10657,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       attempt: ['attempt', 'outcome', 'startedAt', 'endedAt'], activity: ['at', 'kind', 'outcome'],
       gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model'],
       finding: ['severity', 'kind', 'file', 'line', 'summary'],
-      signals: ['days', 'projects', 'outcomes', 'rework', 'runsThisWeek'],
+      signals: ['days', 'projects', 'outcomes', 'seq', 'rework', 'runsThisWeek'],
       sigProject: ['id', 'gate'], sigGate: ['outcome', 'task', 'ageMs'],
       outcomes: ['n', 'pass', 'block', 'needs_context', 'error', 'skipped'], rework: ['n', 'median', 'max', 'excluded'],
       roleSpend: ['enabled', 'days', 'roles'], role: ['costUsd', 'explicit', 'inferred', 'unattributed'],
@@ -11026,9 +11231,9 @@ test('missing rate_limits degrades instead of throwing', () => {
     const consts = ['PIPE_COLS', 'PIPE_SUBS', 'PIPE_ROLE_KEYS', 'MARK_TEXT', 'STAGE_FILTERS', 'OUTCOME_LABEL', 'ROLE_LABEL', 'IDLE_LABEL', 'INSTALL_CMDS'].map((n) => cj.match(new RegExp('^const ' + n + ' = .*;$', 'm'))[0]);
     const fnames = ['estMoney', 'esc', 'largestRemainder', 'relTime', 'projectLabel', 'pillText', 'ringIcon', 'pillHtml', 'waitLabel', 'waitWhat', 'attentionState', 'reviewControl', 'attentionHtml',
       'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
-      'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'installHtml', 'pipelineHasData',
+      'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'cmdRow', 'installHtml', 'pipelineHasData',
       'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
-      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
+      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
     const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -11071,7 +11276,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const h of ['#pipeline/nope', '#spend', '', null, undefined]) assert.strictEqual(T.parsePipeSub(h), 'work', String(h));
       assert.strictEqual(T.initialRoute('#pipeline/signals', 'spend'), 'pipeline');
       const tabs = T.pipelineBody(body([task('builder')]), [], { sub: 'signals' }, NOW);
-      assert.match(tabs, /<a href="#pipeline" class="">Work<\/a><a href="#pipeline\/signals" class="on" aria-current="page">Signals<\/a><a href="#pipeline\/routing" class="">Routing<\/a>/);
+      assert.match(tabs, /<a class="spill" href="#pipeline">Work<\/a><a class="spill on" href="#pipeline\/signals" aria-current="page">Signals<\/a><a class="spill" href="#pipeline\/routing">Routing<\/a>/);
     });
 
     test('[4b-tab] nav order is Projects, Spend, Pipeline and the tab is registered', () => {
@@ -11116,14 +11321,14 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(tag(task('red-team'), 3), '');
       assert.strictEqual(tag(task('red-team'), 2), '');
       const h = T.rowHtml(row(task('builder', { step: 'Fixing 2 findings', attempt: 2 })), null);
-      assert.match(h, /<span class="tlabel">Fixing 2<\/span>/);
-      assert.strictEqual((h.match(/class="tlabel"/g) || []).length, 1);
+      assert.match(h, /<span class="tlabel tchip">Fixing 2<\/span>/);
+      assert.strictEqual((h.match(/class="tlabel[ "]/g) || []).length, 1);
     });
 
     test('[4b-layout] retry and stall labels are neutral: never green, never amber', () => {
       for (const step of ['Fixing 2 findings', 'Retrying after an environment failure', 'Building']) {
         const h = T.rowHtml(row(task('builder', { step, attempt: 2, gate: gate('block') })), 'p1/demo');
-        const label = h.match(/<span class="tlabel">[^<]*<\/span>/)[0];
+        const label = h.match(/<span class="tlabel[^"]*">[^<]*<\/span>/)[0];
         assert.ok(!/amber|green|ok|pass|dec/i.test(label.replace(/Building/, '')), label);
         assert.ok(!/mk-dec|decision|pill-amber/.test(h), h);
       }
@@ -11479,6 +11684,67 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[4b-layout-fix] a selected decision row keeps the amber tint and gets a non-amber selection outline', () => {
       assert.match(css, /\.prow\.sel\.decision \{[^}]*--rowbg: var\(--amberbg\)[^}]*inset 2px 0 0 var\(--amber\)[^}]*outline: 1px solid var\(--muted\)/);
       assert.ok(css.indexOf('.prow.sel.decision') > css.indexOf('.prow.decision {'));
+    });
+
+    // ---- [alpha6-pipeline] P1: Pipeline restyle (look only) ----
+    test('[alpha6-pipeline] sub-tabs reuse the Spend pill classes; no third style is left', () => {
+      const h = T.subtabsHtml('routing');
+      assert.match(h, /^<nav class="spills"/);
+      assert.strictEqual((h.match(/class="spill( on)?"/g) || []).length, 3);
+      assert.match(h, /class="spill on" href="#pipeline\/routing" aria-current="page"/);
+      assert.ok(!/\.subtabs/.test(css));
+      assert.match(css, /\.spill\.on \{[^}]*--accent/);
+    });
+
+    test('[alpha6-pipeline] selected row has an accent outline; a selected decision keeps amber tint and the muted outline', () => {
+      assert.match(css, /\.prow\.sel \{[^}]*outline: 1px solid var\(--accent\)/);
+      assert.match(css, /\.prow\.sel\.decision \{[^}]*outline: 1px solid var\(--muted\)/);
+      assert.ok(css.indexOf('.prow.sel.decision') > css.indexOf('.prow.sel {'));
+    });
+
+    test('[alpha6-pipeline] build label is an outlined neutral chip: no fill, never green or amber; only the Build cell gets it', () => {
+      const m = css.match(/\.tchip \{([^}]*)\}/);
+      assert.ok(m, 'tchip rule');
+      assert.match(m[1], /border: 1px solid var\(--(muted|line)\)/);
+      assert.match(m[1], /background: transparent/);
+      assert.ok(!/amber|green|--src-|#[0-9a-f]{3,6}/i.test(m[1]), m[1]);
+      for (const step of ['Building', 'Fixing 2 findings', 'Retrying after an environment failure']) {
+        const h = T.rowHtml(row(task('builder', { step })), null);
+        assert.strictEqual((h.match(/class="tlabel tchip"/g) || []).length, 1, step);
+      }
+      assert.ok(!/tchip/.test(T.rowHtml(row(task('ready')), null)), 'Ready is not the build chip');
+    });
+
+    test('[alpha6-pipeline] outcome dots: one shape per review, newest last, unknown outcomes dropped, hostile text escaped', () => {
+      const seq = ['pass', 'block', 'needs_context', 'error', 'skipped', 'pass', '<img src=x>', 'bogus'];
+      const h = T.stripHtml(body([], { signals: { days: 30, projects: [], outcomes: { n: 6, pass: 2, block: 1, needs_context: 1, error: 1, skipped: 1 }, seq, rework: { n: 0 }, runsThisWeek: 0 } }));
+      const dots = h.match(/<span class="odots"[^>]*>([\s\S]*?)<\/span><span class="sgroup">/)[1];
+      assert.strictEqual((dots.match(/class="odot"/g) || []).length, 6);
+      assert.ok(dots.endsWith('</svg></span>') && /oshape-pass/.test(dots.slice(dots.lastIndexOf('class="odot"'))), 'newest (a pass) is last');
+      assert.ok(!/<img|bogus/.test(h));
+      assert.match(h, /aria-label="Last 6 reviews, newest last"/);
+      assert.strictEqual(T.outcomeDotsHtml([]), '');
+      assert.strictEqual(T.outcomeDotsHtml(undefined), '');
+      assert.strictEqual((T.outcomeDotsHtml(new Array(100).fill('pass')).match(/class="odot"/g) || []).length, 60);
+      // counts and n stay beside the dots
+      assert.match(strip(h), /n=6/);
+    });
+
+    test('[alpha6-pipeline] API: signals.seq lists reviews oldest to newest inside the window, capped', () => {
+      const pl = require('../src/pipeline');
+      const now = Date.parse('2026-10-16T12:00:00Z');
+      const g = (o, d) => ({ outcome: o, reviewed_at: new Date(now - d * 86400000).toISOString() });
+      const s = pl.signals([{ id: 'p', tasks: [{ task: 't', gates: [g('pass', 1), g('block', 5), g('error', 40), g('weird', 2)] }, { task: 'u', gates: [g('skipped', 3)] }] }], now);
+      assert.deepStrictEqual(s.seq, ['block', 'skipped', 'pass']);
+    });
+
+    test('[alpha6-pipeline] type: Work row names 14px and project 12px; nothing in the pipeline CSS is under 11px', () => {
+      assert.match(css, /\.ptname \{ font-size: 14px/);
+      assert.match(css, /\.ptproj \{ font-size: 12px/);
+      assert.match(css, /\.prow \{[^}]*height: 34px/);
+      const tab = css.slice(css.indexOf('Pipeline tab shared parts'), css.indexOf('Spend tab (alpha.6 S2)'));
+      for (const m of tab.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+      assert.match(css, /\.odot \.oshape \{ width: 14px/);
     });
 
     test('[4b-layout-fix] role spend says "of pipeline spend"', () => {
@@ -11886,7 +12152,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin',
           'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt', 'endedAt', 'at',
           'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'severity', 'kind', 'file', 'line', 'summary',
-          'days', 'outcomes', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
+          'days', 'outcomes', 'seq', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
           'enabled', 'roles', 'builder', 'red-team', 'scribe', 'unattributed', 'explicit', 'inferred', 'mean',
           'models', 'agent', 'role', 'redTeam', 'fallback', 'onFallback', 'installed', 'detected', 'version']);
         const strays = [];
@@ -11973,6 +12239,1352 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('[pipeline exit] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
+  // ---- [alpha6-theme] navy palette: tokens only, contrast holds in both themes ----
+  {
+    const sheets = {
+      console: fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8'),
+      widget: fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8'),
+    };
+    const LIGHT = /@media \(prefers-color-scheme: light\) \{\s*:root \{([^}]*)\}\s*\}/;
+    const DARK = /^:root \{([^}]*)\}/m;
+    const decls = (block) => Object.fromEntries([...block.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]));
+    const themes = (css) => {
+      const light = css.match(LIGHT);
+      const dark = css.match(DARK);
+      assert.ok(dark && light, 'a dark :root block and a light block');
+      return { dark: decls(dark[1]), light: { ...decls(dark[1]), ...decls(light[1]) } };
+    };
+    const lum = (hex) => {
+      const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+        .map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+      return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    };
+    const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+    const surfaces = { console: ['--bg', '--panel', '--panel2'], widget: ['--bg', '--raised', '--panel2'] };
+
+    for (const [name, css] of Object.entries(sheets)) {
+      for (const [mode, t] of Object.entries(themes(css))) {
+        test(`[alpha6-theme] ${name} ${mode}: text and muted reach 4.5:1, quiet 3:1, accent 3:1 on every surface`, () => {
+          for (const k of ['--text', '--muted', '--quiet', '--accent', '--accentbg', '--selected', '--line']) {
+            assert.match(t[k], /^#[0-9a-f]{6}$/i, name + ' ' + mode + ' ' + k);
+          }
+          for (const surf of surfaces[name]) {
+            for (const fg of ['--text', '--muted']) {
+              assert.ok(ratio(t[fg], t[surf]) >= 4.5, `${fg} on ${surf}: ${ratio(t[fg], t[surf]).toFixed(2)}`);
+            }
+            assert.ok(ratio(t['--quiet'], t[surf]) >= 3, `--quiet on ${surf}: ${ratio(t['--quiet'], t[surf]).toFixed(2)}`);
+          }
+          assert.ok(ratio(t['--accent'], t['--bg']) >= 3, `--accent on --bg: ${ratio(t['--accent'], t['--bg']).toFixed(2)}`);
+          assert.ok(ratio(t['--text'], t['--selected']) >= 4.5 && ratio(t['--text'], t['--accentbg']) >= 4.5);
+        });
+      }
+    }
+    test('[alpha6-theme] both stylesheets carry the same palette, dark and light', () => {
+      const c = themes(sheets.console), w = themes(sheets.widget);
+      for (const mode of ['dark', 'light']) {
+        for (const k of ['--bg', '--text', '--muted', '--quiet', '--line', '--grid', '--selected', '--accent', '--accentbg']) {
+          assert.strictEqual(c[mode][k].toLowerCase(), w[mode][k].toLowerCase(), mode + ' ' + k);
+        }
+        assert.strictEqual(c[mode]['--panel'].toLowerCase(), w[mode]['--raised'].toLowerCase(), mode + ' panel');
+      }
+    });
+    test('[alpha6-theme] no hex colour literal outside the :root token blocks', () => {
+      for (const [name, css] of Object.entries(sheets)) {
+        const rest = css.replace(/\/\*[\s\S]*?\*\//g, '').replace(LIGHT, '').replace(DARK, '');
+        assert.deepStrictEqual(rest.match(/#[0-9a-fA-F]{3,8}\b/g) || [], [], name + ' hard-codes colours');
+      }
+    });
+    test('[alpha6-theme] --accent is blue and distinct from amber; focus and selection never use amber', () => {
+      const w = themes(sheets.widget), c = themes(sheets.console);
+      for (const mode of ['dark', 'light']) {
+        assert.notStrictEqual(w[mode]['--accent'].toLowerCase(), w[mode]['--amber'].toLowerCase());
+        assert.notStrictEqual(c[mode]['--accent'].toLowerCase(), c[mode]['--amber'].toLowerCase());
+        for (const t of [w[mode], c[mode]]) {
+          const h = parseInt(t['--accent'].slice(5, 7), 16), r = parseInt(t['--accent'].slice(1, 3), 16);
+          assert.ok(h > r, 'accent leans blue: ' + t['--accent']);
+        }
+      }
+      assert.ok(!/outline:[^;}]*--amber/.test(sheets.console + sheets.widget));
+    });
+  }
+
+  // ---- [alpha6-nav] Projects navigator renderer ----
+  {
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+    const fnNames = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
+      'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'parseRoute', 'initialRoute', 'parseProjectSel', 'navCounts', 'navFilter',
+      'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navMove', 'navBranches', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
+      'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
+      'navManageHtml', 'navPage'];
+    const lifted = fnNames.map((n) => {
+      const m = cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'));
+      assert.ok(m, 'console.js has ' + n);
+      return m[0];
+    });
+    const consts = ["const OUTCOME_LABEL = { pass: 'Pass', block: 'Block', needs_context: 'Needs context', error: 'Error', skipped: 'Skipped' };",
+      "const INSTALL_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];"]
+      .concat(cjs.match(/^const NAV_\w+ = .*;$/gm));
+    assert.strictEqual(consts.length, 7);
+    const N = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnNames.join(', ') + ' };')();
+    const NOW = 1_800_000_000_000;
+    const MIN = 60000, DAY = 86400000;
+    const evil = '<img src=x onerror=alert(1)>';
+    let seq = 0;
+    const mk = (o) => Object.assign({
+      id: 'p' + (++seq), name: 'proj' + seq, hidden: false, pinned: false, active: true, blockers: false, lastActivityAt: NOW - MIN, freshness: 'fresh',
+      brief: { now: 'Doing x', next: 'Then y', blocked: 'None', generatedAt: new Date(NOW - DAY).toISOString(), behindSince: null },
+      git: { defaultBranch: 'main', ahead: 2, behind: 1, dirty: false, lastCommitAt: NOW - 8 * MIN }, prs: 2,
+      branches: [{ name: 'main', freshness: 'fresh', now: 'Doing x', generatedAt: null, behindSince: null }, { name: 'feat/a', freshness: 'behind', now: 'Side work', generatedAt: null, behindSince: NOW - 2 * 3600000 }],
+      spend14: { costMicros: 68_200_000, trend: new Array(14).fill(1) }, activity: [], lastActivity: NOW - MIN,
+      live: { state: null, sessionIds: [] }, error: false,
+    }, o);
+    const UI = (o) => Object.assign({ filter: 'active', q: '', sort: 'pinned', open: { inactive: false }, tab: 'branches', managing: false }, o);
+    const ctx = (projects, o) => Object.assign({ projects, counts: null, sessions: [], nowMs: NOW, sel: null, pluginMissing: false, ui: UI(), opts: { review: true } }, o);
+    const ninety = () => {
+      const ps = [];
+      for (let i = 0; i < 90; i++) ps.push(mk({ id: 'n' + i, name: 'repo-' + String(i).padStart(2, '0'), active: i < 12, blockers: i % 30 === 0, lastActivityAt: NOW - i * MIN }));
+      return ps;
+    };
+
+    test('[alpha6-nav] chips: counts over visible projects, the filters narrow, Active is the default', () => {
+      const ps = ninety().concat([mk({ id: 'h', name: 'hid', hidden: true, active: true, blockers: true })]);
+      assert.deepStrictEqual(N.navCounts(ps), { all: 90, active: 12, blockers: 3 });
+      assert.strictEqual(N.navFilter(ps, 'all').length, 90);
+      assert.strictEqual(N.navFilter(ps, 'active').length, 12);
+      assert.deepStrictEqual(N.navFilter(ps, 'blockers').map((p) => p.id), ['n0', 'n30', 'n60']);
+      assert.match(cjs, /proj: \{ mode: 'loading', list: \[\], counts: null, filter: 'active'/);
+      const page = N.navPage(ctx(ps));
+      assert.match(page, /data-filter="active" aria-pressed="true"/);
+      assert.match(page, /All <span class="num">90<\/span>/);
+      assert.match(page, /Active <span class="num">12<\/span>/);
+      assert.match(page, /With blockers <span class="num">3<\/span>/);
+      assert.strictEqual((page.match(/class="nrow[ "]/g) || []).length, 12, 'only the active rows are listed by default');
+    });
+
+    test('[alpha6-nav] summary: N projects, blockers, stale, decisions; from the API counts, derived when absent', () => {
+      const ps = [mk({}), mk({ freshness: 'stale', blockers: true }), mk({ hidden: true, freshness: 'stale' })];
+      assert.strictEqual(N.navSummary({ total: 87, withBlockers: 3, stale: 5, decisions: 2 }, ps), '87 projects · 3 with blockers · 5 stale · 2 decisions');
+      assert.strictEqual(N.navSummary({ total: 1, withBlockers: 1, stale: 0, decisions: 1 }, ps), '1 project · 1 with blockers · 0 stale · 1 decision');
+      assert.strictEqual(N.navSummary(null, ps), '2 projects · 1 with blockers · 1 stale · 0 decisions');
+      assert.match(N.navPage(ctx(ps, { counts: { total: 2, withBlockers: 1, stale: 1, decisions: 4 } })), /2 projects · 1 with blockers · 1 stale · 4 decisions/);
+    });
+
+    test('[alpha6-nav] search filters by name only, client side, case-insensitive; no match says so', () => {
+      const ps = [mk({ name: 'Billing-API' }), mk({ name: 'web-shop' }), mk({ name: 'ops' })];
+      assert.deepStrictEqual(N.navSearch(ps, 'API').map((p) => p.name), ['Billing-API']);
+      assert.strictEqual(N.navSearch(ps, '  ').length, 3);
+      assert.strictEqual(N.navSearch(ps, 'zzz').length, 0);
+      assert.match(N.navListHtml(ps, { filter: 'all', q: 'zzz', sort: 'pinned', open: {}, sel: null, nowMs: NOW }), /No projects match\./);
+      assert.ok(!/web-shop/.test(N.navListHtml(ps, { filter: 'all', q: 'api', sort: 'pinned', open: {}, sel: null, nowMs: NOW })));
+      assert.match(cjs, /<input type="search" class="nsearch" data-nq/);
+      assert.match(cjs, /viewEl\.addEventListener\('input'[\s\S]*?renderNavPanes\(\)/, 'typing re-renders the panes, not the controls');
+    });
+
+    test('[alpha6-nav] sort: Pinned first, Recent, Name; groups Pinned, Projects, Inactive', () => {
+      const ps = [mk({ id: 'a', name: 'alpha', lastActivityAt: NOW - 5 * MIN }), mk({ id: 'b', name: 'beta', lastActivityAt: NOW - MIN }), mk({ id: 'c', name: 'gamma', pinned: true, lastActivityAt: NOW - 9 * MIN }),
+        mk({ id: 'd', name: 'delta', active: false, lastActivityAt: NOW - 30 * DAY }), mk({ id: 'e', name: 'eps', active: false, lastActivityAt: null })];
+      let g = N.navGroups(ps, 'pinned');
+      assert.deepStrictEqual([g.pinned, g.projects, g.inactive].map((x) => x.map((p) => p.id)), [['c'], ['b', 'a'], ['d', 'e']]);
+      g = N.navGroups(ps, 'recent');
+      assert.deepStrictEqual([g.pinned, g.projects, g.inactive].map((x) => x.map((p) => p.id)), [[], ['b', 'a', 'c'], ['d', 'e']], 'no Pinned group unless sorted that way');
+      g = N.navGroups(ps, 'name');
+      assert.deepStrictEqual([g.pinned, g.projects, g.inactive].map((x) => x.map((p) => p.id)), [[], ['a', 'b', 'c'], ['d', 'e']]);
+      const html = N.navListHtml(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: false }, sel: 'b', nowMs: NOW });
+      assert.ok(html.indexOf('Pinned') < html.indexOf('Projects') && html.indexOf('Projects') < html.indexOf('Inactive (2)'));
+      assert.match(N.navControlsHtml({ all: 5, active: 3, blockers: 0 }, { filter: 'active', q: '', sort: 'pinned' }), /<option value="pinned" selected>Pinned first<\/option>/);
+    });
+
+    test('[alpha6-nav] ~90 repos: Inactive is one collapsed group; its state survives a re-render and a refresh; searching opens it', () => {
+      const ps = ninety();
+      const closed = N.navListHtml(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: false }, sel: null, nowMs: NOW });
+      assert.match(closed, /<details class="ngroup ninactive"><summary>Inactive \(78\)<\/summary>/);
+      assert.strictEqual((closed.match(/<details/g) || []).length, 1);
+      const open = N.navListHtml(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: true }, sel: null, nowMs: NOW });
+      assert.match(open, /<details class="ngroup ninactive" open>/);
+      const found = N.navListHtml(ps, { filter: 'all', q: 'repo-80', sort: 'pinned', open: { inactive: false }, sel: null, nowMs: NOW });
+      assert.match(found, /ninactive" open>/, 'a search that lands in Inactive shows it');
+      assert.ok(N.navVisibleIds(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: false } }).length === 12, 'keys skip rows inside a collapsed group');
+      assert.strictEqual(N.navVisibleIds(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: true } }).length, 90);
+      assert.match(cjs, /closest\('details\.ninactive'\)[\s\S]{0,200}state\.proj\.open\.inactive = g\.open === true/);
+      const refresh = cjs.match(/async function refreshProjects\(\) \{[\s\S]*?\n\}/)[0];
+      assert.ok(!/\.open\b|open:/.test(refresh), 'a refresh keeps the remembered open state');
+    });
+
+    test('[alpha6-nav] rows: name, status line, live marker, pin toggle as the only control', () => {
+      const run = mk({ id: 'r1', name: 'runner', live: { state: 'running', sessionIds: ['s1'] }, pinned: true });
+      const idle = mk({ id: 'r2', name: 'quiet', live: { state: null, sessionIds: [] }, freshness: 'stale', brief: { now: 'a', next: 'b', blocked: 'c', generatedAt: null, behindSince: NOW - 9 * DAY - MIN } });
+      const hr = N.navRowHtml(run, { sel: true, focus: true, nowMs: NOW });
+      assert.match(hr, /role="row" tabindex="0" data-nsel="r1" aria-selected="true"/);
+      assert.match(hr, /Running · 1 branch</);
+      assert.match(hr, /class="nlive">live</);
+      assert.match(hr, /pshape-live/);
+      assert.match(hr, /<button type="button" class="pinbtn on" data-act="pin" data-id="r1" data-pinned="true" aria-pressed="true" aria-label="Unpin runner">/);
+      assert.strictEqual((hr.match(/<button/g) || []).length, 1);
+      const hi = N.navRowHtml(idle, { sel: false, focus: false, nowMs: NOW });
+      assert.match(hi, /tabindex="-1"/);
+      assert.match(hi, /Brief is 9 days behind · 1 branch</);
+      assert.ok(!/nlive/.test(hi));
+      assert.match(hi, /data-pinned="false" aria-pressed="false" aria-label="Pin quiet"/);
+      assert.match(N.navStatus(mk({ live: { state: 'idle', sessionIds: ['x'] } }), NOW), /^Idle/);
+      assert.match(N.navStatus(mk({ live: { state: 'blocked', sessionIds: ['x'] } }), NOW), /^Needs you/);
+      assert.match(N.navStatus(mk({ freshness: 'none', brief: null, branches: [] }), NOW), /^No brief$/);
+    });
+
+    await atest('[alpha6-nav] pin toggle posts {pinned} to the guarded endpoint with the token; without a token nothing is sent', async () => {
+      const names = ['getJson', 'getApiToken', 'postAction', 'setPinned', 'actionRequest'];
+      const src = names.map((n) => cjs.match(new RegExp('(?:async )?function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
+      const make = (fetchImpl, refreshes) => new Function('fetch', 'refreshProjects', 'const state = { apiToken: null };\n' + src.join('\n') + '\nreturn { setPinned };')(fetchImpl, () => { refreshes.n++; });
+      const calls = [];
+      const refreshes = { n: 0 };
+      const ok = make(async (url, init) => {
+        calls.push({ url, init });
+        if (url === '/api/token') return { ok: true, status: 200, json: async () => ({ token: 'tok-1' }) };
+        return { ok: true, status: 204, json: async () => ({}) };
+      }, refreshes);
+      await ok.setPinned('p-1', true);
+      const post = calls.find((c) => c.url !== '/api/token');
+      assert.strictEqual(post.url, '/api/projects/p-1/pin');
+      assert.strictEqual(post.init.method, 'POST');
+      assert.strictEqual(post.init.headers['x-sereno-token'], 'tok-1');
+      assert.deepStrictEqual(JSON.parse(post.init.body), { pinned: true });
+      assert.strictEqual(refreshes.n, 1);
+      const none = [];
+      const r2 = { n: 0 };
+      const noTok = make(async (url, init) => { none.push(url); return { ok: false, status: 403, json: async () => null }; }, r2);
+      await noTok.setPinned('p-1', false);
+      assert.ok(!none.some((u) => /\/pin$/.test(u)), 'no token, no POST');
+      assert.strictEqual(r2.n, 0);
+      assert.match(cjs, /a === 'pin'\) \{ setPinned\(act\.getAttribute\('data-id'\), act\.getAttribute\('data-pinned'\) !== 'true'\)/);
+    });
+
+    test('[alpha6-nav] the bold Blocked line follows the server blockers flag, not a client guess', () => {
+      const dctx = { nowMs: NOW, sid: null, opts: { review: true }, tab: 'branches', pluginMissing: false, sessions: [] };
+      const brief = (blocked) => ({ now: 'a', next: 'b', blocked, generatedAt: NOW - DAY, behindSince: null });
+      const na = N.navDetailHtml(mk({ blockers: false, brief: brief('N/A') }), dctx);
+      assert.ok(na.includes("Blocked</span><span class=\"v\">N/A"));
+      assert.ok(!/blocked-line/.test(na), 'N/A is not a blocker');
+      const real = N.navDetailHtml(mk({ blockers: true, brief: brief('Waiting on keys') }), dctx);
+      assert.match(real, /blocked-line">Waiting on keys/);
+    });
+
+    test('[alpha6-nav] detail by brief state: fresh, behind, stale, none', () => {
+      const dctx = { nowMs: NOW, sid: null, opts: { review: true }, tab: 'branches', pluginMissing: false, sessions: [] };
+      const fresh = N.navDetailHtml(mk({ name: 'alpha' }), dctx);
+      assert.match(fresh, /<h2>alpha<\/h2><span class="chip chip-fresh">fresh<\/span>/);
+      assert.match(fresh, /<span class="k">Now<\/span><span class="v">Doing x<\/span>/);
+      assert.match(fresh, /Next<\/span><span class="v">Then y/);
+      assert.match(fresh, /Blocked<\/span><span class="v">None/);
+      assert.match(fresh, /Updated 1 day ago/);
+      assert.match(fresh, /main ↑2 ↓1 · 2 open PRs · Last commit 8 min ago/);
+      assert.match(fresh, /14-day spend/);
+      assert.match(fresh, /\$68\.20 est\./);
+      assert.ok(!/blocked-line/.test(fresh));
+      const behind = N.navDetailHtml(mk({ freshness: 'behind', brief: { now: 'a', next: 'b', blocked: 'Waiting on keys', generatedAt: NOW - 30 * DAY, behindSince: NOW - 2 * 3600000 }, blockers: true }), dctx);
+      assert.match(behind, /chip-behind">behind</);
+      assert.match(behind, /blocked-line">Waiting on keys/);
+      const stale = N.navDetailHtml(mk({ freshness: 'stale', brief: { now: 'a', next: 'b', blocked: 'c', generatedAt: NOW - 30 * DAY, behindSince: NOW - 9 * DAY - MIN } }), dctx);
+      assert.match(stale, /chip-stale">Brief is 9 days behind</);
+      const none = N.navDetailHtml(mk({ freshness: 'none', brief: null }), dctx);
+      assert.match(none, /No brief yet/);
+      assert.match(none, /<code>\/sereno:brief<\/code><button type="button" class="btn-copy" data-act="copy" data-text="\/sereno:brief">Copy<\/button>/);
+      assert.ok(!/plugin marketplace add/.test(none), 'install commands only when the plugin is missing');
+      assert.ok(!/class="kv"/.test(none));
+      const noPlugin = N.navDetailHtml(mk({ freshness: 'none', brief: null }), Object.assign({}, dctx, { pluginMissing: true }));
+      assert.match(noPlugin, /data-text="\/plugin marketplace add homestockr\/sereno"/);
+      assert.match(noPlugin, /data-text="\/plugin install sereno@sereno"/);
+      assert.match(N.navDetailHtml(mk({ freshness: 'unknown', brief: null }), dctx), /Brief source not found/);
+      assert.match(N.navDetailHtml(mk({ spend14: null }), dctx), /No spend recorded/);
+      assert.ok(!/est\./.test(N.navDetailHtml(mk({ spend14: null }), dctx)));
+      assert.match(N.navDetailHtml(mk({ error: true }), dctx), /Git status unavailable/);
+      assert.match(N.navDetailHtml(mk({ git: { defaultBranch: 'main', ahead: 0, behind: 0, dirty: true, lastCommitAt: NOW } }), dctx), /class="dirty"/);
+      assert.match(N.navDetailHtml(null, dctx), /Select a project/);
+    });
+
+    test('[alpha6-nav] sub-tabs: Branches (default branch numbers, brief freshness), Activity (newest first, at most 20), Git & PRs', () => {
+      const p = mk({});
+      const dctx = (tab) => ({ nowMs: NOW, sid: null, opts: { review: true }, tab, pluginMissing: false, sessions: [] });
+      const br = N.navDetailHtml(p, dctx('branches'));
+      assert.match(br, /role="tab" class="ntab on" data-ntab="branches" aria-selected="true"/);
+      assert.match(br, /nbname" role="cell">main <span class="quiet-text">default<\/span>/);
+      assert.match(br, /↑2 ↓1/);
+      assert.match(br, /feat\/a/);
+      assert.match(br, /chip-behind">behind</);
+      assert.strictEqual((br.match(/nbname/g) || []).length, 2, 'the default branch appears once');
+      const acts = [];
+      for (let i = 0; i < 30; i++) acts.push({ at: NOW - i * MIN, kind: i % 3 === 0 ? 'commit' : i % 3 === 1 ? 'brief' : 'pipeline', subject: i % 3 === 0 ? 'subject ' + i : null, outcome: i % 3 === 2 ? 'pass' : null });
+      acts.push({ at: NOW, kind: 'mystery', subject: 'x' });
+      const act = N.navDetailHtml(mk({ activity: acts.slice().reverse() }), dctx('activity'));
+      assert.strictEqual((act.match(/<li>/g) || []).length, 20);
+      assert.ok(act.indexOf('subject 0') < act.indexOf('Brief updated') && act.indexOf('Brief updated') < act.indexOf('Pipeline: Pass'), 'newest first');
+      assert.ok(!/mystery/.test(act));
+      assert.match(N.navActivityText({ kind: 'commit', subject: null }), /^Commit$/);
+      assert.strictEqual(N.navActivityText({ kind: 'pipeline', outcome: null }), 'Pipeline activity');
+      assert.match(N.navDetailHtml(mk({ activity: [] }), dctx('activity')), /No recent activity\./);
+      const git = N.navDetailHtml(mk({ git: { defaultBranch: 'trunk', ahead: 3, behind: 0, dirty: true, lastCommitAt: NOW - 2 * DAY }, prs: 4 }), dctx('git'));
+      assert.match(git, /Default branch<\/dt><dd>trunk/);
+      assert.match(git, /Open PRs<\/dt><dd>4/);
+      assert.match(git, /Uncommitted changes/);
+      assert.match(git, /2 days ago/);
+      assert.match(N.navDetailHtml(mk({ error: true }), dctx('git')), /Git status unavailable\./);
+      assert.match(N.navDetailHtml(p, dctx('nonsense')), /nbranches/, 'an unknown tab falls back to Branches');
+    });
+
+    test('[alpha6-nav] Review in terminal only with a live session; no other action control in the detail', () => {
+      const live = mk({ id: 'lv', name: 'livep', live: { state: 'running', sessionIds: ['s-1', 's-2'] } });
+      const sessions = [{ id: 's-1', state: 'running', stateSince: NOW - 8 * MIN, projectName: 'x' }, { id: 's-2', state: 'idle', stateSince: NOW - 20 * MIN }];
+      const withLive = N.navPage(ctx([live], { sessions, sel: 'lv' }));
+      assert.match(withLive, /<button type="button" class="btn-review" data-act="review" data-sid="s-1">Review in terminal/);
+      assert.match(withLive, /class="nlivebar"[^>]*>[\s\S]*Running<\/strong><span class="quiet-text">8 min ago<\/span><span class="quiet-text"> · 2 sessions/);
+      const noSession = N.navPage(ctx([live], { sessions: [], sel: 'lv' }));
+      assert.ok(!/btn-review|data-act="review"/.test(noSession), 'a live state without a known session id offers nothing');
+      const stale = N.navPage(ctx([live], { sessions: [{ id: 's-1', state: 'running', stale: true }], sel: 'lv' }));
+      assert.ok(!/btn-review/.test(stale));
+      const calm = N.navPage(ctx([mk({ id: 'cp' })], { sessions, sel: 'cp' }));
+      assert.ok(!/btn-review|nlivebar/.test(calm));
+      assert.match(N.navPage(ctx([live], { sessions, sel: 'lv', opts: { review: true, msgs: { 's-1': 'ok' } } })), /Raised the terminal/);
+      assert.match(N.navPage(ctx([live], { sessions, sel: 'lv', opts: { review: true, na: true } })), /Open the widget to review/);
+      for (const html of [withLive, noSession, calm, N.navDetailHtml(mk({ freshness: 'none', brief: null }), { nowMs: NOW, sid: 's-1', opts: { review: true }, tab: 'git', pluginMissing: true, sessions: [] })]) {
+        const detail = html.slice(html.indexOf('id="ndetail"') >= 0 ? html.indexOf('id="ndetail"') : 0);
+        for (const m of detail.matchAll(/data-act="([a-z-]+)"/g)) assert.ok(['review', 'copy'].includes(m[1]), 'unexpected action ' + m[1]);
+        for (const m of detail.matchAll(/<button\b[^>]*>/g)) assert.match(m[0], /data-act="(review|copy)"|data-ntab=/, m[0]);
+        assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin)"/.test(detail));
+      }
+    });
+
+    test('[alpha6-nav] every API string is escaped: names, branches, brief lines, commit subjects, outcomes', () => {
+      const p = mk({ id: 'ev', name: evil, brief: { now: evil, next: '<b>x</b>', blocked: '"q" & <i>', generatedAt: null, behindSince: null },
+        branches: [{ name: evil, freshness: 'fresh', now: evil, generatedAt: null, behindSince: null }, { name: 'main', freshness: 'fresh', now: null, generatedAt: null, behindSince: null }],
+        git: { defaultBranch: evil, ahead: 1, behind: 0, dirty: false, lastCommitAt: NOW }, activity: [{ at: NOW, kind: 'commit', subject: evil }, { at: NOW - 1, kind: 'pipeline', outcome: evil }] });
+      const all = [];
+      for (const tab of ['branches', 'activity', 'git']) all.push(N.navPage(ctx([p], { sel: 'ev', ui: UI({ tab, filter: 'all' }) })));
+      all.push(N.navManageHtml([p, mk({ name: evil, hidden: true })]), N.navLiveStrip(mk({ live: { state: 'running', sessionIds: ['s'] } }), [{ id: 's', state: 'running', stateSince: NOW }], NOW));
+      for (const h of all) {
+        assert.ok(!h.includes('<img'), h.slice(0, 300));
+        assert.ok(!h.includes('<b>') && !h.includes('<i>'));
+        assert.ok(!/style=/.test(h));
+      }
+      assert.ok(all[0].includes('&lt;img src=x onerror=alert(1)&gt;'));
+      assert.ok(all[1].includes('&lt;img src=x onerror=alert(1)&gt;'), 'the commit subject is escaped');
+      assert.ok(all[3].includes('&lt;img'));
+      const hostile = mk({ id: '"><img>', name: evil });
+      assert.ok(!N.navRowHtml(hostile, { sel: false, focus: false, nowMs: NOW }).includes('<img'));
+      assert.ok(!/<img/.test(N.navControlsHtml({ all: 1, active: 1, blockers: 0 }, { filter: 'active', q: '"><img src=x>', sort: 'pinned' })));
+    });
+
+    test('[alpha6-nav] route: #projects/<id> selects a project; junk ids are ignored; default is the first pinned, else the first active', () => {
+      assert.strictEqual(N.parseProjectSel('#projects/abc_12-X'), 'abc_12-X');
+      assert.strictEqual(N.parseProjectSel('#/projects/p1'), 'p1');
+      for (const j of ['#projects', '#projects/', '#projects/a/b', '#projects/<img>', '#projects/' + 'x'.repeat(65), '#spend/p1', '', null, undefined, '#projects/%3Cimg%3E']) assert.strictEqual(N.parseProjectSel(j), null, String(j));
+      assert.strictEqual(N.parseRoute('#projects/p1'), 'projects');
+      assert.strictEqual(N.initialRoute('#projects/p1', 'spend'), 'projects');
+      const ps = [mk({ id: 'a', active: false, lastActivityAt: NOW }), mk({ id: 'b', active: true, lastActivityAt: NOW - DAY }), mk({ id: 'c', pinned: true, active: false, lastActivityAt: NOW - 9 * DAY }), mk({ id: 'h', hidden: true, pinned: true })];
+      assert.strictEqual(N.navResolveSel(ps, null), 'c', 'first pinned');
+      assert.strictEqual(N.navResolveSel(ps, 'a'), 'a', 'the route wins');
+      assert.strictEqual(N.navResolveSel(ps, 'h'), 'c', 'a hidden project is not selectable');
+      assert.strictEqual(N.navResolveSel(ps, 'nope'), 'c');
+      assert.strictEqual(N.navResolveSel(ps.slice(0, 2), null), 'b', 'else the first active');
+      assert.strictEqual(N.navResolveSel([mk({ id: 'z', active: false })], null), 'z');
+      assert.strictEqual(N.navResolveSel([], null), null);
+      assert.match(N.navPage(ctx(ps, { sel: 'a', ui: UI({ filter: 'all' }) })), /data-nsel="a" aria-selected="true"/);
+      assert.match(cjs, /history\.replaceState\(null, '', '#projects\/' \+ encodeURIComponent\(id\)\)/);
+      assert.match(cjs, /if \(route === 'projects'\) state\.proj\.sel = parseProjectSel\(location\.hash\)/);
+      assert.match(cjs, /else if \(r === 'projects'\) \{ state\.proj\.sel = parseProjectSel\(location\.hash\); renderProjects\(\); \}/);
+    });
+
+    test('[alpha6-nav] keyboard: arrows, Home and End move the selection inside the list; Enter and Space select', () => {
+      const ids = ['a', 'b', 'c'];
+      assert.strictEqual(N.navMove(ids, 'a', 'ArrowDown'), 'b');
+      assert.strictEqual(N.navMove(ids, 'c', 'ArrowDown'), 'c', 'clamped');
+      assert.strictEqual(N.navMove(ids, 'a', 'ArrowUp'), 'a');
+      assert.strictEqual(N.navMove(ids, 'c', 'ArrowUp'), 'b');
+      assert.strictEqual(N.navMove(ids, 'b', 'Home'), 'a');
+      assert.strictEqual(N.navMove(ids, 'b', 'End'), 'c');
+      assert.strictEqual(N.navMove(ids, 'gone', 'ArrowDown'), 'a');
+      assert.strictEqual(N.navMove([], 'a', 'ArrowDown'), null);
+      const page = N.navPage(ctx(ninety(), { ui: UI({ filter: 'all' }) }));
+      assert.ok(/role="grid" aria-label="Projects"/.test(page) && /role="row"/.test(page) && /role="gridcell"/.test(page), 'the grid pattern');
+      assert.strictEqual((page.match(/tabindex="0"/g) || []).length, 1, 'one tab stop in the list');
+      const h = cjs.match(/viewEl\.addEventListener\('keydown'[\s\S]*?\n  \}\);/)[0];
+      assert.match(h, /state\.route === 'projects'/);
+      assert.match(h, /closest\('\.nrow'\)/);
+      assert.match(h, /e\.key === 'Enter' \|\| e\.key === ' '/);
+      assert.match(h, /'ArrowDown'[\s\S]*'ArrowUp'[\s\S]*'Home'[\s\S]*'End'/);
+      assert.match(h, /navMove\(ids/);
+      assert.match(h, /focusNavRow\(viewEl, next\)/, 'focus follows the selection');
+    });
+
+    test('[alpha6-nav] Manage projects: every project with Hide or Unhide through the existing endpoint', () => {
+      const ps = [mk({ id: 'v1', name: 'zeta' }), mk({ id: 'h1', name: 'alpha', hidden: true }), mk({ id: 'v2', name: 'beta' })];
+      const h = N.navPage(ctx(ps, { ui: UI({ managing: true }) }));
+      assert.match(h, /2 visible · 1 hidden/);
+      assert.match(h, /data-act="hide" data-id="v1">Hide</);
+      assert.match(h, /data-act="unhide" data-id="h1">Unhide</);
+      assert.ok(h.indexOf('beta') < h.indexOf('zeta') && h.indexOf('zeta') < h.indexOf('alpha'), 'visible first, by name');
+      assert.ok(!/nrow|ndetail/.test(h));
+      assert.match(cjs, /Manage projects/);
+      assert.match(cjs, /a === 'manage'\) \{ state\.proj\.managing = !state\.proj\.managing/);
+      assert.match(cjs, /a === 'hide' \|\| a === 'unhide'\) \{ setHidden\(/);
+      assert.match(N.navPage(ctx([])), /Projects appear when a Claude Code session runs in a git repo\./);
+    });
+
+    test('[alpha6-nav] amber only for needs-you: calm markup has none; a blocked project shows the ring and pill', () => {
+      const calm = N.navPage(ctx([mk({ id: 'c1', live: { state: 'running', sessionIds: ['s'] } }), mk({ id: 'c2', live: { state: 'idle', sessionIds: ['t'] }, error: true })],
+        { sessions: [{ id: 's', state: 'running', stateSince: NOW }, { id: 't', state: 'idle' }], sel: 'c1' }));
+      assert.ok(!/amber|pshape-need|Needs you/i.test(calm), 'calm markup carries no amber');
+      const need = N.navPage(ctx([mk({ id: 'b1', live: { state: 'blocked', sessionIds: ['s'] } })], { sessions: [{ id: 's', state: 'blocked', stateSince: NOW }], sel: 'b1' }));
+      assert.match(need, /pshape-need/);
+      assert.match(need, /class="pill-amber">/);
+      const sec = css.slice(css.indexOf('/* Projects navigator'), css.indexOf('/* Pipeline tab shared parts'));
+      assert.ok(sec.length > 1000);
+      for (const m of sec.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+        if (/--amber/.test(m[2])) assert.match(m[1].trim(), /^\.(pshape-need|btn-review)$/, 'amber outside a needs-you selector: ' + m[1].trim());
+      }
+      assert.match(sec, /\.nrow\.sel \{[^}]*var\(--accent\)/);
+      assert.match(sec, /\.nchip\.on \{[^}]*var\(--accent\)/);
+      assert.match(sec, /\.ndetail \.btn-review \{ background: var\(--accent\)/);
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(sec), 'tokens only');
+      for (const m of sec.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+    });
+
+    test('[alpha6-nav] layout: the navigator grid cannot land on .body; Projects mode gives .main the width and hides the attention column', () => {
+      const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }));
+      assert.ok(!rules.some((r) => r.sel.split(',').some((s) => /(^|[\s>+~])\.nav$/.test(s.trim()) || /\.nav$/.test(s.trim()))), 'no bare .nav rule');
+      assert.ok(!/class="nav"|toggle\('nav'/.test(cjs), 'no bare nav class in the renderer');
+      for (const r of rules) {
+        if (!/grid-template/.test(r.body)) continue;
+        for (const s of r.sel.split(',').map((x) => x.trim())) assert.ok(!/(^|[\s>+~])\.body\b/.test(s) && !/(^|[\s>+~])\.(main|col)\b/.test(s), 'grid-template on a page container: ' + s);
+      }
+      assert.ok(rules.some((r) => /^\.pnav$/.test(r.sel) && /display: grid/.test(r.body) && /grid-template-columns: minmax\(250px, 320px\) minmax\(0, 1fr\)/.test(r.body)));
+      assert.ok(rules.some((r) => r.sel === '.body.mode-projects .main' && /max-width: none/.test(r.body)));
+      assert.ok(rules.some((r) => r.sel === '.body.mode-projects .attn-col' && /display: none/.test(r.body)));
+      assert.match(cjs, /toggle\('mode-projects', route === 'projects'\)/);
+      assert.match(cjs, /<div class="pnav">/);
+      assert.ok(rules.some((r) => r.sel === '.nlist' && /overflow-y: auto/.test(r.body)) && rules.some((r) => r.sel === '.ndetail' && /overflow-y: auto/.test(r.body)), 'each pane scrolls on its own');
+    });
+
+    test('[alpha6-nav] source: the old Projects renderer is gone, one innerHTML write, no inline styles, 11px minimum, a calm header note', () => {
+      for (const gone of ['cardHtml', 'projectsBody', 'branchRows', 'hiddenSection', 'filterBar', 'liveStrip', 'selectProjects', 'projectsSummary', 'showHidden', 'toggle-hidden', 'run /brief']) {
+        assert.ok(!cjs.includes(gone), gone + ' should be gone');
+      }
+      for (const gone of ['.pcard', '.plist ', '.menu', '.live-strip', '.hidden-box', '.brow']) assert.ok(!css.includes(gone), gone);
+      assert.strictEqual((cjs.match(/\.innerHTML\s*=/g) || []).length, 1);
+      assert.ok(!/style=/.test(cjs.replace(/el\.style\./g, '')));
+      for (const m of css.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+      assert.ok(!/prompt_text|promptText/.test(cjs));
+      assert.match(cjs, /Nothing needs you/);
+      assert.match(css, /#pill-slot:not\(:empty\) \+ \.nav-calm \{ display: none; \}/);
+      assert.match(cjs, /\/sereno:brief/);
+      assert.ok(!/\/brief\b(?!\/)/.test(cjs.replace(/\/sereno:brief/g, '')), 'only /sereno:brief');
+    });
+  }
+
+  // ---- [alpha6-spend-api] Spend redesign API: overview, where, cache, project ----
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const NOW = new Date(2026, 5, 20, 12, 30).getTime();   // Sat 20 Jun 2026, 12:30 local
+    const at = (d, h, m) => new Date(2026, 5, d, h, m || 0).getTime();
+    const rec = (o) => Object.assign({ requestKey: 'k', requestId: null, sessionId: 's', promptId: null, ts: NOW,
+      model: 'ma', querySource: null, source: 'main', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 0, durationMs: 0 }, o);
+    const pid = (i) => 'p' + String(i).padStart(2, '0');
+    const sid = (i) => 'sess-' + String(i).padStart(4, '0') + '-long-session-id';
+    const seed = () => {
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      for (let i = 1; i <= 12; i++) l.recordHook('SessionStart', { session_id: sid(i), cwd: 'C:\\work\\' + pid(i) });
+      const rows = [];
+      for (let i = 1; i <= 12; i++) rows.push(rec({ requestKey: 'base' + i, sessionId: sid(i), ts: at(19, 10), costMicros: (13 - i) * 1000, inputTokens: 10, cacheReadTokens: 100, cacheCreationTokens: 20 }));
+      rows.push(rec({ requestKey: 'sub1', sessionId: sid(1), ts: at(20, 12, 10), source: 'subagent', costMicros: 500, inputTokens: 5, cacheReadTokens: 50 }));
+      rows.push(rec({ requestKey: 'old1', sessionId: sid(1), ts: new Date(2026, 4, 30, 10).getTime(), costMicros: 7777, inputTokens: 1 }));
+      rows.push(rec({ requestKey: 'pa1', sessionId: sid(2), promptId: 'pr-a', ts: at(18, 9), model: 'mb', costMicros: 200 }));
+      rows.push(rec({ requestKey: 'pa2', sessionId: sid(2), promptId: 'pr-a', ts: at(18, 9, 1), model: 'ma', costMicros: 300 }));
+      rows.push(rec({ requestKey: 'pa3', sessionId: sid(2), promptId: 'pr-a', ts: at(18, 9, 2), model: 'ma', source: 'auxiliary', costMicros: 100 }));
+      l.ingestRequests(rows);
+      return l;
+    };
+    const bootA = async (ledger) => {
+      const c = createCollector(new Store(), 0, { ledger, now: () => NOW });
+      const port = await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : res(a.port))));
+      return { c, port };
+    };
+    const haltA = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const getA = (port, p, headers) => new Promise((resolve) => {
+      http.get({ host: '127.0.0.1', port, path: p, headers: headers || {}, agent: false }, (res) => {
+        let d = '';
+        res.on('data', (x) => { d += x; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      }).on('error', () => resolve({ status: 0, body: '' }));
+    });
+    const jA = async (port, p) => JSON.parse((await getA(port, p)).body);
+    const withApi = async (fn) => {
+      const l = seed();
+      const { c, port } = await bootA(l);
+      try { await fn(port, l); } finally { await haltA(c); l.close(); }
+    };
+
+    await atest('[alpha6-spend-api] overview: today and month-to-date totals with the unattributed figure and request count', async () => {
+      await withApi(async (port) => {
+        const o = await jA(port, '/api/spend/overview');
+        assert.strictEqual(o.enabled, true);
+        assert.strictEqual(o.asOf, NOW);
+        assert.strictEqual(o.today.day, '2026-06-20');
+        assert.deepStrictEqual([o.today.costMicros, o.today.requests, o.today.unattributedMicros, o.today.unattributedN], [500, 1, 500, 1]);
+        assert.strictEqual(o.month.since, new Date(2026, 5, 1).getTime());
+        assert.deepStrictEqual([o.month.costMicros, o.month.requests, o.month.unattributedMicros, o.month.unattributedN], [79100, 16, 500, 1], 'the 30 May request is outside the month');
+        assert.strictEqual(o.today.since, new Date(2026, 5, 20).getTime());
+        assert.strictEqual(o.today.until, new Date(2026, 5, 21).getTime());
+      });
+    });
+
+    await atest('[alpha6-spend-api] windows: the stacked series for 24h, 7d and 30d (existing route) split by source and add up', async () => {
+      await withApi(async (port) => {
+        const sum = (s) => s.buckets.reduce((a, b) => a + b.costMicros, 0);
+        const h = await jA(port, '/api/spend/series?range=24h');
+        assert.strictEqual(h.buckets.length, 24);
+        assert.strictEqual(sum(h), 500);
+        assert.deepStrictEqual(h.buckets[23].bySource, { subagent: 500 });
+        const w = await jA(port, '/api/spend/series?range=7d');
+        assert.strictEqual(w.buckets.length, 7);
+        assert.strictEqual(sum(w), 79100);
+        assert.deepStrictEqual(w.buckets[6].bySource, { subagent: 500 });
+        assert.deepStrictEqual(w.buckets[5].bySource, { main: 78000 });
+        assert.deepStrictEqual(w.buckets[4].bySource, { main: 500, auxiliary: 100 });
+        const m = await jA(port, '/api/spend/series?range=30d');
+        assert.strictEqual(m.buckets.length, 30);
+        assert.strictEqual(sum(m), 79100 + 7777);
+      });
+    });
+
+    await atest('[alpha6-spend-api] where: top 8 projects by source with a 14-day trend, the rest rolled into other', async () => {
+      await withApi(async (port) => {
+        const w = await jA(port, '/api/spend/where');
+        assert.strictEqual(w.range, 'month');
+        assert.strictEqual(w.rows.length, 8);
+        assert.deepStrictEqual(w.rows.map((r) => r.project), ['p01', 'p02', 'p03', 'p04', 'p05', 'p06', 'p07', 'p08']);
+        const p1 = w.rows[0];
+        assert.strictEqual(p1.costMicros, 12500);
+        assert.strictEqual(p1.requests, 2);
+        assert.deepStrictEqual(p1.bySource, { main: 12000, subagent: 500, auxiliary: 0 });
+        assert.strictEqual(p1.trend.length, 14);
+        assert.strictEqual(p1.trend[12], 12000);
+        assert.strictEqual(p1.trend[13], 500);
+        assert.strictEqual(p1.trend.reduce((a, b) => a + b, 0), 12500, 'the 30 May request is outside the 14 days');
+        assert.deepStrictEqual(w.rows[1].bySource, { main: 11500, subagent: 0, auxiliary: 100 });
+        assert.strictEqual(w.rows[1].costMicros, 11600);
+        assert.strictEqual(w.other.count, 4);
+        assert.strictEqual(w.other.costMicros, 10000);
+        assert.strictEqual(w.other.requests, 4);
+        assert.deepStrictEqual(w.other.bySource, { main: 10000, subagent: 0, auxiliary: 0 });
+        assert.strictEqual(w.other.trend.length, 14);
+        assert.strictEqual(w.other.trend[12], 10000);
+        assert.strictEqual(w.total.costMicros, 79100);
+        assert.strictEqual(w.total.requests, 16);
+        assert.deepStrictEqual(w.unattributed, { costMicros: 500, requests: 1 });
+        const sumRows = w.rows.reduce((a, r) => a + r.costMicros, 0) + w.other.costMicros;
+        assert.strictEqual(sumRows, w.total.costMicros);
+        // top is a bounded parameter
+        const t2 = await jA(port, '/api/spend/where?top=2');
+        assert.strictEqual(t2.rows.length, 2);
+        assert.strictEqual(t2.other.count, 10);
+        assert.strictEqual(t2.other.costMicros, 79100 - 12500 - 11600);
+        assert.strictEqual((await jA(port, '/api/spend/where?top=0')).rows.length, 1);
+        assert.strictEqual((await jA(port, '/api/spend/where?top=abc')).rows.length, 8);
+        assert.strictEqual((await jA(port, '/api/spend/where?top=999')).rows.length, 12);
+        const t12 = await jA(port, '/api/spend/where?top=12');
+        assert.deepStrictEqual([t12.other.count, t12.other.costMicros], [0, 0]);
+        assert.strictEqual((await jA(port, '/api/spend/where?range=30d')).range, '30d');
+        assert.strictEqual((await getA(port, '/api/spend/where?range=24h')).status, 400);
+      });
+    });
+
+    await atest('[alpha6-spend-api] turns: top-prompts groups by prompt id with a distinct sorted model list, a short session id and the attribution', async () => {
+      await withApi(async (port) => {
+        const t = await jA(port, '/api/spend/top-prompts?limit=100');
+        const a = t.rows.find((r) => r.costMicros === 600);
+        assert.ok(a, 'the three pr-a requests collapse to one turn');
+        assert.deepStrictEqual(a.models, ['ma', 'mb']);
+        assert.strictEqual(a.project, 'p02');
+        assert.strictEqual(a.sessionShort, 'sess-000');
+        assert.strictEqual(a.ts, at(18, 9));
+        assert.strictEqual(a.attribution, 'explicit');
+        assert.strictEqual(t.rows.length, 14, 'twelve base turns, the subagent turn, the pr-a turn');
+        const sub = t.rows.find((r) => r.costMicros === 500 && r.project === 'p01');
+        assert.strictEqual(sub.attribution, 'unknown');
+        for (const r of t.rows) assert.deepStrictEqual(Object.keys(r).sort(), ['attribution', 'costMicros', 'models', 'project', 'sessionShort', 'ts']);
+        for (let i = 1; i < t.rows.length; i++) assert.ok(t.rows[i - 1].costMicros >= t.rows[i].costMicros);
+      });
+    });
+
+    await atest('[alpha6-spend-api] cache: read, creation and uncached input tokens per window, and the read share', async () => {
+      await withApi(async (port) => {
+        const w7 = await jA(port, '/api/spend/cache');
+        assert.strictEqual(w7.range, '7d');
+        assert.deepStrictEqual([w7.requests, w7.inputTokens, w7.cacheReadTokens, w7.cacheCreationTokens], [16, 125, 1250, 240]);
+        assert.strictEqual(w7.cacheReadSharePct, Math.round(1250 / 1615 * 1000) / 10);
+        assert.strictEqual(w7.cacheReadSharePct, 77.4);
+        const h = await jA(port, '/api/spend/cache?range=24h');
+        assert.deepStrictEqual([h.requests, h.inputTokens, h.cacheReadTokens, h.cacheCreationTokens, h.cacheReadSharePct], [1, 5, 50, 0, 90.9]);
+        const d30 = await jA(port, '/api/spend/cache?range=30d');
+        assert.deepStrictEqual([d30.requests, d30.inputTokens, d30.cacheReadTokens], [17, 126, 1250]);
+        const mo = await jA(port, '/api/spend/cache?range=month');
+        assert.strictEqual(mo.since, new Date(2026, 5, 1).getTime());
+        assert.deepStrictEqual([mo.inputTokens, mo.cacheReadTokens, mo.cacheCreationTokens], [125, 1250, 240]);
+        assert.strictEqual((await getA(port, '/api/spend/cache?range=90d')).status, 400);
+        // nothing stored in the window: the share is null, not NaN or 0
+        const l0 = openLedger({ file: ':memory:' });
+        const x = await bootA(l0);
+        try {
+          const e = await jA(x.port, '/api/spend/cache?range=24h');
+          assert.deepStrictEqual([e.requests, e.cacheReadTokens, e.cacheReadSharePct], [0, 0, null]);
+          const o = await jA(x.port, '/api/spend/overview');
+          assert.deepStrictEqual([o.today.costMicros, o.month.requests], [0, 0]);
+          const w = await jA(x.port, '/api/spend/where');
+          assert.deepStrictEqual([w.rows.length, w.other.count, w.total.costMicros], [0, 0, 0]);
+        } finally { await haltA(x.c); l0.close(); }
+        // no cost-effect figure: it would need pricing the ledger does not store
+        assert.deepStrictEqual(Object.keys(w7).sort(), ['asOf', 'cacheCreationTokens', 'cacheReadSharePct', 'cacheReadTokens', 'enabled', 'inputTokens', 'range', 'requests', 'since', 'until']);
+      });
+    });
+
+    await atest('[alpha6-spend-api] selected project: month-to-date total, source breakdown, attribution mix with n, 14-day trend', async () => {
+      await withApi(async (port) => {
+        const p = await jA(port, '/api/spend/project?name=p01');
+        assert.strictEqual(p.project, 'p01');
+        assert.strictEqual(p.since, new Date(2026, 5, 1).getTime());
+        assert.deepStrictEqual([p.costMicros, p.requests], [12500, 2]);
+        assert.deepStrictEqual(p.bySource, { main: 12000, subagent: 500 });
+        assert.deepStrictEqual(p.byAttribution, { explicit: 12000, unknown: 500 });
+        assert.deepStrictEqual(p.byAttributionN, { explicit: 1, unknown: 1 });
+        assert.strictEqual(p.trend.length, 14);
+        assert.deepStrictEqual([p.trend[12], p.trend[13]], [12000, 500]);
+        const p2 = await jA(port, '/api/spend/project?name=p02');
+        assert.deepStrictEqual(p2.byAttributionN, { explicit: 4 });
+        assert.deepStrictEqual(p2.bySource, { main: 11500, auxiliary: 100 });
+        // a project with no spend answers zeros, not an error
+        const z = await jA(port, '/api/spend/project?name=nope');
+        assert.deepStrictEqual([z.costMicros, z.requests, z.bySource, z.byAttributionN], [0, 0, {}, {}]);
+        assert.deepStrictEqual(z.trend, new Array(14).fill(0));
+        assert.strictEqual((await getA(port, '/api/spend/project')).status, 400);
+        assert.strictEqual((await getA(port, '/api/spend/project?name=')).status, 400);
+        assert.strictEqual((await getA(port, '/api/spend/project?name=' + 'x'.repeat(201))).status, 400);
+        // the name is a bound parameter, never SQL
+        const inj = await jA(port, '/api/spend/project?name=' + encodeURIComponent("p01' OR '1'='1"));
+        assert.strictEqual(inj.costMicros, 0);
+      });
+    });
+
+    await atest('[alpha6-spend-api] allowlist: every key of every new and existing spend body is listed; no text beyond names, models and an 8-char session id', async () => {
+      await withApi(async (port) => {
+        const KEYS = new Set(['enabled', 'asOf', 'range', 'since', 'until', 'day', 'today', 'month', 'costMicros', 'requests', 'unattributedMicros',
+          'unattributedN', 'rows', 'other', 'total', 'unattributed', 'project', 'count', 'bySource', 'byAttribution', 'byAttributionN', 'trend',
+          'cacheReadTokens', 'cacheCreationTokens', 'inputTokens', 'cacheReadSharePct', 'ts', 'sessionShort', 'models', 'attribution',
+          'hasTelemetry', 'buckets', 'key']);
+        const LEAF = { bySource: ['main', 'subagent', 'auxiliary'], byAttribution: ['explicit', 'inferred', 'unknown'], byAttributionN: ['explicit', 'inferred', 'unknown'] };
+        const walk = (o, where) => {
+          if (Array.isArray(o)) { o.forEach((x, i) => walk(x, where + '[' + i + ']')); return; }
+          if (!o || typeof o !== 'object') return;
+          for (const k of Object.keys(o)) {
+            assert.ok(KEYS.has(k), where + ': key outside the allowlist: ' + k);
+            if (LEAF[k]) { for (const lk of Object.keys(o[k])) assert.ok(LEAF[k].includes(lk), where + '.' + k + ': ' + lk); }
+            else walk(o[k], where + '.' + k);
+          }
+        };
+        const routes = ['/api/spend/today', '/api/spend/series?range=7d', '/api/spend/series?range=24h', '/api/spend/projects',
+          '/api/spend/top-prompts', '/api/spend/overview', '/api/spend/where', '/api/spend/where?top=3', '/api/spend/cache',
+          '/api/spend/cache?range=24h', '/api/spend/project?name=p01'];
+        for (const r of routes) {
+          const res = await getA(port, r);
+          assert.strictEqual(res.status, 200, r);
+          const b = JSON.parse(res.body);
+          assert.strictEqual(b.enabled, true, r);
+          walk(b, r);
+          assert.ok(!/long-session-id|cwd|prompt_id|promptId|prompt_text|request_key|work/i.test(res.body), r + ' leaks an identifier');
+          for (const row of b.rows || []) if ('sessionShort' in row) assert.ok(row.sessionShort.length <= 8);
+        }
+        // the only string leaves in the where body are project names and the range
+        const w = await jA(port, '/api/spend/where');
+        const strs = [];
+        JSON.stringify(w, (k, v) => { if (typeof v === 'string') strs.push(v); return v; });
+        assert.deepStrictEqual(strs.filter((x) => !/^(p\d\d|month)$/.test(x)), []);
+      });
+    });
+
+    await atest('[alpha6-spend-api] ledger off: every new route answers { enabled: false }; unknown routes still 404', async () => {
+      const { c, port } = await bootA(null);
+      try {
+        for (const r of ['/api/spend/overview', '/api/spend/where', '/api/spend/cache', '/api/spend/project?name=p01', '/api/spend/project', '/api/spend/cache?range=90d']) {
+          const res = await getA(port, r);
+          assert.strictEqual(res.status, 200, r);
+          assert.deepStrictEqual(JSON.parse(res.body), { enabled: false }, r);
+        }
+        assert.strictEqual((await getA(port, '/api/spend/nope')).status, 404);
+      } finally { await haltA(c); }
+    });
+
+    await atest('[alpha6-spend-api] a failing ledger answers 503 on the new routes', async () => {
+      const l = seed();
+      const { c, port } = await bootA(l);
+      try {
+        l.close();
+        for (const r of ['/api/spend/overview', '/api/spend/where', '/api/spend/cache', '/api/spend/project?name=p01']) {
+          assert.strictEqual((await getA(port, r)).status, 503, r);
+        }
+      } finally { await haltA(c); }
+    });
+
+    await atest('[alpha6-spend-api] new routes refuse a foreign Host or Origin', async () => {
+      await withApi(async (port) => {
+        for (const r of ['/api/spend/overview', '/api/spend/where', '/api/spend/cache', '/api/spend/project?name=p01']) {
+          assert.strictEqual((await getA(port, r)).status, 200, 'control ' + r);
+          assert.strictEqual((await getA(port, r, { host: 'evil.example' })).status, 403, 'host ' + r);
+          assert.strictEqual((await getA(port, r, { origin: 'http://evil.example' })).status, 403, 'origin ' + r);
+        }
+      });
+    });
+
+    test('[alpha6-spend-api] ledger: breakdown, cacheTotals and projectDetail read stored fields only and the schema holds no text column', () => {
+      const l = seed();
+      try {
+        const cols = l._db.prepare('PRAGMA table_info(requests)').all().map((r) => r.name);
+        assert.ok(!cols.some((n) => /text|content|body/.test(n)), cols.join(','));
+        assert.deepStrictEqual(l.breakdown({ since: at(1, 0), until: at(21, 0) }), { costMicros: 79100, requests: 16, unattributedMicros: 500, unattributedN: 1 });
+        assert.deepStrictEqual(l.cacheTotals({ since: at(1, 0), until: at(21, 0) }), { cacheReadTokens: 1250, cacheCreationTokens: 240, inputTokens: 125, requests: 16 });
+        assert.deepStrictEqual(l.breakdown({ since: at(1, 0), until: at(1, 1) }), { costMicros: 0, requests: 0, unattributedMicros: 0, unattributedN: 0 });
+        assert.strictEqual(l.projectDetail({ project: 'p03', since: at(1, 0), until: at(21, 0) }).costMicros, 10000);
+      } finally { l.close(); }
+    });
+  }
+
+  // ---- [alpha6-spend] Spend redesign renderer: sub-tabs, Overview, Projects, Turns, Cache, selected-project panel ----
+  {
+    const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
+    const conCss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
+    const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
+    const SP_NAMES = ['parseRoute', 'initialRoute', 'parseSpendHash', 'spendHash', 'projectIdFor', 'spendResolveSel', 'spendRows', 'navMove',
+      'nz', 'esc', 'estMoney', 'modelName', 'modelsHtml', 'projectLabel', 'formatTime', 'largestRemainder', 'attributionSplit', 'sparkPoints', 'sparkSvg',
+      'fmtTokens', 'mixBar', 'wherePreview', 'wherePreviewHtml', 'turnsTableHtml', 'projectsTableHtml', 'cacheCardHtml', 'spendCacheHtml',
+      'spendSideHtml', 'spendHeaderHtml', 'spendTabsHtml', 'spendPageHtml', 'pillText', 'ringIcon', 'pillHtml', 'chartBlock', 'chartTitle', 'legendHtml', 'sw'];
+    const S = new Function("const RANGES = ['24h', '7d', '30d'];\n"
+      + "const SRC_LABEL = { main: 'Main', subagent: 'Subagent', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };\n"
+      + "const ATTR_LABEL = { explicit: 'Explicit', unknown: 'Unattributed', mixed: 'Mixed' };\n"
+      + "const SPEND_SUBS = ['overview', 'projects', 'turns', 'cache'];\n"
+      + "const SPEND_SUB_LABEL = { overview: 'Overview', projects: 'Projects', turns: 'Turns', cache: 'Cache' };\n"
+      + "const CACHE_WINDOWS = [['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];\n"
+      + SP_NAMES.map((n) => lf(conSrc, n)).join('\n') + '\nreturn { ' + SP_NAMES.join(', ') + ' };')();
+
+    const HOSTILE = '<img src=x onerror=alert(1)>"\'&';
+    const trend = (n) => Array.from({ length: 14 }, (_, i) => (i + 1) * n);
+    const row = (project, cost, req, o) => Object.assign({ project, costMicros: cost, requests: req,
+      bySource: { main: Math.round(cost * 0.6), subagent: Math.round(cost * 0.3), auxiliary: cost - Math.round(cost * 0.6) - Math.round(cost * 0.3) }, trend: trend(1000) }, o || {});
+    const WHERE = { enabled: true, range: 'month', rows: [
+      row('delta', 1e6, 10), row('alpha', 5e6, 40), row('beta', 3e6, 30), row('gamma', 2e6, 20), row(null, 1e5, 2), row('epsilon', 5e5, 5),
+    ], other: row(undefined, 4e5, 7, { count: 2 }), total: { costMicros: 12.4e6, requests: 114 }, unattributed: { costMicros: 1e6, requests: 9 } };
+    const OV = { enabled: true, today: { costMicros: 1230000, requests: 11, unattributedMicros: 1000, unattributedN: 1 },
+      month: { costMicros: 12.4e6, requests: 114, unattributedMicros: 1.5e6, unattributedN: 9 } };
+    const TOP = { enabled: true, rows: [
+      { ts: new Date(2026, 5, 10, 9, 4).getTime(), project: 'alpha', sessionShort: 'abc12345', costMicros: 900000, models: ['claude-haiku-4-5-20251001', 'claude-sonnet-5'], attribution: 'explicit' },
+      { ts: new Date(2026, 5, 10, 8, 4).getTime(), project: 'beta', sessionShort: 'def67890', costMicros: 700000, models: ['claude-opus-4'], attribution: 'unknown' },
+      { ts: new Date(2026, 5, 9, 8, 4).getTime(), project: 'gamma', sessionShort: 'aaaa1111', costMicros: 600000, models: ['fable-1'], attribution: 'mixed' },
+      { ts: new Date(2026, 5, 8, 8, 4).getTime(), project: 'delta', sessionShort: 'bbbb2222', costMicros: 500000, models: ['some-other-model'], attribution: 'explicit' },
+    ] };
+    const cacheBody = (r, c, i, n) => ({ enabled: true, range: '7d', requests: n, cacheReadTokens: r, cacheCreationTokens: c, inputTokens: i,
+      cacheReadSharePct: r + c + i > 0 ? Math.round(r / (r + c + i) * 1000) / 10 : null });
+    const CACHES = { '24h': cacheBody(900000, 60000, 40000, 12), '7d': cacheBody(0, 0, 0, 0), '30d': cacheBody(5400000, 300000, 300000, 210) };
+    const DETAIL = { enabled: true, project: 'alpha', costMicros: 5e6, requests: 40, bySource: { main: 3e6, subagent: 1.5e6, auxiliary: 5e5 },
+      byAttribution: { explicit: 4.5e6, unknown: 5e5 }, byAttributionN: { explicit: 36, unknown: 4 }, trend: trend(1000) };
+    const DATA = { ov: OV, series: { range: '7d', buckets: [] }, where: WHERE, top: TOP, caches: CACHES };
+    const PAGES = ['overview', 'projects', 'turns', 'cache'].map((sub) => [sub, S.spendPageHtml(DATA, { sub, sel: 'alpha', range: '7d', q: '', pill: 0 })]);
+    const SIDE = S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: DETAIL, link: 'p-alpha' });
+
+    test('[alpha6-spend] routes: sub-tabs and the selected project parse strictly', () => {
+      for (const [h, sub] of [['#spend', 'overview'], ['#spend/projects', 'projects'], ['#spend/turns', 'turns'], ['#spend/cache', 'cache'], ['#/Spend/Projects', 'projects']]) {
+        assert.strictEqual(S.parseRoute(h), 'spend', h);
+        assert.deepStrictEqual(S.parseSpendHash(h), { sub, sel: null }, h);
+      }
+      assert.deepStrictEqual(S.parseSpendHash('#spend/projects?p=my%20proj'), { sub: 'projects', sel: 'my proj' });
+      assert.deepStrictEqual(S.parseSpendHash('#spend?p=alpha'), { sub: 'overview', sel: 'alpha' });
+      assert.strictEqual(S.parseRoute('#spend/turns?p=alpha'), 'spend');
+      // anything else is not a spend route, and a spend-looking hash never yields a half-parsed selection
+      for (const h of ['#spend/', '#spend/nope', '#spend/projects/alpha', '#spend/../x', '#spend/projects?x=1', '#spend/projects?p=a&q=b', '#spend/projects?p=', '#spendx', '#spend/cache/', null, undefined]) {
+        assert.notStrictEqual(S.parseRoute(h), 'spend', String(h));
+        assert.deepStrictEqual(S.parseSpendHash(h), { sub: 'overview', sel: null }, String(h));
+      }
+      for (const bad of ['%00', '%1f', '%E0%A4%A', '%20', 'x'.repeat(201)]) assert.strictEqual(S.parseSpendHash('#spend/projects?p=' + bad).sel, null, bad);
+      assert.strictEqual(S.parseSpendHash('#spend?p=' + 'x'.repeat(200)).sel, 'x'.repeat(200));
+      assert.strictEqual(S.initialRoute('#spend/cache', 'projects'), 'spend');
+      assert.strictEqual(S.initialRoute('', 'spend'), 'spend');
+      assert.strictEqual(S.parseRoute('#projects/p1'), 'projects');
+    });
+
+    test('[alpha6-spend] spendHash round-trips every sub-tab and hostile names', () => {
+      assert.strictEqual(S.spendHash('overview', null), '#spend');
+      assert.strictEqual(S.spendHash('turns', null), '#spend/turns');
+      assert.strictEqual(S.spendHash('bogus', 'a'), '#spend?p=a');
+      for (const name of ['alpha', 'my proj/x?p=1&q=#', HOSTILE, 'ünï', '😀'.repeat(100), 'x'.repeat(200)]) {
+        for (const sub of ['overview', 'projects', 'turns', 'cache']) {
+          const h = S.spendHash(sub, name);
+          assert.strictEqual(S.parseRoute(h), 'spend', h.slice(0, 60));
+          assert.deepStrictEqual(S.parseSpendHash(h), { sub, sel: name }, sub);
+        }
+      }
+      assert.strictEqual(S.spendHash('projects', 'x'.repeat(201)), '#spend/projects');
+    });
+
+    test('[alpha6-spend] sub-tab render functions on fixture bodies', () => {
+      const [ov, pr, tu, ca] = PAGES.map((p) => p[1]);
+      for (const [sub, html] of PAGES) {
+        assert.match(html, /<h1>Spend<\/h1>/, sub);
+        assert.strictEqual((html.match(/class="spill[ "]/g) || []).length, 4, sub);
+        assert.match(html, new RegExp('class="spill on" href="#spend' + (sub === 'overview' ? '' : '/' + sub) + '\\?p=alpha" aria-current="page"'), sub);
+      }
+      // Overview: the chart (with the range switch), top 3 + Other, the top 3 turns, each preview linking to its sub-tab
+      assert.match(ov, /id="chart-box"/);
+      assert.strictEqual((ov.match(/data-range="/g) || []).length, 3);
+      assert.match(ov, /USD|Daily usage cost/);
+      assert.deepStrictEqual((ov.match(/data-ssel="[^"]*"/g) || []), ['data-ssel="alpha"', 'data-ssel="beta"', 'data-ssel="gamma"']);
+      assert.match(ov, /<span class="sp-name">Other<\/span><span class="quiet-text">5 projects<\/span><span class="num sp-cost">\$2\.00 est\.<\/span>/);   // delta 1.00 + epsilon 0.50 + unnamed 0.10 + API other 0.40, over 3 + 2 projects
+      assert.match(ov, /href="#spend\/projects\?p=alpha">All projects/);
+      assert.match(ov, /href="#spend\/turns\?p=alpha">All turns/);
+      assert.strictEqual((ov.match(/<tbody>[\s\S]*?<\/tbody>/)[0].match(/<tr>/g) || []).length, 3);
+      assert.match(ov, /class="sprev sel" data-ssel="alpha" aria-pressed="true"/);
+      // Projects: every row, the Other roll-up and a total, a sparkline per row, search box
+      assert.match(pr, /data-sq/);
+      assert.deepStrictEqual((pr.match(/<tr class="srow[^>]*data-ssel="[^"]*"/g) || []).map((m) => m.match(/data-ssel="([^"]*)"/)[1]), ['alpha', 'beta', 'gamma', 'delta', 'epsilon']);
+      assert.match(pr, /<tr class="srow nosel"><td class="proj">Unknown project<\/td>/);
+      assert.match(pr, /<tr class="srow sel" tabindex="0" data-ssel="alpha" aria-current="true">/);
+      assert.match(pr, /Other projects <span class="quiet-text">\(2\)<\/span>/);
+      assert.match(pr, /<tfoot><tr><td class="proj">Total<\/td>[\s\S]*\$12\.40 est\.[\s\S]*n=114/);
+      assert.match(pr, /<th>Main<\/th><th>Subagent<\/th><th>Auxiliary<\/th><th>Total<\/th>/);
+      assert.strictEqual((pr.match(/<svg class="spark"/g) || []).length, 7);   // 5 named + unknown + Other
+      // Turns
+      assert.strictEqual((tu.match(/<td class="mono">/g) || []).length, 4);
+      assert.match(tu, /<th>Session<\/th>/);
+      assert.match(tu, /Metadata only\. Prompt text is never stored\./);
+      assert.match(tu, /<td>Explicit<\/td>/); assert.match(tu, /<td>Mixed<\/td>/); assert.match(tu, /<td>Unattributed<\/td>/);
+      // Cache
+      assert.strictEqual((ca.match(/class="ccard"/g) || []).length, 3);
+      assert.match(ca, /Last 24 hours/); assert.match(ca, /Last 7 days/); assert.match(ca, /Last 30 days/);
+      assert.match(ca, /90\.0% read/);
+      assert.match(ca, /No input-side tokens in this window/);
+      assert.match(ca, /900\.0K tokens/);
+      assert.match(ca, /no savings figure/);
+    });
+
+    test('[alpha6-spend] every dollar figure ends in est. (axis ticks excepted), on every sub-tab and the side panel', () => {
+      const TICK = /<text [^>]*text-anchor="end">\$[0-9][0-9.]*<\/text>/g;
+      const chart = new Function("const SRC_LABEL = { main: 'Main', subagent: 'Subagent', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };\n"
+        + ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry', 'dayLabel', 'chartSvg']
+          .map((n) => lf(conSrc, n)).join('\n') + '\nreturn { chartSvg };')();
+      const day = (d) => ({ key: 'd' + d, since: new Date(2026, 5, d).getTime(), until: new Date(2026, 5, d + 1).getTime(), costMicros: d * 1e6, requests: d,
+        bySource: { main: d * 6e5, subagent: d * 3e5, auxiliary: d * 1e5 }, byAttribution: { explicit: d * 9e5, unknown: d * 1e5 } });
+      const svg = chart.chartSvg({ range: '7d', buckets: [day(1), day(2), day(3)] }, 640);
+      assert.match(svg, /USD · estimated/);
+      let money = 0;
+      for (const [name, html] of PAGES.concat([['side', SIDE], ['svg', svg], ['empty side', S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: null, link: null })]])) {
+        const rest = html.replace(TICK, '');
+        for (const m of rest.matchAll(/\$[0-9][0-9.,]*/g)) {
+          money++;
+          assert.strictEqual(rest.slice(m.index + m[0].length, m.index + m[0].length + 5), ' est.', name + ': ' + rest.slice(Math.max(0, m.index - 20), m.index + 30));
+        }
+      }
+      assert.ok(money >= 60, 'money strings checked: ' + money);
+      assert.match(S.spendHeaderHtml(OV, 0), /<dt>Today<\/dt><dd class="num">\$1\.23 est\.<\/dd>/);
+      assert.match(S.spendHeaderHtml(OV, 0), /<dt>Month to date<\/dt><dd class="num">\$12\.40 est\.<\/dd>/);
+      assert.match(S.spendHeaderHtml(OV, 0), /<dt>Unattributed, month to date<\/dt><dd class="num">\$1\.50 est\.<\/dd><dd class="sstat-sub num">9 requests · 12% of spend \(n=114\)<\/dd>/);
+      assert.match(S.spendHeaderHtml(null, 0), /\$0\.00 est\./);
+    });
+
+    test('[alpha6-spend] every share carries n', () => {
+      const text = (h) => h.replace(/<[^>]*>/g, ' ');
+      // side panel: each attribution percent is followed by its own n
+      for (const m of text(SIDE).matchAll(/\d+%/g)) assert.match(text(SIDE).slice(m.index, m.index + 14), /^\d+% \(n=\d+\)/, m[0]);
+      assert.match(SIDE, /Explicit <span class="num">90% \(n=36\)<\/span>/);
+      assert.match(SIDE, /Unattributed <span class="num">10% \(n=4\)<\/span>/);
+      assert.match(SIDE, /aria-label="90% explicit, 10% unattributed, n=40"/);
+      // cache: the three shares of a card carry the card's request count, and the card header says it too
+      const ca = PAGES[3][1];
+      const cards = ca.split('<section class="ccard">').slice(1);
+      assert.strictEqual(cards.length, 3);
+      for (const c of cards) {
+        assert.match(c, /n=\d+ request/);
+        const pcts = c.match(/\d+% \(n=\d+\)/g) || [];
+        assert.ok(pcts.length === 3 || /No input-side/.test(c), c.slice(0, 80));
+      }
+      assert.match(ca, /aria-label="Cache read 90%, cache creation 6%, uncached input 4% of input-side tokens, n=12"/);
+      // header and preview bars
+      assert.match(S.spendHeaderHtml(OV, 0), /% of spend \(n=114\)/);
+      assert.match(PAGES[0][1], /aria-label="Main 60%, subagent 30%, auxiliary 10% of cost, n=40"/);
+      assert.match(S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: Object.assign({}, DETAIL, { requests: 0 }), link: null }), /No requests this month \(n=0\)/);
+      assert.match(S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: null, link: null }), /Attribution is not available right now/);
+    });
+
+    test('[alpha6-spend] models show as Haiku / Sonnet / Opus / Fable with the raw id in the tooltip', () => {
+      const h = S.modelsHtml(['claude-haiku-4-5-20251001', 'claude-sonnet-5', 'claude-opus-4', 'fable-1', 'some-other-model', 'claude-haiku-3']);
+      assert.match(h, /<span class="mdl" title="claude-haiku-4-5-20251001, claude-haiku-3">Haiku<\/span>/);
+      assert.match(h, /title="claude-sonnet-5">Sonnet</);
+      assert.match(h, /title="claude-opus-4">Opus</);
+      assert.match(h, /title="fable-1">Fable</);
+      assert.match(h, /title="some-other-model">some-other-model</);
+      assert.strictEqual((h.match(/>Haiku</g) || []).length, 1);
+      assert.match(S.modelsHtml([]), /Unknown/);
+      assert.match(S.modelsHtml(null), /Unknown/);
+      assert.ok(!/claude-haiku/.test(S.modelsHtml(['claude-haiku-4-5']).replace(/title="[^"]*"/, '')), 'raw id only in the title');
+      assert.match(PAGES[2][1], /<span class="mdl" title="claude-haiku-4-5-20251001">Haiku<\/span>, <span class="mdl" title="claude-sonnet-5">Sonnet<\/span>/);
+    });
+
+    test('[alpha6-spend] no session links anywhere; session ids are plain text; no Open session history', () => {
+      for (const [name, html] of PAGES.concat([['side', SIDE]])) {
+        for (const a of html.match(/<a [^>]*>/g) || []) assert.ok(!/session/i.test(a), name + ': ' + a);
+        assert.ok(!/Open session|session history/i.test(html), name);
+      }
+      assert.match(PAGES[2][1], /<td class="mono">abc12345<\/td>/);
+      assert.ok(!/<a /.test(PAGES[2][1].replace(/<nav[\s\S]*?<\/nav>/, '')), 'Turns table has no links');
+      assert.ok(!/Open session history|\/session|sessions\//.test(conSrc.slice(conSrc.indexOf('Spend tab: pure helpers'), conSrc.indexOf('/* ---------- state ---------- */'))));
+    });
+
+    test('[alpha6-spend] View project links to #projects/<id> only when the name maps to one visible project', () => {
+      assert.match(SIDE, /<a class="btn-copy sview" href="#projects\/p-alpha">View project<\/a>/);
+      for (const link of [null, undefined, '', 'bad id', 'x/y', '<b>', 'a'.repeat(65)]) {
+        assert.ok(!/View project|#projects/.test(S.spendSideHtml('alpha', { row: WHERE.rows[1], detail: DETAIL, link })), String(link));
+      }
+      const list = [{ id: 'p-alpha', name: 'alpha' }, { id: 'p-beta', name: 'beta', hidden: true }, { id: 'p-g1', name: 'gamma' }, { id: 'p-g2', name: 'gamma' },
+        { id: 'p-same', name: 'dup' }, { id: 'p-same', name: 'dup' }, { id: 'bad id', name: 'weird' }, { id: 'p-case', name: 'Case' }, null, 5];
+      assert.strictEqual(S.projectIdFor(list, 'alpha'), 'p-alpha');
+      assert.strictEqual(S.projectIdFor(list, 'beta'), null);      // hidden
+      assert.strictEqual(S.projectIdFor(list, 'gamma'), null);     // two different projects share the name: no guess
+      assert.strictEqual(S.projectIdFor(list, 'dup'), 'p-same');   // the same project listed twice
+      assert.strictEqual(S.projectIdFor(list, 'weird'), null);     // an id the Projects route would not accept
+      assert.strictEqual(S.projectIdFor(list, 'case'), null);      // exact match only
+      assert.strictEqual(S.projectIdFor(list, 'nope'), null);
+      for (const bad of [null, undefined, '', 5]) assert.strictEqual(S.projectIdFor(list, bad), null);
+      for (const bad of [null, undefined, 'x', {}]) assert.strictEqual(S.projectIdFor(bad, 'alpha'), null);
+      assert.strictEqual(S.parseRoute('#projects/p-alpha'), 'projects');
+    });
+
+    test('[alpha6-spend] hostile strings are escaped in every sub-tab and the side panel', () => {
+      const where = { enabled: true, rows: [row(HOSTILE, 5e6, 5), row('ok', 1e6, 1)], other: row(undefined, 0, 0, { count: 0 }), total: { costMicros: 6e6, requests: 6 } };
+      const top = { rows: [{ ts: 1, project: HOSTILE, sessionShort: HOSTILE, costMicros: 1, models: [HOSTILE], attribution: HOSTILE }] };
+      const d = { ov: OV, where, top, caches: CACHES };
+      const out = ['overview', 'projects', 'turns'].map((sub) => S.spendPageHtml(d, { sub, sel: HOSTILE, range: '7d', q: HOSTILE, pill: 0 }));
+      out.push(S.spendSideHtml(HOSTILE, { row: where.rows[0], detail: null, link: 'p1' }));
+      out.push(S.projectsTableHtml(where, 'zz' + HOSTILE, null));
+      out.push(S.wherePreviewHtml(where, HOSTILE));
+      for (const h of out) {
+        assert.ok(!/<img/.test(h), h.slice(0, 200));
+        assert.ok(!/onerror=alert\(1\)>/.test(h.replace(/&lt;img src=x onerror=alert\(1\)&gt;/g, '')), 'raw handler');
+      }
+      assert.match(out[2], /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
+      assert.match(out[0], /data-ssel="&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;"/);
+      assert.match(out[1], /value="&lt;img/);
+      assert.match(out[4], /No project matches/);
+      assert.match(out[4], /&lt;img/);
+      assert.match(out[3], /<h2>&lt;img/);
+      // the hash in a link is percent-encoded, then attribute-escaped
+      assert.ok(!/href="[^"<>']*[<>']/.test(out[0]));
+    });
+
+    test('[alpha6-spend] Projects search filters named rows only; Other and Total hide while a filter is active', () => {
+      const all = S.projectsTableHtml(WHERE, '', 'alpha');
+      const f = S.projectsTableHtml(WHERE, '  ALP ', 'alpha');
+      assert.match(all, /sother/); assert.match(all, /<tfoot>/);
+      assert.deepStrictEqual((f.match(/data-ssel="[^"]*"/g) || []), ['data-ssel="alpha"']);
+      assert.ok(!/sother|<tfoot>/.test(f));
+      assert.match(S.projectsTableHtml(WHERE, 'zzz', null), /No project matches \S*zzz\S*/);
+      assert.match(S.projectsTableHtml({ enabled: true, rows: [], other: null }, '', null), /No project spend this month/);
+      assert.match(S.projectsTableHtml(WHERE, 'unknown', null), /nosel/);   // the unnamed row is findable but never selectable
+    });
+
+    test('[alpha6-spend] Overview preview: top 3 plus Other sums everything else', () => {
+      const pv = S.wherePreview(WHERE, 3);
+      assert.deepStrictEqual(pv.rows.map((r) => r.project), ['alpha', 'beta', 'gamma']);
+      assert.deepStrictEqual(pv.other, { count: 5 - 3 + 1 + 2 - 0, costMicros: 1e6 + 5e5 + 1e5 + 4e5, requests: 10 + 5 + 2 + 7 });
+      assert.deepStrictEqual(S.wherePreview(null, 3), { rows: [], other: { count: 0, costMicros: 0, requests: 0 } });
+      assert.match(S.wherePreviewHtml({ enabled: true, rows: [], other: null }, null), /No project spend this month/);
+      assert.ok(!/Other/.test(S.wherePreviewHtml({ enabled: true, rows: [row('only', 1e6, 1)], other: null }, 'only')));
+    });
+
+    test('[alpha6-spend] selection: the requested named project, else the top one; arrows move through the rows', () => {
+      assert.strictEqual(S.spendResolveSel(WHERE, 'gamma'), 'gamma');
+      assert.strictEqual(S.spendResolveSel(WHERE, null), 'alpha');
+      assert.strictEqual(S.spendResolveSel(WHERE, 'not-there'), 'alpha');
+      assert.strictEqual(S.spendResolveSel({ rows: [row(null, 5, 1)] }, 'x'), null);
+      assert.strictEqual(S.spendResolveSel(null, 'x'), null);
+      const ids = S.spendRows(WHERE).map((r) => r.project).filter((p) => typeof p === 'string');
+      assert.deepStrictEqual(ids, ['alpha', 'beta', 'gamma', 'delta', 'epsilon']);
+      assert.strictEqual(S.navMove(ids, 'alpha', 'ArrowDown'), 'beta');
+      assert.strictEqual(S.navMove(ids, 'alpha', 'ArrowUp'), 'alpha');
+      assert.strictEqual(S.navMove(ids, 'epsilon', 'ArrowDown'), 'epsilon');
+      assert.strictEqual(S.navMove(ids, 'gamma', 'Home'), 'alpha');
+      assert.strictEqual(S.navMove(ids, 'gamma', 'End'), 'epsilon');
+      assert.strictEqual(S.navMove([], 'x', 'Home'), null);
+      // wiring: Enter / Space / arrows / Home / End act from a project row, a click on a row or preview selects, the choice goes into the hash
+      const keys = conSrc.slice(conSrc.indexOf("if (state.route === 'spend') {\n      const row ="));
+      assert.match(keys, /closest\('tr\.srow\[data-ssel\]'\)/);
+      assert.match(keys, /e\.key === 'Enter' \|\| e\.key === ' '/);
+      assert.match(keys, /'ArrowDown' && e\.key !== 'ArrowUp' && e\.key !== 'Home' && e\.key !== 'End'/);
+      assert.match(keys, /selectSpendProject\(next, true\)/);
+      assert.match(conSrc, /closest\('\[data-ssel\]'\)/);
+      assert.match(conSrc, /history\.replaceState\(null, '', spendHash\(state\.spend\.sub, name\)\)/);
+      assert.match(conSrc, /input\[data-sq\]/);
+    });
+
+    // The whole script on a fake DOM: render(), selectSpendProject() and the right column, end to end.
+    const mkApp = (fetchBody) => {
+      const els = {};
+      for (const id of ['view', 'side-today', 'attn-live', 'ptask', 'pill-slot', 'sync']) {
+        els[id] = { id, innerHTML: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+          querySelectorAll() { return []; }, contains() { return false; }, clientWidth: 600, textContent: '' };
+      }
+      const doc = { getElementById: (id) => els[id] || null, activeElement: null, querySelectorAll: () => [], querySelector: () => null };
+      const hashes = [];
+      const hist = { replaceState: (a, b, h) => hashes.push(h) };
+      const src = conSrc.replace("if (typeof document !== 'undefined') boot();", '');
+      const names = ['state', 'render', 'renderAttention', 'selectSpendProject', 'refreshSpendDetail', 'spendPanelNow', 'attentionState', 'renderSpendTable'];
+      const fetchStub = async (url) => ({ ok: true, status: 200, json: async () => (typeof fetchBody === 'function' ? fetchBody(url) : fetchBody) });
+      const app = new Function('document', 'history', 'fetch', 'location', 'localStorage', src + '\nreturn { ' + names.join(', ') + ' };')(doc, hist, fetchStub, { hash: '#spend', host: 'x' }, {});
+      app.els = els; app.hashes = hashes;
+      app.state.route = 'spend'; app.state.mode = 'data';
+      app.state.today = { enabled: true, hasTelemetry: true, costMicros: 1230000, requests: 11 };
+      app.state.series = { range: '30d', buckets: [{ requests: 3 }] };
+      Object.assign(app.state.spend, { ov: OV, where: WHERE, top: TOP, caches: CACHES });
+      app.state.proj.list = [{ id: 'p-alpha', name: 'alpha' }, { id: 'p-beta', name: 'beta' }];
+      return app;
+    };
+
+    test('[alpha6-spend] states: ledger off, unavailable, loading and empty never show data or a project panel', () => {
+      const app = mkApp(null);
+      app.state.mode = 'off'; app.render();
+      assert.match(app.els.view.innerHTML, /Spend history is off/);
+      assert.match(app.els.view.innerHTML, /Turn it on from the Sereno tray: Keep spend history\./);
+      assert.strictEqual(app.els.ptask.innerHTML, '');
+      assert.match(app.els['attn-live'].innerHTML, /ALL CLEAR/);
+      app.state.mode = 'unavailable'; app.render();
+      assert.match(app.els.view.innerHTML, /Spend history is unavailable right now/);
+      assert.strictEqual(app.els.ptask.innerHTML, '');
+      app.state.mode = 'loading'; app.render();
+      assert.strictEqual(app.els.view.innerHTML, '');
+      assert.strictEqual(app.els.view.attrs['aria-busy'], 'true');
+      app.state.mode = 'data';
+      app.state.today = { enabled: true, hasTelemetry: false, costMicros: 0, requests: 0 };
+      app.state.series = { range: '30d', buckets: [{ requests: 0 }] };
+      app.state.spend.where = { enabled: true, rows: [], other: { count: 0, costMicros: 0, requests: 0 }, total: { costMicros: 0, requests: 0 } };
+      app.render();
+      assert.match(app.els.view.innerHTML, /No spend recorded yet/);
+      assert.match(app.els.view.innerHTML, /Wire telemetry/);
+      assert.strictEqual(app.els.ptask.innerHTML, '');
+    });
+
+    await atest('[alpha6-spend] default selection is the top project; selecting updates the panel, the hash and the detail', async () => {
+      const app = mkApp((url) => (url.indexOf('/api/spend/project?name=beta') >= 0
+        ? Object.assign({}, DETAIL, { project: 'beta', costMicros: 3e6, requests: 30, byAttributionN: { explicit: 25, unknown: 5 }, byAttribution: { explicit: 2e6, unknown: 1e6 }, bySource: { main: 2e6, subagent: 1e6, auxiliary: 0 } })
+        : Object.assign({}, DETAIL)));
+      app.render();
+      assert.match(app.els.view.innerHTML, /class="spill on" href="#spend\?p=alpha"/);
+      assert.match(app.els.ptask.innerHTML, /<h2>alpha<\/h2>/);
+      assert.match(app.els.ptask.innerHTML, /href="#projects\/p-alpha">View project/);
+      assert.match(app.els.ptask.innerHTML, /\$5\.00 est\./);
+      assert.strictEqual(app.els['attn-live'].innerHTML, '');   // nothing pinned: the panel owns the column
+      app.state.spend.sub = 'projects';
+      app.selectSpendProject('beta', false);
+      assert.strictEqual(app.state.spend.sel, 'beta');
+      assert.deepStrictEqual(app.hashes, ['#spend/projects?p=beta']);
+      assert.match(app.els.view.innerHTML, /<tr class="srow sel" tabindex="0" data-ssel="beta" aria-current="true">/);
+      assert.match(app.els.ptask.innerHTML, /<h2>beta<\/h2>/);
+      assert.match(app.els.ptask.innerHTML, /href="#projects\/p-beta">View project/);
+      await new Promise((r) => setTimeout(r, 20));
+      assert.strictEqual(app.state.spend.detailFor, 'beta');
+      assert.match(app.els.ptask.innerHTML, /Explicit <span class="num">67% \(n=25\)<\/span>/);
+      assert.match(app.els.ptask.innerHTML, /Unattributed <span class="num">33% \(n=5\)<\/span>/);
+      // a name the table does not have falls back to the top project; a project with no Projects entry gets no link
+      app.state.spend.sel = 'zzz-gone'; app.render();
+      assert.match(app.els.ptask.innerHTML, /<h2>alpha<\/h2>/);
+      app.state.proj.list = [];
+      app.render();
+      assert.ok(!/View project/.test(app.els.ptask.innerHTML));
+    });
+
+    test('[alpha6-spend] amber rule: the Spend page and project panel never use amber; only a needs-you or decision block does, pinned above the panel', () => {
+      const app = mkApp(null);
+      app.state.attn = app.attentionState({ sessions: [] });
+      app.render();
+      for (const el of ['view', 'ptask', 'attn-live']) assert.ok(!/amber|NEEDS YOUR/i.test(app.els[el].innerHTML), el);
+      assert.match(app.els.ptask.innerHTML, /<h2>alpha<\/h2>/);
+      // a pending decision: amber in the live region only, the panel stays below it and neutral
+      app.state.attn = app.attentionState({ sessions: [], decisions: [{ project: 'alpha', task: 't1', reason: 'retry_limit', attempt: 2 }] });
+      app.render();
+      assert.match(app.els['attn-live'].innerHTML, /attn-amber/);
+      assert.match(app.els['pill-slot'].innerHTML, /1 decision needs you/);
+      assert.match(app.els.ptask.innerHTML, /<h2>alpha<\/h2>/);
+      assert.ok(!/amber/i.test(app.els.ptask.innerHTML));
+      assert.ok(!/amber/i.test(app.els.view.innerHTML.replace(/<span id="pill-slot">[\s\S]*?<\/span><\/div>/, '')));
+      // a stalled repair is informational: pinned, not amber
+      app.state.attn = app.attentionState({ sessions: [], stalled: [{ project: 'alpha', task: 't1', kind: 'repair' }] });
+      app.render();
+      assert.match(app.els['attn-live'].innerHTML, /Repair stalled/);
+      assert.ok(!/attn-amber/.test(app.els['attn-live'].innerHTML));
+      // the new Spend CSS has no amber at all
+      const css = conCss.slice(conCss.indexOf('Spend tab (alpha.6 S2)'));
+      assert.ok(css.length > 1500);
+      assert.ok(!/amber/.test(css), 'amber in the Spend CSS');
+      for (const m of css.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+    });
+
+    test('[alpha6-spend] source: old Spend render code is gone, one innerHTML write, no inline styles, no text-field reads, LF only', () => {
+      for (const gone of ['summaryLine', 'chartSection', 'projectsSection', 'promptsSection', 'unattr-row', 'proj-table', 'Top 10 costliest', 'state.projects', 'state.top']) {
+        assert.ok(!conSrc.includes(gone), gone + ' should be gone');
+      }
+      for (const gone of ['.unattr-row', '.proj-table', '.attr-line', '.prompts ', '.summary']) assert.ok(!conCss.includes(gone), gone + ' should be gone from the CSS');
+      assert.strictEqual((conSrc.match(/\.innerHTML\s*=/g) || []).length, 1);
+      assert.ok(!/style=/.test(conSrc.replace(/el\.style\./g, '')));
+      assert.ok(!/\.text\b|\{\s*text\s*[:,}]/.test(conSrc), 'the console never reads a text field');
+      assert.ok(!/\r|[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(conSrc + conCss));
+      assert.match(conSrc, /getJson\('\/api\/spend\/overview'\)/);
+      assert.match(conSrc, /getJson\('\/api\/spend\/where\?range=month'\)/);
+      assert.match(conSrc, /'\/api\/spend\/cache\?range=' \+ w\[0\]/);
+      assert.match(conSrc, /'\/api\/spend\/project\?name=' \+ encodeURIComponent\(name\)/);
+      assert.match(conSrc, /classList\.toggle\('spend', route === 'spend'\)/);
+    });
+  }
+
+  // ---- [alpha6 exit] release gate: the six exit criteria of docs/plans/alpha6-projects-navigator-theme.md, end to end ----
+  // Temp homes, the real collector on an ephemeral port, the real registry, and the real renderer functions
+  // lifted out of console.js. Fixtures are synthetic; nothing here binds 8787.
+  {
+    const projects = require('../src/projects.js');
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const ccss = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+    const wcss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+    const names = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
+      'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'navCounts', 'navFilter', 'navBranches',
+      'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
+      'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
+      'navManageHtml', 'navPage'];
+    const consts = ["const OUTCOME_LABEL = { pass: 'Pass', block: 'Block', needs_context: 'Needs context', error: 'Error', skipped: 'Skipped' };",
+      "const INSTALL_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];"].concat(cjs.match(/^const NAV_\w+ = .*;$/gm));
+    const R = new Function(consts.join('\n') + '\n' + names.map((n) => {
+      const m = cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'));
+      assert.ok(m, 'console.js has ' + n);
+      return m[0];
+    }).join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+
+    const DAY = 86400000;
+    const tmps = [];
+    const tmp = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-exit-'))); tmps.push(d); return d; };
+    const withHome = async (fn) => {
+      const home = tmp(); const prev = process.env.SERENO_HOME; const prevCfg = process.env.CLAUDE_CONFIG_DIR;
+      process.env.SERENO_HOME = home; process.env.CLAUDE_CONFIG_DIR = path.join(home, 'claude');
+      try { await fn(home); } finally {
+        if (prev === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev;
+        if (prevCfg === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prevCfg;
+      }
+    };
+    const rq = (port, o) => new Promise((resolve, reject) => {
+      const body = o.body === undefined ? null : (typeof o.body === 'string' ? o.body : JSON.stringify(o.body));
+      const headers = Object.assign({}, o.headers || {});
+      if (body !== null) headers['content-length'] = Buffer.byteLength(body);
+      const req = http.request({ host: '127.0.0.1', port, path: o.path, method: o.method || 'GET', headers }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (c) => { t += c; });
+        r.on('end', () => resolve({ status: r.statusCode, text: t }));
+      });
+      req.on('error', reject);
+      req.end(body === null ? undefined : body);
+    });
+    const boot = async (store, opts) => {
+      const c = createCollector(store, 0, opts);
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      return c;
+    };
+    const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const getJson = async (port, p) => JSON.parse((await rq(port, { path: p })).text);
+    const writeRegistry = (home, entries) => fs.writeFileSync(path.join(home, 'projects.json'), JSON.stringify({ projects: entries }));
+    const entryOf = (id, name, repoPath) => ({ id, name, repoPath, hidden: false, pinned: false, firstSeen: 1 });
+    const snapOf = (extra) => Object.assign({ id: 'x', worktrees: [], branches: [], error: false, freshness: 'none', brief: null, lastCommitAt: null, commits: [], pipeline: null }, extra || {});
+    const UI = (o) => Object.assign({ filter: 'active', q: '', sort: 'pinned', open: { inactive: false }, tab: 'branches', managing: false }, o);
+    const pageOf = (r, o) => R.navPage(Object.assign({ projects: r.projects, counts: r.counts, sessions: [], nowMs: Date.now(), sel: null, pluginMissing: false, ui: UI(), opts: { review: true } }, o || {}));
+    const files = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+    const tokenOf = async (port) => JSON.parse((await rq(port, { path: '/api/token' })).text).token;
+
+    await atest('[alpha6 exit 1] about 90 registered projects: Active is the default, the inactive ones sit in a collapsed group', async () => {
+      await withHome(async (home) => {
+        const now = Date.now();
+        const entries = Array.from({ length: 90 }, (_, i) => entryOf('e' + String(i).padStart(2, '0'), 'repo-' + String(i).padStart(2, '0'), 'C:/exit/repo-' + i));
+        writeRegistry(home, entries);
+        const snap = {};
+        entries.forEach((e, i) => { snap[e.id] = snapOf({ lastCommitAt: now - (i < 12 ? (i + 1) * 3600000 : 60 * DAY) }); });
+        const c = await boot(new Store(), { projects: projects.createRegistry(), repos: { snapshot: () => snap } });
+        try {
+          const r = await getJson(c.port, '/api/projects');
+          assert.strictEqual(r.projects.length, 90);
+          assert.strictEqual(r.counts.total, 90);
+          assert.strictEqual(r.counts.active, 12);
+          // the client opens on Active, with the inactive group closed
+          assert.match(cjs, /proj: \{ mode: 'loading', list: \[\], counts: null, filter: 'active'[^}]*open: \{ inactive: false \}/);
+          const page = pageOf(r);
+          assert.match(page, /data-filter="active" aria-pressed="true"/);
+          assert.match(page, /All <span class="num">90<\/span>/);
+          assert.match(page, /Active <span class="num">12<\/span>/);
+          assert.strictEqual((page.match(/class="nrow[ "]/g) || []).length, 12, 'only the active projects are listed by default');
+          assert.ok(!/ninactive/.test(page), 'the default view lists no inactive project');
+          // All: the other 78 fold into one collapsed group
+          const all = pageOf(r, { ui: UI({ filter: 'all' }) });
+          assert.match(all, /<details class="ngroup ninactive"><summary>Inactive \(78\)<\/summary>/);
+          assert.strictEqual((all.match(/<details/g) || []).length, 1);
+          assert.ok(!/ninactive" open>/.test(all), 'collapsed until the user opens it');
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[alpha6 exit 2] pin and unpin persist in projects.json; without a valid token the request is refused', async () => {
+      await withHome(async (home) => {
+        writeRegistry(home, [entryOf('pa', 'alpha', 'C:/exit/a'), entryOf('pb', 'beta', 'C:/exit/b')]);
+        const file = path.join(home, 'projects.json');
+        const before = fs.readFileSync(file, 'utf8');
+        const c = await boot(new Store(), { projects: projects.createRegistry(), repos: { snapshot: () => ({ pa: snapOf(), pb: snapOf() }) } });
+        try {
+          const token = await tokenOf(c.port);
+          const good = { origin: 'http://127.0.0.1:' + c.port, 'content-type': 'application/json', 'x-sereno-token': token };
+          const post = (h, b, id) => rq(c.port, { method: 'POST', path: '/api/projects/' + (id || 'pa') + '/pin', headers: h, body: b });
+          const noTok = Object.assign({}, good); delete noTok['x-sereno-token'];
+          assert.strictEqual((await post(noTok, { pinned: true })).status, 403, 'no token');
+          assert.strictEqual((await post(Object.assign({}, good, { 'x-sereno-token': 'nope' }), { pinned: true })).status, 403, 'wrong token');
+          assert.strictEqual((await post(Object.assign({}, good, { origin: 'http://evil.example' }), { pinned: true })).status, 403, 'foreign origin');
+          assert.strictEqual(fs.readFileSync(file, 'utf8'), before, 'a refused request changes nothing on disk');
+          // a valid pin persists, survives a reload of the registry, and leads the list
+          assert.strictEqual((await post(good, { pinned: true }, 'pb')).status, 204);
+          assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).projects.find((p) => p.id === 'pb').pinned, true);
+          assert.strictEqual(projects.createRegistry().list().find((p) => p.id === 'pb').pinned, true);
+          const r = await getJson(c.port, '/api/projects');
+          assert.strictEqual(r.projects.find((p) => p.id === 'pb').pinned, true);
+          assert.match(pageOf(r, { ui: UI({ filter: 'all' }) }), /<h3 class="ngroup-title">Pinned <span>1<\/span>/);
+          assert.strictEqual((await post(good, { pinned: false }, 'pb')).status, 204);
+          assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).projects.find((p) => p.id === 'pb').pinned, false);
+          assert.strictEqual(projects.createRegistry().list().find((p) => p.id === 'pb').pinned, false);
+          assert.ok(!fs.existsSync(file + '.tmp'), 'written atomically');
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[alpha6 exit 3] activity holds no text but capped commit subjects, and none of it reaches the disk', async () => {
+      await withHome(async (home) => {
+        const CANARY = 'EXIT3-CANARY-SUBJECT';
+        const now = Date.now();
+        writeRegistry(home, [entryOf('pa', 'alpha', 'C:/exit/a')]);
+        const commits = Array.from({ length: 14 }, (_, i) => ({ at: now - (i + 1) * 3600000, subject: CANARY + ' ' + i + ' ' + 'Q'.repeat(300) }));
+        const stamp = (h) => new Date(now - h * 3600000).toISOString();
+        const snap = { pa: snapOf({ commits, lastCommitAt: commits[0].at,
+          brief: { now: CANARY + ' brief now', next: CANARY + ' brief next', blocked: CANARY + ' blocked', generatedAt: stamp(30) },
+          pipeline: { tasks: [{ task: CANARY + '-task', stage: 'building', expired: false, attempts: [{ attempt: 1, outcome: 'pass', started_at: stamp(9), ended_at: stamp(8) }], gates: [{ reviewed_at: stamp(7), outcome: 'block' }] }] } }) };
+        const c = await boot(new Store(), { projects: projects.createRegistry(), repos: { snapshot: () => snap } });
+        try {
+          const token = await tokenOf(c.port);
+          const r = await getJson(c.port, '/api/projects');
+          const a = r.projects[0].activity;
+          assert.ok(a.length > 0 && a.length <= 20);
+          assert.deepStrictEqual(Array.from(new Set(a.map((e) => e.kind))).sort(), ['brief', 'commit', 'pipeline']);
+          for (const e of a) {
+            assert.deepStrictEqual(Object.keys(e).sort(), e.kind === 'pipeline' ? ['at', 'kind', 'outcome', 'subject'] : ['at', 'kind', 'subject']);
+            if (e.kind === 'commit') { assert.ok(typeof e.subject === 'string' && e.subject.length <= 120); assert.ok(!/[\x00-\x1f\x7f-\x9f]/.test(e.subject)); }
+            else assert.strictEqual(e.subject, null, e.kind + ' carries no text');
+            if (e.kind === 'pipeline') assert.ok(e.outcome === null || ['pass', 'fail', 'block', 'needs_context', 'error', 'skipped'].includes(e.outcome), 'outcome is an enum, not text: ' + e.outcome);
+          }
+          assert.strictEqual(a.filter((e) => e.kind === 'commit').length, 10, 'at most 10 commit subjects');
+          assert.ok(!JSON.stringify(a.filter((e) => e.kind !== 'commit')).includes(CANARY), 'no brief or task text in the activity');
+          // a pin plus a few reads: whatever the app writes, it never writes activity
+          const good = { origin: 'http://127.0.0.1:' + c.port, 'content-type': 'application/json', 'x-sereno-token': token };
+          assert.strictEqual((await rq(c.port, { method: 'POST', path: '/api/projects/pa/pin', headers: good, body: { pinned: true } })).status, 204);
+          await getJson(c.port, '/api/projects'); await getJson(c.port, '/state');
+          // the renderer shows the capped subject
+          assert.match(pageOf(r, { sel: 'pa', ui: UI({ tab: 'activity' }) }), new RegExp(CANARY));
+        } finally { await halt(c); }
+        const found = files(home).map((f) => path.relative(home, f).split(path.sep).join('/'));
+        for (const f of found) {
+          assert.ok(f === 'projects.json' || f.startsWith('claude/'), 'unexpected file under the home: ' + f);
+          assert.ok(!fs.readFileSync(path.join(home, f)).includes(CANARY), 'activity text written to ' + f);
+        }
+        assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(home, 'projects.json'), 'utf8')).projects[0]).sort(), ['firstSeen', 'hidden', 'id', 'name', 'pinned', 'repoPath']);
+      });
+    });
+
+    await atest('[alpha6 exit 4] the only action in the detail pane is Review in terminal, and only with a live session', async () => {
+      await withHome(async (home) => {
+        const repo = tmp();
+        writeRegistry(home, [entryOf('pl', 'livep', repo), entryOf('pq', 'quiet', tmp())]);
+        const store = new Store();
+        store.applyHook('SessionStart', { session_id: 'live-sess', cwd: path.join(repo, 'sub') }, { ppid: 4242 });
+        const snap = { pl: snapOf({ freshness: 'none' }), pq: snapOf({ freshness: 'none' }) };
+        const c = await boot(store, { projects: projects.createRegistry(), repos: { snapshot: () => snap } });
+        try {
+          const r = await getJson(c.port, '/api/projects');
+          const sessions = (await getJson(c.port, '/state')).sessions;
+          const detail = (html) => html.slice(html.indexOf('id="ndetail"'));
+          const live = detail(pageOf(r, { sel: 'pl', sessions, ui: UI({ filter: 'all' }) }));
+          assert.ok(live.length > 10, 'detail rendered');
+          assert.strictEqual((live.match(/data-act="review"/g) || []).length, 1, 'one Review control');
+          assert.match(live, /<button type="button" class="btn-review" data-act="review" data-sid="live-sess">Review in terminal/);
+          const quiet = detail(pageOf(r, { sel: 'pq', sessions, ui: UI({ filter: 'all' }) }));
+          assert.ok(!/data-act="review"|btn-review/.test(quiet), 'no live session, no action');
+          for (const tab of ['branches', 'activity', 'git']) {
+            for (const [sel, ses] of [['pl', sessions], ['pl', []], ['pq', sessions]]) {
+              const d = detail(pageOf(r, { sel, sessions: ses, ui: UI({ filter: 'all', tab }) }));
+              for (const m of d.matchAll(/data-act="([a-z-]+)"/g)) assert.ok(['review', 'copy'].includes(m[1]), 'unexpected action ' + m[1]);
+              for (const m of d.matchAll(/<button\b[^>]*>/g)) assert.match(m[0], /data-act="(review|copy)"|data-ntab=/, m[0]);
+              assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin|resume|kill|stop)"/.test(d));
+              if (ses.length === 0 || sel === 'pq') assert.ok(!/data-act="review"/.test(d));
+            }
+          }
+        } finally { await halt(c); }
+      });
+    });
+
+    test('[alpha6 exit 5] contrast holds for both themes and both stylesheets', () => {
+      const LIGHT = /@media \(prefers-color-scheme: light\) \{\s*:root \{([^}]*)\}\s*\}/;
+      const DARK = /^:root \{([^}]*)\}/m;
+      const decls = (b) => Object.fromEntries([...b.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]));
+      const lum = (hex) => {
+        const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+        return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+      };
+      const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+      const sheets = { 'console.css': [ccss, ['--bg', '--panel', '--panel2']], 'app.css': [wcss, ['--bg', '--raised', '--panel2']] };
+      let checked = 0;
+      for (const [name, [css, surfaces]] of Object.entries(sheets)) {
+        const dark = css.match(DARK), light = css.match(LIGHT);
+        assert.ok(dark && light, name + ' has a dark block and a light variant');
+        for (const [mode, t] of [['dark', decls(dark[1])], ['light', Object.assign(decls(dark[1]), decls(light[1]))]]) {
+          for (const s of surfaces) {
+            for (const fg of ['--text', '--muted']) { assert.ok(ratio(t[fg], t[s]) >= 4.5, `${name} ${mode} ${fg} on ${s}: ${ratio(t[fg], t[s]).toFixed(2)}`); checked++; }
+            assert.ok(ratio(t['--quiet'], t[s]) >= 3, `${name} ${mode} --quiet on ${s}: ${ratio(t['--quiet'], t[s]).toFixed(2)}`); checked++;
+          }
+        }
+      }
+      assert.strictEqual(checked, 36, '2 sheets x 2 themes x 3 surfaces x 3 pairs');
+    });
+
+    test('[alpha6 exit 6] amber appears only in needs-you and decision contexts, across console and widget', () => {
+      const rulesOf = (css) => [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] }));
+      const users = (css) => rulesOf(css).filter((r) => /--amber/.test(r.body) && r.sel !== ':root').map((r) => r.sel);
+      assert.deepStrictEqual(users(ccss).sort(), ['.attn-amber .attn-head', '.btn-review', '.mk-dec', '.pill-amber', '.pshape-need', '.prow.decision', '.prow.sel.decision'].sort());
+      assert.deepStrictEqual(users(wcss).sort(), ['.alert #banner', '.blocked .state-symbol', '.timer'].sort());
+      assert.ok(!/amber/i.test(fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8').replace(/\/\/.*$/gm, '')), 'the widget script never names amber');
+      // the console renders those classes only for a blocked session or a pending decision
+      const ps = [{ id: 'c1', name: 'calm', hidden: false, pinned: false, active: true, blockers: false, freshness: 'fresh', lastActivityAt: Date.now(),
+        brief: { now: 'x', next: 'y', blocked: 'None', generatedAt: new Date().toISOString(), behindSince: null }, git: { defaultBranch: 'main', ahead: 0, behind: 0, dirty: false, lastCommitAt: null }, prs: 0,
+        branches: [], spend14: { costMicros: 0, trend: new Array(14).fill(0) }, activity: [], live: { state: 'running', sessionIds: ['s'] }, error: false }];
+      const base = { projects: ps, counts: null, sessions: [{ id: 's', state: 'running', stateSince: Date.now() }], nowMs: Date.now(), sel: 'c1', pluginMissing: false, ui: UI(), opts: { review: true } };
+      const calm = R.navPage(base);
+      assert.ok(!/amber|pshape-need|Needs you/i.test(calm), 'a running session is not amber');
+      const need = R.navPage(Object.assign({}, base, { projects: [Object.assign({}, ps[0], { live: { state: 'blocked', sessionIds: ['s'] } })], sessions: [{ id: 's', state: 'blocked', stateSince: Date.now() }] }));
+      assert.match(need, /pill-amber/);
+      for (const m of cjs.matchAll(/^.*(?:pill-amber|attn-amber|pshape-need|mk-dec|prow decision).*$/gm)) {
+        assert.ok(/blocked|decision|needs|Needs|NEEDS|attn|pshape|count|\bdec\b/.test(m[0]), 'amber class outside a needs-you context: ' + m[0].slice(0, 100));
+      }
+    });
+
+    await atest('[alpha6 exit] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
