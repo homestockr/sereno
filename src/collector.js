@@ -497,7 +497,9 @@ function createCollector(store, port, opts) {
       if (p.hidden) continue;
       const st = snap[p.id];
       const pv = st && st.pipeline && typeof st.pipeline === 'object' ? st.pipeline : null;
-      const all = pv && Array.isArray(pv.tasks) ? pv.tasks : [];
+      // Only repos with plugin data (a spec, attempt or gate, or their own pipeline.json) are listed.
+      if (!pv || pv.hasData !== true) continue;
+      const all = Array.isArray(pv.tasks) ? pv.tasks : [];
       const active = all.filter((t) => t && t.stage !== 'merged' && t.stage !== 'stopped');
       const rt = pv ? pv.redTeam : null;
       let idle = null;

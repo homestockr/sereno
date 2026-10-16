@@ -66,7 +66,7 @@ function ghExecDefault(args, o) {
  *   dirty: boolean | null, lastCommitAt: number | null, worktrees: Worktree[], branches: Branch[],
  *   polledAt: number | null, error: boolean, brief: any, freshness: string, behindSince?: number | null, briefsMalformed: number,
  *   prs?: number | null,
- *   pipeline?: { tasks: any[], skipped: number, error: boolean, redTeam?: { agent: any, fallback: any, onFallback: any, enabled: any } | null }
+ *   pipeline?: { tasks: any[], skipped: number, error: boolean, redTeam?: { agent: any, fallback: any, onFallback: any, enabled: any } | null, hasData?: boolean }
  * }} RepoState
  */
 
@@ -316,7 +316,7 @@ function createPoller(opts) {
       for (const entry of repo.tasks) tasks.push(Object.assign(await pipelineLib.taskView(root, entry, repo.config, git, t, { fsp }), { gates: entry.gates, attempts: slimAttempts(entry.attempts) }));
       const rt = repo.config && repo.config.roles && repo.config.roles.redTeam;
       const redTeam = rt && typeof rt === 'object' ? { agent: rt.agent, fallback: rt.fallback, onFallback: rt.onFallback, enabled: rt.enabled } : null;
-      const view = { tasks, skipped: repo.skipped, error: false, redTeam };
+      const view = { tasks, skipped: repo.skipped, error: false, redTeam, hasData: tasks.length > 0 || repo.repoConfig === true };
       pipeGood.set(id, { fp, view });
       return view;
     } catch (_) {

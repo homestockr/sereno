@@ -10429,11 +10429,12 @@ test('missing rate_limits degrades instead of throwing', () => {
         tview('t-old', 'red-team', { expired: true, updatedAt: NOW - 9 * DAY }),
         tview('t-done', 'merged', { gates: [gate('t-done', 'pass', NOW - DAY)] }),
         tview('t-stop', 'stopped'),
-      ], skipped: 0, error: false, redTeam: { agent: 'red-team', fallback: 'red-team-lean', onFallback: 'ask', enabled: true, command: 'SECRET-CMD' } } },
-      p2: { pipeline: { tasks: [], skipped: 0, error: false, redTeam: { agent: 'red-team-lean', fallback: null, onFallback: 'never', enabled: false } } },
-      p3: { pipeline: { tasks: [tview('t-pass', 'merged', { gates: [gate('t-pass', 'pass', NOW - 2 * DAY)] })], skipped: 0, error: false, redTeam: { agent: 'red-team', fallback: null, onFallback: 'ask', enabled: true } } },
-      p4: { pipeline: { tasks: [], skipped: 0, error: false } },
+      ], skipped: 0, error: false, redTeam: { agent: 'red-team', fallback: 'red-team-lean', onFallback: 'ask', enabled: true, command: 'SECRET-CMD' }, hasData: true } },
+      p2: { pipeline: { tasks: [], skipped: 0, error: false, redTeam: { agent: 'red-team-lean', fallback: null, onFallback: 'never', enabled: false }, hasData: true } },
+      p3: { pipeline: { tasks: [tview('t-pass', 'merged', { gates: [gate('t-pass', 'pass', NOW - 2 * DAY)] })], skipped: 0, error: false, redTeam: { agent: 'red-team', fallback: null, onFallback: 'ask', enabled: true }, hasData: true } },
+      p4: { pipeline: { tasks: [], skipped: 0, error: false, hasData: true } },
       p5: {},
+      p6: { pipeline: { tasks: [], skipped: 0, error: false, hasData: false } },
     });
     const reg = () => ({ list: () => [
       { id: 'p1', name: 'one', repoPath: 'C:\\secret\\one', hidden: false }, { id: 'p2', name: 'two', repoPath: 'C:\\secret\\two', hidden: false },
@@ -10480,7 +10481,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const b = JSON.parse(r.text);
         checkBody(b);
         assert.deepStrictEqual(b.plugin, { installed: false, detected: false, version: null });
-        assert.deepStrictEqual(b.projects.map((p) => p.id), ['p1', 'p2', 'p3', 'p4', 'p5'], 'hidden projects are left out');
+        assert.deepStrictEqual(b.projects.map((p) => p.id), ['p1', 'p2', 'p3', 'p4'], 'hidden projects and repos without plugin data are left out');
         assert.strictEqual(b.projects[0].tasks.length, 2, 'merged and stopped leave the cards');
         assert.deepStrictEqual(b.projects[0].tasks[0].findings, [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'boom' }]);
         assert.strictEqual(b.projects[0].tasks[1].expired, true, 'expired tasks are included, flagged');
@@ -10560,7 +10561,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       try {
         const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
         const idle = Object.fromEntries(b.projects.map((p) => [p.id, p.idle]));
-        assert.deepStrictEqual(idle, { p1: null, p2: 'gate-off', p3: 'latest-pass', p4: 'no-task', p5: 'no-task' });
+        assert.deepStrictEqual(idle, { p1: null, p2: 'gate-off', p3: 'latest-pass', p4: 'no-task' });
       } finally { await haltP(c); }
     });
 
@@ -10603,6 +10604,61 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(b.routing.projects[0].redTeam.agent, 'red-team');
         } finally { await haltP(c); }
       } finally { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold the temp dir briefly */ } }
+    });
+
+    // --- [4b-idle]: only repos with plugin data are listed ---
+    await atest('[4b-idle] /api/pipeline lists only repos with a spec, attempt, gate or their own pipeline.json', async () => {
+      const repos = require('../src/repos.js');
+      const dirs = [];
+      const mk = (setup) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4bidle-'));
+        dirs.push(dir);
+        const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't'); g('commit', '-q', '--allow-empty', '-m', 'init');
+        if (setup) setup(path.join(dir, '.sereno'));
+        return dir;
+      };
+      try {
+        const bare = mk(null);
+        const empty = mk((sd) => fs.mkdirSync(sd, { recursive: true }));   // a .sereno with nothing in it
+        const spec = mk((sd) => {
+          fs.mkdirSync(path.join(sd, 'specs'), { recursive: true });
+          fs.writeFileSync(path.join(sd, 'specs', 'demo.md'), ['---', 'task: "demo"', 'builder: sonnet', 'kind: feature', 'reason: "r"', 'fixes: null',
+            'base_branch: "main"', 'spec_revision: 1', 'created_at: "2026-10-15T09:00:00.000Z"', '---', '', 'body', ''].join(String.fromCharCode(10)));
+        });
+        const cfgOnly = mk((sd) => {
+          fs.mkdirSync(sd, { recursive: true });
+          fs.writeFileSync(path.join(sd, 'pipeline.json'), JSON.stringify({ roles: { redTeam: { enabled: false } } }));
+        });
+        const list = () => [
+          { id: 'b', name: 'bare', repoPath: bare, hidden: false }, { id: 'e', name: 'empty', repoPath: empty, hidden: false },
+          { id: 's', name: 'spec', repoPath: spec, hidden: false }, { id: 'c', name: 'cfg', repoPath: cfgOnly, hidden: false },
+        ];
+        const p = repos.createPoller({ registry: { list }, now: () => NOW });
+        await p.pollNow();
+        const c = await bootP({ projects: { list }, repos: p });
+        try {
+          const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+          checkBody(b);
+          const byId = Object.fromEntries(b.projects.map((x) => [x.id, x]));
+          assert.deepStrictEqual(Object.keys(byId).sort(), ['c', 's'], 'bare and empty .sereno repos are omitted');
+          assert.strictEqual(byId.c.idle, 'gate-off');
+          assert.strictEqual(byId.c.tasks.length, 0);
+          assert.ok(byId.s.tasks.length === 1 || byId.s.idle === 'no-task', 'the spec-only repo is listed');
+          assert.deepStrictEqual(b.routing.projects.map((x) => x.id).sort(), ['c', 's']);
+        } finally { await haltP(c); }
+      } finally { for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold the temp dir briefly */ } } }
+    });
+
+    await atest('[4b-idle] a registered repo with no pipeline view or hasData:false is omitted; an empty list still has the well-formed body', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: () => ({ p5: {}, p6: { pipeline: { tasks: [], skipped: 0, error: false, hasData: false } } }) } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        assert.deepStrictEqual(b.projects, []);
+        assert.deepStrictEqual(b.signals.projects, []);
+        assert.strictEqual(b.signals.outcomes.n, 0);
+      } finally { await haltP(c); }
     });
 
     test('[4b-api] agentModels: bundled agents with their models; missing dir is empty', () => {
