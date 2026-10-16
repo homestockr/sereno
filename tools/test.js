@@ -3950,7 +3950,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     test('console.js: no prompt text, one innerHTML write, est. labels, empty-state copy', () => {
-      assert.ok(!/\.prompt\b|\['prompt|prompt_text|promptText|\.text\b|\.body\.text/.test(cjs));
+      assert.ok(!/\.prompt\b|\['prompt|prompt_text|promptText|\.text\b|\.body\.text|\{\s*text\s*[:,}]/.test(cjs));
       assert.strictEqual((cjs.match(/\.innerHTML\s*=/g) || []).length, 1);
       assert.match(cjs, /function setHtml\(el, html\) \{ el\.innerHTML = html; \}/);
       assert.match(cjs, /Prompt text is never stored/);
@@ -4092,8 +4092,8 @@ test('missing rate_limits degrades instead of throwing', () => {
     const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
     const names = ['estMoney', 'esc', 'sparkPoints', 'projectLabel', 'pillText', 'attentionState', 'waitLabel', 'ringIcon', 'pillHtml',
       'waitWhat', 'reviewControl', 'attentionHtml', 'parseRoute', 'initialRoute', 'relTime', 'staleDaysOf', 'freshnessChip', 'hasBlocker',
-      'topSessions', 'isActive', 'visibleProjects', 'filterCounts', 'selectProjects', 'projectsSummary', 'gitLine', 'sparkSvg',
-      'isLiveSession', 'liveState', 'liveShape', 'branchRows', 'cardHtml', 'liveStrip', 'hiddenSection', 'filterBar', 'projectsBody', 'actionRequest', 'reviewRequest'];
+      'topSessions', 'visibleProjects', 'gitLine', 'sparkSvg',
+      'isLiveSession', 'liveState', 'liveShape', 'actionRequest', 'reviewRequest'];
     const lifted = names.map((n) => cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
     const P = new Function(lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -4120,37 +4120,6 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(cjs, /try \{ localStorage\.setItem\('sereno\.console\.tab', r\)/);
     });
 
-    test('projectsSummary: counts and the decision clause', () => {
-      const ps = [mk({}), mk({ id: 'b', brief: { now: 'a', next: 'b', blocked: 'Production key' } }),
-        mk({ id: 'c', freshness: 'stale', brief: { now: 'a', next: 'b', blocked: 'none' } }),
-        mk({ id: 'd', hidden: true, freshness: 'stale', brief: { blocked: 'x' } }), mk({ id: 'e', brief: null, freshness: 'none' })];
-      assert.strictEqual(P.projectsSummary(ps, 0), '4 projects · 1 with blockers · 1 stale · nothing needs a decision');
-      assert.match(P.projectsSummary(ps, 1), /· 1 session needs you$/);
-      assert.match(P.projectsSummary(ps, 3), /· 3 sessions need you$/);
-      assert.match(P.projectsSummary([], 0), /^0 projects · 0 with blockers/);
-      assert.strictEqual(P.hasBlocker({ brief: { blocked: '' } }), false);
-      assert.strictEqual(P.hasBlocker({ brief: null }), false);
-      assert.strictEqual(P.hasBlocker({ brief: { blocked: 'None.' } }), false);
-    });
-
-    test('filterCounts / isActive / selectProjects: live session or commit in 24h, sorted by activity, hidden excluded', () => {
-      const a = mk({ id: 'a', name: 'alpha', git: { lastCommitAt: NOW - 3 * DAY }, lastActivity: NOW - 3 * DAY });
-      const b = mk({ id: 'b', name: 'beta', git: { lastCommitAt: NOW - 2 * 3600000 }, lastActivity: NOW - 2 * 3600000 });
-      const c = mk({ id: 'c', name: 'gamma', git: { lastCommitAt: null }, lastActivity: null });
-      const h = mk({ id: 'h', name: 'hid', hidden: true });
-      const live = [{ projectName: 'gamma', state: 'running' }, { projectName: 'alpha', state: 'idle' }];
-      assert.strictEqual(P.isActive(a, [], NOW), false);
-      assert.strictEqual(P.isActive(a, live, NOW), false, 'an idle session alone does not make a project active');
-      assert.strictEqual(P.isActive(a, [{ projectName: 'alpha', state: 'running', stale: true }], NOW), false);
-      for (const st of ['running', 'thinking', 'blocked']) assert.strictEqual(P.isActive(a, [{ projectName: 'alpha', state: st }], NOW), true, st);
-      assert.strictEqual(P.isActive(b, [], NOW), true);
-      assert.strictEqual(P.isActive(c, live, NOW), true);
-      assert.deepStrictEqual(P.filterCounts([a, b, c, h], live, NOW), { all: 3, active: 2, quiet: 1 });
-      assert.deepStrictEqual(P.selectProjects([a, b, c, h], 'all', live, NOW).map((p) => p.id), ['b', 'a', 'c']);
-      assert.deepStrictEqual(P.selectProjects([a, b, c, h], 'active', live, NOW).map((p) => p.id), ['b', 'c']);
-      assert.deepStrictEqual(P.selectProjects([a, b, c, h], 'quiet', live, NOW).map((p) => p.id), ['a']);
-    });
-
     test('liveState: best non-stale top-level session; shapes per state', () => {
       const a = mk({});
       const S = (state, o) => Object.assign({ projectName: 'alpha', state }, o);
@@ -4165,7 +4134,6 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(P.liveShape('running'), /pshape-live/);
       assert.match(P.liveShape('thinking'), /stroke-dasharray/);
       for (const q of ['idle', null]) assert.ok(!/pshape-live|pshape-need|dasharray/.test(P.liveShape(q)));
-      assert.match(P.cardHtml(a, { now: NOW, state: 'blocked' }), /pshape-need/);
     });
 
     test('freshnessChip: one shape per state, stale wording from the mockup', () => {
@@ -4196,105 +4164,6 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(P.relTime(NOW - 5 * 3600000, NOW), '5 hours ago');
       assert.strictEqual(P.relTime(null, NOW), '');
       assert.ok(!/NaN/.test(P.gitLine({ defaultBranch: 'main', ahead: NaN, behind: 1, lastCommitAt: NaN }, undefined, NOW)));
-    });
-
-    test('cardHtml: escapes the project name and brief lines, no style attribute', () => {
-      const html = P.cardHtml(mk({
-        name: evil, id: evil,
-        brief: { now: evil, next: '<b>x</b>', blocked: '"q" & <i>', generatedAt: NOW },
-        branches: [{ name: evil, freshness: 'fresh', now: evil }],
-      }), { now: NOW, state: 'running' });
-      assert.ok(!html.includes('<img'), html);
-      assert.ok(!html.includes('<b>') && !html.includes('<i>'));
-      assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'));
-      assert.ok(!/style=/.test(html));
-      assert.match(html, /<span class="k">Now<\/span>/);
-      assert.match(html, /Hide project/);
-      assert.match(html, /14-day spend/);
-      assert.match(html, /\$68\.20 est\./);
-      assert.ok(/pshape-live/.test(html));
-      assert.ok(!/pshape-live/.test(P.cardHtml(mk({}), { now: NOW, state: 'idle' })));
-    });
-
-    test('cardHtml: spend via estMoney, column omitted when spend14 is null, dirty marker, no-brief copy', () => {
-      const plain = P.cardHtml(mk({ spend14: null, git: { defaultBranch: 'main', ahead: 0, behind: 0, dirty: true, lastCommitAt: NOW - MIN } }), { now: NOW });
-      assert.ok(!/14-day spend|est\./.test(plain));
-      assert.match(plain, /class="dirty"/);
-      assert.ok(!/class="dirty"/.test(P.cardHtml(mk({}), { now: NOW })));
-      const nb = P.cardHtml(mk({ brief: null, freshness: 'none' }), { now: NOW });
-      assert.match(nb, /No brief yet — run \/brief in a session/);
-      assert.match(nb, /chip-none/);
-      assert.ok(!/class="kv"/.test(nb));
-      assert.match(P.cardHtml(mk({ brief: null, freshness: 'unknown' }), { now: NOW }), /Brief source not found/);
-      const stale = P.cardHtml(mk({ freshness: 'stale', brief: { now: 'a', next: 'b', blocked: 'c', generatedAt: NOW, behindSince: NOW - 9 * DAY - MIN } }), { now: NOW });
-      assert.match(stale, /chip-stale">Brief is 9 days behind</);
-      const beh = P.cardHtml(mk({ freshness: 'behind', brief: { now: 'a', next: 'b', blocked: 'c', generatedAt: NOW - 30 * DAY, behindSince: NOW - 2 * 3600000 } }), { now: NOW });
-      assert.match(beh, /chip-behind">behind</);
-      assert.ok(!/days? behind/.test(beh), 'wording counts from behindSince, not generatedAt');
-      assert.match(cjs, /esc\(estMoney\(p\.spend14\.costMicros\)\)/);
-    });
-
-    test('cardHtml: git error is a quiet line, never amber; calm markup has no amber class', () => {
-      const err = P.cardHtml(mk({ error: true }), { now: NOW });
-      assert.match(err, /Git status unavailable/);
-      assert.ok(!/open PR|Last commit/.test(err));
-      const calm = P.projectsBody([mk({}), mk({ id: 'z', name: 'zed', error: true, freshness: 'none', brief: null })],
-        [{ projectName: 'alpha', state: 'idle', stateSince: NOW - MIN }], 'all', false, NOW);
-      for (const m of [err, calm]) assert.ok(!/amber|pill-amber|attn-amber/i.test(m), m);
-    });
-
-    test('branchRows: chip and brief now, or "No brief"', () => {
-      const h = P.branchRows([{ name: 'feat/a', freshness: 'behind', now: 'Sync queue' }, { name: 'feat/b', freshness: 'none', now: null },
-        { name: 'feat/c', freshness: 'stale', now: 'Last known' }]);
-      assert.match(h, /↳ feat\/a/);
-      assert.match(h, /chip-behind">behind</);
-      assert.match(h, /Sync queue/);
-      assert.match(h, /quiet-text">No brief</);
-      assert.match(h, /chip-stale">stale</);
-      const d = P.branchRows([{ name: 'main', freshness: 'fresh', now: 'dup' }, { name: 'feat/s', freshness: 'stale', now: 'x', behindSince: NOW - 4 * DAY - MIN }], 'main', NOW);
-      assert.ok(!/main|dup/.test(d), 'the default branch is not a branch row');
-      assert.match(d, /chip-stale">Brief is 4 days behind</);
-      assert.ok(!/\u21b3 main/.test(P.cardHtml(mk({ branches: [{ name: 'main', freshness: 'fresh', now: 'dup' }] }), { now: NOW })));
-      assert.strictEqual(P.branchRows(null), '');
-      assert.strictEqual(P.branchRows([]), '');
-      assert.ok(!/<img/.test(P.branchRows([{ name: evil, freshness: 'fresh', now: evil }])));
-    });
-
-    test('liveStrip: project / state with relative time; omitted when none', () => {
-      const h = P.liveStrip([{ projectName: 'alpha', state: 'running', stateSince: NOW - 8 * MIN }, { projectName: evil, state: 'blocked', stateSince: null }], NOW);
-      assert.match(h, /LIVE SESSIONS/);
-      assert.match(h, /alpha \/ running/);
-      assert.match(h, /8 min ago/);
-      assert.ok(!h.includes('<img') && !/style=/.test(h));
-      assert.ok(h.indexOf('alpha') < h.indexOf('&lt;img'), 'newest first');
-      const mkS = (i, o) => Object.assign({ projectName: 'p' + i, state: 'running', stateSince: NOW - i * MIN }, o);
-      const nine = [0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => mkS(i));
-      const capped = P.liveStrip(nine, NOW);
-      assert.strictEqual((capped.match(/class="live-item"/g) || []).length, 6);
-      assert.match(capped, /\+3 more/);
-      assert.ok(!/p6 \//.test(capped));
-      assert.ok(!/more/.test(P.liveStrip(nine.slice(0, 6), NOW)));
-      assert.strictEqual(P.liveStrip([mkS(1, { state: 'idle' }), mkS(2, { stale: true }), mkS(3, { agent_id: 'a' })], NOW), '', 'idle, stale and subagent rows are omitted');
-      assert.match(P.liveStrip([mkS(1, { state: 'thinking' }), mkS(2, { state: 'idle' })], NOW), /p1 \/ thinking/);
-      assert.ok(!/p2/.test(P.liveStrip([mkS(1, { state: 'thinking' }), mkS(2, { state: 'idle' })], NOW)));
-      assert.strictEqual(P.liveStrip([], NOW), '');
-      assert.strictEqual(P.liveStrip(null, NOW), '');
-      assert.ok(!/LIVE SESSIONS/.test(P.projectsBody([mk({})], [], 'all', false, NOW)));
-    });
-
-    test('projectsBody: empty state, filters, hidden toggle with Unhide', () => {
-      assert.match(P.projectsBody([], [], 'all', false, NOW), /Projects appear when a Claude Code session runs in a git repo\./);
-      const ps = [mk({}), mk({ id: 'h1', name: 'secret', hidden: true })];
-      const closed = P.projectsBody(ps, [], 'all', false, NOW);
-      assert.match(closed, /1 hidden · show/);
-      assert.ok(!/Unhide|secret/.test(closed));
-      const open = P.projectsBody(ps, [], 'all', true, NOW);
-      assert.match(open, /1 hidden · hide/);
-      assert.match(open, /data-act="unhide" data-id="h1">Unhide</);
-      assert.match(open, /All 1/);
-      assert.match(open, /Active 1/);
-      assert.match(open, /Quiet 0/);
-      assert.ok(!/hidden/.test(P.projectsBody([mk({})], [], 'all', false, NOW).replace(/aria-hidden/g, '')));
     });
 
     test('attention panel: Review in terminal only when amber, with a session id and opts.review', () => {
@@ -5735,10 +5604,10 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(h.freshness, 'none');
           assert.strictEqual(h.brief, null);
           // exit 6: no path, hash, commit message anywhere in the body
-          // the commit subject is allowed in activity[].text and nowhere else
+          // the commit subject is allowed in activity[].subject and nowhere else
           const strip = (o) => JSON.stringify(o, (k, v) => (k === 'activity' ? undefined : v));
           assert.ok(!/secret commit message/.test(strip(r)), 'commit subject outside activity');
-          assert.ok(p.activity.some((a) => a.kind === 'commit' && a.text === 'secret commit message'));
+          assert.ok(p.activity.some((a) => a.kind === 'commit' && a.subject === 'secret commit message'));
           const body = JSON.stringify(r);
           assert.ok(!body.includes(sha), 'no commit hash');
           walk(r, '$', (k, v, where) => {
@@ -6126,9 +5995,9 @@ test('missing rate_limits degrades instead of throwing', () => {
         for (let i = 1; i < a.length; i++) assert.ok(a[i - 1].at >= a[i].at, 'newest first at ' + i);
         for (const e of a) {
           assert.ok(Number.isFinite(e.at));
-          if (e.kind === 'commit') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'text']); assert.strictEqual(typeof e.text, 'string'); }
-          else if (e.kind === 'brief') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'text']); assert.strictEqual(e.text, null); }
-          else if (e.kind === 'pipeline') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'outcome', 'text']); assert.strictEqual(e.text, null); assert.ok(e.outcome === null || typeof e.outcome === 'string'); }
+          if (e.kind === 'commit') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'subject']); assert.strictEqual(typeof e.subject, 'string'); }
+          else if (e.kind === 'brief') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'subject']); assert.strictEqual(e.subject, null); }
+          else if (e.kind === 'pipeline') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'outcome', 'subject']); assert.strictEqual(e.subject, null); assert.ok(e.outcome === null || typeof e.outcome === 'string'); }
           else assert.fail('unexpected kind ' + e.kind);
         }
         assert.deepStrictEqual(Array.from(new Set(a.map((e) => e.kind))).sort(), ['brief', 'commit', 'pipeline']);
@@ -6136,9 +6005,9 @@ test('missing rate_limits degrades instead of throwing', () => {
         const pOuts = a.filter((e) => e.kind === 'pipeline').map((e) => (e.outcome === null ? 'none' : e.outcome)).sort();
         assert.deepStrictEqual(pOuts, ['block', 'fail', 'none', 'none', 'pass'], 'undated entries dropped');
         const first = a.find((e) => e.kind === 'commit');
-        assert.ok(first.text.startsWith('hostile[31m tail'), JSON.stringify(first.text.slice(0, 24)));
-        assert.strictEqual(first.text.length, 120, 'subject capped');
-        for (const e of a.filter((x) => x.kind === 'commit')) assert.ok(!hasUnsafe(e.text), 'no control or bidi characters');
+        assert.ok(first.subject.startsWith('hostile[31m tail'), JSON.stringify(first.subject.slice(0, 24)));
+        assert.strictEqual(first.subject.length, 120, 'subject capped');
+        for (const e of a.filter((x) => x.kind === 'commit')) assert.ok(!hasUnsafe(e.subject), 'no control or bidi characters');
         assert.strictEqual(r.projects.find((p) => p.id === 'a1').lastActivityAt, commits[0].at);
         // the other project: two commits and nothing else
         assert.deepStrictEqual(r.projects.find((p) => p.id === 'a2').activity.map((e) => e.kind), ['commit', 'commit']);
@@ -6238,7 +6107,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           const r = await getJson(c.port, '/api/projects');
           const p = r.projects[0];
           assert.strictEqual(p.active, true);
-          const texts = p.activity.filter((e) => e.kind === 'commit').map((e) => e.text);
+          const texts = p.activity.filter((e) => e.kind === 'commit').map((e) => e.subject);
           assert.strictEqual(texts.length, 3, 'two subjects and the initial commit (made now, so newest)');
           assert.strictEqual(texts[0], 'secret commit message');
           assert.ok(texts[1].startsWith(CANARY + ' two ') && texts[1].length === 120);
@@ -6932,16 +6801,14 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     {
       const cjs = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
-      const names = ['esc', 'topSessions', 'liveState', 'isActive', 'visibleProjects', 'filterCounts', 'selectProjects', 'projectsSummary'];
+      const names = ['esc', 'topSessions', 'liveState', 'visibleProjects'];
       const lifted = names.map((n) => cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
       const P = new Function(lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
       test('rt4: the console takes live state from p.live, not from the project name', () => {
         const p = { id: 'a', name: 'alpha', hidden: false, git: { lastCommitAt: null }, lastActivity: null, live: { state: 'blocked', sessionIds: ['x'] } };
         const sessions = [{ id: 'x', projectName: 'packages-app', state: 'blocked' }];   // cwd basename != project name
         assert.strictEqual(P.liveState(p, sessions), 'blocked');
-        assert.strictEqual(P.isActive(p, sessions, 1e12), true);
         assert.strictEqual(P.liveState(Object.assign({}, p, { live: { state: null, sessionIds: [] } }), [{ projectName: 'alpha', state: 'running' }]), null, 'a name match no longer counts when p.live says none');
-        assert.strictEqual(P.isActive(Object.assign({}, p, { live: { state: 'idle', sessionIds: ['x'] } }), sessions, 1e12), false);
       });
     }
 
@@ -7460,7 +7327,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     {
       const cj = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
       const names = ['esc', 'projectLabel', 'pillText', 'ringIcon', 'pillHtml', 'attentionState', 'topSessions', 'isLiveSession', 'deriveLiveStates', 'liveDiff', 'withLive',
-        'unknownSessionIds', 'hasBlocker', 'visibleProjects', 'projectsSummary'];
+        'unknownSessionIds', 'hasBlocker', 'visibleProjects'];
       const lifted = names.map((n) => cj.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
       const S = new Function("const LIVE_RANK = ['idle', 'thinking', 'running', 'blocked'];\n" + lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
       const proj = [{ id: 'pa', name: 'alpha', live: { state: 'idle', sessionIds: ['s1'] } }, { id: 'pb', name: 'beta', live: { state: null, sessionIds: [] } }];
@@ -7476,8 +7343,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(map.pa, 'blocked');
         const live = S.withLive(proj, map);
         assert.strictEqual(live[0].live.state, 'blocked');
-        const blocked = S.topSessions(blockedSnap).filter((s) => s.state === 'blocked' && !s.stale).length;
-        assert.ok(S.projectsSummary(live, blocked).endsWith('1 session needs you'));
+        assert.strictEqual(S.topSessions(blockedSnap).filter((s) => s.state === 'blocked' && !s.stale).length, 1);
         assert.deepStrictEqual(S.unknownSessionIds(proj, blockedSnap.sessions, new Set()), [], 'no new session, so no refetch');
       });
 
@@ -7485,7 +7351,6 @@ test('missing rate_limits degrades instead of throwing', () => {
         const a = S.attentionState(calmSnap);
         assert.strictEqual(a.amber, false);
         assert.strictEqual(a.count, 0);
-        assert.ok(S.projectsSummary(proj, 0).endsWith('nothing needs a decision'));
         assert.strictEqual(S.deriveLiveStates(proj, calmSnap.sessions).pa, 'running');
       });
 
@@ -11356,7 +11221,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const consts = ['PIPE_COLS', 'PIPE_SUBS', 'PIPE_ROLE_KEYS', 'MARK_TEXT', 'STAGE_FILTERS', 'OUTCOME_LABEL', 'ROLE_LABEL', 'IDLE_LABEL', 'INSTALL_CMDS'].map((n) => cj.match(new RegExp('^const ' + n + ' = .*;$', 'm'))[0]);
     const fnames = ['estMoney', 'esc', 'largestRemainder', 'relTime', 'projectLabel', 'pillText', 'ringIcon', 'pillHtml', 'waitLabel', 'waitWhat', 'attentionState', 'reviewControl', 'attentionHtml',
       'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
-      'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'installHtml', 'pipelineHasData',
+      'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'cmdRow', 'installHtml', 'pipelineHasData',
       'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
       'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
@@ -12371,6 +12236,368 @@ test('missing rate_limits degrades instead of throwing', () => {
         }
       }
       assert.ok(!/outline:[^;}]*--amber/.test(sheets.console + sheets.widget));
+    });
+  }
+
+  // ---- [alpha6-nav] Projects navigator renderer ----
+  {
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cjs = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+    const fnNames = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'hasBlocker', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
+      'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'parseRoute', 'initialRoute', 'parseProjectSel', 'navCounts', 'navFilter',
+      'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navMove', 'navBranches', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
+      'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
+      'navManageHtml', 'navPage'];
+    const lifted = fnNames.map((n) => {
+      const m = cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'));
+      assert.ok(m, 'console.js has ' + n);
+      return m[0];
+    });
+    const consts = ["const OUTCOME_LABEL = { pass: 'Pass', block: 'Block', needs_context: 'Needs context', error: 'Error', skipped: 'Skipped' };",
+      "const INSTALL_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];"]
+      .concat(cjs.match(/^const NAV_\w+ = .*;$/gm));
+    assert.strictEqual(consts.length, 7);
+    const N = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnNames.join(', ') + ' };')();
+    const NOW = 1_800_000_000_000;
+    const MIN = 60000, DAY = 86400000;
+    const evil = '<img src=x onerror=alert(1)>';
+    let seq = 0;
+    const mk = (o) => Object.assign({
+      id: 'p' + (++seq), name: 'proj' + seq, hidden: false, pinned: false, active: true, blockers: false, lastActivityAt: NOW - MIN, freshness: 'fresh',
+      brief: { now: 'Doing x', next: 'Then y', blocked: 'None', generatedAt: new Date(NOW - DAY).toISOString(), behindSince: null },
+      git: { defaultBranch: 'main', ahead: 2, behind: 1, dirty: false, lastCommitAt: NOW - 8 * MIN }, prs: 2,
+      branches: [{ name: 'main', freshness: 'fresh', now: 'Doing x', generatedAt: null, behindSince: null }, { name: 'feat/a', freshness: 'behind', now: 'Side work', generatedAt: null, behindSince: NOW - 2 * 3600000 }],
+      spend14: { costMicros: 68_200_000, trend: new Array(14).fill(1) }, activity: [], lastActivity: NOW - MIN,
+      live: { state: null, sessionIds: [] }, error: false,
+    }, o);
+    const UI = (o) => Object.assign({ filter: 'active', q: '', sort: 'pinned', open: { inactive: false }, tab: 'branches', managing: false }, o);
+    const ctx = (projects, o) => Object.assign({ projects, counts: null, sessions: [], nowMs: NOW, sel: null, pluginMissing: false, ui: UI(), opts: { review: true } }, o);
+    const ninety = () => {
+      const ps = [];
+      for (let i = 0; i < 90; i++) ps.push(mk({ id: 'n' + i, name: 'repo-' + String(i).padStart(2, '0'), active: i < 12, blockers: i % 30 === 0, lastActivityAt: NOW - i * MIN }));
+      return ps;
+    };
+
+    test('[alpha6-nav] chips: counts over visible projects, the filters narrow, Active is the default', () => {
+      const ps = ninety().concat([mk({ id: 'h', name: 'hid', hidden: true, active: true, blockers: true })]);
+      assert.deepStrictEqual(N.navCounts(ps), { all: 90, active: 12, blockers: 3 });
+      assert.strictEqual(N.navFilter(ps, 'all').length, 90);
+      assert.strictEqual(N.navFilter(ps, 'active').length, 12);
+      assert.deepStrictEqual(N.navFilter(ps, 'blockers').map((p) => p.id), ['n0', 'n30', 'n60']);
+      assert.match(cjs, /proj: \{ mode: 'loading', list: \[\], counts: null, filter: 'active'/);
+      const page = N.navPage(ctx(ps));
+      assert.match(page, /data-filter="active" aria-pressed="true"/);
+      assert.match(page, /All <span class="num">90<\/span>/);
+      assert.match(page, /Active <span class="num">12<\/span>/);
+      assert.match(page, /With blockers <span class="num">3<\/span>/);
+      assert.strictEqual((page.match(/class="nrow[ "]/g) || []).length, 12, 'only the active rows are listed by default');
+    });
+
+    test('[alpha6-nav] summary: N projects, blockers, stale, decisions; from the API counts, derived when absent', () => {
+      const ps = [mk({}), mk({ freshness: 'stale', blockers: true }), mk({ hidden: true, freshness: 'stale' })];
+      assert.strictEqual(N.navSummary({ total: 87, withBlockers: 3, stale: 5, decisions: 2 }, ps), '87 projects · 3 with blockers · 5 stale · 2 decisions');
+      assert.strictEqual(N.navSummary({ total: 1, withBlockers: 1, stale: 0, decisions: 1 }, ps), '1 project · 1 with blockers · 0 stale · 1 decision');
+      assert.strictEqual(N.navSummary(null, ps), '2 projects · 1 with blockers · 1 stale · 0 decisions');
+      assert.match(N.navPage(ctx(ps, { counts: { total: 2, withBlockers: 1, stale: 1, decisions: 4 } })), /2 projects · 1 with blockers · 1 stale · 4 decisions/);
+    });
+
+    test('[alpha6-nav] search filters by name only, client side, case-insensitive; no match says so', () => {
+      const ps = [mk({ name: 'Billing-API' }), mk({ name: 'web-shop' }), mk({ name: 'ops' })];
+      assert.deepStrictEqual(N.navSearch(ps, 'API').map((p) => p.name), ['Billing-API']);
+      assert.strictEqual(N.navSearch(ps, '  ').length, 3);
+      assert.strictEqual(N.navSearch(ps, 'zzz').length, 0);
+      assert.match(N.navListHtml(ps, { filter: 'all', q: 'zzz', sort: 'pinned', open: {}, sel: null, nowMs: NOW }), /No projects match\./);
+      assert.ok(!/web-shop/.test(N.navListHtml(ps, { filter: 'all', q: 'api', sort: 'pinned', open: {}, sel: null, nowMs: NOW })));
+      assert.match(cjs, /<input type="search" class="nsearch" data-nq/);
+      assert.match(cjs, /viewEl\.addEventListener\('input'[\s\S]*?renderNavPanes\(\)/, 'typing re-renders the panes, not the controls');
+    });
+
+    test('[alpha6-nav] sort: Pinned first, Recent, Name; groups Pinned, Projects, Inactive', () => {
+      const ps = [mk({ id: 'a', name: 'alpha', lastActivityAt: NOW - 5 * MIN }), mk({ id: 'b', name: 'beta', lastActivityAt: NOW - MIN }), mk({ id: 'c', name: 'gamma', pinned: true, lastActivityAt: NOW - 9 * MIN }),
+        mk({ id: 'd', name: 'delta', active: false, lastActivityAt: NOW - 30 * DAY }), mk({ id: 'e', name: 'eps', active: false, lastActivityAt: null })];
+      let g = N.navGroups(ps, 'pinned');
+      assert.deepStrictEqual([g.pinned, g.projects, g.inactive].map((x) => x.map((p) => p.id)), [['c'], ['b', 'a'], ['d', 'e']]);
+      g = N.navGroups(ps, 'recent');
+      assert.deepStrictEqual([g.pinned, g.projects, g.inactive].map((x) => x.map((p) => p.id)), [[], ['b', 'a', 'c'], ['d', 'e']], 'no Pinned group unless sorted that way');
+      g = N.navGroups(ps, 'name');
+      assert.deepStrictEqual([g.pinned, g.projects, g.inactive].map((x) => x.map((p) => p.id)), [[], ['a', 'b', 'c'], ['d', 'e']]);
+      const html = N.navListHtml(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: false }, sel: 'b', nowMs: NOW });
+      assert.ok(html.indexOf('Pinned') < html.indexOf('Projects') && html.indexOf('Projects') < html.indexOf('Inactive (2)'));
+      assert.match(N.navControlsHtml({ all: 5, active: 3, blockers: 0 }, { filter: 'active', q: '', sort: 'pinned' }), /<option value="pinned" selected>Pinned first<\/option>/);
+    });
+
+    test('[alpha6-nav] ~90 repos: Inactive is one collapsed group; its state survives a re-render and a refresh; searching opens it', () => {
+      const ps = ninety();
+      const closed = N.navListHtml(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: false }, sel: null, nowMs: NOW });
+      assert.match(closed, /<details class="ngroup ninactive"><summary>Inactive \(78\)<\/summary>/);
+      assert.strictEqual((closed.match(/<details/g) || []).length, 1);
+      const open = N.navListHtml(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: true }, sel: null, nowMs: NOW });
+      assert.match(open, /<details class="ngroup ninactive" open>/);
+      const found = N.navListHtml(ps, { filter: 'all', q: 'repo-80', sort: 'pinned', open: { inactive: false }, sel: null, nowMs: NOW });
+      assert.match(found, /ninactive" open>/, 'a search that lands in Inactive shows it');
+      assert.ok(N.navVisibleIds(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: false } }).length === 12, 'keys skip rows inside a collapsed group');
+      assert.strictEqual(N.navVisibleIds(ps, { filter: 'all', q: '', sort: 'pinned', open: { inactive: true } }).length, 90);
+      assert.match(cjs, /closest\('details\.ninactive'\)[\s\S]{0,200}state\.proj\.open\.inactive = g\.open === true/);
+      const refresh = cjs.match(/async function refreshProjects\(\) \{[\s\S]*?\n\}/)[0];
+      assert.ok(!/\.open\b|open:/.test(refresh), 'a refresh keeps the remembered open state');
+    });
+
+    test('[alpha6-nav] rows: name, status line, live marker, pin toggle as the only control', () => {
+      const run = mk({ id: 'r1', name: 'runner', live: { state: 'running', sessionIds: ['s1'] }, pinned: true });
+      const idle = mk({ id: 'r2', name: 'quiet', live: { state: null, sessionIds: [] }, freshness: 'stale', brief: { now: 'a', next: 'b', blocked: 'c', generatedAt: null, behindSince: NOW - 9 * DAY - MIN } });
+      const hr = N.navRowHtml(run, { sel: true, focus: true, nowMs: NOW });
+      assert.match(hr, /role="row" tabindex="0" data-nsel="r1" aria-selected="true"/);
+      assert.match(hr, /Running · 1 branch</);
+      assert.match(hr, /class="nlive">live</);
+      assert.match(hr, /pshape-live/);
+      assert.match(hr, /<button type="button" class="pinbtn on" data-act="pin" data-id="r1" data-pinned="true" aria-pressed="true" aria-label="Unpin runner">/);
+      assert.strictEqual((hr.match(/<button/g) || []).length, 1);
+      const hi = N.navRowHtml(idle, { sel: false, focus: false, nowMs: NOW });
+      assert.match(hi, /tabindex="-1"/);
+      assert.match(hi, /Brief is 9 days behind · 1 branch</);
+      assert.ok(!/nlive/.test(hi));
+      assert.match(hi, /data-pinned="false" aria-pressed="false" aria-label="Pin quiet"/);
+      assert.match(N.navStatus(mk({ live: { state: 'idle', sessionIds: ['x'] } }), NOW), /^Idle/);
+      assert.match(N.navStatus(mk({ live: { state: 'blocked', sessionIds: ['x'] } }), NOW), /^Needs you/);
+      assert.match(N.navStatus(mk({ freshness: 'none', brief: null, branches: [] }), NOW), /^No brief$/);
+    });
+
+    await atest('[alpha6-nav] pin toggle posts {pinned} to the guarded endpoint with the token; without a token nothing is sent', async () => {
+      const names = ['getJson', 'getApiToken', 'postAction', 'setPinned', 'actionRequest'];
+      const src = names.map((n) => cjs.match(new RegExp('(?:async )?function ' + n + '\\([\\s\\S]*?\\n}'))[0]);
+      const make = (fetchImpl, refreshes) => new Function('fetch', 'refreshProjects', 'const state = { apiToken: null };\n' + src.join('\n') + '\nreturn { setPinned };')(fetchImpl, () => { refreshes.n++; });
+      const calls = [];
+      const refreshes = { n: 0 };
+      const ok = make(async (url, init) => {
+        calls.push({ url, init });
+        if (url === '/api/token') return { ok: true, status: 200, json: async () => ({ token: 'tok-1' }) };
+        return { ok: true, status: 204, json: async () => ({}) };
+      }, refreshes);
+      await ok.setPinned('p-1', true);
+      const post = calls.find((c) => c.url !== '/api/token');
+      assert.strictEqual(post.url, '/api/projects/p-1/pin');
+      assert.strictEqual(post.init.method, 'POST');
+      assert.strictEqual(post.init.headers['x-sereno-token'], 'tok-1');
+      assert.deepStrictEqual(JSON.parse(post.init.body), { pinned: true });
+      assert.strictEqual(refreshes.n, 1);
+      const none = [];
+      const r2 = { n: 0 };
+      const noTok = make(async (url, init) => { none.push(url); return { ok: false, status: 403, json: async () => null }; }, r2);
+      await noTok.setPinned('p-1', false);
+      assert.ok(!none.some((u) => /\/pin$/.test(u)), 'no token, no POST');
+      assert.strictEqual(r2.n, 0);
+      assert.match(cjs, /a === 'pin'\) \{ setPinned\(act\.getAttribute\('data-id'\), act\.getAttribute\('data-pinned'\) !== 'true'\)/);
+    });
+
+    test('[alpha6-nav] detail by brief state: fresh, behind, stale, none', () => {
+      const dctx = { nowMs: NOW, sid: null, opts: { review: true }, tab: 'branches', pluginMissing: false, sessions: [] };
+      const fresh = N.navDetailHtml(mk({ name: 'alpha' }), dctx);
+      assert.match(fresh, /<h2>alpha<\/h2><span class="chip chip-fresh">fresh<\/span>/);
+      assert.match(fresh, /<span class="k">Now<\/span><span class="v">Doing x<\/span>/);
+      assert.match(fresh, /Next<\/span><span class="v">Then y/);
+      assert.match(fresh, /Blocked<\/span><span class="v">None/);
+      assert.match(fresh, /Updated 1 day ago/);
+      assert.match(fresh, /main ↑2 ↓1 · 2 open PRs · Last commit 8 min ago/);
+      assert.match(fresh, /14-day spend/);
+      assert.match(fresh, /\$68\.20 est\./);
+      assert.ok(!/blocked-line/.test(fresh));
+      const behind = N.navDetailHtml(mk({ freshness: 'behind', brief: { now: 'a', next: 'b', blocked: 'Waiting on keys', generatedAt: NOW - 30 * DAY, behindSince: NOW - 2 * 3600000 } }), dctx);
+      assert.match(behind, /chip-behind">behind</);
+      assert.match(behind, /blocked-line">Waiting on keys/);
+      const stale = N.navDetailHtml(mk({ freshness: 'stale', brief: { now: 'a', next: 'b', blocked: 'c', generatedAt: NOW - 30 * DAY, behindSince: NOW - 9 * DAY - MIN } }), dctx);
+      assert.match(stale, /chip-stale">Brief is 9 days behind</);
+      const none = N.navDetailHtml(mk({ freshness: 'none', brief: null }), dctx);
+      assert.match(none, /No brief yet/);
+      assert.match(none, /<code>\/sereno:brief<\/code><button type="button" class="btn-copy" data-act="copy" data-text="\/sereno:brief">Copy<\/button>/);
+      assert.ok(!/plugin marketplace add/.test(none), 'install commands only when the plugin is missing');
+      assert.ok(!/class="kv"/.test(none));
+      const noPlugin = N.navDetailHtml(mk({ freshness: 'none', brief: null }), Object.assign({}, dctx, { pluginMissing: true }));
+      assert.match(noPlugin, /data-text="\/plugin marketplace add homestockr\/sereno"/);
+      assert.match(noPlugin, /data-text="\/plugin install sereno@sereno"/);
+      assert.match(N.navDetailHtml(mk({ freshness: 'unknown', brief: null }), dctx), /Brief source not found/);
+      assert.match(N.navDetailHtml(mk({ spend14: null }), dctx), /No spend recorded/);
+      assert.ok(!/est\./.test(N.navDetailHtml(mk({ spend14: null }), dctx)));
+      assert.match(N.navDetailHtml(mk({ error: true }), dctx), /Git status unavailable/);
+      assert.match(N.navDetailHtml(mk({ git: { defaultBranch: 'main', ahead: 0, behind: 0, dirty: true, lastCommitAt: NOW } }), dctx), /class="dirty"/);
+      assert.match(N.navDetailHtml(null, dctx), /Select a project/);
+    });
+
+    test('[alpha6-nav] sub-tabs: Branches (default branch numbers, brief freshness), Activity (newest first, at most 20), Git & PRs', () => {
+      const p = mk({});
+      const dctx = (tab) => ({ nowMs: NOW, sid: null, opts: { review: true }, tab, pluginMissing: false, sessions: [] });
+      const br = N.navDetailHtml(p, dctx('branches'));
+      assert.match(br, /role="tab" class="ntab on" data-ntab="branches" aria-selected="true"/);
+      assert.match(br, /nbname" role="cell">main <span class="quiet-text">default<\/span>/);
+      assert.match(br, /↑2 ↓1/);
+      assert.match(br, /feat\/a/);
+      assert.match(br, /chip-behind">behind</);
+      assert.strictEqual((br.match(/nbname/g) || []).length, 2, 'the default branch appears once');
+      const acts = [];
+      for (let i = 0; i < 30; i++) acts.push({ at: NOW - i * MIN, kind: i % 3 === 0 ? 'commit' : i % 3 === 1 ? 'brief' : 'pipeline', subject: i % 3 === 0 ? 'subject ' + i : null, outcome: i % 3 === 2 ? 'pass' : null });
+      acts.push({ at: NOW, kind: 'mystery', subject: 'x' });
+      const act = N.navDetailHtml(mk({ activity: acts.slice().reverse() }), dctx('activity'));
+      assert.strictEqual((act.match(/<li>/g) || []).length, 20);
+      assert.ok(act.indexOf('subject 0') < act.indexOf('Brief updated') && act.indexOf('Brief updated') < act.indexOf('Pipeline: Pass'), 'newest first');
+      assert.ok(!/mystery/.test(act));
+      assert.match(N.navActivityText({ kind: 'commit', subject: null }), /^Commit$/);
+      assert.strictEqual(N.navActivityText({ kind: 'pipeline', outcome: null }), 'Pipeline activity');
+      assert.match(N.navDetailHtml(mk({ activity: [] }), dctx('activity')), /No recent activity\./);
+      const git = N.navDetailHtml(mk({ git: { defaultBranch: 'trunk', ahead: 3, behind: 0, dirty: true, lastCommitAt: NOW - 2 * DAY }, prs: 4 }), dctx('git'));
+      assert.match(git, /Default branch<\/dt><dd>trunk/);
+      assert.match(git, /Open PRs<\/dt><dd>4/);
+      assert.match(git, /Uncommitted changes/);
+      assert.match(git, /2 days ago/);
+      assert.match(N.navDetailHtml(mk({ error: true }), dctx('git')), /Git status unavailable\./);
+      assert.match(N.navDetailHtml(p, dctx('nonsense')), /nbranches/, 'an unknown tab falls back to Branches');
+    });
+
+    test('[alpha6-nav] Review in terminal only with a live session; no other action control in the detail', () => {
+      const live = mk({ id: 'lv', name: 'livep', live: { state: 'running', sessionIds: ['s-1', 's-2'] } });
+      const sessions = [{ id: 's-1', state: 'running', stateSince: NOW - 8 * MIN, projectName: 'x' }, { id: 's-2', state: 'idle', stateSince: NOW - 20 * MIN }];
+      const withLive = N.navPage(ctx([live], { sessions, sel: 'lv' }));
+      assert.match(withLive, /<button type="button" class="btn-review" data-act="review" data-sid="s-1">Review in terminal/);
+      assert.match(withLive, /class="nlivebar"[^>]*>[\s\S]*Running<\/strong><span class="quiet-text">8 min ago<\/span><span class="quiet-text"> · 2 sessions/);
+      const noSession = N.navPage(ctx([live], { sessions: [], sel: 'lv' }));
+      assert.ok(!/btn-review|data-act="review"/.test(noSession), 'a live state without a known session id offers nothing');
+      const stale = N.navPage(ctx([live], { sessions: [{ id: 's-1', state: 'running', stale: true }], sel: 'lv' }));
+      assert.ok(!/btn-review/.test(stale));
+      const calm = N.navPage(ctx([mk({ id: 'cp' })], { sessions, sel: 'cp' }));
+      assert.ok(!/btn-review|nlivebar/.test(calm));
+      assert.match(N.navPage(ctx([live], { sessions, sel: 'lv', opts: { review: true, msgs: { 's-1': 'ok' } } })), /Raised the terminal/);
+      assert.match(N.navPage(ctx([live], { sessions, sel: 'lv', opts: { review: true, na: true } })), /Open the widget to review/);
+      for (const html of [withLive, noSession, calm, N.navDetailHtml(mk({ freshness: 'none', brief: null }), { nowMs: NOW, sid: 's-1', opts: { review: true }, tab: 'git', pluginMissing: true, sessions: [] })]) {
+        const detail = html.slice(html.indexOf('id="ndetail"') >= 0 ? html.indexOf('id="ndetail"') : 0);
+        for (const m of detail.matchAll(/data-act="([a-z-]+)"/g)) assert.ok(['review', 'copy'].includes(m[1]), 'unexpected action ' + m[1]);
+        for (const m of detail.matchAll(/<button\b[^>]*>/g)) assert.match(m[0], /data-act="(review|copy)"|data-ntab=/, m[0]);
+        assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin)"/.test(detail));
+      }
+    });
+
+    test('[alpha6-nav] every API string is escaped: names, branches, brief lines, commit subjects, outcomes', () => {
+      const p = mk({ id: 'ev', name: evil, brief: { now: evil, next: '<b>x</b>', blocked: '"q" & <i>', generatedAt: null, behindSince: null },
+        branches: [{ name: evil, freshness: 'fresh', now: evil, generatedAt: null, behindSince: null }, { name: 'main', freshness: 'fresh', now: null, generatedAt: null, behindSince: null }],
+        git: { defaultBranch: evil, ahead: 1, behind: 0, dirty: false, lastCommitAt: NOW }, activity: [{ at: NOW, kind: 'commit', subject: evil }, { at: NOW - 1, kind: 'pipeline', outcome: evil }] });
+      const all = [];
+      for (const tab of ['branches', 'activity', 'git']) all.push(N.navPage(ctx([p], { sel: 'ev', ui: UI({ tab, filter: 'all' }) })));
+      all.push(N.navManageHtml([p, mk({ name: evil, hidden: true })]), N.navLiveStrip(mk({ live: { state: 'running', sessionIds: ['s'] } }), [{ id: 's', state: 'running', stateSince: NOW }], NOW));
+      for (const h of all) {
+        assert.ok(!h.includes('<img'), h.slice(0, 300));
+        assert.ok(!h.includes('<b>') && !h.includes('<i>'));
+        assert.ok(!/style=/.test(h));
+      }
+      assert.ok(all[0].includes('&lt;img src=x onerror=alert(1)&gt;'));
+      assert.ok(all[1].includes('&lt;img src=x onerror=alert(1)&gt;'), 'the commit subject is escaped');
+      assert.ok(all[3].includes('&lt;img'));
+      const hostile = mk({ id: '"><img>', name: evil });
+      assert.ok(!N.navRowHtml(hostile, { sel: false, focus: false, nowMs: NOW }).includes('<img'));
+      assert.ok(!/<img/.test(N.navControlsHtml({ all: 1, active: 1, blockers: 0 }, { filter: 'active', q: '"><img src=x>', sort: 'pinned' })));
+    });
+
+    test('[alpha6-nav] route: #projects/<id> selects a project; junk ids are ignored; default is the first pinned, else the first active', () => {
+      assert.strictEqual(N.parseProjectSel('#projects/abc_12-X'), 'abc_12-X');
+      assert.strictEqual(N.parseProjectSel('#/projects/p1'), 'p1');
+      for (const j of ['#projects', '#projects/', '#projects/a/b', '#projects/<img>', '#projects/' + 'x'.repeat(65), '#spend/p1', '', null, undefined, '#projects/%3Cimg%3E']) assert.strictEqual(N.parseProjectSel(j), null, String(j));
+      assert.strictEqual(N.parseRoute('#projects/p1'), 'projects');
+      assert.strictEqual(N.initialRoute('#projects/p1', 'spend'), 'projects');
+      const ps = [mk({ id: 'a', active: false, lastActivityAt: NOW }), mk({ id: 'b', active: true, lastActivityAt: NOW - DAY }), mk({ id: 'c', pinned: true, active: false, lastActivityAt: NOW - 9 * DAY }), mk({ id: 'h', hidden: true, pinned: true })];
+      assert.strictEqual(N.navResolveSel(ps, null), 'c', 'first pinned');
+      assert.strictEqual(N.navResolveSel(ps, 'a'), 'a', 'the route wins');
+      assert.strictEqual(N.navResolveSel(ps, 'h'), 'c', 'a hidden project is not selectable');
+      assert.strictEqual(N.navResolveSel(ps, 'nope'), 'c');
+      assert.strictEqual(N.navResolveSel(ps.slice(0, 2), null), 'b', 'else the first active');
+      assert.strictEqual(N.navResolveSel([mk({ id: 'z', active: false })], null), 'z');
+      assert.strictEqual(N.navResolveSel([], null), null);
+      assert.match(N.navPage(ctx(ps, { sel: 'a', ui: UI({ filter: 'all' }) })), /data-nsel="a" aria-selected="true"/);
+      assert.match(cjs, /history\.replaceState\(null, '', '#projects\/' \+ encodeURIComponent\(id\)\)/);
+      assert.match(cjs, /if \(route === 'projects'\) state\.proj\.sel = parseProjectSel\(location\.hash\)/);
+      assert.match(cjs, /else if \(r === 'projects'\) \{ state\.proj\.sel = parseProjectSel\(location\.hash\); renderProjects\(\); \}/);
+    });
+
+    test('[alpha6-nav] keyboard: arrows, Home and End move the selection inside the list; Enter and Space select', () => {
+      const ids = ['a', 'b', 'c'];
+      assert.strictEqual(N.navMove(ids, 'a', 'ArrowDown'), 'b');
+      assert.strictEqual(N.navMove(ids, 'c', 'ArrowDown'), 'c', 'clamped');
+      assert.strictEqual(N.navMove(ids, 'a', 'ArrowUp'), 'a');
+      assert.strictEqual(N.navMove(ids, 'c', 'ArrowUp'), 'b');
+      assert.strictEqual(N.navMove(ids, 'b', 'Home'), 'a');
+      assert.strictEqual(N.navMove(ids, 'b', 'End'), 'c');
+      assert.strictEqual(N.navMove(ids, 'gone', 'ArrowDown'), 'a');
+      assert.strictEqual(N.navMove([], 'a', 'ArrowDown'), null);
+      const page = N.navPage(ctx(ninety(), { ui: UI({ filter: 'all' }) }));
+      assert.ok(/role="grid" aria-label="Projects"/.test(page) && /role="row"/.test(page) && /role="gridcell"/.test(page), 'the grid pattern');
+      assert.strictEqual((page.match(/tabindex="0"/g) || []).length, 1, 'one tab stop in the list');
+      const h = cjs.match(/viewEl\.addEventListener\('keydown'[\s\S]*?\n  \}\);/)[0];
+      assert.match(h, /state\.route === 'projects'/);
+      assert.match(h, /closest\('\.nrow'\)/);
+      assert.match(h, /e\.key === 'Enter' \|\| e\.key === ' '/);
+      assert.match(h, /'ArrowDown'[\s\S]*'ArrowUp'[\s\S]*'Home'[\s\S]*'End'/);
+      assert.match(h, /navMove\(ids/);
+      assert.match(h, /focusNavRow\(viewEl, next\)/, 'focus follows the selection');
+    });
+
+    test('[alpha6-nav] Manage projects: every project with Hide or Unhide through the existing endpoint', () => {
+      const ps = [mk({ id: 'v1', name: 'zeta' }), mk({ id: 'h1', name: 'alpha', hidden: true }), mk({ id: 'v2', name: 'beta' })];
+      const h = N.navPage(ctx(ps, { ui: UI({ managing: true }) }));
+      assert.match(h, /2 visible · 1 hidden/);
+      assert.match(h, /data-act="hide" data-id="v1">Hide</);
+      assert.match(h, /data-act="unhide" data-id="h1">Unhide</);
+      assert.ok(h.indexOf('beta') < h.indexOf('zeta') && h.indexOf('zeta') < h.indexOf('alpha'), 'visible first, by name');
+      assert.ok(!/nrow|ndetail/.test(h));
+      assert.match(cjs, /Manage projects/);
+      assert.match(cjs, /a === 'manage'\) \{ state\.proj\.managing = !state\.proj\.managing/);
+      assert.match(cjs, /a === 'hide' \|\| a === 'unhide'\) \{ setHidden\(/);
+      assert.match(N.navPage(ctx([])), /Projects appear when a Claude Code session runs in a git repo\./);
+    });
+
+    test('[alpha6-nav] amber only for needs-you: calm markup has none; a blocked project shows the ring and pill', () => {
+      const calm = N.navPage(ctx([mk({ id: 'c1', live: { state: 'running', sessionIds: ['s'] } }), mk({ id: 'c2', live: { state: 'idle', sessionIds: ['t'] }, error: true })],
+        { sessions: [{ id: 's', state: 'running', stateSince: NOW }, { id: 't', state: 'idle' }], sel: 'c1' }));
+      assert.ok(!/amber|pshape-need|Needs you/i.test(calm), 'calm markup carries no amber');
+      const need = N.navPage(ctx([mk({ id: 'b1', live: { state: 'blocked', sessionIds: ['s'] } })], { sessions: [{ id: 's', state: 'blocked', stateSince: NOW }], sel: 'b1' }));
+      assert.match(need, /pshape-need/);
+      assert.match(need, /class="pill-amber">/);
+      const sec = css.slice(css.indexOf('/* Projects navigator'), css.indexOf('/* Pipeline tab shared parts'));
+      assert.ok(sec.length > 1000);
+      for (const m of sec.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+        if (/--amber/.test(m[2])) assert.match(m[1].trim(), /^\.(pshape-need|btn-review)$/, 'amber outside a needs-you selector: ' + m[1].trim());
+      }
+      assert.match(sec, /\.nrow\.sel \{[^}]*var\(--accent\)/);
+      assert.match(sec, /\.nchip\.on \{[^}]*var\(--accent\)/);
+      assert.match(sec, /\.ndetail \.btn-review \{ background: var\(--accent\)/);
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(sec), 'tokens only');
+      for (const m of sec.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+    });
+
+    test('[alpha6-nav] layout: the navigator grid cannot land on .body; Projects mode gives .main the width and hides the attention column', () => {
+      const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }));
+      assert.ok(!rules.some((r) => r.sel.split(',').some((s) => /(^|[\s>+~])\.nav$/.test(s.trim()) || /\.nav$/.test(s.trim()))), 'no bare .nav rule');
+      assert.ok(!/class="nav"|toggle\('nav'/.test(cjs), 'no bare nav class in the renderer');
+      for (const r of rules) {
+        if (!/grid-template/.test(r.body)) continue;
+        for (const s of r.sel.split(',').map((x) => x.trim())) assert.ok(!/(^|[\s>+~])\.body\b/.test(s) && !/(^|[\s>+~])\.(main|col)\b/.test(s), 'grid-template on a page container: ' + s);
+      }
+      assert.ok(rules.some((r) => /^\.pnav$/.test(r.sel) && /display: grid/.test(r.body) && /grid-template-columns: minmax\(250px, 320px\) minmax\(0, 1fr\)/.test(r.body)));
+      assert.ok(rules.some((r) => r.sel === '.body.mode-projects .main' && /max-width: none/.test(r.body)));
+      assert.ok(rules.some((r) => r.sel === '.body.mode-projects .attn-col' && /display: none/.test(r.body)));
+      assert.match(cjs, /toggle\('mode-projects', route === 'projects'\)/);
+      assert.match(cjs, /<div class="pnav">/);
+      assert.ok(rules.some((r) => r.sel === '.nlist' && /overflow-y: auto/.test(r.body)) && rules.some((r) => r.sel === '.ndetail' && /overflow-y: auto/.test(r.body)), 'each pane scrolls on its own');
+    });
+
+    test('[alpha6-nav] source: the old Projects renderer is gone, one innerHTML write, no inline styles, 11px minimum, a calm header note', () => {
+      for (const gone of ['cardHtml', 'projectsBody', 'branchRows', 'hiddenSection', 'filterBar', 'liveStrip', 'selectProjects', 'projectsSummary', 'showHidden', 'toggle-hidden', 'run /brief']) {
+        assert.ok(!cjs.includes(gone), gone + ' should be gone');
+      }
+      for (const gone of ['.pcard', '.plist ', '.menu', '.live-strip', '.hidden-box', '.brow']) assert.ok(!css.includes(gone), gone);
+      assert.strictEqual((cjs.match(/\.innerHTML\s*=/g) || []).length, 1);
+      assert.ok(!/style=/.test(cjs.replace(/el\.style\./g, '')));
+      for (const m of css.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+      assert.ok(!/prompt_text|promptText/.test(cjs));
+      assert.match(cjs, /Nothing needs you/);
+      assert.match(css, /#pill-slot:not\(:empty\) \+ \.nav-calm \{ display: none; \}/);
+      assert.match(cjs, /\/sereno:brief/);
+      assert.ok(!/\/brief\b(?!\/)/.test(cjs.replace(/\/sereno:brief/g, '')), 'only /sereno:brief');
     });
   }
 

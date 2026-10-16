@@ -417,19 +417,19 @@ function createCollector(store, port, opts) {
         liveRank = Math.max(liveRank, LIVE_ORDER.indexOf(s.state));
       }
       const b = st && st.brief;
-      // Activity: commit subjects (the one text field), brief times and pipeline attempt/gate times.
+      // Activity: commit subjects (the one free-text field), brief times and pipeline attempt/gate times.
       const act = [];
       const actAt = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
       if (st && Array.isArray(st.commits)) {
         for (const c of st.commits.slice(0, 10)) {
           const at = c ? actAt(c.at) : null;
-          if (at !== null) act.push({ at, kind: 'commit', text: typeof c.subject === 'string' ? pSubject(c.subject) : '' });
+          if (at !== null) act.push({ at, kind: 'commit', subject: typeof c.subject === 'string' ? pSubject(c.subject) : null });
         }
       }
       const briefAts = new Set();
       for (const x of [b].concat(st && Array.isArray(st.branches) ? st.branches.map((y) => y && y.brief) : [])) {
         const at = x ? briefTime(x.generatedAt) : null;
-        if (at !== null && !briefAts.has(at)) { briefAts.add(at); act.push({ at, kind: 'brief', text: null }); }
+        if (at !== null && !briefAts.has(at)) { briefAts.add(at); act.push({ at, kind: 'brief', subject: null }); }
       }
       const pv = st && st.pipeline && typeof st.pipeline === 'object' ? st.pipeline : null;
       const ptasks = pv && Array.isArray(pv.tasks) ? pv.tasks : [];
@@ -437,12 +437,12 @@ function createCollector(store, port, opts) {
         if (!t || typeof t !== 'object') continue;
         for (const a of (Array.isArray(t.attempts) ? t.attempts : [])) {
           if (!a || typeof a !== 'object') continue;
-          const s0 = pTime(a.started_at); if (s0 !== null) act.push({ at: s0, kind: 'pipeline', text: null, outcome: null });
-          const e0 = pTime(a.ended_at); if (e0 !== null) act.push({ at: e0, kind: 'pipeline', text: null, outcome: pStr(a.outcome, 32) });
+          const s0 = pTime(a.started_at); if (s0 !== null) act.push({ at: s0, kind: 'pipeline', subject: null, outcome: null });
+          const e0 = pTime(a.ended_at); if (e0 !== null) act.push({ at: e0, kind: 'pipeline', subject: null, outcome: pStr(a.outcome, 32) });
         }
         for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
           const g0 = g && typeof g === 'object' ? pTime(g.reviewed_at) : null;
-          if (g0 !== null) act.push({ at: g0, kind: 'pipeline', text: null, outcome: pStr(g.outcome, 32) });
+          if (g0 !== null) act.push({ at: g0, kind: 'pipeline', subject: null, outcome: pStr(g.outcome, 32) });
         }
       }
       act.sort((x, y) => y.at - x.at);

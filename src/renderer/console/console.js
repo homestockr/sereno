@@ -464,41 +464,8 @@ function unknownSessionIds(projects, sessions, seen) {
     .map((s) => s.id);
 }
 
-/** Active = a running / thinking / blocked session for the project (idle alone does not count) or a commit in the last 24 h. */
-function isActive(p, sessions, nowMs) {
-  const st = liveState(p, sessions);
-  if (st === 'blocked' || st === 'running' || st === 'thinking') return true;
-  const c = p && p.git && p.git.lastCommitAt !== null ? Number(p.git.lastCommitAt) : NaN;
-  return Number.isFinite(c) && Number(nowMs) - c < 86400000;
-}
-
 function visibleProjects(projects) {
   return (Array.isArray(projects) ? projects : []).filter((p) => p && p.hidden !== true);
-}
-
-function filterCounts(projects, sessions, nowMs) {
-  const v = visibleProjects(projects);
-  const active = v.filter((p) => isActive(p, sessions, nowMs)).length;
-  return { all: v.length, active, quiet: v.length - active };
-}
-
-/** Visible projects for a filter ('all' | 'active' | 'quiet'), newest activity first. */
-function selectProjects(projects, filter, sessions, nowMs) {
-  const la = (p) => (p.lastActivity !== null && Number.isFinite(Number(p.lastActivity)) ? Number(p.lastActivity) : -1);
-  return visibleProjects(projects)
-    .filter((p) => (filter === 'active' ? isActive(p, sessions, nowMs) : filter === 'quiet' ? !isActive(p, sessions, nowMs) : true))
-    .sort((a, b) => (la(b) - la(a)) || String(a.name).localeCompare(String(b.name)));
-}
-
-/** `N projects · N with blockers · N stale · <decision clause>` */
-function projectsSummary(projects, blockedCount) {
-  const v = visibleProjects(projects);
-  const n = v.length;
-  const blockers = v.filter(hasBlocker).length;
-  const stale = v.filter((p) => p.freshness === 'stale').length;
-  const b = Number(blockedCount) > 0 ? Math.floor(Number(blockedCount)) : 0;
-  const clause = b === 0 ? 'nothing needs a decision' : b === 1 ? '1 session needs you' : b + ' sessions need you';
-  return n + (n === 1 ? ' project' : ' projects') + ' · ' + blockers + ' with blockers · ' + stale + ' stale · ' + clause;
 }
 
 /** `main ↑2 ↓0 · 2 open PRs · Last commit 8 min ago`; absent parts are left out. */
@@ -528,107 +495,6 @@ function liveShape(st) {
   return '<svg class="pshape" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
 }
 
-/** Non-default branches: `↳ name  <chip>  <brief now or "No brief">`. */
-function branchRows(branches, defaultBranch, nowMs) {
-  const list = (Array.isArray(branches) ? branches : []).filter((b) => b && b.name !== defaultBranch);
-  return list.map((b) => {
-    const f = b && b.freshness ? b.freshness : 'none';
-    const chip = freshnessChip(f, staleDaysOf(b && b.behindSince, nowMs));
-    const none = f === 'none';
-    return '<div class="brow"><span class="bname mono">\u21b3 ' + esc(b && b.name) + '</span>'
-      + (none ? '' : '<span class="chip ' + chip.cls + '">' + esc(chip.label) + '</span>')
-      + '<span class="bnow' + (b && b.now ? '' : ' quiet-text') + '">' + esc(b && b.now ? b.now : 'No brief') + '</span></div>';
-  }).join('');
-}
-
-/** One project card. ctx: { now, state } (state = liveState()). Every API string goes through esc(); no style attributes. */
-function cardHtml(p, ctx) {
-  const c = ctx || {};
-  const now = c.now;
-  const chip = freshnessChip(p.freshness, staleDaysOf(p.brief ? p.brief.behindSince : null, now));
-  const b = p.brief;
-  const kv = (k, v) => '<div class="kv"><span class="k">' + k + '</span><span class="v">' + esc(v == null || v === '' ? '—' : v) + '</span></div>';
-  let body = '';
-  if (b) body = kv('Now', b.now) + kv('Next', b.next) + kv('Blocked', b.blocked);
-  else if (p.freshness === 'none' || p.freshness == null) body = '<div class="nobrief">No brief yet — run /brief in a session</div>';
-  let git = '';
-  if (p.error === true) {
-    git = '<div class="git git-off">Git status unavailable</div>';
-  } else {
-    const line = gitLine(p.git, p.prs, now);
-    const dirty = p.git && p.git.dirty === true
-      ? '<span class="dirty"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1l4 4-4 4-4-4z" fill="currentColor"/></svg>dirty</span>' : '';
-    if (line || dirty) git = '<div class="git">' + (line ? '<span>' + esc(line) + '</span>' : '') + dirty + '</div>';
-  }
-  const spend = p.spend14
-    ? '<div class="spend14"><div class="spend-label">14-day spend</div>' + sparkSvg(p.spend14.trend)
-      + '<div class="spend-num num">' + esc(estMoney(p.spend14.costMicros)) + '</div></div>' : '';
-  const menu = '<details class="menu"><summary aria-label="Project actions">⋯</summary>'
-    + '<button type="button" class="menu-item" data-act="hide" data-id="' + esc(p.id) + '">Hide project</button></details>';
-  return '<article class="pcard">' + liveShape(c.state)
-    + '<div class="pmain"><div class="phead"><h3>' + esc(p.name) + '</h3><span class="chip ' + chip.cls + '">' + esc(chip.label) + '</span></div>'
-    + body + git + branchRows(p.branches, p.git ? p.git.defaultBranch : null, now) + '</div>'
-    + '<div class="pside">' + menu + spend + '</div></article>';
-}
-
-/**
- * LIVE SESSIONS strip: only non-stale running / thinking / blocked sessions, newest first,
- * at most 6 and then "+N more". '' when none.
- */
-function liveStrip(sessions, nowMs) {
-  const list = (Array.isArray(sessions) ? sessions : []).filter(isLiveSession)
-    .sort((a, b) => (Number(b.stateSince) || 0) - (Number(a.stateSince) || 0));
-  if (!list.length) return '';
-  const more = list.length > 6 ? '<div class="live-more">+' + (list.length - 6) + ' more</div>' : '';
-  return '<div class="live-strip"><div class="live-title">LIVE SESSIONS</div><div class="live-list">'
-    + list.slice(0, 6).map((s) => {
-      const rel = relTime(s.stateSince, nowMs);
-      return '<div class="live-item"><strong>' + esc(s.projectName == null || s.projectName === '' ? 'Unknown project' : s.projectName)
-        + ' / ' + esc(s.state) + '</strong>' + (rel ? '<span>' + esc(rel) + '</span>' : '') + '</div>';
-    }).join('') + more + '</div></div>';
-}
-
-/** The hidden-projects toggle and, when open, the list with Unhide. '' when none are hidden. */
-function hiddenSection(projects, open) {
-  const h = (Array.isArray(projects) ? projects : []).filter((p) => p && p.hidden === true);
-  if (!h.length) return '';
-  const list = open ? '<ul class="hidden-list">' + h.map((p) => '<li><span>' + esc(p.name) + '</span>'
-    + '<button type="button" class="link-btn" data-act="unhide" data-id="' + esc(p.id) + '">Unhide</button></li>').join('') + '</ul>' : '';
-  return '<div class="hidden-box"><button type="button" class="link-btn" data-act="toggle-hidden" aria-expanded="' + (open === true) + '">'
-    + h.length + ' hidden · ' + (open ? 'hide' : 'show') + '</button>' + list + '</div>';
-}
-
-/** Filter tabs with counts. */
-function filterBar(counts, filter) {
-  return '<div class="filters" role="group" aria-label="Filter">'
-    + [['all', 'All', counts.all], ['active', 'Active', counts.active], ['quiet', 'Quiet', counts.quiet]].map((f) =>
-      '<button type="button" data-filter="' + f[0] + '" class="' + (filter === f[0] ? 'on' : '') + '" aria-pressed="' + (filter === f[0]) + '">'
-      + f[1] + ' ' + f[2] + '</button>').join('') + '<span class="sortnote">Last activity ↓</span></div>';
-}
-
-/** The whole Projects view body (below the title row). `sessions` is the /state session list. */
-function projectsBody(projects, sessions, filter, showHidden, nowMs) {
-  const all = Array.isArray(projects) ? projects : [];
-  const live = topSessions({ sessions });
-  // Decisions: blocked sessions the server attributed to a project (p.live); name match if no p.live.
-  const owned = new Set();
-  let anyLive = false;
-  for (const p of all) {
-    if (p && p.live && Array.isArray(p.live.sessionIds)) { anyLive = true; for (const id of p.live.sessionIds) owned.add(id); }
-  }
-  const blocked = live.filter((s) => s.state === 'blocked' && !s.stale && (!anyLive || owned.has(s.id))).length;
-  if (!all.length) {
-    return '<div class="state-panel"><h2>No projects yet</h2><p>Projects appear when a Claude Code session runs in a git repo.</p></div>';
-  }
-  const counts = filterCounts(all, live, nowMs);
-  const shown = selectProjects(all, filter, live, nowMs);
-  const cards = shown.length
-    ? shown.map((p) => cardHtml(p, { now: nowMs, state: liveState(p, live) })).join('')
-    : '<p class="empty-note">No projects match this filter.</p>';
-  return '<p class="summary">' + esc(projectsSummary(all, blocked)) + '</p>' + filterBar(counts, filter)
-    + '<div class="plist">' + cards + '</div>' + hiddenSection(all, showHidden) + liveStrip(live, nowMs);
-}
-
 /** Request for a console POST: { method, headers, body } ready for fetch(). */
 function actionRequest(bodyObj, token) {
   return {
@@ -641,6 +507,299 @@ function actionRequest(bodyObj, token) {
 /** The review body carries nothing but the session id. */
 function reviewRequest(sessionId, token) {
   return actionRequest({ sessionId: String(sessionId) }, token);
+}
+
+/* ---------- Projects navigator (alpha.6 N2). Observe only: the one action is Review in terminal, with a live session. ---------- */
+
+const NAV_FILTERS = [['all', 'All'], ['active', 'Active'], ['blockers', 'With blockers']];
+const NAV_SORTS = [['pinned', 'Pinned first'], ['recent', 'Recent'], ['name', 'Name']];
+const NAV_TABS = [['branches', 'Branches'], ['activity', 'Activity'], ['git', 'Git & PRs']];
+const NAV_LIVE_TEXT = { blocked: 'Needs you', running: 'Running', thinking: 'Thinking', idle: 'Idle' };
+const NAV_ACTIVITY_MAX = 20;
+
+/** '#projects/<id>' -> id (only [A-Za-z0-9_-], up to 64 chars, the collector's id alphabet); anything else -> null. */
+function parseProjectSel(hash) {
+  const m = /^projects\/([A-Za-z0-9_-]{1,64})$/.exec(String(hash == null ? '' : hash).replace(/^#\/?/, '').trim());
+  return m ? m[1] : null;
+}
+
+/** Counts behind the filter chips (visible projects only), from the API's active / blockers flags. */
+function navCounts(projects) {
+  const v = visibleProjects(projects);
+  return { all: v.length, active: v.filter((p) => p.active === true).length, blockers: v.filter((p) => p.blockers === true).length };
+}
+
+/** Visible projects for a chip: 'all' | 'active' | 'blockers' (anything else counts as all). */
+function navFilter(projects, filter) {
+  return visibleProjects(projects).filter((p) => (filter === 'active' ? p.active === true : filter === 'blockers' ? p.blockers === true : true));
+}
+
+/** Client-side search over the project name. */
+function navSearch(list, q) {
+  const s = String(q == null ? '' : q).trim().toLowerCase();
+  const arr = Array.isArray(list) ? list : [];
+  return s ? arr.filter((p) => String(p.name).toLowerCase().indexOf(s) >= 0) : arr;
+}
+
+/** 'name' sorts by name; anything else by newest activity, then name. */
+function navSort(list, sort) {
+  const la = (p) => (typeof p.lastActivityAt === 'number' && Number.isFinite(p.lastActivityAt) ? p.lastActivityAt : -1);
+  const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+  const arr = (Array.isArray(list) ? list : []).slice();
+  return sort === 'name' ? arr.sort(byName) : arr.sort((a, b) => (la(b) - la(a)) || byName(a, b));
+}
+
+/** Pinned (only under "Pinned first"), Projects (active) and Inactive. */
+function navGroups(list, sort) {
+  const s = navSort(list, sort);
+  const pinned = sort === 'pinned' ? s.filter((p) => p.pinned === true) : [];
+  const rest = s.filter((p) => pinned.indexOf(p) < 0);
+  return { pinned, projects: rest.filter((p) => p.active === true), inactive: rest.filter((p) => p.active !== true) };
+}
+
+/** The selected project id: the route's id if it is a visible project, else the first pinned, else the first active, else the first. */
+function navResolveSel(projects, sel) {
+  const v = navSort(visibleProjects(projects), 'recent');
+  const hit = v.find((p) => p.id === sel);
+  if (hit) return hit.id;
+  const pick = v.find((p) => p.pinned === true) || v.find((p) => p.active === true) || v[0];
+  return pick ? pick.id : null;
+}
+
+/** Arrow / Home / End movement over the ids of the rows on screen; clamped; null with no rows. */
+function navMove(ids, sel, key) {
+  const list = Array.isArray(ids) ? ids : [];
+  if (!list.length) return null;
+  if (key === 'Home') return list[0];
+  if (key === 'End') return list[list.length - 1];
+  const i = list.indexOf(sel);
+  if (i < 0) return list[0];
+  return list[Math.max(0, Math.min(list.length - 1, i + (key === 'ArrowUp' ? -1 : 1)))];
+}
+
+/** Non-default branches of a project. */
+function navBranches(p) {
+  const def = p && p.git ? p.git.defaultBranch : null;
+  return (p && Array.isArray(p.branches) ? p.branches : []).filter((b) => b && b.name !== def);
+}
+
+/** `Running · 3 branches`, `Idle`, or the brief freshness (`fresh`, `No brief`, `Brief is 9 days behind`). */
+function navStatus(p, nowMs) {
+  const st = liveState(p, []);
+  const head = st ? NAV_LIVE_TEXT[st] : freshnessChip(p.freshness, staleDaysOf(p.brief ? p.brief.behindSince : null, nowMs)).label;
+  const nb = navBranches(p).length;
+  return head + (nb > 0 ? ' · ' + nb + (nb === 1 ? ' branch' : ' branches') : '');
+}
+
+/** `N projects · N with blockers · N stale · N decisions`, from the API's counts (derived from the list when absent). */
+function navSummary(counts, projects) {
+  const v = visibleProjects(projects);
+  const ok = counts && typeof counts === 'object';
+  const num = (x, fb) => (ok && Number.isFinite(counts[x]) && counts[x] >= 0 ? Math.floor(counts[x]) : fb);
+  const n = num('total', v.length);
+  const blockers = num('withBlockers', v.filter((p) => p.blockers === true).length);
+  const stale = num('stale', v.filter((p) => p.freshness === 'stale').length);
+  const dec = num('decisions', 0);
+  return n + (n === 1 ? ' project' : ' projects') + ' · ' + blockers + ' with blockers · ' + stale + ' stale · ' + dec + (dec === 1 ? ' decision' : ' decisions');
+}
+
+function pinIcon(on) {
+  return '<svg class="pin-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 2.5h5l-.7 4 2 2.2v1H8.6V14H7.4v-4.3H4.2v-1l2-2.2z" fill="' + (on ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>';
+}
+
+/** One list row (grid pattern: row + cells). o: { sel, focus, nowMs }. The pin button is the row's only control. */
+function navRowHtml(p, o) {
+  const st = liveState(p, []);
+  const pinned = p.pinned === true;
+  return '<div class="nrow' + (o.sel ? ' sel' : '') + '" role="row" tabindex="' + (o.focus ? '0' : '-1') + '" data-nsel="' + esc(p.id) + '" aria-selected="' + (o.sel === true) + '">'
+    + '<div class="ncell-main" role="gridcell">' + liveShape(st) + '<span class="nwrap"><span class="nname">' + esc(p.name) + '</span>'
+    + '<span class="nstatus">' + esc(navStatus(p, o.nowMs)) + '</span></span>' + (st ? '<span class="nlive">live</span>' : '') + '</div>'
+    + '<div class="ncell-pin" role="gridcell"><button type="button" class="pinbtn' + (pinned ? ' on' : '') + '" data-act="pin" data-id="' + esc(p.id) + '" data-pinned="' + pinned
+    + '" aria-pressed="' + pinned + '" aria-label="' + esc((pinned ? 'Unpin ' : 'Pin ') + p.name) + '">' + pinIcon(pinned) + '</button></div></div>';
+}
+
+/** Project ids in on-screen order (Inactive only while open or while searching). o: { filter, q, sort, open }. */
+function navVisibleIds(projects, o) {
+  const g = navGroups(navSearch(navFilter(projects, o.filter), o.q), o.sort);
+  const ids = g.pinned.concat(g.projects);
+  return (o.open && o.open.inactive) || String(o.q || '').trim() ? ids.concat(g.inactive).map((p) => p.id) : ids.map((p) => p.id);
+}
+
+/** The scrolling list: Pinned, Projects, then a collapsed Inactive (N). o: { filter, q, sort, open, sel, nowMs }. */
+function navListHtml(projects, o) {
+  const g = navGroups(navSearch(navFilter(projects, o.filter), o.q), o.sort);
+  if (!g.pinned.length && !g.projects.length && !g.inactive.length) return '<p class="empty-note">No projects match.</p>';
+  const searching = String(o.q || '').trim() !== '';
+  const openInactive = (o.open && o.open.inactive === true) || searching;
+  const ids = navVisibleIds(projects, o);
+  const focusId = ids.indexOf(o.sel) >= 0 ? o.sel : ids[0];
+  const rows = (arr, label) => '<div class="nrows" role="grid" aria-label="' + esc(label) + '">'
+    + arr.map((p) => navRowHtml(p, { sel: p.id === o.sel, focus: p.id === focusId, nowMs: o.nowMs })).join('') + '</div>';
+  let h = '';
+  if (g.pinned.length) h += '<section class="ngroup"><h3 class="ngroup-title">Pinned <span>' + g.pinned.length + '</span></h3>' + rows(g.pinned, 'Pinned projects') + '</section>';
+  if (g.projects.length) h += '<section class="ngroup"><h3 class="ngroup-title">Projects <span>' + g.projects.length + '</span></h3>' + rows(g.projects, 'Projects') + '</section>';
+  if (g.inactive.length) {
+    h += '<details class="ngroup ninactive"' + (openInactive ? ' open' : '') + '><summary>Inactive (' + g.inactive.length + ')</summary>' + rows(g.inactive, 'Inactive projects') + '</details>';
+  }
+  return h;
+}
+
+/** Filter chips with counts, the search box and the sort menu. */
+function navControlsHtml(counts, o) {
+  return '<div class="nchips" role="group" aria-label="Filter">' + NAV_FILTERS.map((f) => {
+    const c = f[0] === 'all' ? counts.all : f[0] === 'active' ? counts.active : counts.blockers;
+    return '<button type="button" class="nchip' + (o.filter === f[0] ? ' on' : '') + '" data-filter="' + f[0] + '" aria-pressed="' + (o.filter === f[0]) + '">' + f[1] + ' <span class="num">' + c + '</span></button>';
+  }).join('') + '</div>'
+    + '<div class="ntools"><input type="search" class="nsearch" data-nq aria-label="Search projects" placeholder="Search projects" value="' + esc(o.q || '') + '" autocomplete="off">'
+    + '<label class="nsort">Sort <select data-nsort aria-label="Sort projects">' + NAV_SORTS.map((s) => '<option value="' + s[0] + '"' + (o.sort === s[0] ? ' selected' : '') + '>' + s[1] + '</option>').join('') + '</select></label></div>';
+}
+
+/** One command with its copy button (the Pipeline install panel and the brief card share it). */
+function cmdRow(c) {
+  return '<div class="cmd"><code>' + esc(c) + '</code><button type="button" class="btn-copy" data-act="copy" data-text="' + esc(c) + '">Copy</button></div>';
+}
+
+/** The brief card: Now / Next / Blocked with freshness, or "No brief yet" with the copy button (and install commands when the plugin is missing). */
+function navBriefHtml(p, c) {
+  const chip = freshnessChip(p.freshness, staleDaysOf(p.brief ? p.brief.behindSince : null, c.nowMs));
+  const b = p.brief;
+  const kv = (k, v, cls) => '<div class="kv"><span class="k">' + k + '</span><span class="v' + (cls ? ' ' + cls : '') + '">' + esc(v == null || v === '' ? '—' : v) + '</span></div>';
+  const gen = b && typeof b.generatedAt === 'number' ? relTime(b.generatedAt, c.nowMs) : (b && typeof b.generatedAt === 'string' ? relTime(Date.parse(b.generatedAt), c.nowMs) : '');
+  let body;
+  if (b) {
+    body = kv('Now', b.now) + kv('Next', b.next) + kv('Blocked', b.blocked, hasBlocker(p) ? 'blocked-line' : '');
+  } else {
+    body = '<p class="nobrief">No brief yet</p>' + cmdRow('/sereno:brief')
+      + (c.pluginMissing === true ? '<p class="nobrief">The Sereno plugin is not detected. Install it in Claude Code first:</p>' + INSTALL_CMDS.map(cmdRow).join('') : '');
+  }
+  return '<section class="ncard" aria-label="Brief"><div class="ncard-head"><h3>Brief</h3><span class="chip ' + chip.cls + '">' + esc(chip.label) + '</span>'
+    + (gen ? '<span class="quiet-text">Updated ' + esc(gen) + '</span>' : '') + '</div>' + body + '</section>';
+}
+
+/** 14-day spend: sparkline and total, an estimate. */
+function navSpendHtml(p) {
+  if (!p.spend14) return '<section class="ncard nspend" aria-label="Spend"><div class="ncard-head"><h3>14-day spend</h3></div><p class="nobrief">No spend recorded</p></section>';
+  return '<section class="ncard nspend" aria-label="Spend"><div class="ncard-head"><h3>14-day spend</h3></div>'
+    + '<div class="nspend-row">' + sparkSvg(p.spend14.trend) + '<span class="num nspend-total">' + esc(estMoney(p.spend14.costMicros)) + '</span></div></section>';
+}
+
+/** Branch list: name, ahead/behind, brief freshness, last commit. Only the default branch has git numbers; the rest show a dash. */
+function navBranchesHtml(p, nowMs) {
+  const g = p.git || {};
+  const dash = '<span class="quiet-text">—</span>';
+  const rows = [];
+  const byName = new Map((Array.isArray(p.branches) ? p.branches : []).filter((b) => b).map((b) => [b.name, b]));
+  if (typeof g.defaultBranch === 'string' && g.defaultBranch) {
+    const db = byName.get(g.defaultBranch);
+    const ab = Number.isFinite(g.ahead) && Number.isFinite(g.behind) ? '↑' + g.ahead + ' ↓' + g.behind : '';
+    rows.push({ name: g.defaultBranch, def: true, ab, f: db ? db.freshness : p.freshness, bs: db ? db.behindSince : null, last: relTime(g.lastCommitAt, nowMs) });
+  }
+  for (const b of navBranches(p)) rows.push({ name: b.name, def: false, ab: '', f: b.freshness, bs: b.behindSince, last: '' });
+  if (!rows.length) return '<p class="empty-note">No branches yet.</p>';
+  return '<div class="nbranches" role="table" aria-label="Branches"><div class="nbr nbr-head" role="row"><span role="columnheader">Branch</span><span role="columnheader">Ahead / behind</span>'
+    + '<span role="columnheader">Brief</span><span role="columnheader">Last commit</span></div>'
+    + rows.map((r) => {
+      const chip = freshnessChip(r.f || 'none', staleDaysOf(r.bs, nowMs));
+      return '<div class="nbr" role="row"><span class="mono nbname" role="cell">' + esc(r.name) + (r.def ? ' <span class="quiet-text">default</span>' : '') + '</span>'
+        + '<span class="num" role="cell">' + (r.ab ? esc(r.ab) : dash) + '</span><span role="cell"><span class="chip ' + chip.cls + '">' + esc(chip.label) + '</span></span>'
+        + '<span role="cell">' + (r.last ? esc(r.last) : dash) + '</span></div>';
+    }).join('') + '</div>';
+}
+
+/** One activity line from { at, kind, text?, outcome? }; the commit subject is the only free text. '' for an unknown kind. */
+function navActivityText(e) {
+  if (!e || typeof e !== 'object') return '';
+  if (e.kind === 'commit') return typeof e.subject === 'string' && e.subject ? e.subject : 'Commit';   // the commit subject is the one free-text field
+  if (e.kind === 'brief') return 'Brief updated';
+  if (e.kind === 'pipeline') {
+    const oc = e.outcome ? (OUTCOME_LABEL[e.outcome] || String(e.outcome)) : '';
+    return oc ? 'Pipeline: ' + oc : 'Pipeline activity';
+  }
+  return '';
+}
+
+/** Newest first, at most 20. */
+function navActivityHtml(p, nowMs) {
+  const rows = (Array.isArray(p.activity) ? p.activity : []).filter((e) => e && Number.isFinite(Number(e.at)) && navActivityText(e))
+    .sort((a, b) => Number(b.at) - Number(a.at)).slice(0, NAV_ACTIVITY_MAX);
+  if (!rows.length) return '<p class="empty-note">No recent activity.</p>';
+  return '<ul class="nact">' + rows.map((e) => '<li><span class="nact-kind quiet-text">' + esc(e.kind) + '</span><span class="nact-text">' + esc(navActivityText(e))
+    + '</span><span class="quiet-text">' + esc(relTime(e.at, nowMs)) + '</span></li>').join('') + '</ul>';
+}
+
+/** Git & PRs: the default branch state and the open PR count, which is all we hold. */
+function navGitHtml(p, nowMs) {
+  if (p.error === true) return '<p class="empty-note">Git status unavailable.</p>';
+  const g = p.git || {};
+  const row = (k, v) => '<dt>' + k + '</dt><dd>' + esc(v == null || v === '' ? '—' : v) + '</dd>';
+  const ab = Number.isFinite(g.ahead) && Number.isFinite(g.behind) ? '↑' + g.ahead + ' ↓' + g.behind : '';
+  return '<dl class="pkv ngit">' + row('Default branch', g.defaultBranch) + row('Ahead / behind', ab)
+    + row('Open PRs', Number.isFinite(p.prs) ? String(p.prs) : '') + row('Working tree', g.dirty === true ? 'Uncommitted changes' : g.dirty === false ? 'Clean' : '')
+    + row('Last commit', relTime(g.lastCommitAt, nowMs)) + '</dl>';
+}
+
+/** Footer strip while a session is live: state and time of the project's newest live session. '' when none. */
+function navLiveStrip(p, sessions, nowMs) {
+  const st = liveState(p, []);
+  if (!st) return '';
+  const ids = new Set(p.live && Array.isArray(p.live.sessionIds) ? p.live.sessionIds : []);
+  const mine = topSessions({ sessions }).filter((s) => !s.stale && ids.has(s.id)).sort((a, b) => (Number(b.stateSince) || 0) - (Number(a.stateSince) || 0));
+  const lead = mine[0];
+  const state = lead && NAV_LIVE_TEXT[lead.state] ? lead.state : st;
+  const rel = lead ? relTime(lead.stateSince, nowMs) : '';
+  const more = mine.length > 1 ? ' · ' + mine.length + ' sessions' : '';
+  return '<div class="nlivebar" aria-label="Live session">' + liveShape(state) + '<strong>' + esc(NAV_LIVE_TEXT[state]) + '</strong>'
+    + (rel ? '<span class="quiet-text">' + esc(rel) + '</span>' : '') + '<span class="quiet-text">' + esc(more) + '</span></div>';
+}
+
+/** The detail pane for one project. c: { nowMs, sid, opts, tab, pluginMissing, sessions }. */
+function navDetailHtml(p, c) {
+  if (!p) return '<div class="ndetail-empty"><p class="empty-note">Select a project.</p></div>';
+  const chip = freshnessChip(p.freshness, staleDaysOf(p.brief ? p.brief.behindSince : null, c.nowMs));
+  const blocked = liveState(p, []) === 'blocked';
+  let git = '';
+  if (p.error === true) git = '<div class="git git-off">Git status unavailable</div>';
+  else {
+    const line = gitLine(p.git, p.prs, c.nowMs);
+    const dirty = p.git && p.git.dirty === true
+      ? '<span class="dirty"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1l4 4-4 4-4-4z" fill="currentColor"/></svg>dirty</span>' : '';
+    if (line || dirty) git = '<div class="git">' + (line ? '<span>' + esc(line) + '</span>' : '') + dirty + '</div>';
+  }
+  const review = c.sid ? reviewControl({ sessionId: c.sid }, c.opts) : '';
+  const tab = NAV_TABS.some((t) => t[0] === c.tab) ? c.tab : 'branches';
+  const tabs = '<div class="ntabs" role="tablist" aria-label="Project detail">' + NAV_TABS.map((t) => '<button type="button" role="tab" class="ntab' + (tab === t[0] ? ' on' : '')
+    + '" data-ntab="' + t[0] + '" aria-selected="' + (tab === t[0]) + '">' + t[1] + '</button>').join('') + '</div>';
+  const pane = tab === 'activity' ? navActivityHtml(p, c.nowMs) : tab === 'git' ? navGitHtml(p, c.nowMs) : navBranchesHtml(p, c.nowMs);
+  return '<div class="ndetail-head"><div class="ndetail-title"><h2>' + esc(p.name) + '</h2><span class="chip ' + chip.cls + '">' + esc(chip.label) + '</span>'
+    + (blocked ? '<span class="pill-amber">' + ringIcon() + 'Needs you</span>' : '') + '</div>' + git + review + '</div>'
+    + navBriefHtml(p, c) + navSpendHtml(p) + tabs + '<div class="ntabpanel" role="tabpanel">' + pane + '</div>' + navLiveStrip(p, c.sessions, c.nowMs);
+}
+
+/** Manage projects: every project with Hide / Unhide (Sereno's own config; nothing happens to a repo). */
+function navManageHtml(projects) {
+  const all = (Array.isArray(projects) ? projects : []).filter((p) => p)
+    .sort((a, b) => (a.hidden === true) - (b.hidden === true) || String(a.name).localeCompare(String(b.name)));
+  const nh = all.filter((p) => p.hidden === true).length;
+  return '<section class="nmanage" aria-label="Manage projects"><h2>Manage projects</h2><p class="summary">' + (all.length - nh) + ' visible · ' + nh + ' hidden. Hiding a project only removes it from this view.</p>'
+    + '<ul class="nmanage-list">' + all.map((p) => '<li><span class="nname">' + esc(p.name) + '</span>' + (p.hidden === true ? '<span class="quiet-text">hidden</span>' : '')
+      + '<button type="button" class="btn-copy" data-act="' + (p.hidden === true ? 'unhide' : 'hide') + '" data-id="' + esc(p.id) + '">' + (p.hidden === true ? 'Unhide' : 'Hide') + '</button></li>').join('') + '</ul></section>';
+}
+
+/**
+ * The whole Projects body below the title row. ctx: { projects, counts, sessions, ui: { filter, q, sort, open, tab, managing },
+ * sel, nowMs, opts, pluginMissing }. Every API string goes through esc().
+ */
+function navPage(ctx) {
+  const all = Array.isArray(ctx.projects) ? ctx.projects : [];
+  if (!all.length) return '<div class="state-panel"><h2>No projects yet</h2><p>Projects appear when a Claude Code session runs in a git repo.</p></div>';
+  if (ctx.ui.managing) return navManageHtml(all);
+  const sel = navResolveSel(all, ctx.sel);
+  const p = all.find((x) => x && x.id === sel && x.hidden !== true) || null;
+  const o = { filter: ctx.ui.filter, q: ctx.ui.q, sort: ctx.ui.sort, open: ctx.ui.open, sel, nowMs: ctx.nowMs };
+  const detail = navDetailHtml(p, { nowMs: ctx.nowMs, sid: p ? liveSessionId(p.id, all, ctx.sessions) : null, opts: ctx.opts, tab: ctx.ui.tab, pluginMissing: ctx.pluginMissing, sessions: ctx.sessions });
+  return '<p class="summary">' + esc(navSummary(ctx.counts, all)) + '</p><div class="pnav">'
+    + '<div class="nleft">' + navControlsHtml(navCounts(all), o) + '<div class="nlist" id="nlist">' + navListHtml(all, o) + '</div></div>'
+    + '<section class="ndetail" id="ndetail" aria-label="Project detail">' + detail + '</section></div>';
 }
 
 /* ---------- Pipeline tab: pure helpers (Phase 4b step 6). Observe only; amber only for a pending decision. ---------- */
@@ -809,7 +968,7 @@ function routingHtml(routing, projects) {
 function installHtml() {
   return '<div class="state-panel install"><h2>The Sereno pipeline plugin is not detected</h2>'
     + '<p>Install it in Claude Code, then this tab fills in. Sereno only observes what the plugin writes.</p>'
-    + INSTALL_CMDS.map((c) => '<div class="cmd"><code>' + esc(c) + '</code><button type="button" class="btn-copy" data-act="copy" data-text="' + esc(c) + '">Copy</button></div>').join('')
+    + INSTALL_CMDS.map(cmdRow).join('')
     + '</div>';
 }
 
@@ -1157,7 +1316,7 @@ const state = {
   mode: 'loading', lastOk: null, token: 0,
   attn: null, attnToken: 0,   // attn: attentionState() output, { unavailable: true }, or null before the first read
   route: 'projects',
-  proj: { mode: 'loading', list: [], filter: 'all', showHidden: false, token: 0, lastOk: null },
+  proj: { mode: 'loading', list: [], counts: null, filter: 'active', q: '', sort: 'pinned', open: { inactive: false }, tab: 'branches', managing: false, sel: null, pluginMissing: false, token: 0, lastOk: null },
   pipe: { mode: 'loading', body: null, token: 0, lastOk: null, sub: 'work', project: 'all', stage: 'all', sel: null, open: { idle: false, quiet: false } },
   sessions: [],               // /state sessions, for the Projects summary, filters and live strip
   liveMap: {}, liveSig: '', seenIds: new Set(),   // client-side live states from the SSE stream
@@ -1369,7 +1528,34 @@ function render() {
 /* ---------- Projects tab: rendering ---------- */
 
 function projectsTitle() {
-  return '<div class="title-row"><h1>Projects</h1><span id="pill-slot">' + pillHtml(state.attn && state.attn.amber ? state.attn.count : 0) + '</span></div>';
+  const calm = state.attn && !state.attn.unavailable ? '<span class="nav-calm">Nothing needs you</span>' : '';
+  return '<div class="title-row"><h1>Projects</h1><div class="title-right"><span id="pill-slot">' + pillHtml(state.attn && state.attn.amber ? state.attn.count : 0) + '</span>' + calm
+    + '<button type="button" class="btn-copy" data-act="manage" aria-pressed="' + (state.proj.managing === true) + '">' + (state.proj.managing ? 'Done' : 'Manage projects') + '</button></div></div>';
+}
+
+/** The navigator's input: the current list with live states, the UI state and the session list. */
+function navCtx() {
+  const p = state.proj;
+  return { projects: withLive(p.list, state.liveMap), counts: p.counts, sessions: state.sessions, nowMs: Date.now(), sel: p.sel, pluginMissing: p.pluginMissing,
+    ui: { filter: p.filter, q: p.q, sort: p.sort, open: p.open, tab: p.tab, managing: p.managing }, opts: { review: true, na: state.reviewNA, msgs: state.reviewMsgs } };
+}
+
+/** The element that holds focus, as a way to find its twin after a re-render. */
+function focusKey(view) {
+  const ae = document.activeElement;
+  if (!ae || !ae.getAttribute || !view.contains(ae)) return null;
+  for (const a of ['data-nq', 'data-nsort', 'data-nsel', 'data-ntab', 'data-filter']) if (ae.getAttribute(a) !== null) return [a, ae.getAttribute(a)];
+  if (ae.getAttribute('data-act') === 'pin') return ['pin', ae.getAttribute('data-id')];
+  return null;
+}
+
+function restoreFocus(view, key) {
+  if (!key) return;
+  const sel = key[0] === 'pin' ? '[data-act="pin"]' : '[' + key[0] + ']';
+  const el = Array.from(view.querySelectorAll(sel)).find((x) => key[0] === 'data-nq' || key[0] === 'data-nsort' || x.getAttribute(key[0] === 'pin' ? 'data-id' : key[0]) === key[1]);
+  if (!el) return;
+  el.focus();
+  if (key[0] === 'data-nq' && typeof el.setSelectionRange === 'function') { try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) { /* not a text input */ } }
 }
 
 function renderProjects() {
@@ -1382,7 +1568,34 @@ function renderProjects() {
     setHtml(view, projectsTitle() + '<div class="state-panel"><h2>Projects are unavailable right now</h2><p>Sereno will try again on the next refresh.</p></div>');
     return;
   }
-  setHtml(view, projectsTitle() + projectsBody(withLive(p.list, state.liveMap), state.sessions, p.filter, p.showHidden, Date.now()));
+  const key = focusKey(view);
+  setHtml(view, projectsTitle() + navPage(navCtx()));
+  restoreFocus(view, key);
+}
+
+/** The list and the detail pane only: typing in the search box, or moving the selection, leaves the controls (and their focus) alone. */
+function renderNavPanes() {
+  if (state.route !== 'projects' || state.proj.mode !== 'data') return;
+  const list = document.getElementById('nlist');
+  const detail = document.getElementById('ndetail');
+  if (!list || !detail || state.proj.managing) { renderProjects(); return; }
+  const c = navCtx();
+  const sel = navResolveSel(c.projects, c.sel);
+  const o = { filter: c.ui.filter, q: c.ui.q, sort: c.ui.sort, open: c.ui.open, sel, nowMs: c.nowMs };
+  setHtml(list, navListHtml(c.projects, o));
+  const p = c.projects.find((x) => x && x.id === sel && x.hidden !== true) || null;
+  setHtml(detail, navDetailHtml(p, { nowMs: c.nowMs, sid: p ? liveSessionId(p.id, c.projects, c.sessions) : null, opts: c.opts, tab: c.ui.tab, pluginMissing: c.pluginMissing, sessions: c.sessions }));
+}
+
+function focusNavRow(view, id) {
+  const on = Array.from(view.querySelectorAll('.nrow')).find((x) => x.getAttribute('data-nsel') === id);
+  if (on) on.focus();
+}
+
+/** Select a project: keep it in the route (#projects/<id>) without adding history entries. */
+function selectProject(id) {
+  state.proj.sel = id;
+  try { history.replaceState(null, '', '#projects/' + encodeURIComponent(id)); } catch (_) { /* file:// or sandboxed: the route just stays */ }
 }
 
 function pipelineTitle() {
@@ -1486,12 +1699,14 @@ async function refreshPipeline() {
 async function refreshProjects() {
   const p = state.proj;
   const token = ++p.token;
-  const r = await getJson('/api/projects');
+  const [r, pl] = await Promise.all([getJson('/api/projects'), getJson('/api/pipeline')]);
   if (token !== p.token) return;
   if (!r.body || !Array.isArray(r.body.projects)) {
     if (p.mode !== 'data') p.mode = 'unavailable';   // keep showing the last good list on a blip
   } else {
     p.list = r.body.projects; p.mode = 'data'; p.lastOk = Date.now();
+    p.counts = r.body.counts && typeof r.body.counts === 'object' ? r.body.counts : null;
+    p.pluginMissing = !!(pl.body && pl.body.plugin && pl.body.plugin.installed === false);
     // server cwd join + the current snapshot; before any snapshot, the server's p.live stands
     state.liveMap = state.attn && !state.attn.unavailable ? deriveLiveStates(p.list, state.sessions) : {};
   }
@@ -1525,6 +1740,7 @@ async function reviewSession(sid) {
   else if (status === 501) { state.reviewMsgs[sid] = 'na'; state.reviewNA = true; }
   else state.reviewMsgs[sid] = 'err';
   renderAttention();
+  if (state.route === 'projects') renderNavPanes();
 }
 
 /** Copy text to the clipboard; the button says Copied, or Select and copy when the browser refuses. */
@@ -1536,6 +1752,11 @@ async function copyText(text, btn) {
 
 async function setHidden(id, hidden) {
   const status = await postAction('/api/projects/' + encodeURIComponent(id) + '/hide', { hidden });
+  if (status === 204) refreshProjects();
+}
+
+async function setPinned(id, pinned) {
+  const status = await postAction('/api/projects/' + encodeURIComponent(id) + '/pin', { pinned });
   if (status === 204) refreshProjects();
 }
 
@@ -1568,8 +1789,9 @@ function refreshActive() {
 function applyRoute(route, first) {
   state.route = route;
   if (route === 'pipeline') state.pipe.sub = parsePipeSub(location.hash);
+  if (route === 'projects') state.proj.sel = parseProjectSel(location.hash);
   const bodyEl = document.querySelector('.body');
-  if (bodyEl) bodyEl.classList.toggle('pipe', route === 'pipeline');
+  if (bodyEl) { bodyEl.classList.toggle('pipe', route === 'pipeline'); bodyEl.classList.toggle('mode-projects', route === 'projects'); }
   renderAttention();   // the right column differs per tab
   document.querySelectorAll('.nav-item').forEach((a) => {
     const on = a.getAttribute('data-route') === route;
@@ -1617,6 +1839,8 @@ function boot() {
   if (host) host.textContent = location.host + '/console';
   const viewEl = document.getElementById('view');
   viewEl.addEventListener('change', (e) => {
+    const ns = e.target && e.target.closest ? e.target.closest('select[data-nsort]') : null;
+    if (ns) { state.proj.sort = NAV_SORTS.some((x) => x[0] === ns.value) ? ns.value : 'pinned'; renderProjects(); return; }
     const sel = e.target && e.target.closest ? e.target.closest('select[data-pf]') : null;
     if (!sel) return;
     state.pipe[sel.getAttribute('data-pf') === 'stage' ? 'stage' : 'project'] = sel.value;
@@ -1625,8 +1849,35 @@ function boot() {
   viewEl.addEventListener('toggle', (e) => {   // toggle does not bubble: capture it, so a refresh keeps disclosures open
     const d = e.target && e.target.closest ? e.target.closest('details.pidle') : null;
     if (d) state.pipe.open[d.querySelector('.quiet-list') ? 'quiet' : 'idle'] = d.open === true;
+    const g = e.target && e.target.closest ? e.target.closest('details.ninactive') : null;
+    if (g && !String(state.proj.q).trim()) state.proj.open.inactive = g.open === true;   // while searching the group is forced open: not the user's choice
   }, true);
+  viewEl.addEventListener('input', (e) => {
+    const q = e.target && e.target.closest ? e.target.closest('input[data-nq]') : null;
+    if (!q) return;
+    state.proj.q = q.value.slice(0, 80);
+    renderNavPanes();
+  });
   viewEl.addEventListener('keydown', (e) => {
+    if (state.route === 'projects') {
+      if (!(e.target && e.target.closest && e.target.closest('.nrow')) || state.proj.mode !== 'data') return;   // keys act only from the list
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('nrow')) {
+        e.preventDefault();
+        selectProject(e.target.getAttribute('data-nsel'));
+        renderNavPanes();
+        focusNavRow(viewEl, state.proj.sel);
+        return;
+      }
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+      e.preventDefault();
+      const ids = Array.from(viewEl.querySelectorAll('.nrow')).map((x) => x.getAttribute('data-nsel'));
+      const next = navMove(ids, navResolveSel(withLive(state.proj.list, state.liveMap), state.proj.sel), e.key);
+      if (next === null) return;
+      selectProject(next);
+      renderNavPanes();
+      focusNavRow(viewEl, next);
+      return;
+    }
     if (state.route !== 'pipeline' || state.pipe.sub !== 'work' || state.pipe.mode !== 'data') return;
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     if (!(e.target && e.target.closest && e.target.closest('.ptable'))) return;   // arrows move the selection only from the table
@@ -1647,10 +1898,15 @@ function boot() {
       const f = act.getAttribute('data-filter');
       const a = act.getAttribute('data-act');
       if (f) { state.proj.filter = f; renderProjects(); return; }
-      if (a === 'toggle-hidden') { state.proj.showHidden = !state.proj.showHidden; renderProjects(); return; }
+      if (a === 'manage') { state.proj.managing = !state.proj.managing; renderProjects(); return; }
+      if (a === 'pin') { setPinned(act.getAttribute('data-id'), act.getAttribute('data-pinned') !== 'true'); return; }
       if (a === 'copy') { copyText(act.getAttribute('data-text'), act); return; }
       if (a === 'hide' || a === 'unhide') { setHidden(act.getAttribute('data-id'), a === 'hide'); return; }
     }
+    const tb = tgt ? tgt.closest('button[data-ntab]') : null;
+    if (tb) { state.proj.tab = tb.getAttribute('data-ntab'); renderNavPanes(); const again = Array.from(viewEl.querySelectorAll('[data-ntab]')).find((x) => x.getAttribute('data-ntab') === state.proj.tab); if (again) again.focus(); return; }
+    const nr = tgt ? tgt.closest('.nrow[data-nsel]') : null;
+    if (nr) { selectProject(nr.getAttribute('data-nsel')); renderNavPanes(); focusNavRow(viewEl, nr.getAttribute('data-nsel')); return; }
     const b = tgt ? tgt.closest('button[data-range]') : null;
     if (!b) return;
     const r = b.getAttribute('data-range');
@@ -1674,6 +1930,7 @@ function boot() {
     const r = parseRoute(location.hash);
     if (r !== state.route) applyRoute(r, false);
     else if (r === 'pipeline') { state.pipe.sub = parsePipeSub(location.hash); renderPipeline(); }
+    else if (r === 'projects') { state.proj.sel = parseProjectSel(location.hash); renderProjects(); }
   });
   window.addEventListener('focus', () => { if (state.route === 'projects') refreshProjects(); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshActive(); });
