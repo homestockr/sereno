@@ -11975,6 +11975,75 @@ test('missing rate_limits degrades instead of throwing', () => {
     await atest('[pipeline exit] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
 
+  // ---- [alpha6-theme] navy palette: tokens only, contrast holds in both themes ----
+  {
+    const sheets = {
+      console: fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8'),
+      widget: fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8'),
+    };
+    const LIGHT = /@media \(prefers-color-scheme: light\) \{\s*:root \{([^}]*)\}\s*\}/;
+    const DARK = /^:root \{([^}]*)\}/m;
+    const decls = (block) => Object.fromEntries([...block.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]));
+    const themes = (css) => {
+      const light = css.match(LIGHT);
+      const dark = css.match(DARK);
+      assert.ok(dark && light, 'a dark :root block and a light block');
+      return { dark: decls(dark[1]), light: { ...decls(dark[1]), ...decls(light[1]) } };
+    };
+    const lum = (hex) => {
+      const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+        .map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+      return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    };
+    const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+    const surfaces = { console: ['--bg', '--panel', '--panel2'], widget: ['--bg', '--raised', '--panel2'] };
+
+    for (const [name, css] of Object.entries(sheets)) {
+      for (const [mode, t] of Object.entries(themes(css))) {
+        test(`[alpha6-theme] ${name} ${mode}: text and muted reach 4.5:1, quiet 3:1, accent 3:1 on every surface`, () => {
+          for (const k of ['--text', '--muted', '--quiet', '--accent', '--accentbg', '--selected', '--line']) {
+            assert.match(t[k], /^#[0-9a-f]{6}$/i, name + ' ' + mode + ' ' + k);
+          }
+          for (const surf of surfaces[name]) {
+            for (const fg of ['--text', '--muted']) {
+              assert.ok(ratio(t[fg], t[surf]) >= 4.5, `${fg} on ${surf}: ${ratio(t[fg], t[surf]).toFixed(2)}`);
+            }
+            assert.ok(ratio(t['--quiet'], t[surf]) >= 3, `--quiet on ${surf}: ${ratio(t['--quiet'], t[surf]).toFixed(2)}`);
+          }
+          assert.ok(ratio(t['--accent'], t['--bg']) >= 3, `--accent on --bg: ${ratio(t['--accent'], t['--bg']).toFixed(2)}`);
+          assert.ok(ratio(t['--text'], t['--selected']) >= 4.5 && ratio(t['--text'], t['--accentbg']) >= 4.5);
+        });
+      }
+    }
+    test('[alpha6-theme] both stylesheets carry the same palette, dark and light', () => {
+      const c = themes(sheets.console), w = themes(sheets.widget);
+      for (const mode of ['dark', 'light']) {
+        for (const k of ['--bg', '--text', '--muted', '--quiet', '--line', '--grid', '--selected', '--accent', '--accentbg']) {
+          assert.strictEqual(c[mode][k].toLowerCase(), w[mode][k].toLowerCase(), mode + ' ' + k);
+        }
+        assert.strictEqual(c[mode]['--panel'].toLowerCase(), w[mode]['--raised'].toLowerCase(), mode + ' panel');
+      }
+    });
+    test('[alpha6-theme] no hex colour literal outside the :root token blocks', () => {
+      for (const [name, css] of Object.entries(sheets)) {
+        const rest = css.replace(/\/\*[\s\S]*?\*\//g, '').replace(LIGHT, '').replace(DARK, '');
+        assert.deepStrictEqual(rest.match(/#[0-9a-fA-F]{3,8}\b/g) || [], [], name + ' hard-codes colours');
+      }
+    });
+    test('[alpha6-theme] --accent is blue and distinct from amber; focus and selection never use amber', () => {
+      const w = themes(sheets.widget), c = themes(sheets.console);
+      for (const mode of ['dark', 'light']) {
+        assert.notStrictEqual(w[mode]['--accent'].toLowerCase(), w[mode]['--amber'].toLowerCase());
+        assert.notStrictEqual(c[mode]['--accent'].toLowerCase(), c[mode]['--amber'].toLowerCase());
+        for (const t of [w[mode], c[mode]]) {
+          const h = parseInt(t['--accent'].slice(5, 7), 16), r = parseInt(t['--accent'].slice(1, 3), 16);
+          assert.ok(h > r, 'accent leans blue: ' + t['--accent']);
+        }
+      }
+      assert.ok(!/outline:[^;}]*--amber/.test(sheets.console + sheets.widget));
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

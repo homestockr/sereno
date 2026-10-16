@@ -1,21 +1,23 @@
 /* Sereno console. Tokens from docs/design/console/style-sheet.html. Min text 11px. */
 :root {
   color-scheme: dark;
-  --bg: #151718; --panel: #1B1E20; --panel2: #222629; --text: #EBECE7; --muted: #ABB1B4;
+  --bg: #0B1626; --panel: #0F1E33; --panel2: #13263F; --text: #E6EDF5; --muted: #9FB0C3;
   --amber: #E8B96E; --amberbg: #2B251D;
-  --quiet: #80898D; --line: #363D40; --grid: #2A3033; --selected: #272E32; --hatch: #151718;
+  --quiet: #7C8EA3; --line: #1F3550; --grid: #172B44; --selected: #163150; --hatch: #0B1626;
+  --accent: #2F8CEB; --accentbg: #14345A;
   /* Source colours: dark values MUST stay in sync with --src-* in src/renderer/app.css. */
   --src-main: #7da7e0; --src-subagent: #d4845c; --src-auxiliary: #a99fd0;
-  --src-unattributed: #8b94a3; --src-hatch: #202327;
+  --src-unattributed: #8b94a3; --src-hatch: #0F1E33;
 }
 @media (prefers-color-scheme: light) {
   :root {
     color-scheme: light;
-    --bg: #F8F8F5; --panel: #F0F1ED; --panel2: #E8EBE5; --text: #202927; --muted: #53615D;
+    --bg: #F4F7FB; --panel: #EAF0F7; --panel2: #E0E9F3; --text: #0F1E33; --muted: #44566B;
     --amber: #8B5B0D; --amberbg: #FFF1D9;
-    --quiet: #687670; --line: #CDD4CC; --grid: #E0E5DE; --selected: #E1E7DE; --hatch: #F8F8F5;
+    --quiet: #566A80; --line: #C5D3E3; --grid: #DCE5EF; --selected: #DCE8F6; --hatch: #F4F7FB;
+    --accent: #1F6FCB; --accentbg: #D6E6FA;
     --src-main: #3f6fb0; --src-subagent: #b5532a; --src-auxiliary: #6f63a8;
-    --src-unattributed: #7e8897; --src-hatch: #f8f8f5;
+    --src-unattributed: #7e8897; --src-hatch: #F4F7FB;
   }
 }
 * { box-sizing: border-box; }
@@ -39,7 +41,7 @@ h1, h2, p { margin: 0; }
 .nav-label { font-size: 11px; letter-spacing: 1px; color: var(--quiet); padding: 6px 8px 8px; font-weight: 500; }
 .nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 4px; color: var(--muted); text-decoration: none; font-size: 14px; }
 .nav-item svg { width: 16px; height: 16px; flex: none; }
-.nav-item.active { background: var(--selected); color: var(--text); }
+.nav-item.active { background: var(--selected); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
 .side-foot { margin-top: auto; border-top: 1px solid var(--line); padding: 14px 6px 0; display: flex; flex-direction: column; gap: 8px; font-size: 11px; color: var(--muted); }
 .local { display: flex; align-items: center; gap: 8px; }
 .ring { width: 7px; height: 7px; border: 1px solid var(--muted); border-radius: 50%; display: inline-block; }
@@ -68,7 +70,7 @@ h1 { font-size: 30px; line-height: 38px; font-weight: 600; letter-spacing: -.6px
 .range button { font: inherit; font-size: 11px; background: transparent; color: var(--muted); border: 0; border-right: 1px solid var(--line); padding: 5px 11px; cursor: pointer; }
 .range button:last-child { border-right: 0; }
 .range button.on { background: var(--selected); color: var(--text); }
-.range button:focus-visible { outline: 1px solid var(--muted); outline-offset: -2px; }
+.range button:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 
 .chart-box { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 10px 0 6px; position: relative; }
 .chart-box svg { display: block; overflow: visible; }
@@ -135,7 +137,7 @@ td.proj { font-weight: 500; }
 .filters { display: flex; align-items: center; gap: 18px; margin: 18px 0 0; padding-bottom: 8px; font-size: 12px; }
 .filters button { font: inherit; font-size: 12px; background: transparent; color: var(--quiet); border: 0; padding: 2px 0; cursor: pointer; }
 .filters button.on { color: var(--text); font-weight: 600; }
-.filters button:focus-visible, .link-btn:focus-visible, .menu summary:focus-visible, .menu-item:focus-visible, .btn-review:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+.filters button:focus-visible, .link-btn:focus-visible, .menu summary:focus-visible, .menu-item:focus-visible, .btn-review:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 .sortnote { margin-left: auto; font-size: 12px; color: var(--quiet); }
 .plist { border-top: 1px solid var(--line); }
 .pcard { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 0 10px; padding: 12px 0 12px; border-bottom: 1px solid var(--line); }
@@ -195,7 +197,7 @@ td.proj { font-weight: 500; }
 /* Pipeline tab shared parts (Phase 4b step 6): findings, signals, install. */
 .pfind { margin-top: 8px; font-size: 12px; }
 .pfind summary { cursor: pointer; color: var(--muted); }
-.pfind summary:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+.pfind summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 .pfind ul { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .pfind li { display: flex; gap: 4px 12px; flex-wrap: wrap; overflow-wrap: anywhere; }
 .pfind .sev { font-weight: 600; min-width: 56px; }
@@ -213,7 +215,7 @@ td.proj { font-weight: 500; }
 .install .cmd { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 8px 10px; background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; }
 .install code { flex: 1; font: 12px/1.45 'Cascadia Code', Consolas, monospace; overflow-wrap: anywhere; }
 .btn-copy { font: inherit; font-size: 12px; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 4px 10px; cursor: pointer; }
-.btn-copy:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+.btn-copy:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 
 /* Pipeline tab: one-screen layout (Phase 4b addendum). Shapes carry state; amber appears only on a pending decision. */
 .body.pipe .attn-col { width: 340px; }
@@ -222,10 +224,10 @@ td.proj { font-weight: 500; }
 .subtabs { display: flex; gap: 20px; margin-top: 10px; border-bottom: 1px solid var(--line); }
 .subtabs a { color: var(--quiet); text-decoration: none; font-size: 13px; padding: 6px 0 7px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .subtabs a.on { color: var(--text); font-weight: 600; border-bottom-color: var(--muted); }
-.subtabs a:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+.subtabs a:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 .pfilters { display: flex; gap: 18px; margin: 10px 0 6px; font-size: 12px; color: var(--quiet); }
 .pfilters select { font: inherit; font-size: 12px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; margin-left: 6px; }
-.pfilters select:focus-visible { outline: 1px solid var(--muted); outline-offset: 1px; }
+.pfilters select:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .ptable { border-top: 1px solid var(--line); --cols: minmax(150px, 1.5fr) minmax(110px, 1fr) repeat(4, minmax(84px, 1fr)) 92px; }
 .phead-row, .prow { display: grid; grid-template-columns: var(--cols); align-items: center; column-gap: 8px; padding: 0 8px; }
 .phead-row { height: 28px; font-size: 11px; letter-spacing: .6px; text-transform: uppercase; color: var(--quiet); border-bottom: 1px solid var(--line); }
@@ -234,10 +236,10 @@ td.proj { font-weight: 500; }
 .pcell-cost { text-align: right; font-size: 12px; color: var(--muted); }
 .prow { --rowbg: var(--bg); height: 34px; border-bottom: 1px solid var(--grid); background: var(--rowbg); cursor: pointer; }
 .prow:hover { --rowbg: var(--panel); }
-.prow.sel { --rowbg: var(--selected); box-shadow: inset 2px 0 0 var(--muted); }
+.prow.sel { --rowbg: var(--selected); box-shadow: inset 2px 0 0 var(--accent); }
 .prow.decision { --rowbg: var(--amberbg); box-shadow: inset 2px 0 0 var(--amber); }
 .prow.sel.decision { --rowbg: var(--amberbg); box-shadow: inset 2px 0 0 var(--amber); outline: 1px solid var(--muted); outline-offset: -1px; }
-.prow:focus-visible { outline: 1px solid var(--muted); outline-offset: -1px; }
+.prow:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .pcell-task { display: flex; flex-direction: column; min-width: 0; line-height: 15px; }
 .ptname { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ptproj { font-size: 11px; color: var(--quiet); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -260,14 +262,14 @@ td.proj { font-weight: 500; }
 .prow.expired .mk, .prow.expired .tlabel { color: var(--quiet); }
 .pidle { margin-top: 8px; font-size: 12px; }
 .pidle summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
-.pidle summary:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+.pidle summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 .pidle .idle { padding: 4px 0 4px 14px; }
 .pstrip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 22px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
 .sgroup { display: inline-flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; }
 .soc { display: inline-flex; align-items: center; gap: 4px; }
 .soc strong { color: var(--text); font-weight: 600; }
 .slink { margin-left: auto; color: var(--muted); text-underline-offset: 3px; }
-.slink:focus-visible { outline: 1px solid var(--muted); outline-offset: 2px; }
+.slink:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 .pill-neutral { display: inline-flex; align-items: center; font-size: 12px; color: var(--muted); background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 9px; overflow-wrap: anywhere; }
 .ppanel { margin-top: 18px; }
 #attn-live:not(:empty) + #ptask .ppanel { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 20px; }
