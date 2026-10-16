@@ -4,8 +4,9 @@
  * Repo poller: git state per registered project, held in memory.
  *
  * Read-only and local: worktrees, branch names + commit times + hashes,
- * ahead/behind against the existing upstream ref, and a dirty flag. No commit
- * messages, no diffs, no network commands. All git goes through gitexec.js
+ * ahead/behind against the existing upstream ref, and a dirty flag. The default
+ * branch's last 10 commit subjects are held in memory only (capped, control-stripped,
+ * never written to disk). No diffs, no network commands. All git goes through gitexec.js
  * (hardened for untrusted repos). Nothing here throws.
  *
  * Known lag: an unchanged fingerprint (HEAD, index, refs and brief mtimes) skips the full read.
@@ -27,6 +28,8 @@ const MAX_BRANCHES = 8;
 const GH_INTERVAL_MS = 5 * 60 * 1000;
 const GH_TIMEOUT_MS = 10000;
 const GH_ARGS = ['pr', 'list', '--state', 'open', '--json', 'number', '--limit', '100'];
+const MAX_COMMITS = 10;
+const SUBJECT_MAX = 120;
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
 
 /**
@@ -63,7 +66,7 @@ function ghExecDefault(args, o) {
  * @typedef {{ name: string, lastCommitAt: number, head: string, brief?: any, freshness?: string, behindSince?: number | null }} Branch
  * @typedef {{
  *   id: string, name: string, defaultBranch: string | null, ahead: number | null, behind: number | null,
- *   dirty: boolean | null, lastCommitAt: number | null, worktrees: Worktree[], branches: Branch[],
+ *   dirty: boolean | null, lastCommitAt: number | null, worktrees: Worktree[], branches: Branch[], commits?: { at: number, subject: string }[],
  *   polledAt: number | null, error: boolean, brief: any, freshness: string, behindSince?: number | null, briefsMalformed: number,
  *   prs?: number | null,
  *   pipeline?: { tasks: any[], skipped: number, error: boolean, redTeam?: { agent: any, fallback: any, onFallback: any, enabled: any } | null, hasData?: boolean }
@@ -85,6 +88,37 @@ function parseWorktrees(out) {
     } else if (cur && line.startsWith('HEAD ')) cur.head = line.slice(5);
     else if (cur && /^prunable(\s|$)/.test(line)) cur.prunable = true;
     else if (cur && line.startsWith('branch ')) cur.branch = line.slice(7).replace(/^refs\/heads\//, '');
+  }
+  return list;
+}
+
+/** Drops C0/C1 control characters and bidi controls (by code point, so no raw bytes live in this source). @param {string} s */
+function stripUnsafe(s) {
+  let out = '';
+  for (const ch of s) {
+    const c = /** @type {number} */ (ch.codePointAt(0));
+    if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069)) continue;
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * `git log --format=%ct%x09%s` output to [{ at (epoch ms), subject }], newest first as git printed them.
+ * The subject is repo data: control and bidi characters are stripped and it is capped.
+ * @param {string | null} out @returns {{ at: number, subject: string }[]}
+ */
+function parseCommits(out) {
+  /** @type {{ at: number, subject: string }[]} */
+  const list = [];
+  for (const line of String(out || '').split(/\r?\n/)) {
+    const i = line.indexOf('\t');
+    if (i < 1) continue;
+    const t = Number(line.slice(0, i));
+    if (!Number.isFinite(t)) continue;
+    const subject = stripUnsafe(line.slice(i + 1)).trim().slice(0, SUBJECT_MAX);
+    list.push({ at: t * 1000, subject });
+    if (list.length >= MAX_COMMITS) break;
   }
   return list;
 }
@@ -409,6 +443,9 @@ function createPoller(opts) {
       if (m) { ahead = Number(m[1]); behind = Number(m[2]); }
     }
 
+    // Commit subjects for the Projects activity feed: memory only, bounded, same timeouts as the rest.
+    const commits = def ? parseCommits(await gitOrNull(['log', '-n', String(MAX_COMMITS), '--no-color', '--format=%ct%x09%s', '--end-of-options', def], cwd)) : [];
+
     /** @type {Worktree[]} */
     const worktrees = [];
     for (const w of wts) {
@@ -459,7 +496,7 @@ function createPoller(opts) {
       dirty: aggregateDirty(worktrees),
       lastCommitAt: branches.length ? Math.max(...branches.map((b) => b.lastCommitAt)) : null,
       worktrees: worktrees.map((w) => ({ path: w.path, branch: w.branch, dirty: w.dirty })),
-      branches: shown, polledAt: t, error: false,
+      branches: shown, commits, polledAt: t, error: false,
       brief: headline ? headline.brief : null, freshness: headline ? headline.freshness : 'none',
       behindSince: headline ? headline.behindSince : null, briefsMalformed: malformed,
       pipeline: await pipelineOf(p.id, mainRoot),
@@ -647,4 +684,4 @@ function hotProjectIds(sessionCwds, projects, snap) {
   return hot;
 }
 
-module.exports = { hotProjectIds, createPoller, aggregateDirty, QUIET_MS, FULL_RECHECK_MS, parseGithubRemote, GH_INTERVAL_MS, GH_ARGS, parseWorktrees, parseBranches, RECENT_MS, MAX_BRANCHES };
+module.exports = { hotProjectIds, createPoller, aggregateDirty, QUIET_MS, FULL_RECHECK_MS, parseGithubRemote, GH_INTERVAL_MS, GH_ARGS, parseWorktrees, parseBranches, parseCommits, RECENT_MS, MAX_BRANCHES };

@@ -10,7 +10,7 @@
  *   POST /v1/logs, /v1/traces <- OTLP/JSON (only with a ledger; else 200 and drop)
  *   GET  /ledger/summary -> ledger totals
  *   GET  /api/spend/{today,series,projects,top-prompts} -> spend views (ledger only)
- *   GET  /api/projects, /api/pipeline, /api/token; POST /api/review, /api/projects/<id>/hide (guarded)
+ *   GET  /api/projects, /api/pipeline, /api/token; POST /api/review, /api/projects/<id>/hide|pin (guarded)
  *   GET  /console[/*] -> the console pages (src/renderer/console)
  *   GET  /        -> the widget page (also works in a plain browser tab)
  *
@@ -39,8 +39,18 @@ const MAX_BODY = 1024 * 1024;
 const MAX_OTLP_BODY = 8 * 1024 * 1024;   // /v1/*: raw cap, and the gunzip output cap
 const MAX_SSE_CLIENTS = 16;
 const LIVE_ORDER = ['idle', 'thinking', 'running', 'blocked'];   // worst last
-const MAX_ACTION_BODY = 4 * 1024;   // POST /api/review, /api/projects/<id>/hide
-const HIDE_RE = /^\/api\/projects\/([A-Za-z0-9_-]{1,64})\/hide$/;
+const MAX_ACTION_BODY = 4 * 1024;   // POST /api/review, /api/projects/<id>/hide|pin
+const PROJECT_ACTION_RE = /^\/api\/projects\/([A-Za-z0-9_-]{1,64})\/(hide|pin)$/;   // both behind actionGuard
+const ACTIVE_MS = 14 * 24 * 3600 * 1000;   // a commit this recent makes a project active
+const ACTIVITY_MAX = 20;
+const NO_BLOCKER = new Set(['none', 'nothing', 'no', 'n/a', 'na', '-', String.fromCharCode(0x2014), 'nothing blocked', 'no blockers']);
+/** A Blocked line is a blocker unless it is empty or a "nothing here" answer (case-insensitive, trailing punctuation ignored). */
+function isBlocker(v) {
+  if (typeof v !== 'string') return false;
+  let s = v.trim().toLowerCase();
+  while (s.length && '.,;:!? '.includes(s[s.length - 1])) s = s.slice(0, -1);
+  return s !== '' && !NO_BLOCKER.has(s);
+}
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -407,10 +417,51 @@ function createCollector(store, port, opts) {
         liveRank = Math.max(liveRank, LIVE_ORDER.indexOf(s.state));
       }
       const b = st && st.brief;
+      // Activity: commit subjects (the one text field), brief times and pipeline attempt/gate times.
+      const act = [];
+      const actAt = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
+      if (st && Array.isArray(st.commits)) {
+        for (const c of st.commits.slice(0, 10)) {
+          const at = c ? actAt(c.at) : null;
+          if (at !== null) act.push({ at, kind: 'commit', text: typeof c.subject === 'string' ? pSubject(c.subject) : '' });
+        }
+      }
+      const briefAts = new Set();
+      for (const x of [b].concat(st && Array.isArray(st.branches) ? st.branches.map((y) => y && y.brief) : [])) {
+        const at = x ? briefTime(x.generatedAt) : null;
+        if (at !== null && !briefAts.has(at)) { briefAts.add(at); act.push({ at, kind: 'brief', text: null }); }
+      }
+      const pv = st && st.pipeline && typeof st.pipeline === 'object' ? st.pipeline : null;
+      const ptasks = pv && Array.isArray(pv.tasks) ? pv.tasks : [];
+      for (const t of ptasks) {
+        if (!t || typeof t !== 'object') continue;
+        for (const a of (Array.isArray(t.attempts) ? t.attempts : [])) {
+          if (!a || typeof a !== 'object') continue;
+          const s0 = pTime(a.started_at); if (s0 !== null) act.push({ at: s0, kind: 'pipeline', text: null, outcome: null });
+          const e0 = pTime(a.ended_at); if (e0 !== null) act.push({ at: e0, kind: 'pipeline', text: null, outcome: pStr(a.outcome, 32) });
+        }
+        for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+          const g0 = g && typeof g === 'object' ? pTime(g.reviewed_at) : null;
+          if (g0 !== null) act.push({ at: g0, kind: 'pipeline', text: null, outcome: pStr(g.outcome, 32) });
+        }
+      }
+      act.sort((x, y) => y.at - x.at);
+      const activity = act.slice(0, ACTIVITY_MAX);
+      const commitAt = st ? num(st.lastCommitAt) : null;
+      const active = liveIds.length > 0
+        || (commitAt !== null && asOf - commitAt < ACTIVE_MS)
+        || ptasks.some((t) => t && t.expired !== true && t.stage !== 'merged' && t.stage !== 'stopped');
+      const blockers = !!(b && isBlocker(b.blocked));
+      const lastAct = last;
       return {
         id: p.id,
         name: p.name,
         hidden: p.hidden === true,
+        pinned: p.pinned === true,
+        active,
+        lastActivityAt: lastAct,
+        blockers,
+        activity,
         freshness: st && typeof st.freshness === 'string' ? st.freshness : 'none',
         brief: b ? { now: b.now ?? null, next: b.next ?? null, blocked: b.blocked ?? null, generatedAt: b.generatedAt ?? null, behindSince: st ? num(st.behindSince) : null } : null,
         git: {
@@ -431,7 +482,18 @@ function createCollector(store, port, opts) {
         briefsMalformed: st ? (num(st.briefsMalformed) || 0) : 0,
       };
     });
-    return { asOf, projects: out };
+    // Header counts cover visible projects only. Decisions are the pipeline alerts' open ones.
+    const shown = out.filter((x) => !x.hidden);
+    let decisions = 0;
+    try { decisions = pipelineAlerts ? pipelineAlerts.open().length : 0; } catch (_) { decisions = 0; }
+    const counts = {
+      total: shown.length,
+      active: shown.filter((x) => x.active).length,
+      withBlockers: shown.filter((x) => x.blockers).length,
+      stale: shown.filter((x) => x.freshness === 'stale').length,
+      decisions,
+    };
+    return { asOf, counts, projects: out };
   }
 
   /*
@@ -473,6 +535,16 @@ function createCollector(store, port, opts) {
     } catch (_) { return null; }
     return any ? sum : null;
   }
+  /** A commit subject for the wire: control and bidi characters dropped (by code point), capped at 120. */
+  const pSubject = (v) => {
+    let o = '';
+    for (const ch of String(v)) {
+      const c = /** @type {number} */ (ch.codePointAt(0));
+      if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069)) continue;
+      o += ch;
+    }
+    return o.trim().slice(0, 120);
+  };
   const pTime = (v) => { const n = typeof v === 'string' ? Date.parse(v) : NaN; return Number.isFinite(n) ? n : null; };
   function pipeAttempts(t) {
     return (Array.isArray(t.attempts) ? t.attempts : []).slice(0, 10).map((a) => {
@@ -621,7 +693,7 @@ function createCollector(store, port, opts) {
       let body;
       try { body = JSON.parse(buf.toString('utf8')); } catch (_) { return bad(); }
       const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : null;
-      const hideM = HIDE_RE.exec(url);
+      const hideM = PROJECT_ACTION_RE.exec(url);
       try {
         if (!hideM) {   // review: the only input is a session id; the pid is the store's, never the request's
           if (!keys || keys.length !== 1 || keys[0] !== 'sessionId' || typeof body.sessionId !== 'string'
@@ -635,12 +707,15 @@ function createCollector(store, port, opts) {
           );
           return;
         }
-        if (!keys || keys.length !== 1 || keys[0] !== 'hidden' || typeof body.hidden !== 'boolean') return bad();
+        const field = hideM[2] === 'pin' ? 'pinned' : 'hidden';
+        if (!keys || keys.length !== 1 || keys[0] !== field || typeof body[field] !== 'boolean') return bad();
         if (!projects) return plain(404, 'not found');
-        const ok = body.hidden ? projects.hide(hideM[1]) : projects.unhide(hideM[1]);
+        const ok = field === 'pinned'
+          ? (body.pinned ? projects.pin(hideM[1]) : projects.unpin(hideM[1]))
+          : (body.hidden ? projects.hide(hideM[1]) : projects.unhide(hideM[1]));
         if (!ok) return plain(404, 'not found');
         res.writeHead(204).end();
-        if (repos && typeof repos.refresh === 'function') { try { Promise.resolve(repos.refresh()).catch(() => {}); } catch (_) {} }
+        if (field === 'hidden' && repos && typeof repos.refresh === 'function') { try { Promise.resolve(repos.refresh()).catch(() => {}); } catch (_) {} }
       } catch (_) {
         try { if (!res.headersSent) plain(500, 'internal error'); } catch (_e) {}
       }
@@ -769,7 +844,7 @@ function createCollector(store, port, opts) {
     // --- console actions ----------------------------------------------
     if (req.method === 'GET' && url === '/api/token') { sendJson(res, 200, { token }); return; }
     if (req.method === 'GET' && url === '/api/projects') { sendJson(res, 200, buildProjects()); return; }
-    if (req.method === 'POST' && (url === '/api/review' || HIDE_RE.test(url))) { handleAction(req, res, url); return; }
+    if (req.method === 'POST' && (url === '/api/review' || PROJECT_ACTION_RE.test(url))) { handleAction(req, res, url); return; }
 
     // --- spend API ----------------------------------------------------
     if (req.method === 'GET' && url.startsWith('/api/')) {

@@ -5014,7 +5014,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         reg.register(mk());
         const saved = JSON.parse(fs.readFileSync(f, 'utf8'));
         assert.strictEqual(saved.projects.length, 1);
-        assert.deepStrictEqual(Object.keys(saved.projects[0]).sort(), ['firstSeen', 'hidden', 'id', 'name', 'repoPath']);
+        assert.deepStrictEqual(Object.keys(saved.projects[0]).sort(), ['firstSeen', 'hidden', 'id', 'name', 'pinned', 'repoPath']);
         assert.ok(!fs.existsSync(f + '.tmp'));
       });
     });
@@ -5685,7 +5685,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
     const getJson = async (port, p) => JSON.parse((await rq(port, { path: p })).text);
 
-    const PROJECT_KEYS = ['id', 'name', 'hidden', 'freshness', 'brief', 'git', 'prs', 'branches', 'spend14', 'lastActivity', 'live', 'error', 'briefsMalformed'];
+    const PROJECT_KEYS = ['id', 'name', 'hidden', 'pinned', 'active', 'lastActivityAt', 'blockers', 'activity', 'freshness', 'brief', 'git', 'prs', 'branches', 'spend14', 'lastActivity', 'live', 'error', 'briefsMalformed'];
     const FORBIDDEN_KEYS = new Set(['repoPath', 'worktree', 'worktrees', 'worktreePath', 'cwd', 'path', 'head', 'sourceCommit', 'file', 'message']);
     const walk = (o, where, cb) => {
       if (Array.isArray(o)) { o.forEach((x, i) => walk(x, where + '[' + i + ']', cb)); return; }
@@ -5711,7 +5711,8 @@ test('missing rate_limits degrades instead of throwing', () => {
         PORT = c.port;
         try {
           const r = await getJson(PORT, '/api/projects');
-          assert.deepStrictEqual(Object.keys(r).sort(), ['asOf', 'projects']);
+          assert.deepStrictEqual(Object.keys(r).sort(), ['asOf', 'counts', 'projects']);
+          assert.deepStrictEqual(Object.keys(r.counts).sort(), ['active', 'decisions', 'stale', 'total', 'withBlockers']);
           assert.strictEqual(typeof r.asOf, 'number');
           assert.strictEqual(r.projects.length, 2, 'hidden projects are included, flagged');
           const p = r.projects.find((x) => !x.hidden);
@@ -5734,8 +5735,11 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(h.freshness, 'none');
           assert.strictEqual(h.brief, null);
           // exit 6: no path, hash, commit message anywhere in the body
+          // the commit subject is allowed in activity[].text and nowhere else
+          const strip = (o) => JSON.stringify(o, (k, v) => (k === 'activity' ? undefined : v));
+          assert.ok(!/secret commit message/.test(strip(r)), 'commit subject outside activity');
+          assert.ok(p.activity.some((a) => a.kind === 'commit' && a.text === 'secret commit message'));
           const body = JSON.stringify(r);
-          assert.ok(!/secret commit message/.test(body));
           assert.ok(!body.includes(sha), 'no commit hash');
           walk(r, '$', (k, v, where) => {
             assert.ok(!FORBIDDEN_KEYS.has(k), 'forbidden key ' + where);
@@ -5928,6 +5932,332 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(/ipcMain\.handle\('sereno:focus', \(_e, pid\) => raiseTerminal\(pid\)\)/.test(main));
       assert.ok(/createRegistry\(\)/.test(serve) && /projects: registry, repos: poller/.test(serve) && /poller\.start\(\)/.test(serve) && /poller\.stop\(\)/.test(serve));
       assert.ok(!/onReview/.test(serve.replace(/\/\/.*$/gm, '')), 'serve passes no onReview');
+    });
+
+    // ---- alpha.6 N1: Projects API (pinned, active, activity, blockers, counts) ----
+    const day = 24 * 3600 * 1000;
+    const isoAt = (ms) => new Date(ms).toISOString();
+    const gitAt = (cwd, at, ...args) => execFileSync('git', args, { cwd, env: Object.assign({}, baseEnv, { GIT_AUTHOR_DATE: isoAt(at), GIT_COMMITTER_DATE: isoAt(at) }), stdio: 'pipe', windowsHide: true }).toString();
+    const stubEntry = (id, repoPath, extra) => Object.assign({ id, name: id, repoPath, hidden: false, pinned: false, firstSeen: 0 }, extra || {});
+    const stubState = (extra) => Object.assign({ id: 'x', worktrees: [], branches: [], error: false, freshness: 'none', brief: null, lastCommitAt: null, commits: [], pipeline: null }, extra || {});
+    const bootStub = async (clock, entries, snap, opts) => boot(opts && opts.store ? opts.store : new Store(), 0,
+      Object.assign({ now: () => clock, projects: { list: () => entries, noteCwd: () => Promise.resolve() }, repos: { snapshot: () => snap } }, (opts && opts.extra) || {}));
+    const listFiles = (dir) => {
+      const out = [];
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const f = path.join(dir, e.name);
+        if (e.isDirectory()) out.push(...listFiles(f)); else out.push(f);
+      }
+      return out;
+    };
+    // True when s holds a C0/C1 control or a bidi control (checked by code point, so no raw bytes live in this file).
+    const hasUnsafe = (s) => {
+      for (const ch of String(s)) {
+        const c = ch.codePointAt(0);
+        if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069)) return true;
+      }
+      return false;
+    };
+    const CH = (n) => String.fromCharCode(n);
+
+    await atest('[alpha6-projects-api] pin and unpin persist; old files read as unpinned; a corrupt file reloads empty and untouched', async () => {
+      await withHome(async (home) => {
+        const reg = projects.createRegistry();
+        const p = reg.register(mk());
+        assert.strictEqual(reg.list()[0].pinned, false, 'default is unpinned');
+        assert.strictEqual(reg.pin(p.id), true);
+        assert.strictEqual(projects.createRegistry().list()[0].pinned, true, 'survives a reload');
+        assert.strictEqual(JSON.parse(fs.readFileSync(path.join(home, 'projects.json'), 'utf8')).projects[0].pinned, true);
+        assert.strictEqual(reg.unpin(p.id), true);
+        assert.strictEqual(projects.createRegistry().list()[0].pinned, false);
+        assert.strictEqual(reg.pin('nope'), false);
+        assert.strictEqual(reg.unpin('nope'), false);
+        assert.ok(!fs.existsSync(path.join(home, 'projects.json.tmp')), 'atomic: no temp file left');
+        // an entry without the key (a pre-alpha.6 file) loads unpinned; a non-boolean is not a pin
+        const f = path.join(home, 'projects.json');
+        fs.writeFileSync(f, JSON.stringify({ projects: [{ id: 'old1', name: 'old', repoPath: 'C:/old', hidden: false, firstSeen: 1 }, { id: 'old2', repoPath: 'C:/old2', pinned: 'yes' }] }));
+        const old = projects.createRegistry().list();
+        assert.deepStrictEqual(old.map((x) => x.pinned), [false, false]);
+        // corrupt: empty, untouched, and a pin works again after a real change
+        fs.writeFileSync(f, '{ not json');
+        const bad = projects.createRegistry();
+        assert.deepStrictEqual(bad.list(), []);
+        assert.strictEqual(bad.pin('old1'), false);
+        assert.strictEqual(fs.readFileSync(f, 'utf8'), '{ not json', 'a failed pin does not rewrite the file');
+        const q = bad.register(mk());
+        bad.pin(q.id);
+        assert.strictEqual(projects.createRegistry().list()[0].pinned, true);
+      });
+    });
+
+    await atest('[alpha6-projects-api] POST /api/projects/<id>/pin sits behind the same guard as hide and changes nothing when refused', async () => {
+      await withHome(async () => {
+        const reg = projects.createRegistry();
+        const pid = reg.register(mk()).id;
+        let refreshes = 0;
+        const c = await boot(new Store(), 0, { projects: reg, repos: { snapshot: () => ({}), refresh: () => { refreshes++; return Promise.resolve(); } } });
+        const PORT = c.port;
+        try {
+          const token = JSON.parse((await rq(PORT, { path: '/api/token' })).text).token;
+          const good = { origin: 'http://127.0.0.1:' + PORT, 'content-type': 'application/json', 'x-sereno-token': token };
+          const hdr = (o) => { const h = Object.assign({}, good, o); for (const k of Object.keys(h)) if (h[k] === null) delete h[k]; return h; };
+          const url = '/api/projects/' + pid + '/pin';
+          const post = (h, b, u) => rq(PORT, { method: 'POST', path: u || url, headers: h, body: b });
+          const expect = async (label, res, code) => assert.strictEqual((await res).status, code, label);
+          const flip = token.slice(0, -1) + (token.endsWith('A') ? 'B' : 'A');
+          await expect('foreign Origin', post(hdr({ origin: 'http://evil.example' }), { pinned: true }), 403);
+          await expect('missing Origin', post(hdr({ origin: null }), { pinned: true }), 403);
+          await expect('bad Host', post(hdr({ host: 'evil.example' }), { pinned: true }), 403);
+          await expect('wrong token', post(hdr({ 'x-sereno-token': flip }), { pinned: true }), 403);
+          await expect('short token', post(hdr({ 'x-sereno-token': 'x' }), { pinned: true }), 403);
+          await expect('missing token', post(hdr({ 'x-sereno-token': null }), { pinned: true }), 403);
+          await expect('text/plain', post(hdr({ 'content-type': 'text/plain' }), { pinned: true }), 403);
+          await expect('oversize body', post(hdr({}), '{"x":"' + 'a'.repeat(5000) + '"}'), 400);
+          await expect('extra key', post(hdr({}), { pinned: true, extra: 1 }), 400);
+          await expect('the hide key on the pin route', post(hdr({}), { hidden: true }), 400);
+          await expect('the pin key on the hide route', post(hdr({}), { pinned: true }, '/api/projects/' + pid + '/hide'), 400);
+          await expect('not a boolean', post(hdr({}), { pinned: 1 }), 400);
+          await expect('not json', post(hdr({}), 'nope'), 400);
+          await expect('array body', post(hdr({}), []), 400);
+          await expect('unknown project', post(good, { pinned: true }, '/api/projects/deadbeef0000/pin'), 404);
+          await expect('GET is not a pin', rq(PORT, { path: url }), 404);
+          assert.strictEqual(reg.list()[0].pinned, false, 'no refused call pinned anything');
+          assert.strictEqual(reg.list()[0].hidden, false);
+          // valid, including the localhost origin
+          await expect('valid pin', post(good, { pinned: true }), 204);
+          assert.strictEqual(reg.list()[0].pinned, true);
+          assert.strictEqual((await getJson(PORT, '/api/projects')).projects[0].pinned, true);
+          await expect('valid pin again (idempotent, localhost origin)', post(hdr({ origin: 'http://localhost:' + PORT }), { pinned: true }), 204);
+          await expect('valid unpin', post(good, { pinned: false }), 204);
+          assert.strictEqual(reg.list()[0].pinned, false);
+          assert.strictEqual(refreshes, 0, 'pinning is Sereno config: no git refresh');
+          assert.strictEqual(projects.createRegistry().list()[0].pinned, false);
+        } finally { await halt(c); }
+      });
+    });
+
+    await atest('[alpha6-projects-api] active: a live session, a commit inside 14 days, or a non-expired pipeline task; nothing else', async () => {
+      const clock = Date.now();
+      const store = new Store();
+      const dirs = Array.from({ length: 9 }, () => mk());
+      store.applyHook('SessionStart', { session_id: 'live-a', cwd: path.join(dirs[0], 'sub') }, { ppid: 11 });
+      const task = (expired, stage) => ({ task: 't', stage: stage || 'building', expired, attempts: [], gates: [] });
+      const entries = dirs.map((d, i) => stubEntry('p' + i, d));
+      const snap = {
+        p0: stubState({ lastCommitAt: clock - 400 * day }),                                          // live session only
+        p1: stubState({ lastCommitAt: clock - 13 * day }),                                           // recent commit
+        p2: stubState({ lastCommitAt: clock - 15 * day }),                                           // old commit: inactive
+        p3: stubState({ lastCommitAt: clock - 200 * day, pipeline: { tasks: [task(false)] } }),      // live task
+        p4: stubState({ lastCommitAt: clock - 200 * day, pipeline: { tasks: [task(true), task(true)] } }), // expired tasks only
+        p5: stubState({ lastCommitAt: null }),                                                       // nothing
+        p7: stubState({ lastCommitAt: clock - 200 * day, pipeline: { tasks: [task(false, 'merged')] } }),  // merged: not live work
+        p8: stubState({ lastCommitAt: clock - 200 * day, pipeline: { tasks: [task(false, 'stopped'), task(true)] } }), // stopped + expired
+      };                                                                                             // p6 has no state at all
+      const c = await bootStub(clock, entries, snap, { store });
+      try {
+        const r = await getJson(c.port, '/api/projects');
+        const act = Object.fromEntries(r.projects.map((p) => [p.id, p.active]));
+        assert.deepStrictEqual(act, { p0: true, p1: true, p2: false, p3: true, p4: false, p5: false, p6: false, p7: false, p8: false });
+        assert.strictEqual(r.counts.active, 3);
+        assert.strictEqual(r.counts.total, 9);
+        // a session that ended no longer holds the project active
+        store.sessions.clear();
+        const r2 = await getJson(c.port, '/api/projects');
+        assert.strictEqual(r2.projects.find((p) => p.id === 'p0').active, false);
+        // the boundary: exactly 14 days is out, just inside is in
+        snap.p2 = stubState({ lastCommitAt: clock - 14 * day + 5000 });
+        snap.p5 = stubState({ lastCommitAt: clock - 14 * day });
+        const r3 = await getJson(c.port, '/api/projects');
+        assert.strictEqual(r3.projects.find((p) => p.id === 'p2').active, true);
+        assert.strictEqual(r3.projects.find((p) => p.id === 'p5').active, false);
+      } finally { await halt(c); }
+    });
+
+    await atest('[alpha6-projects-api] blockers is true only for a non-empty Blocked line on the headline brief', async () => {
+      const clock = Date.now();
+      const mkBrief = (blocked) => ({ now: 'n', next: 'x', blocked, generatedAt: isoAt(clock - day) });
+      const cases = { a: 'waiting on a review', b: '', c: '   ', d: null, e: undefined };
+      const nots = ['none', 'None.', 'NOTHING', ' no ', 'n/a', 'N/A!', 'na', '-', CH(0x2014), 'Nothing blocked.', 'No Blockers;', 'none...'];
+      nots.forEach((v, i) => { cases['n' + i] = v; });
+      cases.y1 = 'none of the tests pass'; cases.y2 = 'no access to the API';
+      const entries = Object.keys(cases).map((k) => stubEntry(k, mk()));
+      entries.push(stubEntry('f', mk()));   // no brief at all
+      const snap = {};
+      for (const k of Object.keys(cases)) snap[k] = stubState({ brief: mkBrief(cases[k]) });
+      snap.f = stubState({ brief: null });
+      const c = await bootStub(clock, entries, snap);
+      try {
+        const r = await getJson(c.port, '/api/projects');
+        assert.deepStrictEqual(Object.fromEntries(r.projects.map((p) => [p.id, p.blockers])), Object.assign({ a: true, b: false, c: false, d: false, e: false, f: false, y1: true, y2: true }, Object.fromEntries(nots.map((v, i) => ['n' + i, false]))));
+        assert.strictEqual(r.counts.withBlockers, 3);
+      } finally { await halt(c); }
+    });
+
+    await atest('[alpha6-projects-api] activity: newest first, kinds commit / brief / pipeline with exact keys, subjects capped and stripped', async () => {
+      const clock = Date.now();
+      const HOUR = 3600 * 1000;
+      const commits = Array.from({ length: 12 }, (_, i) => ({ at: clock - (i + 1) * HOUR, subject: 'commit number ' + i }));
+      commits[0].subject = 'hostile' + CH(27) + '[31m' + CH(7) + CH(0x202e) + CH(0x85) + ' tail' + 'Z'.repeat(300);
+      const gAt = (n) => isoAt(clock - n * HOUR - 30000);
+      const pv = { tasks: [{
+        task: 't1', stage: 'building', expired: false,
+        attempts: [
+          { attempt: 1, outcome: 'pass', started_at: gAt(20), ended_at: gAt(19) },
+          { attempt: 2, outcome: 'fail', started_at: gAt(5), ended_at: gAt(4) },
+          { attempt: 3, outcome: null, started_at: 'not a date', ended_at: null },
+        ],
+        gates: [{ reviewed_at: gAt(3), outcome: 'block' }, { reviewed_at: 'nope', outcome: 'pass' }],
+      }] };
+      const brief = { now: 'n', next: null, blocked: null, generatedAt: isoAt(clock - 6 * HOUR - 77000) };
+      const branches = [
+        { name: 'main', freshness: 'fresh', brief },
+        { name: 'side', freshness: 'fresh', brief: { now: 'm', next: null, blocked: null, generatedAt: isoAt(clock - 8 * HOUR - 77000) } },
+        { name: 'dupe', freshness: 'fresh', brief: { now: 'm', next: null, blocked: null, generatedAt: brief.generatedAt } },
+        { name: 'none', freshness: 'none', brief: null },
+      ];
+      const c = await bootStub(clock, [stubEntry('a1', mk()), stubEntry('a2', mk())], {
+        a1: stubState({ commits, brief, branches, pipeline: pv, lastCommitAt: commits[0].at }),
+        a2: stubState({ commits: commits.slice(0, 2), pipeline: { tasks: [] } }),
+      });
+      try {
+        const r = await getJson(c.port, '/api/projects');
+        const a = r.projects.find((p) => p.id === 'a1').activity;
+        assert.strictEqual(a.length, 10 + 2 + 5, 'commits capped at 10, 2 distinct brief times, 5 dated pipeline events');
+        for (let i = 1; i < a.length; i++) assert.ok(a[i - 1].at >= a[i].at, 'newest first at ' + i);
+        for (const e of a) {
+          assert.ok(Number.isFinite(e.at));
+          if (e.kind === 'commit') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'text']); assert.strictEqual(typeof e.text, 'string'); }
+          else if (e.kind === 'brief') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'text']); assert.strictEqual(e.text, null); }
+          else if (e.kind === 'pipeline') { assert.deepStrictEqual(Object.keys(e).sort(), ['at', 'kind', 'outcome', 'text']); assert.strictEqual(e.text, null); assert.ok(e.outcome === null || typeof e.outcome === 'string'); }
+          else assert.fail('unexpected kind ' + e.kind);
+        }
+        assert.deepStrictEqual(Array.from(new Set(a.map((e) => e.kind))).sort(), ['brief', 'commit', 'pipeline']);
+        assert.strictEqual(a.filter((e) => e.kind === 'brief').length, 2, 'equal brief times collapse to one event');
+        const pOuts = a.filter((e) => e.kind === 'pipeline').map((e) => (e.outcome === null ? 'none' : e.outcome)).sort();
+        assert.deepStrictEqual(pOuts, ['block', 'fail', 'none', 'none', 'pass'], 'undated entries dropped');
+        const first = a.find((e) => e.kind === 'commit');
+        assert.ok(first.text.startsWith('hostile[31m tail'), JSON.stringify(first.text.slice(0, 24)));
+        assert.strictEqual(first.text.length, 120, 'subject capped');
+        for (const e of a.filter((x) => x.kind === 'commit')) assert.ok(!hasUnsafe(e.text), 'no control or bidi characters');
+        assert.strictEqual(r.projects.find((p) => p.id === 'a1').lastActivityAt, commits[0].at);
+        // the other project: two commits and nothing else
+        assert.deepStrictEqual(r.projects.find((p) => p.id === 'a2').activity.map((e) => e.kind), ['commit', 'commit']);
+      } finally { await halt(c); }
+    });
+
+    await atest('[alpha6-projects-api] activity is capped at 20 even with a long pipeline history', async () => {
+      const clock = Date.now();
+      const attempts = Array.from({ length: 30 }, (_, i) => ({ attempt: i, outcome: 'pass', started_at: isoAt(clock - (i + 1) * 60000), ended_at: isoAt(clock - (i + 1) * 60000 + 1000) }));
+      const c = await bootStub(clock, [stubEntry('z', mk())], { z: stubState({ pipeline: { tasks: [{ task: 't', stage: 'building', expired: false, attempts, gates: [] }] } }) });
+      try {
+        const a = (await getJson(c.port, '/api/projects')).projects[0].activity;
+        assert.strictEqual(a.length, 20);
+        for (let i = 1; i < a.length; i++) assert.ok(a[i - 1].at >= a[i].at);
+      } finally { await halt(c); }
+    });
+
+    await atest('[alpha6-projects-api] counts: visible projects only; stale, blockers, active; decisions from the pipeline alerts', async () => {
+      const clock = Date.now();
+      const entries = ['a', 'b', 'c', 'd'].map((k) => stubEntry(k, mk()));
+      entries[3].hidden = true;
+      const snap = {
+        a: stubState({ freshness: 'stale', lastCommitAt: clock - day, brief: { now: 'n', next: null, blocked: 'stuck', generatedAt: isoAt(clock) } }),
+        b: stubState({ freshness: 'fresh', lastCommitAt: clock - 90 * day }),
+        c: stubState({ freshness: 'stale', lastCommitAt: clock - 90 * day }),
+        d: stubState({ freshness: 'stale', lastCommitAt: clock - day, brief: { now: 'n', next: null, blocked: 'hidden one', generatedAt: isoAt(clock) } }),
+      };
+      const open2 = [{ projectId: 'a', project: 'a', task: 't', reason: null, attempt: 1, paths: [] }, { projectId: 'c', project: 'c', task: 'u', reason: null, attempt: 1, paths: [] }];
+      let c = await bootStub(clock, entries, snap, { extra: { pipelineAlerts: { open: () => open2 } } });
+      try {
+        const r = await getJson(c.port, '/api/projects');
+        assert.deepStrictEqual(r.counts, { total: 3, active: 1, withBlockers: 1, stale: 2, decisions: 2 });
+        assert.strictEqual(r.projects.length, 4, 'hidden projects are still listed, flagged');
+        const hid = r.projects.find((p) => p.hidden);
+        assert.strictEqual(hid.active, false, 'a hidden project is not polled, so it is not active');
+        assert.strictEqual(hid.blockers, false);
+        assert.deepStrictEqual(hid.activity, []);
+      } finally { await halt(c); }
+      c = await bootStub(clock, entries, snap);
+      try { assert.strictEqual((await getJson(c.port, '/api/projects')).counts.decisions, 0, 'no alerts machine: zero'); } finally { await halt(c); }
+      c = await bootStub(clock, entries, snap, { extra: { pipelineAlerts: { open: () => { throw new Error('boom'); } } } });
+      try { assert.strictEqual((await getJson(c.port, '/api/projects')).counts.decisions, 0, 'a throwing machine is zero, not a 500'); } finally { await halt(c); }
+    });
+
+    test('[alpha6-projects-api] parseCommits: capped at 120, control and bidi stripped, at most 10, junk lines skipped', () => {
+      const lines = Array.from({ length: 14 }, (_, i) => (1700000000 + i) + '\tsubject ' + i);
+      lines[0] = '1700000100\ta' + CH(27) + '[1m' + CH(0x202e) + CH(0x2066) + 'b' + 'Q'.repeat(400);
+      lines.splice(3, 0, 'no tab here', '\tmissing time', 'abc\tbad time');
+      const out = repos.parseCommits(lines.join('\n'));
+      assert.strictEqual(out.length, 10);
+      assert.strictEqual(out[0].at, 1700000100 * 1000);
+      assert.ok(out[0].subject.startsWith('a[1mb') && out[0].subject.length === 120);
+      assert.ok(out.every((c) => !hasUnsafe(c.subject)));
+      assert.deepStrictEqual(repos.parseCommits(null), []);
+      assert.deepStrictEqual(repos.parseCommits(''), []);
+    });
+
+    await atest('[alpha6-projects-api] the poller reads at most 10 subjects with one bounded git log on the default branch, and the fast path keeps them', async () => {
+      await withHome(async () => {
+        const d = mkRepo();
+        const t0 = Date.now() - 3 * day;
+        for (let i = 0; i < 12; i++) gitAt(d, t0 + i * 1000, 'commit', '-q', '--allow-empty', '-m', 'step ' + i);
+        const { gitExec } = require('../src/gitexec.js');
+        const logs = [];
+        const reg = projects.createRegistry();
+        reg.register(d);
+        const poller = repos.createPoller({ registry: reg, ghExec: () => Promise.reject(Object.assign(new Error('x'), { code: 'ENOENT' })),
+          exec: (f, args, o) => { if (args[0] === 'log') logs.push(args.slice()); return gitExec(f, args, o); } });
+        await poller.pollNow();
+        assert.strictEqual(logs.length, 1);
+        assert.deepStrictEqual(logs[0].slice(0, 3), ['log', '-n', '10']);
+        assert.ok(logs[0].includes('--format=%ct%x09%s') && logs[0].includes('--end-of-options') && logs[0][logs[0].length - 1] === 'main');
+        const st = Object.values(poller.snapshot())[0];
+        assert.strictEqual(st.commits.length, 10);
+        assert.strictEqual(st.commits[0].subject, 'step 11', 'newest first');
+        assert.strictEqual(st.commits[0].at, Math.floor((t0 + 11000) / 1000) * 1000);
+        assert.deepStrictEqual(Object.keys(st.commits[0]).sort(), ['at', 'subject']);
+        await poller.pollNow();   // unchanged repo: the earlier read is reused, no second log
+        assert.strictEqual(logs.length, 1);
+        assert.strictEqual(Object.values(poller.snapshot())[0].commits.length, 10);
+      });
+    });
+
+    await atest('[alpha6-projects-api] end to end: a real repo feeds activity; commit subjects reach the API but never any file under the home', async () => {
+      await withHome(async (home) => {
+        const CANARY = 'ALPHA6-SUBJECT-CANARY';
+        const d = mkRepo();
+        gitAt(d, Date.now() - 2 * 3600 * 1000, 'commit', '-q', '--allow-empty', '-m', CANARY + ' one' + CH(27) + '[0m');
+        gitAt(d, Date.now() - 3600 * 1000, 'commit', '-q', '--allow-empty', '-m', CANARY + ' two ' + 'Y'.repeat(300));
+        const ledger = openLedger({ file: path.join(home, 'ledger.db') });
+        const reg = projects.createRegistry();
+        const pid = reg.register(d).id;
+        const poller = repos.createPoller({ registry: reg, ghExec: () => Promise.reject(Object.assign(new Error('x'), { code: 'ENOENT' })) });
+        await poller.pollNow();
+        const c = await boot(new Store(), 0, { projects: reg, repos: poller, ledger });
+        try {
+          const r = await getJson(c.port, '/api/projects');
+          const p = r.projects[0];
+          assert.strictEqual(p.active, true);
+          const texts = p.activity.filter((e) => e.kind === 'commit').map((e) => e.text);
+          assert.strictEqual(texts.length, 3, 'two subjects and the initial commit (made now, so newest)');
+          assert.strictEqual(texts[0], 'secret commit message');
+          assert.ok(texts[1].startsWith(CANARY + ' two ') && texts[1].length === 120);
+          assert.strictEqual(texts[2], CANARY + ' one[0m', 'control character stripped');
+          const token = JSON.parse((await rq(c.port, { path: '/api/token' })).text).token;
+          const good = { origin: 'http://127.0.0.1:' + c.port, 'content-type': 'application/json', 'x-sereno-token': token };
+          assert.strictEqual((await rq(c.port, { method: 'POST', path: '/api/projects/' + pid + '/pin', headers: good, body: { pinned: true } })).status, 204);
+          await poller.pollNow();
+          await getJson(c.port, '/api/projects');
+        } finally { await halt(c); ledger.close(); }
+        const files = listFiles(home);
+        const names = files.map((f) => path.relative(home, f).split(path.sep).join('/'));
+        assert.ok(names.includes('projects.json'), 'the registry is on disk: ' + names.join(','));
+        for (const n of names) assert.ok(/^(projects[.]json|ledger[.]db(-wal|-shm)?)$/.test(n) || n.startsWith('claude/'), 'unexpected file under the home: ' + n);
+        for (const f of files) assert.ok(!fs.readFileSync(f).includes(CANARY), 'commit subject written to ' + path.relative(home, f));
+        const saved = JSON.parse(fs.readFileSync(path.join(home, 'projects.json'), 'utf8'));
+        assert.deepStrictEqual(Object.keys(saved.projects[0]).sort(), ['firstSeen', 'hidden', 'id', 'name', 'pinned', 'repoPath']);
+        assert.strictEqual(saved.projects[0].pinned, true);
+      });
     });
 
     // ---- gh PR counts ----
@@ -6285,7 +6615,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.ok(p && p.brief, 'the project and its brief are present');
           assert.ok(!/SERENO-FILE-CANARY/.test(text), 'file content');
           assert.ok(!/SERENO-TASK-CANARY/.test(text), 'brief front matter other than the lines');
-          assert.ok(!/SERENO-COMMIT-CANARY/.test(text), 'commit message');
+          assert.ok(!/SERENO-COMMIT-CANARY/.test(JSON.stringify(r, (k, v) => (k === 'activity' ? undefined : v))), 'commit subject outside activity');
           assert.ok(!/\b[0-9a-f]{40}\b/i.test(text) && !text.includes(sha) && !text.includes(c0), 'no hash');
           assert.ok(!text.toLowerCase().includes(os.tmpdir().toLowerCase().replace(/\\/g, '\\\\')), 'no path');
           assert.ok(!text.includes('somewhere/secret'), 'no brief worktree path');

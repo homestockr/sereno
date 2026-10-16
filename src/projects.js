@@ -36,7 +36,7 @@ function cacheSet(cache, key, val, at) {
  * @typedef {{ stdout: string }} ExecResult
  * @typedef {(file: string, args: string[], opts: { cwd?: string }) => Promise<ExecResult>} Exec
  * @typedef {{ root: string, worktree: string }} Repo
- * @typedef {{ id: string, name: string, repoPath: string, hidden: boolean, firstSeen: number }} Project
+ * @typedef {{ id: string, name: string, repoPath: string, hidden: boolean, pinned: boolean, firstSeen: number }} Project
  */
 
 /** Shared hardened git runner (src/gitexec.js). @type {Exec} */
@@ -141,6 +141,7 @@ function createRegistry(opts) {
               name: typeof p.name === 'string' ? p.name : path.basename(p.repoPath),
               repoPath: p.repoPath,
               hidden: p.hidden === true,
+              pinned: p.pinned === true,
               firstSeen: typeof p.firstSeen === 'number' ? p.firstSeen : 0,
             });
           }
@@ -169,7 +170,7 @@ function createRegistry(opts) {
     let p = list.find((x) => x.id === id);
     if (p) return copy(p);
     const repoPath = displayPath(root);
-    p = { id, name: path.basename(repoPath) || repoPath, repoPath, hidden: false, firstSeen: now() };
+    p = { id, name: path.basename(repoPath) || repoPath, repoPath, hidden: false, pinned: false, firstSeen: now() };
     list.push(p);
     save();
     return copy(p);
@@ -180,6 +181,14 @@ function createRegistry(opts) {
     const p = load().find((x) => x.id === id);
     if (!p) return false;
     if (p.hidden !== hidden) { p.hidden = hidden; save(); }
+    return true;
+  }
+
+  /** @param {string} id @param {boolean} pinned */
+  function setPinned(id, pinned) {
+    const p = load().find((x) => x.id === id);
+    if (!p) return false;
+    if (p.pinned !== pinned) { p.pinned = pinned; save(); }
     return true;
   }
 
@@ -212,6 +221,8 @@ function createRegistry(opts) {
     register,
     hide: (id) => setHidden(id, true),
     unhide: (id) => setHidden(id, false),
+    pin: (id) => setPinned(id, true),
+    unpin: (id) => setPinned(id, false),
     list: () => load().map(copy),
     noteCwd,
     pendingCount: () => inflight.size,
