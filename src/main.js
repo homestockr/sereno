@@ -820,33 +820,29 @@ if (CLI_UNWIRE) {
     catch (e) { return { ok: false, error: e.message }; }
   });
 
-  ipcMain.handle('sereno:commands-status', () => {
-    try { return { ok: true, status: wiring.commandsStatus() }; }
+  // Plugin detection (read-only) plus whether the app's old /brief copy can be removed.
+  ipcMain.handle('sereno:plugin-status', () => {
+    try { return { ok: true, plugin: wiring.pluginStatus(), brief: wiring.commandsStatus() }; }
     catch (e) { return { ok: false, error: e.message }; }
   });
 
-  // The renderer only asks; the confirmation and the write both happen here.
-  ipcMain.handle('sereno:commands-toggle', async () => {
+  // Removal only. The renderer asks; the confirmation and the delete both happen here.
+  ipcMain.handle('sereno:commands-remove', async () => {
     try {
       const cur = wiring.commandsStatus();
-      if (cur === 'conflict') return { ok: true, status: cur, changed: false };
-      const removing = cur === 'installed';
-      const updating = cur === 'update-available';
+      if (cur !== 'installed') return { ok: true, brief: cur, changed: false };
       const { response } = await dialog.showMessageBox({
         type: 'question',
-        message: removing ? 'Remove the /brief command from ~/.claude/commands?'
-          : updating ? 'Update the /brief command in ~/.claude/commands?'
-            : 'Install the /brief command into ~/.claude/commands?',
-        detail: removing ? 'Sereno removes that one file if you have not changed it, and changes nothing else.'
-          : 'Sereno writes one file and changes nothing else.',
-        buttons: [removing ? 'Remove /brief' : updating ? 'Update /brief' : 'Install /brief', 'Cancel'],
-        defaultId: 1,   // Enter / Escape never write
+        message: 'Remove the old /brief command from ~/.claude/commands?',
+        detail: 'The Sereno plugin provides /sereno:brief instead. Sereno removes that one file if you have not changed it, and changes nothing else.',
+        buttons: ['Remove /brief', 'Cancel'],
+        defaultId: 1,   // Enter / Escape never delete
         cancelId: 1,
         noLink: true,
       });
-      if (response !== 0) return { ok: true, status: cur, changed: false };
-      if (removing) wiring.uninstallCommands(); else wiring.installCommands();
-      return { ok: true, status: wiring.commandsStatus(), changed: true };
+      if (response !== 0) return { ok: true, brief: cur, changed: false };
+      wiring.uninstallCommands();
+      return { ok: true, brief: wiring.commandsStatus(), changed: true };
     } catch (e) { return { ok: false, error: e.message }; }
   });
 

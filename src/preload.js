@@ -21,9 +21,10 @@ contextBridge.exposeInMainWorld('sereno', {
   connect: (opts) => ipcRenderer.invoke('sereno:wire', opts || {}),
   disconnect: () => ipcRenderer.invoke('sereno:unwire'),
 
-  // The /brief slash command (one file in ~/.claude/commands, written after a native confirmation).
-  commandsStatus: () => ipcRenderer.invoke('sereno:commands-status'),
-  toggleBriefCommand: () => ipcRenderer.invoke('sereno:commands-toggle'),
+  // The pipeline plugin (read-only detection) and the retired app-written /brief command
+  // (removal only, after a native confirmation).
+  pluginStatus: () => ipcRenderer.invoke('sereno:plugin-status'),
+  removeBriefCommand: () => ipcRenderer.invoke('sereno:commands-remove'),
 
   // Sereno's own settings, which live nowhere near Claude Code's.
   settings: () => ipcRenderer.invoke('sereno:settings'),

@@ -536,6 +536,10 @@ html, body { height: 100%; }
 .console-line a:hover { color: #fff; text-decoration: underline; }
 .console-line a:focus-visible { outline: 2px solid #f3cc91; outline-offset: 3px; }
 
-/* The /brief row: a status on the left, its button on the right. */
+/* The plugin row stacks its commands under the label; the /brief row puts its button on the right. */
+.plugin-row { flex-direction: column; align-items: stretch; gap: 6px; }
+.plugin-cmds .cmd { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.plugin-cmds code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
+.plugin-cmds .review { flex: none; width: auto; margin: 0; padding: 4px 8px; }
 #brief-row { align-items: center; }
 #brief-row .review { flex: none; width: auto; margin: 0 0 0 auto; padding: 6px 10px; }

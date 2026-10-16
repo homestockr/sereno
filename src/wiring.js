@@ -407,14 +407,12 @@ function conflictMessage(keys) {
     + 'Nothing was changed. Remove or align those keys to let Sereno wire telemetry.';
 }
 
-/* ---------- /brief slash command (templates/commands/brief.md) ---------- */
+/* ---------- legacy /brief slash command (retired: the plugin ships /sereno:brief) ---------- */
+// The app no longer installs this file. It only recognises a copy it wrote earlier
+// (by the sha256 it recorded) so the user can remove it, and never touches any other.
 
 const COMMAND_KEY = 'commands/brief.md';
 
-/** The bundled template. Same relative path in dev and inside app.asar. */
-function commandTemplatePath() {
-  return path.join(__dirname, '..', 'templates', 'commands', 'brief.md');
-}
 function commandTargetPath() { return path.join(configDir(), 'commands', 'brief.md'); }
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
@@ -422,50 +420,16 @@ function readIfExists(file) {
   try { return fs.readFileSync(file); } catch (e) { if (e && e.code === 'ENOENT') return null; throw e; }
 }
 
-/** 'installed' (same bytes), 'not-installed', 'update-available' (our unedited copy, older than the bundle) or 'conflict'. */
-function commandsStatus(options) {
-  const tpl = fs.readFileSync((options && options.templatePath) || commandTemplatePath());
+/**
+ * 'not-installed' (no file), 'installed' (the file still matches the sha256 Sereno
+ * recorded, so it is ours and unedited) or 'conflict' (a file we did not write, or one
+ * that was edited).
+ */
+function commandsStatus() {
   const cur = readIfExists(commandTargetPath());
   if (cur === null) return 'not-installed';
-  if (cur.equals(tpl)) return 'installed';
-  // Ours and unedited (matches the recorded sha) but behind the bundled template: an upgrade, not a conflict.
   const rec = readWiredRecord().commands;
-  return rec && rec[COMMAND_KEY] === sha256(cur) ? 'update-available' : 'conflict';
-}
-function commandsInstalled(options) {
-  try { return commandsStatus(options) === 'installed'; } catch (_) { return false; }
-}
-
-/**
- * Copies the /brief command into <configDir>/commands. Never overwrites a
- * different file: that returns { conflict: ['commands/brief.md'] } and writes nothing.
- * @param {{dryRun?: boolean, templatePath?: string}} [options]
- */
-function installCommands(options) {
-  const opt = options || {};
-  const tpl = fs.readFileSync(opt.templatePath || commandTemplatePath());
-  const target = commandTargetPath();
-  const cur = readIfExists(target);
-  if (cur !== null) {
-    if (cur.equals(tpl)) return { conflict: null, changes: [], installed: true };
-    const recd = readWiredRecord().commands;
-    if (!(recd && recd[COMMAND_KEY] === sha256(cur))) return { conflict: [COMMAND_KEY], changes: [] };
-  }
-  const changes = [COMMAND_KEY + (cur !== null ? ': updated' : ': added')];
-  if (opt.dryRun) return { conflict: null, changes, dryRun: true };
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const tmp = target + '.tmp-' + process.pid;
-  try {
-    fs.writeFileSync(tmp, tpl);
-    fs.renameSync(tmp, target);
-  } catch (e) {
-    try { fs.unlinkSync(tmp); } catch (_) { /* nothing to clean */ }
-    throw e;
-  }
-  const rec = readWiredRecord();
-  rec.commands = Object.assign({}, rec.commands, { [COMMAND_KEY]: sha256(tpl) });
-  writeWiredRecord(rec);
-  return { conflict: null, changes, installed: true };
+  return rec && rec[COMMAND_KEY] === sha256(cur) ? 'installed' : 'conflict';
 }
 
 /** Removes brief.md only if it still matches the sha256 we recorded; otherwise keeps it. */
@@ -485,6 +449,41 @@ function uninstallCommands() {
   if (!Object.keys(rec.commands).length) delete rec.commands;
   writeWiredRecord(rec);
   return { removed, kept, recorded: true };
+}
+
+/* ---------- Pipeline plugin detection ---------- */
+
+const MAX_PLUGINS_FILE = 1024 * 1024;
+
+/**
+ * Whether the Sereno pipeline plugin is installed in Claude Code. Reads
+ * <home>/.claude/plugins/installed_plugins.json read-only: bounded, lstat'd, never
+ * through a link. Never throws.
+ * @param {string} [home]
+ * @returns {{installed: boolean, detected?: boolean, version?: string|null}}
+ */
+function pluginStatus(home) {
+  const none = { installed: false, detected: false };
+  try {
+    const file = path.join(home || os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || st.isSymbolicLink() || st.size > MAX_PLUGINS_FILE) return none;
+    const fd = fs.openSync(file, 'r');
+    let text;
+    try {
+      const buf = Buffer.alloc(st.size);
+      const n = fs.readSync(fd, buf, 0, st.size, 0);
+      text = buf.toString('utf8', 0, n);
+    } finally { fs.closeSync(fd); }
+    const j = JSON.parse(text);
+    const plugins = j && typeof j === 'object' ? j.plugins : null;
+    if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return none;
+    if (!Object.prototype.hasOwnProperty.call(plugins, 'sereno@sereno')) return { installed: false, detected: true };
+    const v = plugins['sereno@sereno'];
+    const entry = Array.isArray(v) ? v[0] : v;
+    const ver = entry && typeof entry === 'object' && typeof entry.version === 'string' ? entry.version.slice(0, 32) : null;
+    return { installed: true, version: ver };
+  } catch (_) { return none; }
 }
 
 function backups() {
@@ -515,6 +514,6 @@ function unwire() {
 module.exports = {
   EVENTS, ledgerPath, configDir, settingsPath, buildCommands,
   wireTelemetry, unwireTelemetry, telemetryWired, conflictMessage, telemetryEnv,
-  installCommands, uninstallCommands, commandsInstalled, commandsStatus, commandTemplatePath,
+  uninstallCommands, commandsStatus, pluginStatus,
   status, wire, unwire, removeEntries, backups, isOurs, shimPathOf, ownShims,
 };

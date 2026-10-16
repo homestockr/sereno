@@ -26,6 +26,7 @@ const crypto = require('node:crypto');
 const otlp = require('./otlp.js');
 const spendtime = require('./spendtime.js');
 const pipelineLib = require('./pipeline.js');
+const wiring = require('./wiring.js');
 const { emptyRoleSpend } = require('./ledger.js');
 const { normalizePath } = require('./projects.js');
 
@@ -128,6 +129,7 @@ function createCollector(store, port, opts) {
   const projects = (opts && opts.projects) || null;   // project registry (src/projects.js)
   const repos = (opts && opts.repos) || null;   // repo poller (src/repos.js)
   const pipelineAlerts = (opts && opts.pipelineAlerts && typeof opts.pipelineAlerts.open === 'function') ? opts.pipelineAlerts : null;   // src/pipeline-alerts.js machine (absent under npm run serve)
+  const pluginStatusFn = (opts && typeof opts.pluginStatus === 'function') ? opts.pluginStatus : () => wiring.pluginStatus();   // tests inject; reads installed_plugins.json read-only
   const onReview = (opts && typeof opts.onReview === 'function') ? opts.onReview : null;   // absent under npm run serve
   // Per-launch secret for the console's POST actions; handed out by GET /api/token.
   const token = crypto.randomBytes(24).toString('base64url');
@@ -540,7 +542,13 @@ function createCollector(store, port, opts) {
         models: pipelineLib.agentModels().map((m) => ({ agent: m.agent, role: m.role, model: m.model })),
         projects: routingProjects,
       },
-      plugin: null,
+      plugin: (() => {
+        let ps = null;
+        try { ps = pluginStatusFn(); } catch (_) { ps = null; }
+        ps = ps && typeof ps === 'object' ? ps : {};
+        const installed = ps.installed === true;
+        return { installed, detected: installed || ps.detected === true, version: installed && typeof ps.version === 'string' ? pStr(ps.version, 32) : null };
+      })(),
     };
   }
 

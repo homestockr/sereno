@@ -247,10 +247,10 @@ lines, `Now:`, `Next:` and `Blocked:`. The `/` in a branch name becomes `%2F`, s
 is `feat%2Fx.md`. The `/brief` command in Claude Code writes it. Sereno never writes to your
 repos; it only reads briefs.
 
-Install `/brief` from the widget's settings panel (after a confirmation), or run
-`npm run wire -- --commands`. Install never overwrites a different `brief.md` already in
-`~/.claude/commands/`; it reports the conflict instead. Remove it with
-`npm run unwire -- --commands`, which deletes it only if it is unchanged.
+The app no longer installs `/brief`. The Sereno plugin provides `/sereno:brief`; the widget's
+settings panel shows the two install commands. An older app-written `~/.claude/commands/brief.md`
+can be removed from the same panel (after a confirmation), or with `npm run unwire -- --commands`;
+either deletes it only if it is unchanged.
 
 **Freshness** compares a brief with its branch:
 

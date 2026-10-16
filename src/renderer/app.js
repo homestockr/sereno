@@ -26,7 +26,7 @@ const ui = {
   setupActionLabel: el('setup-action-label'), setupNote: el('setup-note'),
   settingsToggle: el('settings-toggle'), collapse: el('collapse'),
   autoLaunchRow: el('autolaunch-row'), autoLaunch: el('autolaunch'),
-  briefRow: el('brief-row'), briefStatus: el('brief-status'), briefAction: el('brief-action'),
+  pluginRow: el('plugin-row'), pluginStatus: el('plugin-status'), pluginCmds: el('plugin-cmds'), briefRow: el('brief-row'), briefStatus: el('brief-status'), briefAction: el('brief-action'),
   spend: el('spend'), consoleLine: el('console-line'),
 };
 
@@ -742,38 +742,69 @@ async function refreshSettings() {
   ui.autoLaunchRow.hidden = !wired;
 }
 
-/** The /brief command row. Hidden in a browser tab: there is no main process to write the file. */
-const BRIEF_STATUS = {
-  'installed': ['Installed', 'Remove /brief'],
-  'not-installed': ['Not installed', 'Install /brief'],
-  'update-available': ['Update available', 'Update /brief'],
-  'conflict': ['Conflict: a different brief.md exists', 'Install /brief'],
-};
+/** The pipeline plugin row and the retired /brief row. Hidden in a browser tab: there is no main process to ask. */
+const PLUGIN_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];
+
+/**
+ * What the two rows show. plugin: {installed, version}; brief: 'installed' | 'conflict' | 'not-installed'.
+ * The old /brief can only be removed when its hash still matches (status 'installed').
+ */
+function pluginRowModel(plugin, brief) {
+  const installed = !!(plugin && plugin.installed);
+  const ver = installed && plugin.version ? String(plugin.version) : '';
+  return {
+    pluginText: installed ? 'Pipeline plugin' + (ver ? ' ' + ver : '') + ' installed' : 'Not installed. Run these in Claude Code:',
+    cmds: installed ? [] : PLUGIN_CMDS,
+    brief: brief === 'installed' ? 'remove' : brief === 'conflict' ? 'conflict' : 'none',
+    briefText: brief === 'conflict' ? 'A different brief.md exists in ~/.claude/commands. Left as it is.' : 'Replaced by /sereno:brief',
+  };
+}
 
 async function refreshBrief() {
-  if (!api || !api.commandsStatus) { ui.briefRow.hidden = true; return; }
-  if (ui.briefAction.disabled && ui.briefAction.dataset.status !== 'conflict') return;   // a click is in flight
+  if (!api || !api.pluginStatus) { ui.pluginRow.hidden = true; ui.briefRow.hidden = true; return; }
+  if (ui.briefAction.dataset.status === 'busy') return;   // a click is in flight
   let st;
-  try { st = await api.commandsStatus(); } catch (_) { return; }
-  if (!st || !st.ok || !BRIEF_STATUS[st.status]) { ui.briefRow.hidden = true; return; }
-  ui.briefRow.hidden = false;
-  ui.briefStatus.textContent = BRIEF_STATUS[st.status][0];
-  ui.briefAction.textContent = BRIEF_STATUS[st.status][1];
-  ui.briefAction.dataset.status = st.status;
-  ui.briefAction.disabled = st.status === 'conflict';
+  try { st = await api.pluginStatus(); } catch (_) { return; }
+  if (!st || !st.ok) { ui.pluginRow.hidden = true; ui.briefRow.hidden = true; return; }
+  const m = pluginRowModel(st.plugin, st.brief);
+  ui.pluginRow.hidden = false;
+  ui.pluginStatus.textContent = m.pluginText;
+  ui.pluginCmds.textContent = '';
+  for (const c of m.cmds) {
+    const line = document.createElement('div');
+    line.className = 'cmd';
+    const code = document.createElement('code');
+    code.textContent = c;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'review no-drag';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', async () => {
+      let ok = false;
+      try { await navigator.clipboard.writeText(c); ok = true; } catch (_) { ok = false; }
+      btn.textContent = ok ? 'Copied' : 'Select and copy';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    });
+    line.append(code, btn);
+    ui.pluginCmds.append(line);
+  }
+  ui.briefRow.hidden = m.brief === 'none';
+  ui.briefStatus.textContent = m.briefText;
+  ui.briefAction.hidden = m.brief !== 'remove';
+  ui.briefAction.dataset.status = m.brief;
 }
 
 ui.briefAction.addEventListener('click', async () => {
-  if (!api || !api.toggleBriefCommand) return;
+  if (!api || !api.removeBriefCommand) return;
   ui.briefAction.disabled = true;
   ui.briefAction.dataset.status = 'busy';
   let res;
-  try { res = await api.toggleBriefCommand(); } catch (e) { res = { ok: false, error: e.message }; }
+  try { res = await api.removeBriefCommand(); } catch (e) { res = { ok: false, error: e.message }; }
   ui.briefAction.disabled = false;
   ui.briefAction.dataset.status = '';
   if (!res || !res.ok) {
     ui.setupNote.hidden = false;
-    ui.setupNote.textContent = 'Could not update the /brief command: ' + ((res && res.error) || 'unknown error');
+    ui.setupNote.textContent = 'Could not remove the /brief command: ' + ((res && res.error) || 'unknown error');
   }
   await refreshBrief();
   reportHeight();
