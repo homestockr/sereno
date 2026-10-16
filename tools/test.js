@@ -10969,29 +10969,39 @@ test('missing rate_limits degrades instead of throwing', () => {
     }
   }
 
-  /* ---- 4b step 6: console Pipeline tab ---- */
+  /* ---- 4b step 6 + layout L2: console Pipeline tab ([4b-tab] kept from step 6, [4b-layout] the one-screen layout) ---- */
   {
     const cj = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
     const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'index.html'), 'utf8');
-    const consts = ['PIPE_STEPS', 'OUTCOME_LABEL', 'ROLE_LABEL', 'IDLE_LABEL', 'INSTALL_CMDS'].map((n) => cj.match(new RegExp('^const ' + n + ' = .*;$', 'm'))[0]);
-    const fnames = ['estMoney', 'esc', 'largestRemainder', 'relTime', 'pillText', 'ringIcon', 'pillHtml', 'parseRoute', 'initialRoute',
-      'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'pipelineSteps', 'outcomeShape', 'stepShape', 'findingsHtml', 'taskBrief', 'taskCardHtml',
-      'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'installHtml', 'pipelineHasData', 'pipelineBody'];
+    const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
+    const consts = ['PIPE_COLS', 'PIPE_SUBS', 'PIPE_ROLE_KEYS', 'MARK_TEXT', 'STAGE_FILTERS', 'OUTCOME_LABEL', 'ROLE_LABEL', 'IDLE_LABEL', 'INSTALL_CMDS'].map((n) => cj.match(new RegExp('^const ' + n + ' = .*;$', 'm'))[0]);
+    const fnames = ['estMoney', 'esc', 'largestRemainder', 'relTime', 'projectLabel', 'pillText', 'ringIcon', 'pillHtml', 'waitLabel', 'waitWhat', 'attentionState', 'reviewControl', 'attentionHtml',
+      'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
+      'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'installHtml', 'pipelineHasData',
+      'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
+      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
     const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
+    const MIN = 60000;
     const gate = (o) => ({ review_run_id: 'r1', outcome: o, tests_passed: true, reviewed_at: '2026-10-01T00:00:00Z', model: 'm' });
-    const task = (stage, over) => Object.assign({ task: 'demo', stage, step: 'x', reason: null, attempt: 1, gate: gate('pass'), findings: [], startedAt: NOW - 8 * 60000, updatedAt: NOW - 60000, reviewRuns: 2, expired: false }, over || {});
+    const task = (stage, over) => Object.assign({
+      task: 'demo', stage, step: 'x', reason: null, attempt: 1, gate: gate('pass'), findings: [], startedAt: NOW - 8 * MIN, updatedAt: NOW - MIN, reviewRuns: 2, expired: false,
+      costUsd: null, builderModel: null, attempts: [], activity: [],
+    }, over || {});
     const body = (tasks, over) => Object.assign({
       projects: [{ id: 'p1', name: 'alpha', tasks, idle: tasks.length ? null : 'no-task' }],
       signals: { days: 30, projects: [{ id: 'p1', gate: { outcome: 'pass', task: 'demo', ageMs: 3600000 } }],
         outcomes: { n: 10, pass: 6, block: 2, needs_context: 1, error: 1, skipped: 0 }, rework: { n: 4, median: 1, max: 3, excluded: 1 }, runsThisWeek: 5 },
-      roleSpend: { enabled: true, days: 30, roles: { builder: { costUsd: 3, explicit: 2, inferred: 1, unattributed: 0 }, 'red-team': { costUsd: 1, explicit: 0, inferred: 0, unattributed: 1 }, scribe: { costUsd: 0 }, main: { costUsd: 0 }, auxiliary: { costUsd: 0 }, unattributed: { costUsd: 0 } } },
+      roleSpend: { enabled: true, days: 30, roles: { builder: { costUsd: 3, explicit: 2, inferred: 1, unattributed: 0 }, 'red-team': { costUsd: 1, explicit: 0, inferred: 0, unattributed: 1 }, scribe: { costUsd: 0 }, main: { costUsd: 9 }, auxiliary: { costUsd: 9 }, unattributed: { costUsd: 9 } } },
       redTeamPerMerge: { mean: 0.5, n: 3, excluded: 1 },
       routing: { models: [{ agent: 'builder', role: 'builder', model: 'sonnet' }], projects: [{ id: 'p1', redTeam: { agent: 'red-team', fallback: 'red-team-lite', onFallback: 'warn' } }] },
       plugin: { installed: true, version: '0.1.0' },
     }, over || {});
-    const states = (t) => T.pipelineSteps(t).map((s) => s.state).join(',');
+    const WORK = {};
+    const marks = (t) => T.trackMarks(t).map((m) => m.mark).join(',');
+    const strip = (h) => h.replace(/<[^>]*>/g, ' ');
+    const row = (t, name) => ({ key: 'p1/' + t.task, project: { id: 'p1', name: name || 'alpha' }, t });
 
     test('[4b-tab] #pipeline parses; unknown hashes still fall back to projects; saved tab is honoured', () => {
       assert.strictEqual(T.parseRoute('#pipeline'), 'pipeline');
@@ -11003,6 +11013,18 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(T.initialRoute('', 'bogus'), 'projects');
     });
 
+    test('[4b-layout] routes: #pipeline, #pipeline/signals and #pipeline/routing parse, junk sub-tabs do not', () => {
+      for (const [h, sub] of [['#pipeline', 'work'], ['#pipeline/work', 'work'], ['#pipeline/signals', 'signals'], ['#/Pipeline/Routing', 'routing']]) {
+        assert.strictEqual(T.parseRoute(h), 'pipeline', h);
+        assert.strictEqual(T.parsePipeSub(h), sub, h);
+      }
+      for (const h of ['#pipeline/', '#pipeline/signals/x', '#pipeline/<script>', '#spend/signals', '#projects/routing']) assert.notStrictEqual(T.parseRoute(h), 'pipeline', h);
+      for (const h of ['#pipeline/nope', '#spend', '', null, undefined]) assert.strictEqual(T.parsePipeSub(h), 'work', String(h));
+      assert.strictEqual(T.initialRoute('#pipeline/signals', 'spend'), 'pipeline');
+      const tabs = T.pipelineBody(body([task('builder')]), [], { sub: 'signals' }, NOW);
+      assert.match(tabs, /<a href="#pipeline" class="">Work<\/a><a href="#pipeline\/signals" class="on" aria-current="page">Signals<\/a><a href="#pipeline\/routing" class="">Routing<\/a>/);
+    });
+
     test('[4b-tab] nav order is Projects, Spend, Pipeline and the tab is registered', () => {
       const order = [...html.matchAll(/data-route="(\w+)"/g)].map((m) => m[1]);
       assert.deepStrictEqual(order, ['projects', 'spend', 'pipeline']);
@@ -11010,44 +11032,90 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(cj, /getJson\('\/api\/pipeline'\)/);
     });
 
-    test('[4b-tab] every stage renders the right track state', () => {
-      assert.strictEqual(states(task('architect')), 'current,pending,pending,pending');
-      assert.strictEqual(states(task('builder')), 'done,current,pending,pending');
-      assert.strictEqual(states(task('red-team')), 'done,done,current,pending');
-      assert.strictEqual(states(task('decision')), 'done,done,decision,pending');
-      assert.strictEqual(states(task('ready')), 'done,done,done,current');
-      assert.strictEqual(states(task('unknown')), 'pending,pending,pending,pending');
-      assert.deepStrictEqual(T.pipelineSteps(task('architect')).map((s) => s.label), ['Architect', 'Builder', 'Red team', 'Merge']);
-      assert.strictEqual(T.pipelineSteps(task('builder', { step: 'Fixing 2 findings' }))[1].status, 'Fixing 2 findings');
-      assert.strictEqual(T.pipelineSteps(task('ready', { step: 'Ready: run /sereno:merge' }))[3].status, 'Ready: run /sereno:merge');
-      assert.strictEqual(T.pipelineSteps(task('decision', { step: 'Needs a decision' }))[2].status, 'Needs a decision');
+    test('[4b-layout] track marks per stage: check, node, ring, slashed ring, question ring, triangle', () => {
+      assert.strictEqual(marks(task('architect')), 'current,waiting,waiting,waiting');
+      assert.strictEqual(marks(task('builder', { gate: null })), 'done,current,waiting,waiting');
+      assert.strictEqual(marks(task('red-team')), 'done,done,current,waiting');
+      assert.strictEqual(marks(task('ready')), 'done,done,done,current');
+      assert.strictEqual(marks(task('unknown')), 'waiting,waiting,waiting,waiting');
+      // an open decision shows the gate outcome's shape at Review; the question ring when there is none to show
+      assert.strictEqual(marks(task('decision', { gate: gate('block') })), 'done,done,block,waiting');
+      assert.strictEqual(marks(task('decision', { gate: gate('needs_context') })), 'done,done,needs_context,waiting');
+      assert.strictEqual(marks(task('decision', { gate: gate('error') })), 'done,done,error,waiting');
+      assert.strictEqual(marks(task('decision', { gate: gate('pass') })), 'done,done,needs_context,waiting');
+      // repair: the last review said no, the Builder is fixing it
+      assert.strictEqual(marks(task('builder', { gate: gate('block'), step: 'Fixing 2 findings', attempt: 2 })), 'done,current,block,waiting');
+      assert.deepStrictEqual(T.trackMarks(task('architect')).map((m) => m.label), ['Plan', 'Build', 'Review', 'Merge']);
+      const svg = ['done', 'current', 'waiting', 'block', 'needs_context', 'error'].map((m) => T.markSvg(m, 'review', false));
+      assert.strictEqual(new Set(svg).size, 6);
+      assert.match(svg[0], /class="chk" d="M4\.8 8\.2l2\.2 2\.2/);            // check
+      assert.match(svg[1], /<circle cx="8" cy="8" r="5\.5" fill="currentColor"\/>/);   // filled node
+      assert.ok(!/path/.test(svg[2]) && /class="bg"/.test(svg[2]));            // empty ring
+      assert.match(svg[3], /M3\.8 12\.2L12\.2 3\.8/);                          // slash
+      assert.match(svg[4], /M6\.2 6\.3c0-1\.9/);                               // question
+      assert.match(svg[5], /M8 2\.5L14 13H2z/);                                // triangle
     });
 
-    test('[4b-tab] repair marker only when a repair happened; header counts', () => {
-      const rep = T.taskCardHtml('alpha', task('builder', { step: 'Fixing 2 findings', attempt: 2 }), null, NOW);
-      assert.match(rep, /Repair loop/);
-      assert.match(rep, /attempt 2/);
-      assert.ok(!/Repair loop/.test(T.taskCardHtml('alpha', task('red-team'), null, NOW)));
+    test('[4b-layout] build label: Building, Fixing N, Env. retry; Merge says Ready; other cells carry no label', () => {
+      const tag = (t, i) => T.trackMarks(t)[i].tag;
+      assert.strictEqual(tag(task('builder', { step: 'Building' }), 1), 'Building');
+      assert.strictEqual(tag(task('builder', { step: 'Fixing 3 findings' }), 1), 'Fixing 3');
+      assert.strictEqual(tag(task('builder', { step: 'Fixing 1 finding' }), 1), 'Fixing 1');
+      assert.strictEqual(tag(task('builder', { step: 'Retrying after an environment failure' }), 1), 'Env. retry');
+      assert.strictEqual(tag(task('builder', { step: 'something else' }), 1), '');
+      assert.strictEqual(tag(task('ready'), 3), 'Ready');
+      assert.strictEqual(tag(task('red-team'), 3), '');
+      assert.strictEqual(tag(task('red-team'), 2), '');
+      const h = T.rowHtml(row(task('builder', { step: 'Fixing 2 findings', attempt: 2 })), null);
+      assert.match(h, /<span class="tlabel">Fixing 2<\/span>/);
+      assert.strictEqual((h.match(/class="tlabel"/g) || []).length, 1);
+    });
+
+    test('[4b-layout] retry and stall labels are neutral: never green, never amber', () => {
+      for (const step of ['Fixing 2 findings', 'Retrying after an environment failure', 'Building']) {
+        const h = T.rowHtml(row(task('builder', { step, attempt: 2, gate: gate('block') })), 'p1/demo');
+        const label = h.match(/<span class="tlabel">[^<]*<\/span>/)[0];
+        assert.ok(!/amber|green|ok|pass|dec/i.test(label.replace(/Building/, '')), label);
+        assert.ok(!/mk-dec|decision|pill-amber/.test(h), h);
+      }
+      const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].map((m) => [m[1].trim(), m[2]]);
+      for (const [sel, decl] of rules.filter(([s]) => /\.tlabel|\.mk-block|\.mk-needs_context|\.mk-error/.test(s))) {
+        assert.ok(!/--amber|green|#0[0-9a-f]{2}/i.test(decl), sel + ' ' + decl);
+      }
+      assert.ok(!/green/i.test(css));
+    });
+
+    test('[4b-tab] header counts and the summary line', () => {
       const b = body([task('builder', { step: 'Fixing 1 finding', attempt: 2 }), task('decision', { task: 'd2' }), task('ready', { task: 'r3' })]);
       assert.deepStrictEqual(T.pipelineCounts(b), { active: 3, repairs: 1, decisions: 1, runs: 5 });
-      assert.match(T.pipelineBody(b, [], NOW), /3 active tasks · 1 repair · 1 decision · 5 runs this week/);
+      assert.match(T.pipelineBody(b, [], WORK, NOW), /3 active tasks · 1 repair · 1 decision · 5 runs this week/);
+      assert.strictEqual(T.pipelineCounts(body([task('decision', { expired: true })])).decisions, 0);
     });
 
-    test('[4b-tab] amber only on a pending decision: the pill and the decision step, never expired or other stages', () => {
+    test('[4b-layout] amber only on an open decision: its row tint and node, the pill, never expired or other stages', () => {
       assert.match(T.pillHtml(T.pipelineCounts(body([task('decision')])).decisions), /1 decision needs you/);
       assert.strictEqual(T.pillHtml(T.pipelineCounts(body([task('ready')])).decisions), '');
       for (const s of ['architect', 'builder', 'red-team', 'ready', 'unknown']) {
-        assert.ok(!/tstep-decision|ptask[^"]*decision/.test(T.taskCardHtml('alpha', task(s), null, NOW)), s);
+        const h = T.rowHtml(row(task(s)), 'p1/demo');
+        assert.ok(!/mk-dec|prow[^"]*decision/.test(h), s);
       }
-      const dec = T.taskCardHtml('alpha', task('decision'), null, NOW);
-      assert.match(dec, /tstep-decision/);
-      assert.match(dec, /class="ptask decision"/);
-      const exp = T.taskCardHtml('alpha', task('decision', { expired: true }), null, NOW);
-      assert.ok(!/decision/.test(exp.replace(/Needs a decision/g, '')), exp);
-      assert.match(exp, /class="ptask expired"/);
-      assert.match(exp, /Expired/);
-      assert.strictEqual(T.pipelineCounts(body([task('decision', { expired: true })])).decisions, 0);
-      assert.ok(!/pill-amber/.test(T.pipelineBody(body([task('decision', { expired: true })]), [], NOW)));
+      const dec = T.rowHtml(row(task('decision', { gate: gate('block') })), null);
+      assert.match(dec, /class="prow decision"/);
+      assert.strictEqual((dec.match(/mk-dec/g) || []).length, 1);
+      assert.match(dec, /aria-label="Review: needs a decision"/);
+      const exp = T.rowHtml(row(task('decision', { expired: true })), null);
+      assert.ok(!/mk-dec|decision"/.test(exp.replace(/needs_context|Needs a decision/g, '')), exp);
+      assert.match(exp, /class="prow expired"/);
+      assert.ok(!/pill-amber/.test(T.pipelineBody(body([task('decision', { expired: true })]), [], WORK, NOW)));
+      // the panel: amber pill for a decision, neutral for everything else
+      assert.match(T.panelHtml(row(task('decision')), { nowMs: NOW }), /pill-amber/);
+      assert.ok(!/pill-amber|ppanel-dec|ptl-dec/.test(T.panelHtml(row(task('red-team')), { nowMs: NOW })));
+      assert.ok(!/pill-amber|ppanel-dec|ptl-dec/.test(T.panelHtml(row(task('decision', { expired: true })), { nowMs: NOW })));
+      // CSS: every rule that uses --amber in the pipeline section belongs to a decision selector
+      const tab = css.slice(css.indexOf('Pipeline tab: one-screen layout'));
+      for (const m of tab.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+        if (/--amber/.test(m[2])) assert.match(m[1], /decision|mk-dec|ptl-dec|pill-amber/, m[1]);
+      }
     });
 
     test('[4b-tab] outcome shapes are distinct and every one carries a text label', () => {
@@ -11059,7 +11127,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const l of ['Pass', 'Block', 'Needs context', 'Error', 'Skipped']) assert.ok(h.includes('>' + l + '<'), l);
     });
 
-    test('[4b-tab] every rate carries n; every dollar figure carries est.', () => {
+    test('[4b-layout] every dollar figure carries est.; every rate carries n', () => {
       const h = T.outcomesHtml({ n: 10, pass: 6, block: 2, needs_context: 1, error: 1, skipped: 0 });
       assert.strictEqual((h.match(/n=10/g) || []).length, 5);
       assert.match(h, /60% · n=10/);
@@ -11073,79 +11141,290 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(rs, /75% of spend/);
       assert.match(rs, /67% explicit · 33% inferred · 0% unattributed/);
       assert.strictEqual(T.roleSpendHtml({ enabled: false }), '<p class="empty-note">Spend history is off</p>');
-      const card = T.taskCardHtml('alpha', task('red-team', { costUsd: 1.234 }), null, NOW);
-      assert.match(card, /\$1\.23 est\. · 2 review runs/);
-      const noMoney = T.taskCardHtml('alpha', task('red-team'), null, NOW);
-      assert.ok(!/\$/.test(noMoney.replace(/<[^>]*>/g, '')), 'no figure, no $');
-      assert.match(noMoney, /2 review runs/);
-      const full = T.pipelineBody(body([task('red-team', { costUsd: 2 })]), [], NOW).replace(/<[^>]*>/g, ' ');
+      // the table: cost cell is "$X est." or blank
+      assert.match(T.rowHtml(row(task('red-team', { costUsd: 1.234 })), null), /<div class="pcell-cost num">\$1\.23 est\.<\/div>/);
+      const noMoney = T.rowHtml(row(task('red-team')), null);
+      assert.match(noMoney, /<div class="pcell-cost num"><\/div>/);
+      assert.ok(!/\$/.test(strip(noMoney)));
+      // every $ on every sub-tab and in the panel is followed by est.; every % is followed by n=
+      const b = body([task('red-team', { costUsd: 2 })]);
+      const all = [T.pipelineBody(b, [], { sub: 'work' }, NOW), T.pipelineBody(b, [], { sub: 'signals' }, NOW), T.pipelineBody(b, [], { sub: 'routing' }, NOW),
+        T.panelHtml(row(b.projects[0].tasks[0]), { nowMs: NOW })].map(strip).join(' ');
       let seen = 0;
-      for (const m of full.matchAll(/\$[\d.]+/g)) { seen++; assert.ok(full.slice(m.index + m[0].length).startsWith(' est.'), m[0]); }
-      assert.ok(seen >= 4);
+      for (const m of all.matchAll(/\$[\d.]+/g)) { seen++; assert.ok(all.slice(m.index + m[0].length).startsWith(' est.'), m[0]); }
+      assert.ok(seen >= 5, String(seen));
+      for (const m of strip(T.pipelineBody(b, [], { sub: 'work' }, NOW)).matchAll(/\d+%/g)) assert.fail('work view shows a bare rate ' + m[0]);
+      const sig = strip(T.pipelineBody(b, [], { sub: 'signals' }, NOW));
+      for (const m of sig.matchAll(/(\d+)% · n=\d+/g)) assert.ok(m[1] !== undefined);
+      assert.match(strip(T.stripHtml(b)), /n=10/);
+      assert.match(strip(T.stripHtml(b)), /Rework: median 1 · max 3 reruns before a pass \(n=4/);
+      assert.match(strip(T.stripHtml(b)), /Red team per merge: \$0\.50 est\. \(n=3, 1 excluded\)/);
+      assert.match(T.stripHtml(b), /href="#pipeline\/signals"/);
+      assert.match(strip(T.stripHtml(body([], { signals: { days: 30, projects: [], outcomes: { n: 0 }, rework: { n: 0 }, runsThisWeek: 0 } }))), /n=0/);
     });
 
-    test('[4b-tab] idle repos, gate state, routing and the Scribe line', () => {
-      const idle = (k) => T.pipelineBody(body([], { projects: [{ id: 'p1', name: 'alpha', tasks: [], idle: k }] }), [], NOW);
-      assert.match(idle('no-task'), /No active task/);
-      assert.match(idle('gate-off'), /Gate off/);
-      assert.match(idle('latest-pass'), /Latest review passed/);
-      const full = T.pipelineBody(body([task('red-team')]), [], NOW);
-      assert.match(full, /oshape-pass/);
-      assert.match(full, /<strong>alpha<\/strong><span>Pass<\/span><span class="mono">demo<\/span><span class="quiet-text">1 hour ago/);
-      assert.match(full, /red-team-lite/);
-      assert.match(full, /sonnet/);
-      assert.ok(!/Scribe ·/.test(full), 'no brief, no Scribe line');
-      const withBrief = T.taskCardHtml('alpha', task('red-team'), { branches: [{ name: 'task/demo', freshness: 'fresh', generatedAt: NOW - 5 * 60000 }] }, NOW);
-      assert.match(withBrief, /Scribe · brief updated 5 min ago/);
-      assert.ok(!/Scribe ·/.test(T.taskCardHtml('alpha', task('red-team'), { branches: [{ name: 'task/demo', freshness: 'none' }] }, NOW)));
-      assert.match(T.taskCardHtml('alpha', task('red-team'), null, NOW), /Started 8 min ago/);
+    test('[4b-layout] expired rows are greyed and listed after the active ones', () => {
+      const b = body([task('builder', { task: 'old', expired: true }), task('ready', { task: 'a1' }), task('decision', { task: 'old2', expired: true }), task('red-team', { task: 'a2' })]);
+      assert.deepStrictEqual(T.pipeRows(b, WORK).map((r) => r.t.task), ['a1', 'a2', 'old', 'old2']);
+      const h = T.pipelineBody(b, [], WORK, NOW);
+      assert.strictEqual((h.match(/class="prow[^"]*expired/g) || []).length, 2);
+      assert.ok(h.indexOf('data-sel="p1/old"') > h.indexOf('data-sel="p1/a2"'));
+      assert.match(h, /alpha · expired/);
+      assert.match(css, /\.prow\.expired \{ opacity: \.6;/);
     });
 
-    test('[4b-tab] findings are collapsible, text-escaped and show file:line', () => {
-      const h = T.taskCardHtml('alpha', task('builder', { findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'Wrong thing' }] }), null, NOW);
-      assert.match(h, /<details class="pfind"><summary>1 finding<\/summary>/);
-      assert.match(h, /src\/a\.js:12/);
-      assert.match(h, /Wrong thing/);
-      assert.strictEqual(T.findingsHtml([]), '');
+    test('[4b-layout] filters: project and stage narrow the rows, there is no search', () => {
+      const b = body([], { projects: [
+        { id: 'p1', name: 'alpha', tasks: [task('builder', { task: 'b1' }), task('red-team', { task: 'r1' }), task('decision', { task: 'd1' })], idle: null },
+        { id: 'p2', name: 'beta', tasks: [task('architect', { task: 'a2' }), task('ready', { task: 'm2' })], idle: null },
+      ] });
+      const ids = (f) => T.pipeRows(b, f).map((r) => r.t.task);
+      assert.deepStrictEqual(ids(WORK), ['b1', 'r1', 'd1', 'a2', 'm2']);
+      assert.deepStrictEqual(ids({ project: 'p2' }), ['a2', 'm2']);
+      assert.deepStrictEqual(ids({ stage: 'review' }), ['r1', 'd1']);
+      assert.deepStrictEqual(ids({ stage: 'plan' }), ['a2']);
+      assert.deepStrictEqual(ids({ stage: 'merge' }), ['m2']);
+      assert.deepStrictEqual(ids({ project: 'p1', stage: 'build' }), ['b1']);
+      assert.deepStrictEqual(ids({ project: 'p2', stage: 'build' }), []);
+      const h = T.pipelineBody(b, [], { project: 'p2', stage: 'build' }, NOW);
+      assert.match(h, /No tasks match these filters/);
+      assert.match(T.pipelineBody(b, [], { project: 'p2' }, NOW), /<option value="p2" selected>beta<\/option>/);
+      assert.match(T.pipelineBody(b, [], { stage: 'review' }, NOW), /<option value="review" selected>Review<\/option>/);
+      assert.ok(!/<input|type="search"/.test(h));
+      assert.strictEqual((h.match(/<select/g) || []).length, 2);
+      assert.match(T.pipelineBody(body([]), [], WORK, NOW), /No active tasks/);
+    });
+
+    test('[4b-layout] idle repositories: one collapsed row with the count; the lines are inside it', () => {
+      const idle = (k, extra) => body([], { projects: [{ id: 'p1', name: 'alpha', tasks: [], idle: k }].concat(extra || []) });
+      const one = T.pipelineBody(idle('no-task'), [], WORK, NOW);
+      assert.match(one, /<details class="pidle"><summary>Idle repositories \(1\)<\/summary>/);
+      assert.ok(!/<details class="pidle" open/.test(one));
+      assert.match(one, /No active task/);
+      assert.match(T.pipelineBody(idle('gate-off'), [], WORK, NOW), /Gate off/);
+      assert.match(T.pipelineBody(idle('latest-pass'), [], WORK, NOW), /Latest review passed/);
+      const three = idle('no-task', [{ id: 'p2', name: 'beta', tasks: [], idle: 'gate-off' }, { id: 'p3', name: 'gamma', tasks: [task('builder')], idle: null }]);
+      const h3 = T.pipelineBody(three, [], WORK, NOW);
+      assert.match(h3, /Idle repositories \(2\)/);
+      assert.strictEqual((h3.match(/<ul class="idle"><li>/g) || []).length, 1);
+      assert.match(T.pipelineBody(three, [], { project: 'p2' }, NOW), /Idle repositories \(1\)/);
+      assert.ok(!/pidle/.test(T.pipelineBody(body([task('builder')]), [], WORK, NOW)));
+    });
+
+    test('[4b-layout] selection: first open decision, else first row; arrow keys clamp; a decision stays pinned above the panel', () => {
+      const b = body([task('builder', { task: 'b1' }), task('decision', { task: 'd1' }), task('ready', { task: 'm1' })]);
+      const rows = T.pipeRows(b, WORK);
+      assert.strictEqual(T.resolveSel(rows, null).t.task, 'd1');
+      assert.strictEqual(T.resolveSel(rows, 'p1/m1').t.task, 'm1');
+      assert.strictEqual(T.resolveSel(rows, 'p9/gone').t.task, 'd1');
+      assert.strictEqual(T.resolveSel(T.pipeRows(body([task('builder', { task: 'b1' }), task('ready', { task: 'm1' })]), WORK), null).t.task, 'b1');
+      assert.strictEqual(T.resolveSel([], null), null);
+      assert.strictEqual(T.moveSel(rows, 'p1/b1', 1), 'p1/d1');
+      assert.strictEqual(T.moveSel(rows, 'p1/b1', -1), 'p1/b1');
+      assert.strictEqual(T.moveSel(rows, 'p1/m1', 1), 'p1/m1');
+      assert.strictEqual(T.moveSel(rows, null, 1), 'p1/m1');   // the default is d1, so down is m1
+      assert.strictEqual(T.moveSel([], null, 1), null);
+      assert.match(T.pipelineBody(b, [], WORK, NOW), /class="prow sel decision"[^>]*data-sel="p1\/d1"/);
+      assert.match(T.pipelineBody(b, [], { sel: 'p1/m1' }, NOW), /class="prow sel"[^>]*data-sel="p1\/m1"/);
+      const st = T.attentionState({ sessions: [], decisions: [{ project: 'alpha', task: 'd1', reason: 'retry_limit', attempt: 2 }] });
+      const side = T.pipelineSideHtml(st, b, WORK, { sessions: [], projectsList: [], opts: { review: true }, nowMs: NOW });
+      assert.ok(side.indexOf('attn-amber') >= 0 && side.indexOf('attn-amber') < side.indexOf('ppanel'));
+      assert.match(side, /<h2 class="mono">d1<\/h2>/);
+      assert.match(cj, /e\.key !== 'ArrowDown' && e\.key !== 'ArrowUp'/);
+      assert.match(cj, /closest\('\.prow\[data-sel\]'\)/);
+    });
+
+    test('[4b-layout] panel: timeline with times, cost, runs, started, model, brief age, findings, attempts, activity', () => {
+      const t = task('builder', {
+        step: 'Fixing 2 findings', attempt: 2, gate: gate('block'), costUsd: 1.5, builderModel: 'claude-sonnet-x', reviewRuns: 1,
+        findings: [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'Wrong thing' }],
+        attempts: [{ attempt: 1, outcome: 'block', startedAt: NOW - 20 * MIN, endedAt: NOW - 12 * MIN }, { attempt: 2, outcome: 'running', startedAt: NOW - 3 * MIN, endedAt: null }],
+        activity: [{ at: NOW - 3 * MIN, kind: 'attempt-start', outcome: null }, { at: NOW - 12 * MIN, kind: 'attempt-end', outcome: 'block' }, { at: NOW - 13 * MIN, kind: 'gate', outcome: 'block' }, { at: NOW - 25 * MIN, kind: 'spec', outcome: null }, { at: NOW, kind: 'weird', outcome: null }],
+      });
+      const proj = { id: 'p1', branches: [{ name: 'task/demo', freshness: 'fresh', generatedAt: NOW - 5 * MIN }] };
+      const h = T.panelHtml(row(t), { project: proj, nowMs: NOW });
+      const text = strip(h).replace(/\s+/g, ' ');
+      assert.match(h, /<h2 class="mono">demo<\/h2>/);
+      assert.match(h, /<span class="pill-neutral">Fixing 2 findings<\/span>/);
+      assert.match(text, /alpha task\/demo/);
+      assert.match(text, /Plan · Architect Spec written 25 min ago/);
+      assert.match(text, /Build · Builder Fixing 2 20 min ago/);
+      assert.match(text, /Review · Red team Review: Block/);
+      assert.match(text, /Merge Waiting/);
+      assert.match(text, /Cost \$1\.50 est\./);
+      assert.match(text, /Review runs 1/);
+      assert.match(text, /Started 8 min ago/);
+      assert.match(text, /Builder model Sonnet Brief/);
+      assert.match(h, /<dd title="claude-sonnet-x">Sonnet<\/dd>/);
+      assert.match(text, /Brief Updated 5 min ago/);
+      assert.match(h, /<details class="pfind" open>/);
+      assert.match(text, /src\/a\.js:12/);
+      assert.match(text, /#1 Block started 20 min ago · ended 12 min ago/);
+      assert.match(text, /#2 Running started 3 min ago|#2 running started 3 min ago/);
+      assert.match(text, /Attempt started 3 min ago/);
+      assert.match(text, /Attempt ended: Block 12 min ago/);
+      assert.match(text, /Review: Block 13 min ago/);
+      assert.ok(!/weird/.test(h));
+      // nothing known: dashes, no sections for what is absent
+      const bare = strip(T.panelHtml(row(task('architect', { startedAt: null, gate: null, reviewRuns: 0 })), { nowMs: NOW })).replace(/\s+/g, ' ');
+      assert.match(bare, /Cost — Review runs 0 Started — Builder model — Brief No brief/);
+      assert.ok(!/Attempts|Recent activity|Latest findings/.test(bare));
+      assert.strictEqual(T.panelHtml(null, {}), '');
+    });
+
+    test('[4b-layout] Review in terminal appears only when a live session exists in that repo', () => {
+      const b = body([task('red-team')]);
+      const st = T.attentionState({ sessions: [], decisions: [] });
+      const opts = { review: true, na: false, msgs: {} };
+      const side = (projectsList, sessions, st2) => T.pipelineSideHtml(st2 || st, b, WORK, { sessions, projectsList, opts, nowMs: NOW });
+      const live = [{ id: 'p1', name: 'alpha', live: { state: 'running', sessionIds: ['s1'] } }];
+      const sess = [{ id: 's1', state: 'running', stale: false, projectName: 'alpha' }];
+      const withLive = side(live, sess);
+      assert.match(withLive, /Review in terminal/);
+      assert.match(withLive, /data-act="review" data-sid="s1"/);
+      assert.strictEqual((withLive.match(/data-act="review"/g) || []).length, 1);
+      const none = (h) => assert.ok(!/Review in terminal|<button/.test(h), h);
+      none(side([{ id: 'p1', name: 'alpha', live: { state: null, sessionIds: [] } }], sess));      // no session in the repo
+      none(side([{ id: 'p2', name: 'beta', live: { state: 'running', sessionIds: ['s1'] } }], sess));   // a session in another repo
+      none(side(live, [{ id: 's1', state: 'idle', stale: true }]));                              // stale
+      none(side(live, [{ id: 's1', state: 'running', agent_id: 'a1' }]));                        // a subagent row
+      none(side(live, []));
+      none(side([], sess));
+      assert.strictEqual(T.liveSessionId('p1', live, sess), 's1');
+      assert.strictEqual(T.liveSessionId('p1', live, []), null);
+      // a decision's pinned block already has the button: the panel does not repeat it
+      const dst = T.attentionState({ sessions: [], decisions: [{ project: 'alpha', task: 'demo', reason: 'retry_limit', attempt: 2, sessionId: 's1' }] });
+      const db = body([task('decision')]);
+      const h = T.pipelineSideHtml(dst, db, WORK, { sessions: sess, projectsList: live, opts, nowMs: NOW });
+      assert.strictEqual((h.match(/data-act="review"/g) || []).length, 1);
+      // after a 501 the control is plain text, and no other button exists in the panel
+      const na = T.pipelineSideHtml(st, b, WORK, { sessions: sess, projectsList: live, opts: { review: true, na: true, msgs: {} }, nowMs: NOW });
+      assert.match(na, /Open the widget to review/);
+      assert.ok(!/<button/.test(T.panelHtml(row(task('red-team')), { nowMs: NOW })));
+    });
+
+    test('[4b-layout] signals and routing sub-tabs; role spend counts only the three pipeline roles', () => {
+      const b = body([task('red-team')]);
+      const sig = T.pipelineBody(b, [], { sub: 'signals' }, NOW);
+      assert.match(sig, /oshape-pass/);
+      assert.match(sig, /<strong>alpha<\/strong><span>Pass<\/span><span class="mono">demo<\/span><span class="quiet-text">1 hour ago/);
+      assert.match(sig, /Last 30 days/);
+      assert.match(sig, /Rework: median 1/);
+      assert.match(sig, /Red team per merge: \$0\.50 est\./);
+      assert.match(sig, /Builder/);
+      assert.match(sig, /Red team<\/strong>/);
+      assert.ok(!/<strong>(Main|Auxiliary|Unattributed)<\/strong>/.test(sig), 'main, auxiliary and unattributed spend stay in the Spend tab');
+      assert.ok(!/ptable|prow/.test(sig));
+      assert.match(sig, /75% of spend/);   // 3 of 4: the other roles' spend is not in the denominator
+      const rt = T.pipelineBody(b, [], { sub: 'routing' }, NOW);
+      assert.match(rt, /<td class="mono">builder<\/td><td>Builder<\/td><td>Sonnet<\/td>/);
+      assert.match(rt, /<td>alpha<\/td><td class="mono">red-team<\/td><td class="mono">red-team-lite<\/td><td>warn<\/td>/);
+      assert.ok(!/ptable|oshape/.test(rt));
+      const work = T.pipelineBody(b, [], WORK, NOW);
+      assert.match(work, /class="ptable"/);
+      assert.ok(!/Role routing|Gate state/.test(work));
+    });
+
+    test('[4b-layout] friendly model names: family word from the id, raw id as fallback and as quieter text', () => {
+      for (const [id, n] of [['claude-haiku-4-5-20251001', 'Haiku'], ['claude-sonnet-4-6', 'Sonnet'], ['claude-opus-4-8[1m]', 'Opus'], ['us.anthropic.Claude-FABLE-1', 'Fable'], ['sonnet', 'Sonnet']]) assert.strictEqual(T.modelName(id), n, id);
+      assert.strictEqual(T.modelName('gpt-9-mini'), 'gpt-9-mini');
+      assert.strictEqual(T.modelName(null), '');
+      assert.strictEqual(T.modelHtml('claude-haiku-4-5-20251001'), 'Haiku <span class="quiet-text mono">claude-haiku-4-5-20251001</span>');
+      assert.strictEqual(T.modelHtml('sonnet'), 'Sonnet');
+      assert.strictEqual(T.modelHtml('gpt-9-mini'), 'gpt-9-mini');
+      assert.strictEqual(T.modelHtml(''), '—');
+      assert.ok(!T.modelHtml('<b>opus</b>').includes('<b>'));
+      const panel = T.panelHtml(row(task('builder', { builderModel: 'claude-haiku-4-5-20251001' })), { nowMs: NOW });
+      assert.match(panel, /<dd title="claude-haiku-4-5-20251001">Haiku<\/dd>/);
+      assert.ok(!/>claude-haiku/.test(panel));
+      const b = body([task('builder')], { routing: { models: [{ agent: 'sereno:builder-haiku', role: 'builder', model: 'claude-haiku-4-5-20251001' }], projects: [] } });
+      assert.match(T.pipelineBody(b, [], { sub: 'routing' }, NOW), /<td>Haiku <span class="quiet-text mono">claude-haiku-4-5-20251001<\/span><\/td>/);
+    });
+
+    test('[4b-layout] gate grid: only projects with a gate get a cell; the rest collapse into one counted line', () => {
+      const projs = [];
+      const sp = [];
+      for (let i = 0; i < 5; i++) { projs.push({ id: 'g' + i, name: 'rev' + i, tasks: [], idle: 'no-task' }); sp.push({ id: 'g' + i, gate: { outcome: i === 1 ? 'block' : 'pass', task: 't' + i, ageMs: 3600000 } }); }
+      for (let i = 0; i < 3; i++) { projs.push({ id: 'q' + i, name: 'quiet' + i, tasks: [], idle: 'no-task' }); sp.push({ id: 'q' + i, gate: null }); }
+      const b = body([], { projects: projs, signals: Object.assign(body([]).signals, { projects: sp }) });
+      const h = T.pipelineBody(b, [], { sub: 'signals' }, NOW);
+      const grid = h.match(/<ul class="glist ggrid">[\s\S]*?<\/ul>/)[0];
+      assert.strictEqual((grid.match(/<li class="gline">/g) || []).length, 5);
+      assert.ok(!/quiet\d|No review in/.test(grid));
+      assert.match(grid, /<strong>rev1<\/strong><span>Block<\/span><span class="mono">t1<\/span><span class="quiet-text">1 hour ago/);
+      assert.match(h, /<details class="pidle"><summary>3 projects with no review in 30 days<\/summary>/);
+      assert.ok(!/<details class="pidle" open/.test(h));
+      assert.match(h.match(/<details class="pidle">[\s\S]*?<\/details>/)[0], /<li>quiet0<\/li><li>quiet1<\/li><li>quiet2<\/li>/);
+      assert.match(css, /\.ggrid \{ display: grid; grid-template-columns: repeat\(auto-fill/);
+      const one = body([], { signals: Object.assign(body([]).signals, { projects: [{ id: 'q', gate: null }] }) });
+      const ho = T.pipelineBody(one, [], { sub: 'signals' }, NOW);
+      assert.match(ho, /1 project with no review in 30 days/);
+      assert.ok(!/ggrid/.test(ho));
+      assert.ok(!/with no review/.test(T.pipelineBody(body([task('builder')]), [], { sub: 'signals' }, NOW)));
+    });
+
+    test('[4b-layout] the table head names the four stages with their roles', () => {
+      const h = T.pipelineBody(body([task('builder')]), [], WORK, NOW);
+      const head = strip(h.match(/<div class="phead-row"[\s\S]*?<\/div><\/div>/)[0]).replace(/\s+/g, ' ');
+      assert.match(head, /Task Branch Plan Architect Build Builder Review Red team Merge Cost/);
+      assert.match(h, /<div class="pcell-branch mono">task\/demo<\/div>/);
+      assert.strictEqual((h.match(/class="tcell tc-/g) || []).length, 4);
     });
 
     test('[4b-tab] install empty state: two commands with copy buttons; data keeps the tab normal', () => {
       const empty = body([], { projects: [{ id: 'p1', name: 'alpha', tasks: [], idle: 'no-task' }], plugin: null,
         signals: { days: 30, projects: [], outcomes: { n: 0 }, rework: { n: 0 }, runsThisWeek: 0 }, routing: { models: [], projects: [{ id: 'p1', redTeam: null }] } });
-      const h = T.pipelineBody(empty, [], NOW);
+      const h = T.pipelineBody(empty, [], WORK, NOW);
       assert.match(h, /\/plugin marketplace add homestockr\/sereno/);
       assert.match(h, /\/plugin install sereno@sereno/);
       assert.strictEqual((h.match(/data-act="copy"/g) || []).length, 2);
       assert.match(h, /data-text="\/plugin install sereno@sereno"/);
-      const withData = T.pipelineBody(body([task('builder')], { plugin: null }), [], NOW);
+      assert.ok(!/subtabs|ptable/.test(h));
+      assert.strictEqual(T.pipelineSideHtml(T.attentionState({ sessions: [] }), empty, WORK, { nowMs: NOW }).includes('ppanel'), false);
+      const withData = T.pipelineBody(body([task('builder')], { plugin: null }), [], WORK, NOW);
       assert.ok(!/data-act="copy"/.test(withData));
-      assert.match(withData, /Active tasks/);
-      assert.match(T.pipelineBody(null, [], NOW), /unavailable/);
+      assert.match(withData, /class="ptable"/);
+      assert.match(T.pipelineBody(null, [], WORK, NOW), /unavailable/);
     });
 
-    test('[4b-tab] hostile strings from the API are escaped everywhere', () => {
+    test('[4b-layout] hostile strings from the API are escaped everywhere', () => {
       const evil = '<img src=x onerror=alert(1)>"\'&';
-      const hostile = () => task('decision', { task: evil, step: evil, findings: [{ severity: evil, kind: evil, file: evil, line: 3, summary: evil }], gate: gate(evil) });
+      const hostile = () => task('decision', {
+        task: evil, step: evil, builderModel: evil, findings: [{ severity: evil, kind: evil, file: evil, line: 3, summary: evil }], gate: gate(evil),
+        attempts: [{ attempt: evil, outcome: evil, startedAt: NOW - MIN, endedAt: NOW }], activity: [{ at: NOW, kind: evil, outcome: evil }, { at: NOW, kind: 'gate', outcome: evil }, { at: NOW, kind: 'attempt-end', outcome: evil }],
+      });
       const b = body([], {
         projects: [{ id: 'p1', name: evil, tasks: [hostile()], idle: null }, { id: 'p2', name: evil, tasks: [], idle: evil }],
         signals: { days: 30, projects: [{ id: 'p1', gate: { outcome: evil, task: evil, ageMs: 5 } }, { id: evil, gate: null }], outcomes: { n: 1, pass: 1 }, rework: { n: 0 }, runsThisWeek: 0 },
         routing: { models: [{ agent: evil, role: evil, model: evil }], projects: [{ id: 'p1', redTeam: { agent: evil, fallback: evil, onFallback: evil } }] },
       });
-      const h = T.pipelineBody(b, [{ id: 'p1', branches: [{ name: 'task/' + evil, freshness: 'fresh' }] }], NOW);
-      assert.ok(!h.includes('<img'), h);
-      assert.match(h, /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
-      assert.ok(!h.includes('data-text="' + evil));
+      const pl = [{ id: 'p1', branches: [{ name: 'task/' + evil, freshness: 'fresh' }], live: { sessionIds: [evil] } }];
+      const st = T.attentionState({ sessions: [], decisions: [{ project: evil, task: evil, reason: evil, attempt: 1, sessionId: evil }] });
+      const outs = ['work', 'signals', 'routing'].map((sub) => T.pipelineBody(b, pl, { sub, project: evil, stage: evil, sel: evil }, NOW))
+        .concat(['work', 'signals', 'routing'].map((sub) => T.pipelineBody(b, pl, { sub }, NOW)))
+        .concat([T.pipelineSideHtml(st, b, WORK, { sessions: [{ id: evil, state: 'running' }], projectsList: pl, opts: { review: true }, nowMs: NOW })]);
+      for (const h of outs) {
+        assert.ok(!h.includes('<img'), h);
+        assert.ok(!h.includes('data-text="' + evil));
+        assert.ok(!h.includes('onerror=alert(1)>'), h);
+      }
+      assert.match(outs[3], /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
+      assert.match(outs[outs.length - 1], /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
     });
 
-    test('[4b-tab] source: one innerHTML write, no inline styles, 11px minimum, the tab posts nothing', () => {
+    test('[4b-layout] source: old card renderer is gone, one innerHTML write, no inline styles, 11px minimum, the tab posts nothing', () => {
       assert.strictEqual((cj.match(/\.innerHTML\s*=/g) || []).length, 1);
-      const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
-      const tab = css.slice(css.indexOf('Pipeline tab (Phase 4b step 6)'));
+      assert.ok(!/taskCardHtml|pipelineSteps|stepShape|PIPE_STEPS|class="ptask|class="track"/.test(cj));
+      assert.ok(!/\.ptask|\.tstep|\.track\b|\.tshape|\.prepair|\.pscribe|\.pmeta/.test(css), 'dead card CSS removed');
+      const tab = css.slice(css.indexOf('Pipeline tab shared parts'));
+      assert.ok(tab.length > 500);
       for (const m of tab.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
       assert.ok(!/style=/.test(cj.slice(cj.indexOf('Pipeline tab: pure helpers'), cj.indexOf('/* ---------- state ---------- */'))));
       assert.match(cj, /async function refreshPipeline/);
       assert.ok(!/postAction\([^)]*pipeline/i.test(cj));
       assert.ok(!/\r|[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(cj + css + html));
+      // row height budget: ~34px rows keep 15 tasks on one 1080p screen
+      assert.match(css, /\.prow \{[^}]*height: 34px/);
     });
   }
 

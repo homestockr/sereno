@@ -330,7 +330,14 @@ function attentionHtml(st, nowMs, opts) {
 /** '#spend' -> 'spend'; '#projects', '', and anything else -> 'projects'. */
 function parseRoute(hash) {
   const h = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim().toLowerCase();
-  return h === 'spend' || h === 'pipeline' ? h : 'projects';
+  if (h === 'spend') return 'spend';
+  return h === 'pipeline' || /^pipeline\/(work|signals|routing)$/.test(h) ? 'pipeline' : 'projects';
+}
+
+/** '#pipeline/signals' -> 'signals', '#pipeline/routing' -> 'routing'; anything else -> 'work'. */
+function parsePipeSub(hash) {
+  const m = /^pipeline\/(work|signals|routing)$/.exec(String(hash == null ? '' : hash).replace(/^#\/?/, '').trim().toLowerCase());
+  return m ? m[1] : 'work';
 }
 
 /** No hash -> the remembered tab (default projects); a hash always wins. */
@@ -638,9 +645,11 @@ function reviewRequest(sessionId, token) {
 
 /* ---------- Pipeline tab: pure helpers (Phase 4b step 6). Observe only; amber only for a pending decision. ---------- */
 
-const PIPE_STEPS = [['architect', 'Architect'], ['builder', 'Builder'], ['red-team', 'Red team'], ['merge', 'Merge']];
 const OUTCOME_LABEL = { pass: 'Pass', block: 'Block', needs_context: 'Needs context', error: 'Error', skipped: 'Skipped' };
 const ROLE_LABEL = { builder: 'Builder', 'red-team': 'Red team', scribe: 'Scribe', main: 'Main', auxiliary: 'Auxiliary', unattributed: 'Unattributed' };
+const PIPE_ROLE_KEYS = ['builder', 'red-team', 'scribe'];
+const PIPE_COLS = [['plan', 'Plan', 'Architect'], ['build', 'Build', 'Builder'], ['review', 'Review', 'Red team'], ['merge', 'Merge', '']];
+const PIPE_SUBS = [['work', 'Work'], ['signals', 'Signals'], ['routing', 'Routing']];
 const IDLE_LABEL = { 'no-task': 'No active task', 'gate-off': 'Gate off', 'latest-pass': 'Latest review passed' };
 const INSTALL_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];
 
@@ -674,25 +683,6 @@ function pipelineCounts(body) {
   };
 }
 
-/** Architect, Builder, Red team, Merge, each { key, label, state, status }; state is done | current | decision | pending. */
-function pipelineSteps(t) {
-  const stage = t ? t.stage : null;
-  const cur = stage === 'architect' ? 0 : stage === 'builder' ? 1 : (stage === 'red-team' || stage === 'decision') ? 2 : stage === 'ready' ? 3 : -1;
-  const step = t && typeof t.step === 'string' ? t.step : '';
-  const outcome = t && t.gate && t.gate.outcome ? t.gate.outcome : '';
-  return PIPE_STEPS.map((s, i) => {
-    let state = cur < 0 ? 'pending' : i < cur ? 'done' : i === cur ? 'current' : 'pending';
-    if (state === 'current' && stage === 'decision' && !(t && t.expired === true)) state = 'decision';
-    let status = 'Waiting';
-    if (state === 'done') {
-      status = i === 0 ? 'Spec written' : i === 1 ? 'Built' : (outcome ? 'Review: ' + (OUTCOME_LABEL[outcome] || outcome) : 'Reviewed');
-    } else if (state === 'current' || state === 'decision') {
-      status = step || (i === 0 ? 'Spec written' : i === 1 ? 'Building' : i === 2 ? 'In review' : 'Ready to merge');
-    }
-    return { key: s[0], label: s[1], state, status };
-  });
-}
-
 /** Outcome as a shape, so it reads without colour: pass dot, block slashed ring, needs_context question ring, error triangle, skipped dash. */
 function outcomeShape(outcome) {
   const open = '<svg class="oshape oshape-' + esc(outcome) + '" viewBox="0 0 16 16" aria-hidden="true">';
@@ -705,21 +695,11 @@ function outcomeShape(outcome) {
   return open + '<circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2 2"/></svg>';
 }
 
-/** Track step marker: done dot, current ring with dot, decision question ring (amber), pending dashed ring. */
-function stepShape(state) {
-  const open = '<svg class="tshape tshape-' + esc(state) + '" viewBox="0 0 16 16" aria-hidden="true">';
-  if (state === 'done') return open + '<circle cx="8" cy="8" r="4.5" fill="currentColor"/></svg>';
-  if (state === 'current') return open + '<circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2.4" fill="currentColor"/></svg>';
-  if (state === 'decision') return open + '<circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/>'
-    + '<path d="M6.2 6.3c0-1.9 3.6-1.9 3.6 0 0 1.3-1.8 1.4-1.8 2.6M8 11.1v.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
-  return open + '<circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2 2"/></svg>';
-}
-
 /** Findings list (collapsed): severity, kind, file:line, summary. Every string escaped; '' when none. */
-function findingsHtml(findings) {
+function findingsHtml(findings, open) {
   const list = Array.isArray(findings) ? findings : [];
   if (!list.length) return '';
-  return '<details class="pfind"><summary>' + list.length + (list.length === 1 ? ' finding' : ' findings') + '</summary><ul>'
+  return '<details class="pfind"' + (open === true ? ' open' : '') + '><summary>' + list.length + (list.length === 1 ? ' finding' : ' findings') + '</summary><ul>'
     + list.map((f) => {
       const loc = f && f.file ? esc(f.file) + (f.line !== null && Number.isFinite(f.line) ? ':' + esc(f.line) : '') : '';
       return '<li><span class="sev">' + esc(f && f.severity ? f.severity : '—') + '</span>'
@@ -736,29 +716,6 @@ function taskBrief(project, task) {
   const b = (Array.isArray(project.branches) ? project.branches : []).find((x) => x && x.name === want);
   if (!b || b.freshness === 'none' || b.freshness == null) return null;
   return { at: b.generatedAt != null && Number.isFinite(Number(b.generatedAt)) ? Number(b.generatedAt) : null };
-}
-
-/** One active task card. proj is the matching /api/projects entry (or null). */
-function taskCardHtml(projName, t, proj, nowMs) {
-  const expired = t.expired === true;
-  const open = isOpenDecision(t);
-  const steps = pipelineSteps(t);
-  const track = '<ol class="track">' + steps.map((s) => '<li class="tstep tstep-' + esc(s.state) + '">' + stepShape(s.state)
-    + '<span class="tname">' + esc(s.label) + '</span><span class="tstat">' + esc(s.status) + '</span></li>').join('') + '</ol>';
-  const started = relTime(t.startedAt, nowMs);
-  const money = usdEst(t.costUsd);
-  const runs = Number(t.reviewRuns) > 0 ? Math.floor(Number(t.reviewRuns)) : 0;
-  const meta = (money ? esc(money) + ' · ' : '') + runs + (runs === 1 ? ' review run' : ' review runs');
-  const brief = taskBrief(proj, t.task);
-  const scribe = brief ? '<div class="pscribe">Scribe · ' + (brief.at !== null ? 'brief updated ' + esc(relTime(brief.at, nowMs)) : 'brief on this branch') + '</div>' : '';
-  const repair = !expired && isRepair(t)
-    ? '<div class="prepair"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Repair loop'
-      + (Number(t.attempt) > 0 ? ' · attempt ' + esc(Math.floor(Number(t.attempt))) : '') + '</div>' : '';
-  return '<article class="ptask' + (expired ? ' expired' : '') + (open ? ' decision' : '') + '">'
-    + '<div class="ptask-head"><h3>' + esc(projName) + '</h3><span class="mono">' + esc(t.task) + '</span>'
-    + (expired ? '<span class="chip chip-none">Expired</span>' : '') + '</div>'
-    + '<div class="ptask-sub"><span class="mono">task/' + esc(t.task) + '</span>' + (started ? '<span>Started ' + esc(started) + '</span>' : '') + '</div>'
-    + track + repair + scribe + '<div class="pmeta num">' + meta + '</div>' + findingsHtml(t.findings) + '</article>';
 }
 
 /** Gate-state line for one project (shape + label + task + age). */
@@ -802,7 +759,7 @@ function perMergeLine(m) {
 function roleSpendHtml(rs) {
   if (!rs || rs.enabled !== true) return '<p class="empty-note">Spend history is off</p>';
   const roles = rs.roles || {};
-  const keys = Object.keys(ROLE_LABEL);
+  const keys = PIPE_ROLE_KEYS;   // the three pipeline roles; main, auxiliary and unattributed live in the Spend tab
   const costs = keys.map((k) => (roles[k] && Number(roles[k].costUsd) > 0 ? Number(roles[k].costUsd) : 0));
   const days = Number(rs.days) || 30;
   if (costs.reduce((a, b) => a + b, 0) <= 0) return '<p class="empty-note">No spend in the last ' + days + ' days</p>';
@@ -817,6 +774,21 @@ function roleSpendHtml(rs) {
   }).join('') + '</ul><p class="quiet-text rnote">Last ' + days + ' days · estimates from the local ledger</p>';
 }
 
+/** Friendly model name from the family word in the id (Haiku, Sonnet, Opus, Fable); the raw id when none matches; '' when empty. */
+function modelName(id) {
+  const raw = typeof id === 'string' ? id.trim() : '';
+  const m = /haiku|sonnet|opus|fable/i.exec(raw);
+  return m ? m[0].charAt(0).toUpperCase() + m[0].slice(1).toLowerCase() : raw;
+}
+
+/** Model cell markup: the friendly name, with the raw id in quieter text when it adds something. */
+function modelHtml(id) {
+  const raw = typeof id === 'string' ? id.trim() : '';
+  if (!raw) return '—';
+  const n = modelName(raw);
+  return esc(n) + (n.toLowerCase() !== raw.toLowerCase() ? ' <span class="quiet-text mono">' + esc(raw) + '</span>' : '');
+}
+
 /** Role routing: agent, role, model; then each project's red-team agent and fallback. */
 function routingHtml(routing, projects) {
   const models = routing && Array.isArray(routing.models) ? routing.models : [];
@@ -825,7 +797,7 @@ function routingHtml(routing, projects) {
   const rt = (routing && Array.isArray(routing.projects) ? routing.projects : []).filter((p) => p && p.redTeam);
   const dash = (v) => esc(v == null || v === '' ? '—' : v);
   return '<div class="table-wrap"><table class="route-table"><thead><tr><th>Agent</th><th>Role</th><th>Model</th></tr></thead><tbody>'
-    + (models.length ? models.map((m) => '<tr><td class="mono">' + dash(m.agent) + '</td><td>' + dash(ROLE_LABEL[m.role] || m.role) + '</td><td class="mono">' + dash(m.model) + '</td></tr>').join('')
+    + (models.length ? models.map((m) => '<tr><td class="mono">' + dash(m.agent) + '</td><td>' + dash(ROLE_LABEL[m.role] || m.role) + '</td><td>' + modelHtml(m.model) + '</td></tr>').join('')
       : '<tr><td colspan="3" class="quiet-text">No agents found</td></tr>')
     + '</tbody></table></div>'
     + (rt.length ? '<div class="table-wrap"><table class="route-table"><thead><tr><th>Project</th><th>Red-team agent</th><th>Fallback</th><th>On fallback</th></tr></thead><tbody>'
@@ -849,39 +821,318 @@ function pipelineHasData(body) {
   return !!(body.routing && Array.isArray(body.routing.projects) && body.routing.projects.some((p) => p && p.redTeam));
 }
 
-/** The whole Pipeline view body (below the title row). projectsList: /api/projects entries (for the Scribe line); may be empty. */
-function pipelineBody(body, projectsList, nowMs) {
+/* ---------- Pipeline tab: one-screen layout (Phase 4b addendum, L2). Observe only; amber only for a pending decision. ---------- */
+
+const MARK_TEXT = { done: 'done', current: 'in progress', waiting: 'waiting', block: 'review blocked', needs_context: 'needs context', error: 'review error' };
+const STAGE_FILTERS = [['all', 'All stages'], ['plan', 'Plan'], ['build', 'Build'], ['review', 'Review'], ['merge', 'Merge']];
+
+/** The small neutral label on the current Build step: "Building", "Fixing N", "Env. retry"; '' otherwise. */
+function buildLabel(step) {
+  const s = String(step == null ? '' : step);
+  const m = /^Fixing (\d+)/.exec(s);
+  if (m) return 'Fixing ' + m[1];
+  if (/^Retrying/.test(s)) return 'Env. retry';
+  return s === 'Building' ? 'Building' : '';
+}
+
+/**
+ * The four track cells for a task: { key, label, role, mark, dec, tag }.
+ * mark: done | current | waiting | block | needs_context | error. dec is true only for an open
+ * decision (the Review node). tag is the small neutral label (never coloured by state).
+ */
+function trackMarks(t) {
+  const stage = t ? t.stage : null;
+  const cur = { architect: 0, builder: 1, 'red-team': 2, decision: 2, ready: 3 }[stage];
+  const at = cur === undefined ? -1 : cur;
+  const oc = t && t.gate && t.gate.outcome ? t.gate.outcome : '';
+  const bad = oc === 'block' || oc === 'needs_context' || oc === 'error' ? oc : '';
+  return PIPE_COLS.map((c, i) => {
+    let mark = at < 0 ? 'waiting' : i < at ? 'done' : i === at ? 'current' : 'waiting';
+    let dec = false;
+    if (i === 2 && stage === 'decision') { mark = bad || 'needs_context'; dec = isOpenDecision(t); }
+    else if (i === 2 && stage === 'builder' && bad) mark = bad;   // the last review said no; the Builder is fixing it
+    let tag = '';
+    if (i === 1 && mark === 'current') tag = buildLabel(t.step);
+    if (i === 3 && mark === 'current') tag = 'Ready';
+    return { key: c[0], label: c[1], role: c[2], mark, dec, tag };
+  });
+}
+
+/** One track mark as a shape: done check, current node, waiting ring, block slash, question ring, error triangle. */
+function markSvg(mark, key, dec) {
+  const cls = 'mk mk-' + esc(mark) + ' role-' + esc(key) + (dec ? ' mk-dec' : '');
+  const open = '<svg class="' + cls + '" viewBox="0 0 16 16" aria-hidden="true">';
+  const ring = '<circle class="bg" cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.4"/>';
+  if (mark === 'done') return open + '<circle cx="8" cy="8" r="7" fill="currentColor"/><path class="chk" d="M4.8 8.2l2.2 2.2 4.2-4.6" fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  if (mark === 'current') return open + '<circle cx="8" cy="8" r="5.5" fill="currentColor"/></svg>';
+  if (mark === 'block') return open + ring + '<path d="M3.8 12.2L12.2 3.8" stroke="currentColor" stroke-width="1.4"/></svg>';
+  if (mark === 'needs_context') return open + ring + '<path d="M6.2 6.3c0-1.9 3.6-1.9 3.6 0 0 1.3-1.8 1.4-1.8 2.6M8 11.1v.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+  if (mark === 'error') return open + '<path class="bg" d="M8 2.5L14 13H2z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  return open + ring + '</svg>';
+}
+
+/** Which filter group a task belongs to: plan | build | review | merge, '' when unknown. */
+function stageGroup(t) {
+  const g = { architect: 'plan', builder: 'build', 'red-team': 'review', decision: 'review', ready: 'merge' }[t ? t.stage : ''];
+  return g || '';
+}
+
+/** Table rows after the project and stage filters; expired rows come last. Row: { key, project, t }. */
+function pipeRows(body, f) {
+  const fp = f && f.project ? f.project : 'all';
+  const fg = f && f.stage ? f.stage : 'all';
+  const active = [];
+  const expired = [];
+  for (const p of (body && Array.isArray(body.projects) ? body.projects : [])) {
+    if (!p || (fp !== 'all' && p.id !== fp)) continue;
+    for (const t of (Array.isArray(p.tasks) ? p.tasks : [])) {
+      if (!t || (fg !== 'all' && stageGroup(t) !== fg)) continue;
+      (t.expired === true ? expired : active).push({ key: String(p.id) + '/' + String(t.task), project: p, t });
+    }
+  }
+  return active.concat(expired);
+}
+
+/** The selected row: the remembered key if still listed, else the first open decision, else the first row. */
+function resolveSel(rows, sel) {
+  const list = Array.isArray(rows) ? rows : [];
+  return list.find((r) => r.key === sel) || list.find((r) => isOpenDecision(r.t)) || list[0] || null;
+}
+
+/** Arrow-key movement: the key of the row dir (-1 or 1) away from the selection, clamped; null with no rows. */
+function moveSel(rows, sel, dir) {
+  const list = Array.isArray(rows) ? rows : [];
+  const cur = resolveSel(list, sel);
+  if (!cur) return null;
+  const i = Math.max(0, Math.min(list.length - 1, list.indexOf(cur) + (dir < 0 ? -1 : 1)));
+  return list[i].key;
+}
+
+/** One ~34px table row: task + project, branch, the four track cells, cost. */
+function rowHtml(r, selKey) {
+  const t = r.t;
+  const open = isOpenDecision(t);
+  const exp = t.expired === true;
+  const cells = trackMarks(t).map((m) => {
+    const what = m.dec ? 'needs a decision' : (MARK_TEXT[m.mark] || m.mark);
+    return '<div class="tcell tc-' + m.key + '"><span class="tmark" role="img" aria-label="' + esc(m.label + ': ' + what + (m.tag ? ', ' + m.tag : '')) + '">'
+      + markSvg(m.mark, m.key, m.dec) + (m.tag ? '<span class="tlabel">' + esc(m.tag) + '</span>' : '') + '</span></div>';
+  }).join('');
+  const money = usdEst(t.costUsd);
+  const on = r.key === selKey;
+  return '<div class="prow' + (on ? ' sel' : '') + (open ? ' decision' : '') + (exp ? ' expired' : '') + '" role="row" tabindex="0" data-sel="' + esc(r.key)
+    + '" aria-selected="' + on + '">'
+    + '<div class="pcell-task"><span class="ptname">' + esc(t.task) + '</span><span class="ptproj">' + esc(r.project.name) + (exp ? ' · expired' : '') + '</span></div>'
+    + '<div class="pcell-branch mono">task/' + esc(t.task) + '</div>' + cells
+    + '<div class="pcell-cost num">' + (money ? esc(money) : '') + '</div></div>';
+}
+
+/** Project and stage filters (no search). */
+function pipeFiltersHtml(body, ui) {
+  const projs = (body && Array.isArray(body.projects) ? body.projects : []).filter((p) => p && p.id != null);
+  const opt = (v, label, cur) => '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc(label) + '</option>';
+  return '<div class="pfilters"><label>Project <select data-pf="project" aria-label="Project">' + opt('all', 'All projects', ui.project)
+    + projs.map((p) => opt(p.id, p.name, ui.project)).join('') + '</select></label>'
+    + '<label>Stage <select data-pf="stage" aria-label="Stage">' + STAGE_FILTERS.map((s) => opt(s[0], s[1], ui.stage)).join('') + '</select></label></div>';
+}
+
+/** The collapsed "Idle repositories (N)" row; the idle lines show when it opens. '' when there are none. */
+function idleHtml(body, ui) {
+  const idle = (body && Array.isArray(body.projects) ? body.projects : [])
+    .filter((p) => p && p.idle && !(Array.isArray(p.tasks) && p.tasks.length) && (ui.project === 'all' || p.id === ui.project));
+  if (!idle.length) return '';
+  return '<details class="pidle"><summary>Idle repositories (' + idle.length + ')</summary><ul class="idle">'
+    + idle.map((p) => '<li><strong>' + esc(p.name) + '</strong><span class="quiet-text">' + esc(IDLE_LABEL[p.idle] || IDLE_LABEL['no-task']) + '</span></li>').join('') + '</ul></details>';
+}
+
+/** Bottom strip: outcome shapes with n, rework (n), red-team cost per merge (est., n, excluded), link to Signals. */
+function stripHtml(body) {
+  const sg = body && body.signals ? body.signals : {};
+  const o = sg.outcomes || {};
+  const n = Number(o.n) > 0 ? Math.floor(Number(o.n)) : 0;
+  const outs = n
+    ? ['pass', 'block', 'needs_context', 'error', 'skipped'].map((k) => {
+      const c = Number(o[k]) > 0 ? Math.floor(Number(o[k])) : 0;
+      return '<span class="soc">' + outcomeShape(k) + esc(OUTCOME_LABEL[k]) + ' <strong class="num">' + c + '</strong></span>';
+    }).join('') + '<span class="quiet-text num">n=' + n + '</span>'
+    : '<span class="quiet-text num">No review runs in 30 days (n=0)</span>';
+  return '<div class="pstrip"><span class="sgroup">' + outs + '</span><span class="sgroup">' + esc(reworkLine(sg.rework)) + '</span>'
+    + '<span class="sgroup">' + esc(perMergeLine(body ? body.redTeamPerMerge : null)) + '</span>'
+    + '<a class="slink" href="#pipeline/signals">Signals</a></div>';
+}
+
+/** The Work sub-tab: filters, the table, idle repositories, the bottom strip. */
+function workHtml(body, ui) {
+  const all = pipeRows(body, { project: 'all', stage: 'all' });
+  const rows = pipeRows(body, ui);
+  const sel = resolveSel(rows, ui.sel);
+  const head = '<div class="phead-row" role="row"><div>Task</div><div>Branch</div>'
+    + PIPE_COLS.map((c) => '<div class="tcell">' + esc(c[1]) + (c[2] ? '<span class="trole">' + esc(c[2]) + '</span>' : '') + '</div>').join('') + '<div class="pcell-cost">Cost</div></div>';
+  const table = rows.length
+    ? '<div class="ptable" role="table" aria-label="Active tasks">' + head + rows.map((r) => rowHtml(r, sel ? sel.key : null)).join('') + '</div>'
+    : '<p class="empty-note">' + (all.length ? 'No tasks match these filters' : 'No active tasks') + '</p>';
+  return pipeFiltersHtml(body, ui) + table + idleHtml(body, ui) + stripHtml(body);
+}
+
+/** Signals sub-tab: gate state per project, 30-day outcomes, rework, red-team cost per merge, role spend. */
+function signalsHtml(body, nowMs) {
+  const names = {};
+  for (const p of (body && Array.isArray(body.projects) ? body.projects : [])) if (p) names[p.id] = p.name;
+  const sg = body.signals || {};
+  const gp = Array.isArray(sg.projects) ? sg.projects : [];
+  const gates = gp.filter((g) => g && g.gate).map((g) => gateLine(names[g.id] || g.id || 'Unknown project', g.gate, nowMs));
+  const quiet = gp.filter((g) => g && !g.gate).map((g) => '<li>' + esc(names[g.id] || g.id || 'Unknown project') + '</li>');
+  const days = Number(sg.days) || 30;
+  const gateBox = (gates.length ? '<ul class="glist ggrid">' + gates.join('') + '</ul>' : '')
+    + (quiet.length ? '<details class="pidle"><summary>' + quiet.length + (quiet.length === 1 ? ' project' : ' projects') + ' with no review in ' + days + ' days</summary><ul class="idle quiet-list">' + quiet.join('') + '</ul></details>' : '')
+    + (gp.length ? '' : '<p class="empty-note">No projects</p>');
+  return '<div class="sig"><h3>Gate state</h3>' + gateBox + '</div>'
+    + '<div class="sig"><h3>Review outcomes<span class="sub"> Last ' + (Number(sg.days) || 30) + ' days</span></h3>' + outcomesHtml(sg.outcomes) + '</div>'
+    + '<div class="sig"><h3>Rework and cost</h3><p>' + esc(reworkLine(sg.rework)) + '</p><p>' + esc(perMergeLine(body.redTeamPerMerge)) + '</p></div>'
+    + '<div class="sig"><h3>Spend by pipeline role</h3>' + roleSpendHtml(body.roleSpend) + '</div>';
+}
+
+/** Routing sub-tab: role to model, and each project's red-team policy. */
+function routingTabHtml(body) {
+  return '<div class="sig"><h3>Role routing</h3>' + routingHtml(body.routing, body.projects) + '</div>';
+}
+
+/** Sub-tab links, kept in the route. */
+function subtabsHtml(sub) {
+  return '<nav class="subtabs" aria-label="Pipeline views">' + PIPE_SUBS.map((s) => '<a href="#pipeline' + (s[0] === 'work' ? '' : '/' + s[0]) + '" class="' + (s[0] === sub ? 'on' : '')
+    + '"' + (s[0] === sub ? ' aria-current="page"' : '') + '>' + esc(s[1]) + '</a>').join('') + '</nav>';
+}
+
+/** Normalised UI state: sub, project, stage, sel. */
+function pipeUi(ui) {
+  const u = ui && typeof ui === 'object' ? ui : {};
+  return {
+    sub: u.sub === 'signals' || u.sub === 'routing' ? u.sub : 'work',
+    project: typeof u.project === 'string' && u.project ? u.project : 'all',
+    stage: typeof u.stage === 'string' && u.stage ? u.stage : 'all',
+    sel: typeof u.sel === 'string' ? u.sel : null,
+  };
+}
+
+/** The whole Pipeline view body (below the title row). */
+function pipelineBody(body, projectsList, ui, nowMs) {
   if (!body) return '<div class="state-panel"><h2>Pipeline is unavailable right now</h2><p>Sereno will try again on the next refresh.</p></div>';
   const plugin = body.plugin;
   const installed = !!plugin && plugin.installed !== false;
   if (!pipelineHasData(body) && !installed) return installHtml();
+  const u = pipeUi(ui);
   const c = pipelineCounts(body);
-  const byId = {};
-  for (const p of (Array.isArray(projectsList) ? projectsList : [])) if (p) byId[p.id] = p;
-  const projs = Array.isArray(body.projects) ? body.projects : [];
-  const cards = [];
-  const idle = [];
-  const names = {};
-  for (const p of projs) {
-    names[p.id] = p.name;
-    const tasks = Array.isArray(p.tasks) ? p.tasks : [];
-    for (const t of tasks) cards.push(taskCardHtml(p.name, t, byId[p.id] || null, nowMs));
-    if (p.idle && !tasks.length) idle.push('<li><strong>' + esc(p.name) + '</strong><span class="quiet-text">' + esc(IDLE_LABEL[p.idle] || IDLE_LABEL['no-task']) + '</span></li>');
-  }
-  const sg = body.signals || {};
-  const gates = (Array.isArray(sg.projects) ? sg.projects : []).map((g) => gateLine(names[g.id] || g.id || 'Unknown project', g.gate, nowMs));
   const summary = c.active + (c.active === 1 ? ' active task' : ' active tasks') + ' · ' + c.repairs + (c.repairs === 1 ? ' repair' : ' repairs') + ' · '
     + c.decisions + (c.decisions === 1 ? ' decision' : ' decisions') + ' · ' + c.runs + (c.runs === 1 ? ' run' : ' runs') + ' this week';
-  return '<p class="summary">' + esc(summary) + '</p>'
-    + '<div class="section-top"><h2>Active tasks</h2></div>'
-    + (cards.length ? '<div class="ptasks">' + cards.join('') + '</div>' : '<p class="empty-note">No active tasks</p>')
-    + (idle.length ? '<div class="section-top"><h2>Idle repos</h2></div><ul class="idle">' + idle.join('') + '</ul>' : '')
-    + '<div class="section-top"><h2>Signals<span class="sub">Last ' + (Number(sg.days) || 30) + ' days</span></h2></div>'
-    + '<div class="sig"><h3>Gate state</h3>' + (gates.length ? '<ul class="glist">' + gates.join('') + '</ul>' : '<p class="empty-note">No projects</p>') + '</div>'
-    + '<div class="sig"><h3>Review outcomes</h3>' + outcomesHtml(sg.outcomes) + '</div>'
-    + '<div class="sig"><h3>Rework and cost</h3><p>' + esc(reworkLine(sg.rework)) + '</p><p>' + esc(perMergeLine(body.redTeamPerMerge)) + '</p></div>'
-    + '<div class="sig"><h3>Spend by role</h3>' + roleSpendHtml(body.roleSpend) + '</div>'
-    + '<div class="sig"><h3>Role routing</h3>' + routingHtml(body.routing, projs) + '</div>';
+  const content = u.sub === 'signals' ? signalsHtml(body, nowMs) : u.sub === 'routing' ? routingTabHtml(body) : workHtml(body, u);
+  return '<p class="summary">' + esc(summary) + '</p>' + subtabsHtml(u.sub) + content;
+}
+
+/** A live top-level session id inside the project's repo (from /api/projects p.live.sessionIds and /state), or null. */
+function liveSessionId(projectId, projectsList, sessions) {
+  const p = (Array.isArray(projectsList) ? projectsList : []).find((x) => x && x.id === projectId);
+  const ids = p && p.live && Array.isArray(p.live.sessionIds) ? p.live.sessionIds : [];
+  const hit = topSessions({ sessions }).find((s) => !s.stale && typeof s.id === 'string' && ids.indexOf(s.id) >= 0);
+  return hit ? hit.id : null;
+}
+
+/** Text for one timeline step. */
+function timelineText(m, t) {
+  if (m.dec) return 'Needs a decision';
+  const oc = t && t.gate && t.gate.outcome ? (OUTCOME_LABEL[t.gate.outcome] || t.gate.outcome) : '';
+  if (m.mark === 'block' || m.mark === 'needs_context' || m.mark === 'error') return 'Review: ' + (OUTCOME_LABEL[m.mark] || m.mark);
+  if (m.mark === 'waiting') return 'Waiting';
+  if (m.mark === 'current') return m.tag || (m.key === 'review' ? 'In review' : m.key === 'plan' ? 'Spec written' : 'In progress');
+  if (m.key === 'plan') return 'Spec written';
+  if (m.key === 'build') return 'Built';
+  return m.key === 'review' ? (oc ? 'Review: ' + oc : 'Reviewed') : 'Done';
+}
+
+/** One activity line from the API's { at, kind, outcome }; '' for an unknown kind. */
+function activityText(e) {
+  const oc = e && e.outcome ? (OUTCOME_LABEL[e.outcome] || e.outcome) : '';
+  if (!e) return '';
+  if (e.kind === 'spec') return 'Spec written';
+  if (e.kind === 'attempt-start') return 'Attempt started';
+  if (e.kind === 'attempt-end') return 'Attempt ended' + (oc ? ': ' + oc : '');
+  if (e.kind === 'gate') return 'Review' + (oc ? ': ' + oc : '');
+  return '';
+}
+
+/**
+ * The selected-task panel. ctx: { project: /api/projects entry or null, sid: live session id or null,
+ * pinned: session ids already offered in the pinned decision block, opts: reviewControl opts, nowMs }.
+ */
+function panelHtml(row, ctx) {
+  if (!row) return '';
+  const t = row.t;
+  const c = ctx || {};
+  const nowMs = c.nowMs;
+  const open = isOpenDecision(t);
+  const exp = t.expired === true;
+  const marks = trackMarks(t);
+  const acts = Array.isArray(t.activity) ? t.activity : [];
+  const specAt = acts.find((e) => e && e.kind === 'spec');
+  const starts = (Array.isArray(t.attempts) ? t.attempts : []).map((a) => Number(a && a.startedAt)).filter(Number.isFinite);
+  const gateAt = t.gate && t.gate.reviewed_at ? Date.parse(t.gate.reviewed_at) : NaN;
+  const times = { plan: specAt ? specAt.at : null, build: starts.length ? Math.min.apply(null, starts) : null, review: Number.isFinite(gateAt) ? gateAt : null, merge: null };
+  const pill = open
+    ? '<span class="pill-amber">' + ringIcon() + 'Needs a decision</span>'
+    : '<span class="pill-neutral">' + esc(exp ? 'Expired' : (t.step || 'Status unavailable')) + '</span>';
+  const tl = '<ol class="ptl">' + marks.map((m) => {
+    const when = times[m.key] != null ? relTime(times[m.key], nowMs) : '';
+    return '<li class="ptl-' + esc(m.mark) + (m.dec ? ' ptl-dec' : '') + '">' + markSvg(m.mark, m.key, m.dec)
+      + '<span class="ptl-name">' + esc(m.label + (m.role ? ' · ' + m.role : '')) + '</span><span class="ptl-stat">' + esc(timelineText(m, t)) + '</span>'
+      + (when ? '<span class="ptl-time quiet-text">' + esc(when) + '</span>' : '') + '</li>';
+  }).join('') + '</ol>';
+  const runs = Number(t.reviewRuns) > 0 ? Math.floor(Number(t.reviewRuns)) : 0;
+  const money = usdEst(t.costUsd);
+  const started = relTime(t.startedAt, nowMs);
+  const brief = taskBrief(c.project, t.task);
+  const briefText = brief ? (brief.at !== null ? 'Updated ' + relTime(brief.at, nowMs) : 'On this branch') : 'No brief';
+  const kv = '<dl class="pkv"><dt>Cost</dt><dd class="num">' + (money ? esc(money) : '—') + '</dd>'
+    + '<dt>Review runs</dt><dd class="num">' + runs + '</dd>'
+    + '<dt>Started</dt><dd>' + (started ? esc(started) : '—') + '</dd>'
+    + '<dt>Builder model</dt><dd' + (t.builderModel ? ' title="' + esc(t.builderModel) + '"' : '') + '>' + (t.builderModel ? esc(modelName(t.builderModel)) : '—') + '</dd>'
+    + '<dt>Brief</dt><dd>' + esc(briefText) + '</dd></dl>';
+  const pinned = Array.isArray(c.pinned) ? c.pinned : [];
+  const review = c.sid && pinned.indexOf(c.sid) < 0 ? reviewControl({ sessionId: c.sid }, c.opts) : '';
+  const attempts = Array.isArray(t.attempts) ? t.attempts : [];
+  const attList = attempts.length
+    ? '<h4>Attempts</h4><ul class="plist2">' + attempts.map((a) => {
+      const s = a && a.startedAt != null ? relTime(a.startedAt, nowMs) : '';
+      const e = a && a.endedAt != null ? relTime(a.endedAt, nowMs) : '';
+      return '<li><span class="num">#' + esc(a && a.attempt != null ? a.attempt : '?') + '</span><span>' + esc(a && a.outcome ? (OUTCOME_LABEL[a.outcome] || a.outcome) : '—') + '</span>'
+        + '<span class="quiet-text">' + (s ? 'started ' + esc(s) : '') + (e ? ' · ended ' + esc(e) : '') + '</span></li>';
+    }).join('') + '</ul>' : '';
+  const actLines = acts.map((e) => ({ e, line: activityText(e) })).filter((x) => x.line);
+  const actList = actLines.length
+    ? '<h4>Recent activity</h4><ul class="plist2">' + actLines.map((x) => '<li><span>' + esc(x.line) + '</span><span class="quiet-text">' + esc(relTime(x.e.at, nowMs)) + '</span></li>').join('') + '</ul>' : '';
+  const find = Array.isArray(t.findings) && t.findings.length ? '<h4>Latest findings</h4>' + findingsHtml(t.findings, true) : '';
+  return '<section class="ppanel' + (open ? ' ppanel-dec' : '') + '" aria-label="Selected task"><div class="ppanel-head"><h2 class="mono">' + esc(t.task) + '</h2>' + pill + '</div>'
+    + '<div class="ppanel-sub"><span>' + esc(row.project.name) + '</span><span class="mono">task/' + esc(t.task) + '</span></div>'
+    + tl + kv + review + find + attList + actList + '</section>';
+}
+
+/**
+ * The right column on the Pipeline tab: the pinned attention block (a decision, or a stalled note) and,
+ * on the Work sub-tab, the selected-task panel. ctx: { sessions, projectsList, opts, nowMs }.
+ */
+function pipelineSideHtml(st, body, ui, ctx) {
+  const c = ctx || {};
+  const u = pipeUi(ui);
+  const pinned = st && !st.unavailable && (st.amber || (Array.isArray(st.stalled) && st.stalled.length)) ? attentionHtml(st, c.nowMs, c.opts) : '';
+  let panel = '';
+  if (body && u.sub === 'work' && (pipelineHasData(body) || (body.plugin && body.plugin.installed !== false))) {
+    const row = resolveSel(pipeRows(body, u), u.sel);
+    if (row) {
+      const sids = [];
+      for (const d of (st && Array.isArray(st.decisions) ? st.decisions : [])) if (d.sessionId) sids.push(d.sessionId);
+      panel = panelHtml(row, { project: (Array.isArray(c.projectsList) ? c.projectsList : []).find((p) => p && p.id === row.project.id) || null,
+        sid: liveSessionId(row.project.id, c.projectsList, c.sessions), pinned: sids, opts: c.opts, nowMs: c.nowMs });
+    }
+  }
+  return pinned || panel ? pinned + panel : attentionHtml(st || { amber: false, count: 0, items: [] }, c.nowMs, c.opts);
 }
 
 /* ---------- state ---------- */
@@ -896,7 +1147,7 @@ const state = {
   attn: null, attnToken: 0,   // attn: attentionState() output, { unavailable: true }, or null before the first read
   route: 'projects',
   proj: { mode: 'loading', list: [], filter: 'all', showHidden: false, token: 0, lastOk: null },
-  pipe: { mode: 'loading', body: null, token: 0, lastOk: null },
+  pipe: { mode: 'loading', body: null, token: 0, lastOk: null, sub: 'work', project: 'all', stage: 'all', sel: null },
   sessions: [],               // /state sessions, for the Projects summary, filters and live strip
   liveMap: {}, liveSig: '', seenIds: new Set(),   // client-side live states from the SSE stream
   apiToken: null, reviewNA: false, reviewMsgs: {},
@@ -1058,8 +1309,12 @@ function titleRow() {
 function renderAttention() {
   const box = document.getElementById('attn');
   if (box) {
-    setHtml(box, attentionHtml(state.attn || { amber: false, count: 0, items: [] }, Date.now(),
-      { review: true, na: state.reviewNA, msgs: state.reviewMsgs }));
+    const opts = { review: true, na: state.reviewNA, msgs: state.reviewMsgs };
+    if (state.route === 'pipeline') {
+      setHtml(box, pipelineSideHtml(state.attn, state.pipe.mode === 'data' ? state.pipe.body : null, pipeUiOf(), { sessions: state.sessions, projectsList: state.proj.list, opts, nowMs: Date.now() }));
+    } else {
+      setHtml(box, attentionHtml(state.attn || { amber: false, count: 0, items: [] }, Date.now(), opts));
+    }
   }
   const slot = document.getElementById('pill-slot');
   if (slot && state.route !== 'pipeline') setHtml(slot, pillHtml(state.attn && state.attn.amber ? state.attn.count : 0));   // the Pipeline pill counts decisions only
@@ -1120,14 +1375,23 @@ function pipelineTitle() {
   return '<div class="title-row"><h1>Pipeline</h1><span id="pill-slot">' + pillHtml(c.decisions) + '</span></div>';
 }
 
+function pipeUiOf() {
+  const p = state.pipe;
+  return { sub: p.sub, project: p.project, stage: p.stage, sel: p.sel };
+}
+
 function renderPipeline() {
   if (state.route !== 'pipeline') return;
   const view = document.getElementById('view');
   const p = state.pipe;
   view.setAttribute('aria-busy', p.mode === 'loading' ? 'true' : 'false');
-  if (p.mode === 'loading') { setHtml(view, ''); return; }
-  if (p.mode === 'unavailable') { setHtml(view, pipelineTitle() + pipelineBody(null, [], Date.now())); return; }
-  setHtml(view, pipelineTitle() + pipelineBody(p.body, state.proj.list, Date.now()));
+  if (p.mode === 'loading') { setHtml(view, ''); renderAttention(); return; }
+  if (p.mode === 'unavailable') { setHtml(view, pipelineTitle() + pipelineBody(null, [], pipeUiOf(), Date.now())); renderAttention(); return; }
+  const ae = document.activeElement;
+  const keep = ae && ae.getAttribute && view.contains(ae) ? (ae.getAttribute('data-sel') !== null ? '.prow[data-sel]' : ae.getAttribute('data-pf') !== null ? 'select[data-pf="' + ae.getAttribute('data-pf') + '"]' : '') : '';
+  setHtml(view, pipelineTitle() + pipelineBody(p.body, state.proj.list, pipeUiOf(), Date.now()));
+  if (keep) { const el = keep.indexOf('.prow') === 0 ? view.querySelector('.prow.sel') : view.querySelector(keep); if (el) el.focus(); }   // a refresh must not drop keyboard focus
+  renderAttention();
 }
 
 /* ---------- data ---------- */
@@ -1288,6 +1552,10 @@ function refreshActive() {
 
 function applyRoute(route, first) {
   state.route = route;
+  if (route === 'pipeline') state.pipe.sub = parsePipeSub(location.hash);
+  const bodyEl = document.querySelector('.body');
+  if (bodyEl) bodyEl.classList.toggle('pipe', route === 'pipeline');
+  renderAttention();   // the right column differs per tab
   document.querySelectorAll('.nav-item').forEach((a) => {
     const on = a.getAttribute('data-route') === route;
     a.classList.toggle('active', on);
@@ -1332,8 +1600,29 @@ function boot() {
   loadRange();
   const host = document.getElementById('foot-host');
   if (host) host.textContent = location.host + '/console';
-  document.getElementById('view').addEventListener('click', (e) => {
+  const viewEl = document.getElementById('view');
+  viewEl.addEventListener('change', (e) => {
+    const sel = e.target && e.target.closest ? e.target.closest('select[data-pf]') : null;
+    if (!sel) return;
+    state.pipe[sel.getAttribute('data-pf') === 'stage' ? 'stage' : 'project'] = sel.value;
+    renderPipeline();
+  });
+  viewEl.addEventListener('keydown', (e) => {
+    if (state.route !== 'pipeline' || state.pipe.sub !== 'work' || state.pipe.mode !== 'data') return;
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    if (e.target && e.target.tagName === 'SELECT') return;
+    e.preventDefault();
+    const key = moveSel(pipeRows(state.pipe.body, pipeUiOf()), state.pipe.sel, e.key === 'ArrowUp' ? -1 : 1);
+    if (key === null) return;
+    state.pipe.sel = key;
+    renderPipeline();
+    const on = viewEl.querySelector('.prow.sel');
+    if (on) on.focus();
+  });
+  viewEl.addEventListener('click', (e) => {
     const tgt = e.target && e.target.closest ? e.target : null;
+    const rowEl = tgt ? tgt.closest('.prow[data-sel]') : null;
+    if (rowEl) { state.pipe.sel = rowEl.getAttribute('data-sel'); renderPipeline(); return; }
     const act = tgt ? tgt.closest('button[data-act], button[data-filter]') : null;
     if (act) {
       const f = act.getAttribute('data-filter');
@@ -1365,6 +1654,7 @@ function boot() {
   window.addEventListener('hashchange', () => {
     const r = parseRoute(location.hash);
     if (r !== state.route) applyRoute(r, false);
+    else if (r === 'pipeline') { state.pipe.sub = parsePipeSub(location.hash); renderPipeline(); }
   });
   window.addEventListener('focus', () => { if (state.route === 'projects') refreshProjects(); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshActive(); });
