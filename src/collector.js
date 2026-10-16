@@ -9,7 +9,7 @@
  *   GET  /state   -> one snapshot as JSON
  *   POST /v1/logs, /v1/traces <- OTLP/JSON (only with a ledger; else 200 and drop)
  *   GET  /ledger/summary -> ledger totals
- *   GET  /api/spend/{today,series,projects,top-prompts} -> spend views (ledger only)
+ *   GET  /api/spend/{today,series,projects,top-prompts,overview,where,cache,project} -> spend views (ledger only)
  *   GET  /api/projects, /api/pipeline, /api/token; POST /api/review, /api/projects/<id>/hide|pin (guarded)
  *   GET  /console[/*] -> the console pages (src/renderer/console)
  *   GET  /        -> the widget page (also works in a plain browser tab)
@@ -131,6 +131,8 @@ function serveStatic(res, dir, rel) {
 
 const SPEND_RANGES_SERIES = ['24h', '7d', '30d'];
 const SPEND_RANGES_PERIOD = ['7d', '30d', 'month'];
+const SPEND_RANGES_CACHE = ['24h', '7d', '30d', 'month'];
+const SPEND_TOP_PROJECTS = 8;
 
 function createCollector(store, port, opts) {
   // Swappable at runtime (setLedger): the tray toggles it without a restart.
@@ -284,7 +286,7 @@ function createCollector(store, port, opts) {
   // can leak into the API by accident.
   function handleApi(req, res, url) {
     if (url === '/api/pipeline') { sendJson(res, 200, buildPipeline()); return; }
-    const m = /^\/api\/spend\/(today|series|projects|top-prompts)$/.exec(url);
+    const m = /^\/api\/spend\/(today|series|projects|top-prompts|overview|where|cache|project)$/.exec(url);
     if (!m) { res.writeHead(404, { 'content-type': 'text/plain' }).end('not found'); return; }
     if (!ledger) { sendJson(res, 200, { enabled: false }); return; }
     let sp;
@@ -312,6 +314,83 @@ function createCollector(store, port, opts) {
             key: r.key, since: spec[i].since, until: spec[i].until, costMicros: r.costMicros, requests: r.requests,
             bySource: pick(r.bySource), byAttribution: pick(r.byAttribution),
           })),
+        });
+        return;
+      }
+      if (m[1] === 'overview') {
+        const td = spendtime.dayBounds(asOf);
+        const mo = spendtime.monthStart(asOf);
+        const t = ledger.breakdown({ since: td.since, until: td.until });
+        const mt = ledger.breakdown({ since: mo, until: td.until });
+        sendJson(res, 200, {
+          enabled: true, asOf,
+          today: { day: td.day, since: td.since, until: td.until, costMicros: t.costMicros, requests: t.requests, unattributedMicros: t.unattributedMicros, unattributedN: t.unattributedN },
+          month: { since: mo, until: td.until, costMicros: mt.costMicros, requests: mt.requests, unattributedMicros: mt.unattributedMicros, unattributedN: mt.unattributedN },
+        });
+        return;
+      }
+      if (m[1] === 'cache') {
+        const range = sp.get('range') === null ? '7d' : sp.get('range');
+        if (!SPEND_RANGES_CACHE.includes(range)) return bad('range must be 24h, 7d, 30d or month');
+        const dEnd = spendtime.dayBounds(asOf).until;
+        let w;
+        if (range === '24h') { const hb = spendtime.hourBuckets(asOf); w = { since: hb[0].since, until: hb[hb.length - 1].until }; }
+        else if (range === 'month') w = { since: spendtime.monthStart(asOf), until: dEnd };
+        else w = { since: spendtime.lastNDays(range === '7d' ? 7 : 30, asOf)[0].since, until: dEnd };
+        const ct = ledger.cacheTotals(w);
+        // read share of all input-side tokens: read / (read + creation + uncached input); null when there are none
+        const denom = ct.cacheReadTokens + ct.cacheCreationTokens + ct.inputTokens;
+        sendJson(res, 200, {
+          enabled: true, asOf, range, since: w.since, until: w.until, requests: ct.requests,
+          cacheReadTokens: ct.cacheReadTokens, cacheCreationTokens: ct.cacheCreationTokens, inputTokens: ct.inputTokens,
+          cacheReadSharePct: denom > 0 ? Math.round(ct.cacheReadTokens / denom * 1000) / 10 : null,
+        });
+        return;
+      }
+      if (m[1] === 'project') {
+        const name = sp.get('name');
+        if (name === null || name === '' || name.length > 200) return bad('name is required (1-200 chars)');
+        const d = spendtime.dayBounds(asOf);
+        const since = spendtime.monthStart(asOf);
+        const days = spendtime.lastNDays(14, asOf);
+        const r = ledger.projectDetail({ project: name, since, until: d.until });
+        sendJson(res, 200, {
+          enabled: true, asOf, project: name, since, until: d.until, costMicros: r.costMicros, requests: r.requests,
+          bySource: pick(r.bySource), byAttribution: pick(r.byAttribution), byAttributionN: pick(r.byAttributionN),
+          trend: ledger.trend({ project: name, buckets: days }),
+        });
+        return;
+      }
+      if (m[1] === 'where') {
+        const range = sp.get('range') === null ? 'month' : sp.get('range');
+        if (!SPEND_RANGES_PERIOD.includes(range)) return bad('range must be 7d, 30d or month');
+        const until = spendtime.dayBounds(asOf).until;
+        const since = range === 'month' ? spendtime.monthStart(asOf) : spendtime.lastNDays(range === '7d' ? 7 : 30, asOf)[0].since;
+        const tv = sp.get('top');
+        const rawTop = tv !== null && tv.trim() !== '' && Number.isFinite(Number(tv)) ? Math.floor(Number(tv)) : SPEND_TOP_PROJECTS;
+        const top = Math.min(50, Math.max(1, rawTop));
+        const p = ledger.projects({ since, until });
+        const days = spendtime.lastNDays(14, asOf);
+        const tr = ledger.trends({ buckets: days });
+        const src = (o) => ({ main: o.main || 0, subagent: o.subagent || 0, auxiliary: o.auxiliary || 0 });
+        const shape = (r) => ({
+          project: r.project, costMicros: r.costMicros, requests: r.requests, bySource: src(r.bySource),
+          trend: (tr.get(r.project ?? null) || days.map(() => 0)).slice(),
+        });
+        const rows = p.rows.slice(0, top).map(shape);
+        const rest = p.rows.slice(top);
+        const other = { count: rest.length, costMicros: 0, requests: 0, bySource: src({}), trend: days.map(() => 0) };
+        for (const r of rest) {
+          other.costMicros += r.costMicros; other.requests += r.requests;
+          for (const k of ['main', 'subagent', 'auxiliary']) other.bySource[k] += r.bySource[k] || 0;
+          (tr.get(r.project ?? null) || []).forEach((v, i) => { other.trend[i] += v; });
+        }
+        let totalCost = other.costMicros, totalReq = other.requests;
+        for (const r of rows) { totalCost += r.costMicros; totalReq += r.requests; }
+        sendJson(res, 200, {
+          enabled: true, asOf, range, since, until, rows, other,
+          total: { costMicros: totalCost, requests: totalReq },
+          unattributed: { costMicros: p.unattributed.costMicros, requests: p.unattributed.requests },
         });
         return;
       }

@@ -12601,6 +12601,282 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  // ---- [alpha6-spend-api] Spend redesign API: overview, where, cache, project ----
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const NOW = new Date(2026, 5, 20, 12, 30).getTime();   // Sat 20 Jun 2026, 12:30 local
+    const at = (d, h, m) => new Date(2026, 5, d, h, m || 0).getTime();
+    const rec = (o) => Object.assign({ requestKey: 'k', requestId: null, sessionId: 's', promptId: null, ts: NOW,
+      model: 'ma', querySource: null, source: 'main', agentName: null, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 0, durationMs: 0 }, o);
+    const pid = (i) => 'p' + String(i).padStart(2, '0');
+    const sid = (i) => 'sess-' + String(i).padStart(4, '0') + '-long-session-id';
+    const seed = () => {
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      for (let i = 1; i <= 12; i++) l.recordHook('SessionStart', { session_id: sid(i), cwd: 'C:\\work\\' + pid(i) });
+      const rows = [];
+      for (let i = 1; i <= 12; i++) rows.push(rec({ requestKey: 'base' + i, sessionId: sid(i), ts: at(19, 10), costMicros: (13 - i) * 1000, inputTokens: 10, cacheReadTokens: 100, cacheCreationTokens: 20 }));
+      rows.push(rec({ requestKey: 'sub1', sessionId: sid(1), ts: at(20, 12, 10), source: 'subagent', costMicros: 500, inputTokens: 5, cacheReadTokens: 50 }));
+      rows.push(rec({ requestKey: 'old1', sessionId: sid(1), ts: new Date(2026, 4, 30, 10).getTime(), costMicros: 7777, inputTokens: 1 }));
+      rows.push(rec({ requestKey: 'pa1', sessionId: sid(2), promptId: 'pr-a', ts: at(18, 9), model: 'mb', costMicros: 200 }));
+      rows.push(rec({ requestKey: 'pa2', sessionId: sid(2), promptId: 'pr-a', ts: at(18, 9, 1), model: 'ma', costMicros: 300 }));
+      rows.push(rec({ requestKey: 'pa3', sessionId: sid(2), promptId: 'pr-a', ts: at(18, 9, 2), model: 'ma', source: 'auxiliary', costMicros: 100 }));
+      l.ingestRequests(rows);
+      return l;
+    };
+    const bootA = async (ledger) => {
+      const c = createCollector(new Store(), 0, { ledger, now: () => NOW });
+      const port = await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : res(a.port))));
+      return { c, port };
+    };
+    const haltA = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const getA = (port, p, headers) => new Promise((resolve) => {
+      http.get({ host: '127.0.0.1', port, path: p, headers: headers || {}, agent: false }, (res) => {
+        let d = '';
+        res.on('data', (x) => { d += x; });
+        res.on('end', () => resolve({ status: res.statusCode, body: d }));
+      }).on('error', () => resolve({ status: 0, body: '' }));
+    });
+    const jA = async (port, p) => JSON.parse((await getA(port, p)).body);
+    const withApi = async (fn) => {
+      const l = seed();
+      const { c, port } = await bootA(l);
+      try { await fn(port, l); } finally { await haltA(c); l.close(); }
+    };
+
+    await atest('[alpha6-spend-api] overview: today and month-to-date totals with the unattributed figure and request count', async () => {
+      await withApi(async (port) => {
+        const o = await jA(port, '/api/spend/overview');
+        assert.strictEqual(o.enabled, true);
+        assert.strictEqual(o.asOf, NOW);
+        assert.strictEqual(o.today.day, '2026-06-20');
+        assert.deepStrictEqual([o.today.costMicros, o.today.requests, o.today.unattributedMicros, o.today.unattributedN], [500, 1, 500, 1]);
+        assert.strictEqual(o.month.since, new Date(2026, 5, 1).getTime());
+        assert.deepStrictEqual([o.month.costMicros, o.month.requests, o.month.unattributedMicros, o.month.unattributedN], [79100, 16, 500, 1], 'the 30 May request is outside the month');
+        assert.strictEqual(o.today.since, new Date(2026, 5, 20).getTime());
+        assert.strictEqual(o.today.until, new Date(2026, 5, 21).getTime());
+      });
+    });
+
+    await atest('[alpha6-spend-api] windows: the stacked series for 24h, 7d and 30d (existing route) split by source and add up', async () => {
+      await withApi(async (port) => {
+        const sum = (s) => s.buckets.reduce((a, b) => a + b.costMicros, 0);
+        const h = await jA(port, '/api/spend/series?range=24h');
+        assert.strictEqual(h.buckets.length, 24);
+        assert.strictEqual(sum(h), 500);
+        assert.deepStrictEqual(h.buckets[23].bySource, { subagent: 500 });
+        const w = await jA(port, '/api/spend/series?range=7d');
+        assert.strictEqual(w.buckets.length, 7);
+        assert.strictEqual(sum(w), 79100);
+        assert.deepStrictEqual(w.buckets[6].bySource, { subagent: 500 });
+        assert.deepStrictEqual(w.buckets[5].bySource, { main: 78000 });
+        assert.deepStrictEqual(w.buckets[4].bySource, { main: 500, auxiliary: 100 });
+        const m = await jA(port, '/api/spend/series?range=30d');
+        assert.strictEqual(m.buckets.length, 30);
+        assert.strictEqual(sum(m), 79100 + 7777);
+      });
+    });
+
+    await atest('[alpha6-spend-api] where: top 8 projects by source with a 14-day trend, the rest rolled into other', async () => {
+      await withApi(async (port) => {
+        const w = await jA(port, '/api/spend/where');
+        assert.strictEqual(w.range, 'month');
+        assert.strictEqual(w.rows.length, 8);
+        assert.deepStrictEqual(w.rows.map((r) => r.project), ['p01', 'p02', 'p03', 'p04', 'p05', 'p06', 'p07', 'p08']);
+        const p1 = w.rows[0];
+        assert.strictEqual(p1.costMicros, 12500);
+        assert.strictEqual(p1.requests, 2);
+        assert.deepStrictEqual(p1.bySource, { main: 12000, subagent: 500, auxiliary: 0 });
+        assert.strictEqual(p1.trend.length, 14);
+        assert.strictEqual(p1.trend[12], 12000);
+        assert.strictEqual(p1.trend[13], 500);
+        assert.strictEqual(p1.trend.reduce((a, b) => a + b, 0), 12500, 'the 30 May request is outside the 14 days');
+        assert.deepStrictEqual(w.rows[1].bySource, { main: 11500, subagent: 0, auxiliary: 100 });
+        assert.strictEqual(w.rows[1].costMicros, 11600);
+        assert.strictEqual(w.other.count, 4);
+        assert.strictEqual(w.other.costMicros, 10000);
+        assert.strictEqual(w.other.requests, 4);
+        assert.deepStrictEqual(w.other.bySource, { main: 10000, subagent: 0, auxiliary: 0 });
+        assert.strictEqual(w.other.trend.length, 14);
+        assert.strictEqual(w.other.trend[12], 10000);
+        assert.strictEqual(w.total.costMicros, 79100);
+        assert.strictEqual(w.total.requests, 16);
+        assert.deepStrictEqual(w.unattributed, { costMicros: 500, requests: 1 });
+        const sumRows = w.rows.reduce((a, r) => a + r.costMicros, 0) + w.other.costMicros;
+        assert.strictEqual(sumRows, w.total.costMicros);
+        // top is a bounded parameter
+        const t2 = await jA(port, '/api/spend/where?top=2');
+        assert.strictEqual(t2.rows.length, 2);
+        assert.strictEqual(t2.other.count, 10);
+        assert.strictEqual(t2.other.costMicros, 79100 - 12500 - 11600);
+        assert.strictEqual((await jA(port, '/api/spend/where?top=0')).rows.length, 1);
+        assert.strictEqual((await jA(port, '/api/spend/where?top=abc')).rows.length, 8);
+        assert.strictEqual((await jA(port, '/api/spend/where?top=999')).rows.length, 12);
+        const t12 = await jA(port, '/api/spend/where?top=12');
+        assert.deepStrictEqual([t12.other.count, t12.other.costMicros], [0, 0]);
+        assert.strictEqual((await jA(port, '/api/spend/where?range=30d')).range, '30d');
+        assert.strictEqual((await getA(port, '/api/spend/where?range=24h')).status, 400);
+      });
+    });
+
+    await atest('[alpha6-spend-api] turns: top-prompts groups by prompt id with a distinct sorted model list, a short session id and the attribution', async () => {
+      await withApi(async (port) => {
+        const t = await jA(port, '/api/spend/top-prompts?limit=100');
+        const a = t.rows.find((r) => r.costMicros === 600);
+        assert.ok(a, 'the three pr-a requests collapse to one turn');
+        assert.deepStrictEqual(a.models, ['ma', 'mb']);
+        assert.strictEqual(a.project, 'p02');
+        assert.strictEqual(a.sessionShort, 'sess-000');
+        assert.strictEqual(a.ts, at(18, 9));
+        assert.strictEqual(a.attribution, 'explicit');
+        assert.strictEqual(t.rows.length, 14, 'twelve base turns, the subagent turn, the pr-a turn');
+        const sub = t.rows.find((r) => r.costMicros === 500 && r.project === 'p01');
+        assert.strictEqual(sub.attribution, 'unknown');
+        for (const r of t.rows) assert.deepStrictEqual(Object.keys(r).sort(), ['attribution', 'costMicros', 'models', 'project', 'sessionShort', 'ts']);
+        for (let i = 1; i < t.rows.length; i++) assert.ok(t.rows[i - 1].costMicros >= t.rows[i].costMicros);
+      });
+    });
+
+    await atest('[alpha6-spend-api] cache: read, creation and uncached input tokens per window, and the read share', async () => {
+      await withApi(async (port) => {
+        const w7 = await jA(port, '/api/spend/cache');
+        assert.strictEqual(w7.range, '7d');
+        assert.deepStrictEqual([w7.requests, w7.inputTokens, w7.cacheReadTokens, w7.cacheCreationTokens], [16, 125, 1250, 240]);
+        assert.strictEqual(w7.cacheReadSharePct, Math.round(1250 / 1615 * 1000) / 10);
+        assert.strictEqual(w7.cacheReadSharePct, 77.4);
+        const h = await jA(port, '/api/spend/cache?range=24h');
+        assert.deepStrictEqual([h.requests, h.inputTokens, h.cacheReadTokens, h.cacheCreationTokens, h.cacheReadSharePct], [1, 5, 50, 0, 90.9]);
+        const d30 = await jA(port, '/api/spend/cache?range=30d');
+        assert.deepStrictEqual([d30.requests, d30.inputTokens, d30.cacheReadTokens], [17, 126, 1250]);
+        const mo = await jA(port, '/api/spend/cache?range=month');
+        assert.strictEqual(mo.since, new Date(2026, 5, 1).getTime());
+        assert.deepStrictEqual([mo.inputTokens, mo.cacheReadTokens, mo.cacheCreationTokens], [125, 1250, 240]);
+        assert.strictEqual((await getA(port, '/api/spend/cache?range=90d')).status, 400);
+        // nothing stored in the window: the share is null, not NaN or 0
+        const l0 = openLedger({ file: ':memory:' });
+        const x = await bootA(l0);
+        try {
+          const e = await jA(x.port, '/api/spend/cache?range=24h');
+          assert.deepStrictEqual([e.requests, e.cacheReadTokens, e.cacheReadSharePct], [0, 0, null]);
+          const o = await jA(x.port, '/api/spend/overview');
+          assert.deepStrictEqual([o.today.costMicros, o.month.requests], [0, 0]);
+          const w = await jA(x.port, '/api/spend/where');
+          assert.deepStrictEqual([w.rows.length, w.other.count, w.total.costMicros], [0, 0, 0]);
+        } finally { await haltA(x.c); l0.close(); }
+        // no cost-effect figure: it would need pricing the ledger does not store
+        assert.deepStrictEqual(Object.keys(w7).sort(), ['asOf', 'cacheCreationTokens', 'cacheReadSharePct', 'cacheReadTokens', 'enabled', 'inputTokens', 'range', 'requests', 'since', 'until']);
+      });
+    });
+
+    await atest('[alpha6-spend-api] selected project: month-to-date total, source breakdown, attribution mix with n, 14-day trend', async () => {
+      await withApi(async (port) => {
+        const p = await jA(port, '/api/spend/project?name=p01');
+        assert.strictEqual(p.project, 'p01');
+        assert.strictEqual(p.since, new Date(2026, 5, 1).getTime());
+        assert.deepStrictEqual([p.costMicros, p.requests], [12500, 2]);
+        assert.deepStrictEqual(p.bySource, { main: 12000, subagent: 500 });
+        assert.deepStrictEqual(p.byAttribution, { explicit: 12000, unknown: 500 });
+        assert.deepStrictEqual(p.byAttributionN, { explicit: 1, unknown: 1 });
+        assert.strictEqual(p.trend.length, 14);
+        assert.deepStrictEqual([p.trend[12], p.trend[13]], [12000, 500]);
+        const p2 = await jA(port, '/api/spend/project?name=p02');
+        assert.deepStrictEqual(p2.byAttributionN, { explicit: 4 });
+        assert.deepStrictEqual(p2.bySource, { main: 11500, auxiliary: 100 });
+        // a project with no spend answers zeros, not an error
+        const z = await jA(port, '/api/spend/project?name=nope');
+        assert.deepStrictEqual([z.costMicros, z.requests, z.bySource, z.byAttributionN], [0, 0, {}, {}]);
+        assert.deepStrictEqual(z.trend, new Array(14).fill(0));
+        assert.strictEqual((await getA(port, '/api/spend/project')).status, 400);
+        assert.strictEqual((await getA(port, '/api/spend/project?name=')).status, 400);
+        assert.strictEqual((await getA(port, '/api/spend/project?name=' + 'x'.repeat(201))).status, 400);
+        // the name is a bound parameter, never SQL
+        const inj = await jA(port, '/api/spend/project?name=' + encodeURIComponent("p01' OR '1'='1"));
+        assert.strictEqual(inj.costMicros, 0);
+      });
+    });
+
+    await atest('[alpha6-spend-api] allowlist: every key of every new and existing spend body is listed; no text beyond names, models and an 8-char session id', async () => {
+      await withApi(async (port) => {
+        const KEYS = new Set(['enabled', 'asOf', 'range', 'since', 'until', 'day', 'today', 'month', 'costMicros', 'requests', 'unattributedMicros',
+          'unattributedN', 'rows', 'other', 'total', 'unattributed', 'project', 'count', 'bySource', 'byAttribution', 'byAttributionN', 'trend',
+          'cacheReadTokens', 'cacheCreationTokens', 'inputTokens', 'cacheReadSharePct', 'ts', 'sessionShort', 'models', 'attribution',
+          'hasTelemetry', 'buckets', 'key']);
+        const LEAF = { bySource: ['main', 'subagent', 'auxiliary'], byAttribution: ['explicit', 'inferred', 'unknown'], byAttributionN: ['explicit', 'inferred', 'unknown'] };
+        const walk = (o, where) => {
+          if (Array.isArray(o)) { o.forEach((x, i) => walk(x, where + '[' + i + ']')); return; }
+          if (!o || typeof o !== 'object') return;
+          for (const k of Object.keys(o)) {
+            assert.ok(KEYS.has(k), where + ': key outside the allowlist: ' + k);
+            if (LEAF[k]) { for (const lk of Object.keys(o[k])) assert.ok(LEAF[k].includes(lk), where + '.' + k + ': ' + lk); }
+            else walk(o[k], where + '.' + k);
+          }
+        };
+        const routes = ['/api/spend/today', '/api/spend/series?range=7d', '/api/spend/series?range=24h', '/api/spend/projects',
+          '/api/spend/top-prompts', '/api/spend/overview', '/api/spend/where', '/api/spend/where?top=3', '/api/spend/cache',
+          '/api/spend/cache?range=24h', '/api/spend/project?name=p01'];
+        for (const r of routes) {
+          const res = await getA(port, r);
+          assert.strictEqual(res.status, 200, r);
+          const b = JSON.parse(res.body);
+          assert.strictEqual(b.enabled, true, r);
+          walk(b, r);
+          assert.ok(!/long-session-id|cwd|prompt_id|promptId|prompt_text|request_key|work/i.test(res.body), r + ' leaks an identifier');
+          for (const row of b.rows || []) if ('sessionShort' in row) assert.ok(row.sessionShort.length <= 8);
+        }
+        // the only string leaves in the where body are project names and the range
+        const w = await jA(port, '/api/spend/where');
+        const strs = [];
+        JSON.stringify(w, (k, v) => { if (typeof v === 'string') strs.push(v); return v; });
+        assert.deepStrictEqual(strs.filter((x) => !/^(p\d\d|month)$/.test(x)), []);
+      });
+    });
+
+    await atest('[alpha6-spend-api] ledger off: every new route answers { enabled: false }; unknown routes still 404', async () => {
+      const { c, port } = await bootA(null);
+      try {
+        for (const r of ['/api/spend/overview', '/api/spend/where', '/api/spend/cache', '/api/spend/project?name=p01', '/api/spend/project', '/api/spend/cache?range=90d']) {
+          const res = await getA(port, r);
+          assert.strictEqual(res.status, 200, r);
+          assert.deepStrictEqual(JSON.parse(res.body), { enabled: false }, r);
+        }
+        assert.strictEqual((await getA(port, '/api/spend/nope')).status, 404);
+      } finally { await haltA(c); }
+    });
+
+    await atest('[alpha6-spend-api] a failing ledger answers 503 on the new routes', async () => {
+      const l = seed();
+      const { c, port } = await bootA(l);
+      try {
+        l.close();
+        for (const r of ['/api/spend/overview', '/api/spend/where', '/api/spend/cache', '/api/spend/project?name=p01']) {
+          assert.strictEqual((await getA(port, r)).status, 503, r);
+        }
+      } finally { await haltA(c); }
+    });
+
+    await atest('[alpha6-spend-api] new routes refuse a foreign Host or Origin', async () => {
+      await withApi(async (port) => {
+        for (const r of ['/api/spend/overview', '/api/spend/where', '/api/spend/cache', '/api/spend/project?name=p01']) {
+          assert.strictEqual((await getA(port, r)).status, 200, 'control ' + r);
+          assert.strictEqual((await getA(port, r, { host: 'evil.example' })).status, 403, 'host ' + r);
+          assert.strictEqual((await getA(port, r, { origin: 'http://evil.example' })).status, 403, 'origin ' + r);
+        }
+      });
+    });
+
+    test('[alpha6-spend-api] ledger: breakdown, cacheTotals and projectDetail read stored fields only and the schema holds no text column', () => {
+      const l = seed();
+      try {
+        const cols = l._db.prepare('PRAGMA table_info(requests)').all().map((r) => r.name);
+        assert.ok(!cols.some((n) => /text|content|body/.test(n)), cols.join(','));
+        assert.deepStrictEqual(l.breakdown({ since: at(1, 0), until: at(21, 0) }), { costMicros: 79100, requests: 16, unattributedMicros: 500, unattributedN: 1 });
+        assert.deepStrictEqual(l.cacheTotals({ since: at(1, 0), until: at(21, 0) }), { cacheReadTokens: 1250, cacheCreationTokens: 240, inputTokens: 125, requests: 16 });
+        assert.deepStrictEqual(l.breakdown({ since: at(1, 0), until: at(1, 1) }), { costMicros: 0, requests: 0, unattributedMicros: 0, unattributedN: 0 });
+        assert.strictEqual(l.projectDetail({ project: 'p03', since: at(1, 0), until: at(21, 0) }).costMicros, 10000);
+      } finally { l.close(); }
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
