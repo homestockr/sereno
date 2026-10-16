@@ -97,6 +97,38 @@ invariants and `docs/design/console/README.md`.
   - footer: the live session strip (state, updated time) when one exists.
 - **Widget:** the theme only. No layout changes.
 
+## Added 2026-10-16: Spend redesign and Pipeline restyle
+
+Robe shared two more navy concepts, one for Pipeline and one for Spend, and added both to alpha.6.
+The Sessions tab, shown in their nav, stays out of alpha.6 and is not built.
+
+- **Spend:**
+  - sub-tabs **Overview** / **Projects** / **Turns** / **Cache**, kept in the route
+    (`#spend`, `#spend/projects`, …).
+  - **Overview:** today's and this month's totals (est.), with unattributed spend shown;
+    daily usage as stacked bars by source with a 24h / 7d / 30d switch.
+  - **Projects:** "Where the spend goes": project × source (main, subagent, auxiliary,
+    total), each `est.`, with a 14-day trend sparkline; the rest fold into "Other projects".
+  - **Turns:** the costliest turns by prompt ID, showing metadata only (time, project,
+    session id as plain text, cost est., models, attribution). No prompt text, ever.
+  - **Cache:** cache read and write share, and its effect on cost. This uses only fields the
+    ledger already stores; if a figure isn't stored, leave it out and don't add it.
+  - **Right column:** the selected project, with month-to-date total (est.), a source
+    breakdown, the attribution mix with n, and a 14-day trend. "View project" moves to that
+    project in the Projects tab, which is navigation inside the console. There are no session
+    links and no "Open session history" until a Sessions tab exists.
+- **Pipeline restyle:** only the look. Pill sub-tabs, an accent outline on the selected row,
+  outlined neutral chips for the Build label ("Env. retry", "Fixing N"), a row of outcome dots
+  in the bottom strip, and slightly larger type. The same exclusions apply: no "Open
+  session", no ⌘K search, amber only for decisions.
+
+Steps, after N2:
+- **S1, Spend API:** whatever `/api/spend*` lacks for the layout above: the 24h/7d/30d
+  series, project × source month-to-date with 14-day trends, turns by prompt ID with
+  model lists, and cache figures from stored fields. Allowlisted, with no text fields.
+- **S2, Spend renderer.**
+- **P1, Pipeline restyle.**
+
 ## Exit criteria (`[alpha6 exit]` in `tools/test.js`)
 
 1. With about 90 registered projects, the Projects tab shows Active by default, and
