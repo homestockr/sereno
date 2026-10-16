@@ -10448,7 +10448,8 @@ test('missing rate_limits degrades instead of throwing', () => {
     const KEYS = {
       body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin'],
       project: ['id', 'name', 'tasks', 'idle'],
-      task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd'],
+      task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity'],
+      attempt: ['attempt', 'outcome', 'startedAt', 'endedAt'], activity: ['at', 'kind', 'outcome'],
       gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model'],
       finding: ['severity', 'kind', 'file', 'line', 'summary'],
       signals: ['days', 'projects', 'outcomes', 'rework', 'runsThisWeek'],
@@ -10457,11 +10458,11 @@ test('missing rate_limits degrades instead of throwing', () => {
       roleSpend: ['enabled', 'days', 'roles'], role: ['costUsd', 'explicit', 'inferred', 'unattributed'],
       rpm: ['mean', 'n', 'excluded'], routing: ['models', 'projects'], model: ['agent', 'role', 'model'], routeProject: ['id', 'redTeam'], redTeam: ['agent', 'fallback', 'onFallback'],
     };
-    const ROLES = ['builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed'];
+    const ROLES = ['builder', 'red-team', 'scribe'];
     const same = (o, keys, where) => assert.deepStrictEqual(Object.keys(o).sort(), keys.slice().sort(), where);
     const checkBody = (b) => {
       same(b, KEYS.body, 'body'); same(b.plugin, ['installed', 'detected', 'version'], 'plugin');
-      for (const p of b.projects) { same(p, KEYS.project, 'project'); for (const t of p.tasks) { same(t, KEYS.task, 'task'); if (t.gate) same(t.gate, KEYS.gate, 'gate'); for (const f of t.findings) same(f, KEYS.finding, 'finding'); } }
+      for (const p of b.projects) { same(p, KEYS.project, 'project'); for (const t of p.tasks) { same(t, KEYS.task, 'task'); if (t.gate) same(t.gate, KEYS.gate, 'gate'); for (const f of t.findings) same(f, KEYS.finding, 'finding'); for (const a of t.attempts) same(a, KEYS.attempt, 'attempt'); for (const e of t.activity) same(e, KEYS.activity, 'activity'); } }
       same(b.signals, KEYS.signals, 'signals'); same(b.signals.outcomes, KEYS.outcomes, 'outcomes'); same(b.signals.rework, KEYS.rework, 'rework');
       for (const p of b.signals.projects) { same(p, KEYS.sigProject, 'sigProject'); if (p.gate) same(p.gate, KEYS.sigGate, 'sigGate'); }
       same(b.roleSpend, KEYS.roleSpend, 'roleSpend'); same(b.roleSpend.roles, ROLES, 'roles'); for (const k of ROLES) same(b.roleSpend.roles[k], KEYS.role, 'role ' + k);
@@ -10542,6 +10543,87 @@ test('missing rate_limits degrades instead of throwing', () => {
         for (const k of ROLES) assert.deepStrictEqual(b.roleSpend.roles[k], { costUsd: 0, explicit: 0, inferred: 0, unattributed: 0 });
         assert.deepStrictEqual(b.redTeamPerMerge, { mean: null, n: 0, excluded: 2 });
       } finally { await haltP(c); }
+    });
+
+    await atest('[4b-layout-api] builderModel maps the spec builder to its agent model; unknown or missing is null', async () => {
+      const models = Object.fromEntries(pl.agentModels().map((m) => [m.agent, m.model]));
+      const snap = () => ({ p1: { pipeline: { tasks: [
+        tview('t1', 'builder', { specBuilder: 'haiku' }), tview('t2', 'builder', { specBuilder: 'sonnet' }), tview('t3', 'builder', { specBuilder: 'opus' }),
+        tview('t4', 'builder', { specBuilder: 'gpt' }), tview('t5', 'builder', { specBuilder: null }), tview('t6', 'builder', { specBuilder: '__proto__' }), tview('t7', 'builder'),
+      ], skipped: 0, error: false, hasData: true } } });
+      const c = await bootP({ projects: reg(), repos: { snapshot: snap } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        const bm = b.projects[0].tasks.map((t) => t.builderModel);
+        assert.strictEqual(bm[0], models['sereno:builder-haiku']); assert.ok(bm[0]);
+        assert.strictEqual(bm[1], models['sereno:builder']); assert.ok(bm[1]);
+        assert.strictEqual(bm[2], models['sereno:builder-opus']); assert.ok(bm[2]);
+        assert.deepStrictEqual(bm.slice(3), [null, null, null, null]);
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-layout-api] attempts: newest first as the poller orders them, capped at 10, epoch ms or null', async () => {
+      const atts = [];
+      for (let n = 14; n >= 1; n--) atts.push({ attempt: n, outcome: n === 14 ? 'running' : 'block', agent_id: 'a' + n, started_at: iso(NOW - n * 3600000), ended_at: n === 14 ? null : iso(NOW - n * 3600000 + 60000) });
+      atts[1].started_at = 'garbage';
+      const snap = () => ({ p1: { pipeline: { tasks: [tview('t1', 'builder', { attempts: atts })], skipped: 0, error: false, hasData: true } } });
+      const c = await bootP({ projects: reg(), repos: { snapshot: snap } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        const a = b.projects[0].tasks[0].attempts;
+        assert.strictEqual(a.length, 10);
+        assert.deepStrictEqual(a.map((x) => x.attempt), [14, 13, 12, 11, 10, 9, 8, 7, 6, 5]);
+        assert.deepStrictEqual(a[0], { attempt: 14, outcome: 'running', startedAt: NOW - 14 * 3600000, endedAt: null });
+        assert.strictEqual(a[1].startedAt, null);
+        assert.strictEqual(a[2].endedAt, NOW - 12 * 3600000 + 60000);
+        assert.ok(!/a14|agent_id/.test(JSON.stringify(a)));
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-layout-api] activity: spec, attempt start/end and gate events, newest first, at most 6, outcome only where it applies, no text', async () => {
+      const H = 3600000;
+      const t0 = NOW - 10 * H;
+      const snap = () => ({ p1: { pipeline: { tasks: [
+        tview('few', 'builder', { specCreatedAt: iso(t0), attempts: [{ attempt: 1, outcome: 'block', agent_id: 'x', started_at: iso(t0 + H), ended_at: iso(t0 + 2 * H) }],
+          gates: [gate('few', 'block', t0 + 3 * H)] }),
+        tview('many', 'builder', { specCreatedAt: iso(t0), attempts: [
+          { attempt: 3, outcome: 'running', started_at: iso(t0 + 9 * H), ended_at: null },
+          { attempt: 2, outcome: 'pass', started_at: iso(t0 + 5 * H), ended_at: iso(t0 + 6 * H) },
+          { attempt: 1, outcome: 'block', started_at: iso(t0 + H), ended_at: iso(t0 + 2 * H) }],
+        gates: [gate('many', 'block', t0 + 3 * H), gate('many', 'pass', t0 + 7 * H)] }),
+        tview('none', 'architect'),
+      ], skipped: 0, error: false, hasData: true } } });
+      const c = await bootP({ projects: reg(), repos: { snapshot: snap } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        const [few, many, none] = b.projects[0].tasks;
+        assert.deepStrictEqual(few.activity, [
+          { at: t0 + 3 * H, kind: 'gate', outcome: 'block' }, { at: t0 + 2 * H, kind: 'attempt-end', outcome: 'block' },
+          { at: t0 + H, kind: 'attempt-start', outcome: null }, { at: t0, kind: 'spec', outcome: null }]);
+        assert.strictEqual(many.activity.length, 6, 'capped at 6 of 9 events');
+        assert.deepStrictEqual(many.activity.map((e) => e.at), [t0 + 9 * H, t0 + 7 * H, t0 + 6 * H, t0 + 5 * H, t0 + 3 * H, t0 + 2 * H]);
+        assert.deepStrictEqual(many.activity.map((e) => e.kind), ['attempt-start', 'gate', 'attempt-end', 'attempt-start', 'gate', 'attempt-end']);
+        assert.strictEqual(many.activity[0].outcome, null, 'a start event has no outcome');
+        assert.strictEqual(many.activity[1].outcome, 'pass');
+        assert.deepStrictEqual(none.activity, []);
+        assert.ok(!/SECRET/.test(JSON.stringify(b)));
+      } finally { await haltP(c); }
+    });
+
+    await atest('[4b-layout-api] roleSpend serves exactly builder, red-team, scribe, each with the cost and attribution split', async () => {
+      const l = openLedger({ file: ':memory:' });
+      l.ingestRequests([rqL({ requestKey: '1', requestId: 'r1' }), rqL({ requestKey: '2', requestId: 'r2', model: 'claude-sonnet-5-5', costMicros: 300000 })]);
+      const c = await bootP({ projects: reg(), repos: { snapshot: mkSnap }, ledger: l });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        assert.deepStrictEqual(Object.keys(b.roleSpend.roles).sort(), ['builder', 'red-team', 'scribe']);
+        for (const k of ['builder', 'red-team', 'scribe']) assert.deepStrictEqual(Object.keys(b.roleSpend.roles[k]).sort(), ['costUsd', 'explicit', 'inferred', 'unattributed']);
+        assert.strictEqual(b.roleSpend.roles['red-team'].inferred, 2, 'a Fable subagent request still infers the red team');
+      } finally { await haltP(c); l.close(); }
     });
 
     await atest('[4b-api] /api/pipeline: no projects, no poller, a throwing poller all give a well-formed empty body', async () => {
@@ -11397,10 +11479,10 @@ test('missing rate_limits degrades instead of throwing', () => {
         const text = await getText(c.port);
         const b = JSON.parse(text);
         const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin',
-          'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd',
+          'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'endedAt', 'at',
           'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'severity', 'kind', 'file', 'line', 'summary',
           'days', 'outcomes', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
-          'enabled', 'roles', 'builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed', 'explicit', 'inferred', 'mean',
+          'enabled', 'roles', 'builder', 'red-team', 'scribe', 'unattributed', 'explicit', 'inferred', 'mean',
           'models', 'agent', 'role', 'redTeam', 'fallback', 'onFallback', 'installed', 'detected', 'version']);
         const strays = [];
         const walk = (v, at) => {
@@ -11436,7 +11518,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.deepStrictEqual(roles.builder, { costUsd: 1, explicit: 1, inferred: 0, unattributed: 0 });
         assert.deepStrictEqual(roles['red-team'], { costUsd: 2.5, explicit: 2, inferred: 0.5, unattributed: 0 });
         assert.strictEqual(roles.scribe.costUsd, 0);
-        assert.deepStrictEqual(roles.unattributed, { costUsd: 0.75, explicit: 0, inferred: 0, unattributed: 0.75 });
+        assert.deepStrictEqual(Object.keys(roles).sort(), ['builder', 'red-team', 'scribe'], 'only the pipeline roles; main/auxiliary/unattributed buckets are not served here');
       } finally { await halt(c); l.close(); }
     });
 

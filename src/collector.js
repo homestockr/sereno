@@ -439,7 +439,8 @@ function createCollector(store, port, opts) {
    * from explicit key lists: no command, prompt, spec body, hash, session or agent id,
    * or repo path leaves here. Findings are the one place a file name appears.
    */
-  const PIPE_ROLES = ['builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed'];
+  const PIPE_ROLES = ['builder', 'red-team', 'scribe'];
+  const BUILDER_AGENTS = { haiku: 'sereno:builder-haiku', sonnet: 'sereno:builder', opus: 'sereno:builder-opus' };
   const PIPE_DAYS = 30;
   const pStr = (v, max) => (typeof v === 'string' ? v.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max) : null);
   const pNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -472,13 +473,41 @@ function createCollector(store, port, opts) {
     } catch (_) { return null; }
     return any ? sum : null;
   }
-  function pipeTask(t) {
+  const pTime = (v) => { const n = typeof v === 'string' ? Date.parse(v) : NaN; return Number.isFinite(n) ? n : null; };
+  function pipeAttempts(t) {
+    return (Array.isArray(t.attempts) ? t.attempts : []).slice(0, 10).map((a) => {
+      a = a && typeof a === 'object' ? a : {};
+      return { attempt: pNum(a.attempt), outcome: pStr(a.outcome, 32), startedAt: pTime(a.started_at), endedAt: pTime(a.ended_at) };
+    });
+  }
+  /** Newest-first events from timestamps already read: no free text. */
+  function pipeActivity(t) {
+    const ev = [];
+    const add = (at, kind, outcome) => { if (at !== null) ev.push({ at, kind, outcome: outcome || null }); };
+    add(pTime(t.specCreatedAt), 'spec', null);
+    for (const a of (Array.isArray(t.attempts) ? t.attempts : [])) {
+      if (!a || typeof a !== 'object') continue;
+      add(pTime(a.started_at), 'attempt-start', null);
+      add(pTime(a.ended_at), 'attempt-end', pStr(a.outcome, 32));
+    }
+    for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+      if (g && typeof g === 'object') add(pTime(g.reviewed_at), 'gate', pStr(g.outcome, 32));
+    }
+    ev.sort((x, y) => y.at - x.at);
+    return ev.slice(0, 6);
+  }
+  function pipeTask(t, models) {
+    const agent = BUILDER_AGENTS[t.specBuilder];
+    const bm = agent ? models.find((m) => m.agent === agent) : null;
     return {
       task: pStr(t.task, 128), stage: pStr(t.stage, 32), step: pStr(t.step, 120), reason: pStr(t.reason, 64), attempt: pNum(t.attempt),
       gate: pipeGate(t.gate),
       findings: Array.isArray(t.findings) ? t.findings.slice(0, 50).map(pipeFinding) : [],
       startedAt: pNum(t.startedAt), updatedAt: pNum(t.updatedAt), reviewRuns: pNum(t.reviewRuns) || 0, expired: pBool(t.expired),
       costUsd: taskCost(t),
+      builderModel: bm ? pStr(bm.model, 128) : null,
+      attempts: pipeAttempts(t),
+      activity: pipeActivity(t),
     };
   }
   function pipeRedTeam(r) {
@@ -490,6 +519,7 @@ function createCollector(store, port, opts) {
     const reg = projects ? projects.list() : [];
     let snap = {};
     try { snap = repos ? repos.snapshot() : {}; } catch (_) { snap = {}; }
+    const models = pipelineLib.agentModels();
     const outProjects = [];
     const sigIn = [];
     const routingProjects = [];
@@ -511,7 +541,7 @@ function createCollector(store, port, opts) {
         }
         idle = rt && rt.enabled === false ? 'gate-off' : (latest && latest.outcome === 'pass' ? 'latest-pass' : 'no-task');
       }
-      outProjects.push({ id: p.id, name: p.name, tasks: active.map(pipeTask), idle });
+      outProjects.push({ id: p.id, name: p.name, tasks: active.map((t) => pipeTask(t, models)), idle });
       sigIn.push({ id: p.id, tasks: all.map((t) => ({ task: t.task, stage: t.stage, gates: Array.isArray(t.gates) ? t.gates : [] })) });
       routingProjects.push({ id: p.id, redTeam: pipeRedTeam(rt) });
     }
@@ -541,7 +571,7 @@ function createCollector(store, port, opts) {
       roleSpend: { enabled: !!rs, days: PIPE_DAYS, roles },
       redTeamPerMerge: { mean: pNum(rpm.mean), n: rpm.n, excluded: rpm.excluded },
       routing: {
-        models: pipelineLib.agentModels().map((m) => ({ agent: m.agent, role: m.role, model: m.model })),
+        models: models.map((m) => ({ agent: m.agent, role: m.role, model: m.model })),
         projects: routingProjects,
       },
       plugin: (() => {
