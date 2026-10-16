@@ -577,8 +577,8 @@ function toastStalled(ev) {
   if (!Notification.isSupported()) return;
   try {
     const n = new Notification({
-      title: ev.project + ': repair looks stalled',
-      body: ev.task + ' has a repair attempt running but no builder is active',
+      title: ev.project + ': ' + (ev.kind === 'repair' ? 'Repair stalled' : 'Build stalled'),
+      body: ev.task + ' has a ' + (ev.kind === 'repair' ? 'repair' : 'build') + ' attempt running but no builder is active',
     });
     n.on('click', () => openConsole('pipeline'));
     n.show();

@@ -218,7 +218,7 @@ function attentionState(snapshot) {
     }));
   const stalled = (snapshot && Array.isArray(snapshot.stalled) ? snapshot.stalled : [])
     .filter((d) => d && typeof d === 'object' && typeof d.task === 'string')
-    .map((d) => ({ project: projectLabel(d.project), task: d.task }));
+    .map((d) => ({ project: projectLabel(d.project), task: d.task, kind: d.kind === 'repair' ? 'repair' : 'build' }));
   return {
     amber: items.length + decs.length > 0, count: items.length + decs.length, items,
     ...(decs.length ? { decisions: decs } : {}),
@@ -275,7 +275,7 @@ function attentionHtml(st, nowMs, opts) {
     const rows = x && Array.isArray(x.stalled) ? x.stalled : [];
     if (!rows.length) return '';
     return '<ul class="attn-stalled">' + rows.map((r) => '<li><strong>' + esc(r.project) + '</strong><span class="mono">' + esc(r.task)
-      + '</span><span class="wait">repair looks stalled</span></li>').join('') + '</ul>';
+      + '</span><span class="wait">' + (r.kind === 'repair' ? 'Repair stalled' : 'Build stalled') + '</span></li>').join('') + '</ul>';
   };
   if (!st || st.unavailable) {
     return '<div class="attn attn-off"><div class="attn-head"><span>LIVE STATUS</span></div>'

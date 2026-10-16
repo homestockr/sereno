@@ -197,7 +197,7 @@ function createCollector(store, port, opts) {
   function stalledList() {
     if (!pipelineAlerts || typeof pipelineAlerts.stalled !== 'function') return [];
     try {
-      return pipelineAlerts.stalled().slice(0, 50).map((d) => ({ project: String(d.project).slice(0, 128), task: String(d.task).slice(0, 128) }));
+      return pipelineAlerts.stalled().slice(0, 50).map((d) => ({ project: String(d.project).slice(0, 128), task: String(d.task).slice(0, 128), kind: d.kind === 'repair' ? 'repair' : 'build' }));
     } catch (_) { return []; }
   }
   function snapshot() { return Object.assign(store.snapshot(), { spend: spendState(), decisions: decisionList(), stalled: stalledList() }); }

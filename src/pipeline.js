@@ -351,8 +351,8 @@ async function taskView(root, entry, cfg, git, now, opts) {
   const spec = entry.spec || null;
   const latest = attempts.length ? attempts[0] : null;   // reader sorts newest first
   const byRun = latest && latest.review_run_id ? gates.find((g) => g.review_run_id === latest.review_run_id) : null;
-  const gate = byRun || gates[0] || null;
-  const findings = gate ? gate.findings : [];
+  let gate = byRun || gates[0] || null;
+  let findings = gate ? gate.findings : [];
 
   /** @type {number[]} */
   const stamps = [];
@@ -371,6 +371,21 @@ async function taskView(root, entry, cfg, git, now, opts) {
   try {
     if (!attempts.length) return view('architect', 'Spec written', null, null);
     if (!cfg || !isObj(cfg.recovery) || !isObj(cfg.roles) || !isObj(cfg.roles.redTeam)) return view('unknown', 'Status unavailable', 'config_unavailable', latest.attempt);
+
+    // A running attempt is a Builder working right now (recovery.decide would call it unfinished,
+    // which is right only after the Builder has returned). Never a decision.
+    if (latest.outcome === 'running') {
+      const prev = attempts[1];
+      if (prev && prev.outcome === 'block') {
+        const pg = (prev.review_run_id && gates.find((g) => g.review_run_id === prev.review_run_id)) || gates[0] || null;
+        if (pg) {
+          gate = pg; findings = pg.findings;
+          const c = findings.filter(NON_LOW).length;
+          return view('builder', 'Fixing ' + c + ' finding' + (c === 1 ? '' : 's'), null, latest.attempt);
+        }
+      }
+      return view('builder', 'Building', null, latest.attempt);
+    }
 
     // Merged: the reviewed commit is already in the spec's base branch.
     const head = gate && gate.head_commit;

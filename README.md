@@ -293,21 +293,32 @@ GitHub owner and name from `origin`.
 **Review in terminal** is in the console's attention panel. It raises the waiting session's
 terminal, as the widget's button does. It is not available under `npm run serve`.
 
-## Use the pipeline without the app
+## Pipeline tab (alpha)
 
-The pipeline is also a Claude Code plugin, so it runs without this app. It gives each
-task a gated flow: a spec, a Builder on its own branch, a red-team review with a verdict,
-tests run against the base commit, and a merge only after you say yes. Each role has its
-own model. Install it inside Claude Code:
+The console's **Pipeline** tab shows the Sereno plugin's work: active tasks on an Architect,
+Builder, Red team, Merge track, repairs, tasks that need a decision, the gate state per repo,
+and the last 30 days of review outcomes, rework and spend by role. It reads the plugin's
+`.sereno/` files in each project and never acts: the plugin does everything that changes a
+repo. A task waiting on you raises "Review needs a decision" the way "needs you" does.
+
+Every dollar figure is an estimate. Spend by role is split into **explicit** (the request is
+linked to a subagent), **inferred** (no link, but the model belongs to one role only) and
+**unattributed**. Rates show their n; they describe, they don't grade.
+
+The pipeline is also a Claude Code plugin, so it runs without this app. It gives each task a
+gated flow: a spec, a Builder on its own branch, a red-team review with a verdict, tests run
+against the base commit, and a merge only after you say yes. Each role has its own model.
+Install it inside Claude Code:
 
 ```
 /plugin marketplace add homestockr/sereno
 /plugin install sereno@sereno
 ```
 
-The plugin writes gate and attempt files under `.sereno/`. The app's Pipeline view,
-planned for the next phase, will read them. See [plugin/README.md](plugin/README.md) for
-the commands, presets and recovery rules.
+Without the plugin, the tab and the widget's settings panel show these two commands. The
+plugin's `/sereno:brief` replaces the app's old `/brief`, which is retired: the panel offers
+to remove an unchanged copy. See [plugin/README.md](plugin/README.md) for the commands,
+presets and recovery rules.
 
 ## Sizing
 

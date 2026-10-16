@@ -10035,11 +10035,11 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(v.gate.review_run_id, id);
         });
 
-        await atest('[4b-stage] red-team: a built attempt awaits review; decision: a running one never finished; stopped: stopped', async () => {
+        await atest('[4b-stage] red-team: a built attempt awaits review; building: a running one; decision: needs_context; stopped: stopped', async () => {
           const r = mkrepo(); mkTask(r, 'a'); mkTask(r, 'b'); mkTask(r, 'c');
           for (const t of ['a', 'b', 'c']) putSpec(r, t);
           putAtt(r, 'a', 1, { outcome: 'built' });
-          putAtt(r, 'b', 1, { outcome: 'running', ended_at: null });
+          putAtt(r, 'b', 1, { outcome: 'needs_context', ended_at: null });
           putAtt(r, 'c', 1, { outcome: 'stopped' });
           assert.strictEqual((await viewOf(r, 'a')).stage, 'red-team');
           const b = await viewOf(r, 'b');
@@ -10056,6 +10056,19 @@ test('missing rate_limits degrades instead of throwing', () => {
           putAtt(r, task, 1, { outcome: 'pass', review_run_id: id, spec_hash: sh, head_commit: tip });
           return { tip, sh, id };
         };
+
+        await atest('[4b-stage] a running attempt is a Builder working: "Building", or "Fixing N findings" after a block; never a decision', async () => {
+          const r = mkrepo(); mkTask(r, 'first'); putSpec(r, 'first'); putAtt(r, 'first', 1, { outcome: 'running', ended_at: null });
+          const v = await viewOf(r, 'first', NOW, async () => { throw new Error('git must not run'); });
+          assert.deepStrictEqual([v.stage, v.step, v.attempt], ['builder', 'Building', 1]);
+          const r2 = mkrepo(); mkTask(r2, 'fix'); putSpec(r2, 'fix'); const id = rid();
+          putGate(r2, 'fix', id, { findings: [{ severity: 'high', kind: 'bug', file: 'a.js', line: 1, summary: 'x' }, { severity: 'low', kind: 'bug', file: 'b.js', line: 2, summary: 'y' }] });
+          putAtt(r2, 'fix', 1, { outcome: 'block', diagnosis: 'defect', review_run_id: id });
+          putAtt(r2, 'fix', 2, { outcome: 'running', ended_at: null });
+          const w = await viewOf(r2, 'fix');
+          assert.deepStrictEqual([w.stage, w.step, w.attempt], ['builder', 'Fixing 1 finding', 2]);
+          assert.strictEqual(w.findings.length, 2);
+        });
 
         await atest('[4b-stage] ready: pass + gate pass at the branch tip', async () => {
           const r = mkrepo(); passTask(r, 'demo');
@@ -10626,6 +10639,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const ev = m.update(stalledTask(), []);
       assert.deepStrictEqual(types(ev), ['stalled']);
       assert.strictEqual(ev[0].task, 'demo');
+      assert.strictEqual(ev[0].kind, 'repair');
       clock = T0 + 12 * MIN;
       assert.deepStrictEqual(m.update(stalledTask(), []), [], 'once per episode');
       assert.strictEqual(m.stalled().length, 1);
@@ -10640,17 +10654,19 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual(types(m.update(ended, [])), ['stalled-clear']);
     });
 
-    test('[4b-alerts] stalled needs a block gate, a running attempt and 10 minutes from its start', () => {
+    test('[4b-alerts] stalled needs a running attempt and 10 minutes from its start; kind is repair after a block, else build', () => {
       clock = T0;
       const m = mk();
       clock = T0 + 60 * MIN;
       const old = new Date(T0).toISOString();
       const fresh = new Date(clock - 2 * MIN).toISOString();
       const run = (started) => [{ attempt: 2, outcome: 'running', started_at: started }];
-      assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'pass'), attempts: run(old) })]), []), [], 'gate pass');
       assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'block'), attempts: run(fresh) })]), []), [], 'attempt only 2 min old');
       assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'block'), attempts: [{ attempt: 2, outcome: 'built', started_at: old }] })]), []), [], 'not running');
       assert.deepStrictEqual(m.update(proj([task({ gate: gate('r1', 'block'), attempts: [] })]), []), []);
+      const ev = m.update(proj([task({ gate: gate('r1', 'pass'), attempts: run(old) })]), []);
+      assert.deepStrictEqual([types(ev), ev[0].kind], [['stalled'], 'build'], 'no block gate: a stalled build');
+      assert.deepStrictEqual(m.stalled().map((x) => x.kind), ['build']);
     });
 
     test('[4b-alerts] toInput joins the registry with the poller snapshot and skips hidden or pipeline-less projects', () => {
@@ -10682,7 +10698,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           { projectId: 'p0', project: 'demo-proj', task: 'demo', reason: 'retry_limit\u0007' + 'x'.repeat(400), attempt: 3, paths: [REPO], command: 'SECRET-CMD', prompt: 'SECRET-PROMPT' },
           { projectId: 'p1', project: 'other', task: 'zzz', reason: null, attempt: null, paths: ['C:\\elsewhere'], repoPath: 'C:\\secret' },
         ],
-        stalled: () => [{ projectId: 'p0', project: 'demo-proj', task: 'demo', attempt: 2, paths: [REPO] }],
+        stalled: () => [{ projectId: 'p0', project: 'demo-proj', task: 'demo', attempt: 2, kind: 'repair', paths: [REPO] }],
       };
       const c = createCollector(st, 0, { pipelineAlerts: machine });
       await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
@@ -10699,7 +10715,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(b.decisions[0].sessionId, 'sess-in');
         assert.ok(b.decisions[0].reason.length <= 200 && !/[\u0000-\u001f]/.test(b.decisions[0].reason));
         assert.deepStrictEqual(Object.keys(b.decisions[1]).sort(), ['attempt', 'project', 'projectId', 'reason', 'task']);
-        assert.deepStrictEqual(b.stalled, [{ project: 'demo-proj', task: 'demo' }]);
+        assert.deepStrictEqual(b.stalled, [{ project: 'demo-proj', task: 'demo', kind: 'repair' }]);
       } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
     });
 
@@ -10724,11 +10740,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       });
 
       test('[4b-alerts] attention: stalled rows are never amber and never counted', () => {
-        const st = A.attentionState({ sessions: [], stalled: [{ project: 'demo-proj', task: 'demo' }] });
+        const st = A.attentionState({ sessions: [], stalled: [{ project: 'demo-proj', task: 'demo', kind: 'repair' }, { project: 'demo-proj', task: 'first', kind: 'build' }] });
         assert.deepStrictEqual([st.amber, st.count], [false, 0]);
         const h = A.attentionHtml(st, T0, { review: true });
         assert.ok(!/attn-amber|NEEDS YOUR/.test(h), h);
-        assert.match(h, /repair looks stalled/);
+        assert.match(h, /Repair stalled/);
+        assert.match(h, /Build stalled/);
         assert.match(h, /demo/);
         assert.ok(!/<button/.test(h));
       });
@@ -11091,6 +11108,260 @@ test('missing rate_limits degrades instead of throwing', () => {
         try { assert.deepStrictEqual(await get(c.port), want); } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); }
       }
     });
+  }
+
+  /* ---- [pipeline exit] Phase 4b exit criteria, end to end through the real modules ---- */
+  {
+    const pl = require('../src/pipeline.js');
+    const repos = require('../src/repos.js');
+    const pa = require('../src/pipeline-alerts.js');
+    const rec = require('../plugin/bin/lib/records.js');
+    const recovery = require('../plugin/bin/lib/recovery.js');
+    const { openLedger } = require('../src/ledger.js');
+    const NOW = Date.parse('2026-10-15T12:00:00.000Z');
+    const genv = Object.assign({}, process.env, { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' });
+    const g = (cwd, ...a) => execFileSync('git', a, { cwd, env: genv, stdio: 'pipe', windowsHide: true }).toString().trim();
+    const tmps = [];
+    const mkd = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-px-'))); tmps.push(d); return d; };
+    const sub = (r, s) => { const d = path.join(r, '.sereno', s); fs.mkdirSync(d, { recursive: true }); return d; };
+    const wj = (d, n, o) => fs.writeFileSync(path.join(d, n), typeof o === 'string' ? o : JSON.stringify(o));
+    const link = (target, at) => { try { fs.symlinkSync(target, at, process.platform === 'win32' ? 'junction' : 'dir'); return true; } catch (_) { return false; } };
+    const SPEC = (task) => '---\ntask: "' + task + '"\nbuilder: sonnet\nkind: feature\nreason: "r"\nfixes: null\nbase_branch: "main"\nspec_revision: 1\ncreated_at: "2026-10-15T09:00:00.000Z"\n---\n\nbody\n';
+    const mkrepo = () => { const r = mkd(); g(r, 'init', '-q', '-b', 'main'); g(r, 'commit', '-q', '--allow-empty', '-m', 'init'); return r; };
+    const mkTask = (r, task) => { g(r, 'checkout', '-q', '-b', 'task/' + task); g(r, 'commit', '-q', '--allow-empty', '-m', 'work ' + task); const t = g(r, 'rev-parse', 'HEAD'); g(r, 'checkout', '-q', 'main'); return t; };
+    const putSpec = (r, task) => { wj(sub(r, 'specs'), task + '.md', SPEC(task)); return rec.sha256(fs.readFileSync(path.join(r, '.sereno', 'specs', task + '.md'))); };
+    let rn = 0;
+    const rid = () => { rn++; return 'rr_20261015T11' + String(10 + (rn % 40)) + '00Z_a' + String(rn).padStart(6, '0'); };
+    const putGate = (r, task, id, extra) => wj(sub(r, 'gates'), id + '.json', Object.assign({ review_run_id: id, task_id: task, spec: '.sereno/specs/' + task + '.md', spec_hash: 'sha256:' + 'b'.repeat(64),
+      branch: 'task/' + task, base_commit: 'abcdef1', head_commit: 'abcdef2', session_id: 's-1', agent_id: 'a_2', model: 'claude-fable-5-1',
+      outcome: 'block', tests_passed: true, findings: [], context_requests: [], reviewed_at: '2026-10-15T11:00:00.000Z', config_hash: 'sha256:' + 'a'.repeat(64) }, extra || {}));
+    const putAtt = (r, task, n, extra) => wj(sub(r, 'attempts'), task + '-' + n + '.json', Object.assign({ project_id: 'p1', task_id: task, spec_revision: 1, attempt: n, builder_requested: 'sonnet', agent_id: 'a_1',
+      config_hash: 'sha256:' + 'a'.repeat(64), kind: 'feature', fixes: null, diagnosis: 'none', outcome: 'pass', review_run_id: null,
+      started_at: '2026-10-15T10:00:00.000Z', ended_at: '2026-10-15T10:05:00.000Z' }, extra || {}));
+    const passTask = (r, task) => {
+      const tip = mkTask(r, task); const sh = putSpec(r, task); const id = rid();
+      putGate(r, task, id, { outcome: 'pass', tests_passed: true, head_commit: tip, spec_hash: sh });
+      putAtt(r, task, 1, { outcome: 'pass', review_run_id: id, spec_hash: sh, head_commit: tip });
+    };
+    const poller = (r, opts) => { const list = () => [{ id: 'p0', name: 'demo-proj', repoPath: r, hidden: false }]; return { list, p: repos.createPoller(Object.assign({ registry: { list }, now: () => NOW }, opts || {})) }; };
+    const boot = async (opts) => {
+      const c = createCollector(new Store(), 0, Object.assign({ now: () => NOW, pluginStatus: () => ({ installed: false, detected: false }) }, opts));
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      return c;
+    };
+    const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const getText = (port) => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: '/api/pipeline', agent: false }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (x) => { t += x; }); r.on('end', () => resolve(t));
+      }).on('error', reject);
+    });
+
+    await atest('[pipeline exit 1] a fixture repo with a task in each state yields the right card stage for each', async () => {
+      const r = mkrepo();
+      // running: a Builder working right now
+      mkTask(r, 'running'); putSpec(r, 'running'); putAtt(r, 'running', 1, { outcome: 'running', ended_at: null });
+      // retrying: an environment failure that will be retried
+      mkTask(r, 'retrying'); putSpec(r, 'retrying'); putAtt(r, 'retrying', 1, { outcome: 'error', diagnosis: 'environment' });
+      // repairing: a running attempt after a block with two non-low findings
+      mkTask(r, 'repairing'); putSpec(r, 'repairing'); const gid = rid();
+      putGate(r, 'repairing', gid, { findings: [{ severity: 'high', kind: 'bug', file: 'a.js', line: 1, summary: 'x' }, { severity: 'medium', kind: 'bug', file: 'b.js', line: 2, summary: 'y' }] });
+      putAtt(r, 'repairing', 1, { outcome: 'block', diagnosis: 'defect', review_run_id: gid });
+      putAtt(r, 'repairing', 2, { outcome: 'running', ended_at: null });
+      // built: waiting for the red team
+      mkTask(r, 'built'); putSpec(r, 'built'); putAtt(r, 'built', 1, { outcome: 'built' });
+      // decide: a genuine decision outcome
+      mkTask(r, 'decide'); putSpec(r, 'decide'); putAtt(r, 'decide', 1, { outcome: 'needs_context' });
+      // ready to merge, merged, stopped, expired
+      passTask(r, 'ready');
+      passTask(r, 'merged'); g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/merged');
+      mkTask(r, 'stopped'); putSpec(r, 'stopped'); putAtt(r, 'stopped', 1, { outcome: 'stopped' });
+      mkTask(r, 'expired'); putSpec(r, 'expired'); putAtt(r, 'expired', 1, { outcome: 'built', started_at: '2026-10-01T10:00:00.000Z', ended_at: '2026-10-01T10:05:00.000Z' });
+      const { p } = poller(r);
+      await p.pollNow();
+      const view = p.snapshot().p0.pipeline;
+      assert.strictEqual(view.error, false);
+      const by = Object.fromEntries(view.tasks.map((t) => [t.task, t]));
+      assert.deepStrictEqual(Object.keys(by).sort(), ['built', 'decide', 'expired', 'merged', 'ready', 'repairing', 'retrying', 'running', 'stopped']);
+      assert.deepStrictEqual(Object.fromEntries(Object.entries(by).map(([k, t]) => [k, t.stage])),
+        { running: 'builder', retrying: 'builder', repairing: 'builder', built: 'red-team', decide: 'decision', ready: 'ready', merged: 'merged', stopped: 'stopped', expired: 'red-team' });
+      assert.strictEqual(by.running.step, 'Building');
+      assert.match(by.retrying.step, /retry/i);
+      assert.strictEqual(by.repairing.step, 'Fixing 2 findings');
+      assert.strictEqual(by.ready.step, 'Ready: run /sereno:merge');
+      assert.deepStrictEqual(Object.entries(by).filter(([, t]) => t.expired).map(([k]) => k), ['expired']);
+    });
+
+    await atest('[pipeline exit 2] a decide raises one decision; a newer attempt moves it to reviewing; a second decide reopens it; nothing re-fires without a new episode', async () => {
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      putAtt(r, 'demo', 1, { outcome: 'needs_context' });
+      const { list, p } = poller(r);
+      const m = pa.createPipelineAlerts({ now: () => NOW });
+      const step = async () => { await p.pollNow(); return m.update(pa.toInput(list(), p.snapshot()), []).map((e) => e.type); };
+      assert.deepStrictEqual(await step(), ['decision-open']);
+      assert.strictEqual(m.open().length, 1);
+      assert.strictEqual(m.open()[0].task, 'demo');
+      for (let i = 0; i < 3; i++) assert.deepStrictEqual(await step(), [], 'no re-fire while the same decision stands');
+      putAtt(r, 'demo', 2, { outcome: 'built' });
+      assert.deepStrictEqual(await step(), ['decision-reviewing']);
+      assert.strictEqual(m.open().length, 0);
+      assert.deepStrictEqual(await step(), []);
+      putAtt(r, 'demo', 3, { outcome: 'needs_context' });
+      assert.deepStrictEqual(await step(), ['decision-reopen']);
+      assert.strictEqual(m.open().length, 1);
+      for (let i = 0; i < 3; i++) assert.deepStrictEqual(await step(), []);
+    });
+
+    await atest('[pipeline exit 2] a running attempt never raises a decision event', async () => {
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      putAtt(r, 'demo', 1, { outcome: 'running', ended_at: null });
+      const { list, p } = poller(r);
+      const m = pa.createPipelineAlerts({ now: () => NOW });
+      for (let i = 0; i < 3; i++) {
+        await p.pollNow();
+        assert.deepStrictEqual(m.update(pa.toInput(list(), p.snapshot()), []), []);
+      }
+      assert.strictEqual(p.snapshot().p0.pipeline.tasks[0].stage, 'builder');
+      assert.strictEqual(m.open().length, 0);
+    });
+
+    await atest('[pipeline exit 2] a first build running 10 min with no live builder fires stalled with kind build, then clears', async () => {
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      putAtt(r, 'demo', 1, { outcome: 'running', ended_at: null, started_at: '2026-10-15T10:00:00.000Z' });
+      const { list, p } = poller(r);
+      let clock = Date.parse('2026-10-15T10:00:00.000Z');
+      const m = pa.createPipelineAlerts({ now: () => clock });
+      await p.pollNow();
+      const feed = () => m.update(pa.toInput(list(), p.snapshot()), []);
+      assert.deepStrictEqual(feed(), []);
+      clock = Date.parse('2026-10-15T10:10:00.000Z');
+      const ev = feed();
+      assert.deepStrictEqual(ev.map((e) => [e.type, e.kind, e.task]), [['stalled', 'build', 'demo']]);
+      assert.deepStrictEqual(m.stalled().map((x) => x.kind), ['build']);
+      assert.strictEqual(m.open().length, 0, 'never a decision');
+      putAtt(r, 'demo', 1, { outcome: 'built' });
+      await p.pollNow();
+      assert.deepStrictEqual(feed().map((e) => e.type), ['stalled-clear']);
+    });
+
+    await atest('[pipeline exit 3] a symlinked .sereno/attempts is refused before any plugin code reads it', async () => {
+      const outside = mkd(); wj(outside, 'demo-1.json', { task_id: 'demo', attempt: 1, outcome: 'built', started_at: '2026-10-15T10:00:00.000Z', ended_at: '2026-10-15T10:05:00.000Z' });
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      if (!link(outside, path.join(r, '.sereno', 'attempts'))) { console.log('    (link not permitted here; case not exercised)'); return; }
+      const orig = recovery.decide; let calls = 0;
+      recovery.decide = function () { calls++; return orig.apply(this, arguments); };
+      try {
+        assert.strictEqual(await pl.readRepo(r), null);
+        assert.strictEqual(await pl.listAttempts(r), null);
+        const { p } = poller(r);
+        await p.pollNow();
+        assert.deepStrictEqual(p.snapshot().p0.pipeline.tasks, []);
+        assert.strictEqual(calls, 0, 'recovery.decide never ran');
+      } finally { recovery.decide = orig; }
+    });
+
+    await atest('[pipeline exit 4] /api/pipeline responses contain no field outside the allowlist', async () => {
+      const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+      wj(path.join(r, '.sereno'), 'pipeline.json', { tests: { command: 'SECRET-CMD', setup: 'SECRET-SETUP' } });
+      const id = rid();
+      putGate(r, 'demo', id, { prompt: 'SECRET-PROMPT', command: 'SECRET-CMD', findings: [{ severity: 'high', kind: 'bug', file: 'a.js', line: 3, summary: 'boom', prompt: 'SECRET-PROMPT', command: 'SECRET-CMD' }] });
+      putAtt(r, 'demo', 1, { outcome: 'block', diagnosis: 'defect', review_run_id: id, prompt: 'SECRET-PROMPT', command: 'SECRET-CMD' });
+      const { list, p } = poller(r);
+      await p.pollNow();
+      const l = openLedger({ file: ':memory:' });
+      const c = await boot({ projects: { list }, repos: p, ledger: l });
+      try {
+        const text = await getText(c.port);
+        const b = JSON.parse(text);
+        const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin',
+          'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd',
+          'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'severity', 'kind', 'file', 'line', 'summary',
+          'days', 'outcomes', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
+          'enabled', 'roles', 'builder', 'red-team', 'scribe', 'main', 'auxiliary', 'unattributed', 'explicit', 'inferred', 'mean',
+          'models', 'agent', 'role', 'redTeam', 'fallback', 'onFallback', 'installed', 'detected', 'version']);
+        const strays = [];
+        const walk = (v, at) => {
+          if (Array.isArray(v)) v.forEach((x, i) => walk(x, at + '[' + i + ']'));
+          else if (v && typeof v === 'object') for (const k of Object.keys(v)) { if (!ALLOWED.has(k)) strays.push(at + '.' + k); walk(v[k], at + '.' + k); }
+        };
+        walk(b, '$');
+        assert.deepStrictEqual(strays, []);
+        assert.strictEqual(b.projects[0].tasks.length, 1, 'the fixture task is really in the body');
+        assert.strictEqual(b.projects[0].tasks[0].findings.length, 1);
+        assert.ok(!/SECRET|spec_hash|head_commit|agent_id|session_id|config_hash/.test(text) && !text.includes(r.replace(/\\/g, '\\\\')));
+      } finally { await halt(c); l.close(); }
+    });
+
+    await atest('[pipeline exit 5] role spend splits explicit / inferred / unattributed, and Sonnet is never inferred', async () => {
+      const l = openLedger({ file: ':memory:' });
+      const rq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: 's1', promptId: null, ts: NOW, model: 'claude-sonnet-5-5', querySource: null, source: 'subagent',
+        agentName: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 1000000, durationMs: 0 }, o);
+      const agent = (sid, aid, type) => l._db.prepare('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,NULL)').run(sid, aid, type, NOW);
+      agent('s1', 'ag-b', 'sereno:builder'); agent('s1', 'ag-r', 'sereno:red-team');
+      l.ingestRequests([
+        rq({ requestKey: '1', requestId: 'r1' }),                                                       // Sonnet, span-linked to the builder: explicit
+        rq({ requestKey: '2', requestId: 'r2', model: 'claude-fable-5-1', costMicros: 2000000 }),         // Fable, span-linked to the red team: explicit
+        rq({ requestKey: '3', requestId: 'r3', model: 'claude-fable-5-1', costMicros: 500000 }),          // Fable, no link: inferred red team
+        rq({ requestKey: '4', requestId: 'r4', costMicros: 250000 }),                                    // Sonnet, no link: unattributed
+        rq({ requestKey: '5', requestId: 'r5', model: 'claude-opus-5-5', costMicros: 250000 }),          // Opus, no link: unattributed
+        rq({ requestKey: '6', requestId: 'r6', model: 'claude-haiku-4-5-20251001', costMicros: 250000 }),
+      ]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag-b', ts: NOW }, { requestId: 'r2', sessionId: 's1', agentId: 'ag-r', ts: NOW }]);
+      const c = await boot({ projects: { list: () => [] }, repos: { snapshot: () => ({}) }, ledger: l });
+      try {
+        const roles = JSON.parse(await getText(c.port)).roleSpend.roles;
+        assert.deepStrictEqual(roles.builder, { costUsd: 1, explicit: 1, inferred: 0, unattributed: 0 });
+        assert.deepStrictEqual(roles['red-team'], { costUsd: 2.5, explicit: 2, inferred: 0.5, unattributed: 0 });
+        assert.strictEqual(roles.scribe.costUsd, 0);
+        assert.deepStrictEqual(roles.unattributed, { costUsd: 0.75, explicit: 0, inferred: 0, unattributed: 0.75 });
+      } finally { await halt(c); l.close(); }
+    });
+
+    await atest('[pipeline exit 6] plugin detection reports installed / not installed / not detected (corrupt file)', async () => {
+      const mkHome = (body) => {
+        const home = mkd(); const dir = path.join(home, '.claude', 'plugins'); fs.mkdirSync(dir, { recursive: true });
+        if (body !== undefined) fs.writeFileSync(path.join(dir, 'installed_plugins.json'), body);
+        return home;
+      };
+      const homes = {
+        installed: mkHome(JSON.stringify({ version: 2, plugins: { 'sereno@sereno': [{ scope: 'user', version: '0.2.0' }] } })),
+        absent: mkHome(JSON.stringify({ version: 2, plugins: { 'other@market': [{ version: '1.0.0' }] } })),
+        corrupt: mkHome('{ not json'),
+      };
+      const want = { installed: { installed: true, detected: true, version: '0.2.0' }, absent: { installed: false, detected: true, version: null }, corrupt: { installed: false, detected: false, version: null } };
+      for (const k of Object.keys(homes)) {
+        const c = await boot({ projects: { list: () => [] }, repos: { snapshot: () => ({}) }, pluginStatus: () => wiring.pluginStatus(homes[k]) });
+        try { assert.deepStrictEqual(JSON.parse(await getText(c.port)).plugin, want[k], k); } finally { await halt(c); }
+      }
+    });
+
+    test('[pipeline exit 7] the app brief command is removed only when its hash matches; a conflict stays', () => {
+      const sha = (b) => require('node:crypto').createHash('sha256').update(b).digest('hex');
+      const tmp = mkd();
+      const prev = { c: process.env.CLAUDE_CONFIG_DIR, h: process.env.SERENO_HOME };
+      process.env.CLAUDE_CONFIG_DIR = tmp; process.env.SERENO_HOME = tmp;
+      try {
+        const target = path.join(tmp, 'commands', 'brief.md');
+        const sibling = path.join(tmp, 'commands', 'mine.md');
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(sibling, 'not ours\n');
+        const record = () => fs.writeFileSync(path.join(tmp, 'wired.json'), JSON.stringify({ commands: { 'commands/brief.md': sha(Buffer.from('ours\n')) } }));
+        fs.writeFileSync(target, 'ours\n'); record();
+        assert.strictEqual(wiring.commandsStatus(), 'installed');
+        assert.deepStrictEqual(wiring.uninstallCommands().removed, ['commands/brief.md']);
+        assert.ok(!fs.existsSync(target));
+        fs.writeFileSync(target, 'ours\nedited\n'); record();
+        assert.strictEqual(wiring.commandsStatus(), 'conflict');
+        const res = wiring.uninstallCommands();
+        assert.deepStrictEqual([res.removed, res.kept], [[], ['commands/brief.md']]);
+        assert.strictEqual(fs.readFileSync(target, 'utf8'), 'ours\nedited\n');
+        assert.strictEqual(fs.readFileSync(sibling, 'utf8'), 'not ours\n');
+      } finally {
+        if (prev.c === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev.c;
+        if (prev.h === undefined) delete process.env.SERENO_HOME; else process.env.SERENO_HOME = prev.h;
+      }
+    });
+
+    await atest('[pipeline exit] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

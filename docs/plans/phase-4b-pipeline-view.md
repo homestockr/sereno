@@ -143,7 +143,9 @@ In `src/pipeline.js`:
   `stalled-clear`.
   - Decision: open on `decide`; `reviewing` when a newer attempt or gate appears; reopen
     on the next `decide`. Fires once per episode.
-  - Stalled: latest gate `block`, repair attempt `running` ≥ 10 min, and no live
+  - A `running` attempt is a Builder at work: stage `builder`, never `decide` (recovery's
+    "never finished" applies only after the Builder returned, inside /sereno:ship).
+  - Stalled (build or repair): latest attempt `running` ≥ 10 min, and no live
     `sereno:builder*` subagent in a session whose cwd is in that repo for 10 min (from
     `store.js`'s live subagents). Clears on activity or when the attempt ends.
 - `src/main.js`: decision → critical toast "<project>: review needs a decision", tray

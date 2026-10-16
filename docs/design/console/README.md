@@ -46,3 +46,5 @@ and Red team move close together under deutan, so role labels must always accomp
 colour (they do on every screen).
 
 Generated with GPT 6.1 Sol from the spec, then revised in review (2026-10-04).
+
+Dropped for v1 (decided 2026-10-15): the Default vs Lean preset comparison and the 24h/7d/30d time toggle on the Pipeline mockups; the tab uses a fixed 30 days.

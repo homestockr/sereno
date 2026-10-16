@@ -21,7 +21,7 @@ const REASON_MAX = 200;
  *   attempts?: Array<{ attempt?: number | null, outcome?: string | null, started_at?: string | null }> }} TaskIn
  * @typedef {{ id: string, name: string, paths?: string[], tasks?: TaskIn[] }} ProjectIn
  * @typedef {{ type: 'decision-open' | 'decision-reopen' | 'decision-reviewing' | 'stalled' | 'stalled-clear',
- *   key: string, projectId: string, project: string, task: string, attempt: number | null, reason: string | null }} AlertEvent
+ *   key: string, projectId: string, project: string, task: string, attempt: number | null, reason: string | null, kind?: 'repair' | 'build' }} AlertEvent
  * @typedef {{ projectId: string, project: string, task: string, reason: string | null, attempt: number | null, paths: string[] }} OpenDecision
  */
 
@@ -139,17 +139,18 @@ function createPipelineAlerts(opts) {
           }
         }
 
-        // --- stalled repair ---
+        // --- stalled build or repair ---
         const latest = Array.isArray(t.attempts) && t.attempts.length ? t.attempts[0] : null;
         const startedAt = latest && typeof latest.started_at === 'string' ? Date.parse(latest.started_at) : NaN;
-        const isStalled = !!(t.gate && t.gate.outcome === 'block' && latest && latest.outcome === 'running'
+        const kind = t.gate && t.gate.outcome === 'block' ? 'repair' : 'build';
+        const isStalled = !!(latest && latest.outcome === 'running'
           && Number.isFinite(startedAt) && t0 - startedAt >= STALL_MS && idle >= STALL_MS);
         const skey = dkey + '/' + att;
         if (isStalled) {
           seenS.add(skey);
           if (!stalled.has(skey)) {
-            stalled.set(skey, { projectId: p.id, project: String(p.name), task: t.task, attempt: att < 0 ? null : att });
-            events.push(ev('stalled', skey));
+            stalled.set(skey, { projectId: p.id, project: String(p.name), task: t.task, attempt: att < 0 ? null : att, kind });
+            events.push(Object.assign(ev('stalled', skey), { kind }));
           }
         }
       }

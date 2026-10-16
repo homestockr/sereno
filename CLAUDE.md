@@ -38,7 +38,7 @@ Agents live in `.claude/agents/`; change a role's model there.
 
 ```sh
 npm install
-npm test            # GUI-free suite (571 tests); CI runs it on every push/PR
+npm test            # GUI-free suite (679 tests); CI runs it on every push/PR
 npm start           # the widget
 npm run serve       # collector only, http://127.0.0.1:8787/
 npm run wire        # install hooks + statusline (merges, backs up first)
@@ -97,7 +97,8 @@ Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
    Code plugin owns everything that acts; the app only observes the files it writes.
    - 4a, the plugin (`plugin/`, marketplace at the repo root), shipped in `2.0.0-alpha.4` as
      plugin `0.1.0`: plan `docs/plans/phase-4a-plugin.md`.
-   - 4b, the app side: Pipeline tab, role spend, pipeline alerts, offer the plugin.
+   - 4b, the app side (Pipeline tab, role spend, pipeline alerts, offer the plugin): built on
+     `feat/pipeline-view`, ships in `2.0.0-alpha.5`. Plan: `docs/plans/phase-4b-pipeline-view.md`.
 
 ### Phase 1 notes
 
