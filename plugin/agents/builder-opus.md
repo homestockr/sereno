@@ -1,7 +1,7 @@
 ---
 name: builder-opus
 description: Opus Builder for substantial work that needs judgment. Implements one task from its spec on the current task branch and commits. Spawned by /sereno:build.
-model: claude-opus-5-5
+model: opus
 maxTurns: 120
 color: purple
 ---

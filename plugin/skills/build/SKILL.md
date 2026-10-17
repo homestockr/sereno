@@ -3,7 +3,7 @@ name: build
 description: Run the spec's Builder on the task branch and record the attempt. Use after /sereno:task.
 argument-hint: <task>
 disable-model-invocation: true
-model: claude-sonnet-5-5
+model: sonnet
 allowed-tools: Bash, Read, Agent
 ---
 
@@ -46,7 +46,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision
 ## 4. Spawn the Builder
 
 Map the spec's `builder` to an agent by name and call the Agent tool with
-`subagent_type` set to it. Do not pass a `model` parameter; the agent fixes its own model.
+`subagent_type` set to it. Do not pass a `model` parameter; the agent sets its own model tier.
 
 | spec `builder` | agent |
 |----------------|-------|

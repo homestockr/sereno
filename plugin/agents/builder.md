@@ -1,7 +1,7 @@
 ---
 name: builder
 description: Sonnet Builder (default). Implements one task from its spec on the current task branch: code, its tests, a commit. Spawned by /sereno:build.
-model: claude-sonnet-5-5
+model: sonnet
 maxTurns: 80
 color: blue
 ---

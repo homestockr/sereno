@@ -85,11 +85,12 @@ function renderSpec(p) {
 
 /**
  * Write .sereno/specs/<task>.md.
- * @param {{ root: string, fsafe: { writeFile: (rel: string, data: string) => string }, task: string, builder?: string, kind?: string, reason?: string, fixes?: string, baseBranch?: string, body: string }} a
+ * @param {{ root: string, fsafe: { writeFile: (rel: string, data: string) => string }, task: string, allowed?: string[], builder?: string, kind?: string, reason?: string, fixes?: string, baseBranch?: string, body: string }} a
  */
 function writeSpec(a) {
   const task = rec.checkTask(a.task);
   if (!rec.BUILDERS.includes(a.builder || '')) throw new SerenoError('invalid_arg', '--builder must be one of: ' + rec.BUILDERS.join(', '));
+  if (a.allowed && !a.allowed.includes(/** @type {string} */ (a.builder))) throw new SerenoError('builder_not_allowed', '--builder ' + a.builder + ' is not allowed by roles.builder.allowed; allowed tiers: ' + a.allowed.join(', '));
   if (!rec.KINDS.includes(a.kind || '')) throw new SerenoError('invalid_arg', '--kind must be one of: ' + rec.KINDS.join(', '));
   const reason = rec.cleanText(a.reason, REASON_MAX);
   if (!reason) throw new SerenoError('invalid_arg', '--reason is required: record why this Builder was chosen');

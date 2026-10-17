@@ -1,7 +1,7 @@
 ---
 name: red-team-lean
 description: Lean red team on Opus: the same read-only adversarial review of a task branch diff, for the lean preset or when Fable is unavailable. Returns a verdict JSON.
-model: claude-opus-5-5
+model: opus
 maxTurns: 60
 tools: Read, Grep, Glob, Bash
 disallowedTools: Write, Edit, NotebookEdit

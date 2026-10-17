@@ -3,7 +3,7 @@ name: task
 description: Write a task spec and create its task branch. Use to start a piece of work for the Sereno pipeline.
 argument-hint: <name> [one-line goal]
 disable-model-invocation: true
-model: claude-sonnet-5-5
+model: sonnet
 allowed-tools: Bash, Read, Grep, Glob, Edit(.sereno/cache/spec-*.md)
 ---
 
@@ -24,6 +24,8 @@ acceptance criteria: observable outcomes a reviewer can check, the files or area
 scope, what is out of scope, and the tests that must exist. Keep it short and concrete.
 
 ## 2. Choose the Builder and record why
+
+Run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" config` and read `roles.builder.allowed`. Choose only among those tiers; if only one is allowed, use it without deliberating. The `spec` command refuses any other tier.
 
 | Builder  | Use for |
 |----------|---------|

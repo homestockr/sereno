@@ -7,7 +7,7 @@
       "name": "sereno",
       "source": "./plugin",
       "description": "Gated build, review and ship pipeline for Claude Code with per-role models.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "category": "development",
       "tags": ["pipeline", "review", "gates"]
     }

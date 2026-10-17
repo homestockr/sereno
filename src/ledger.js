@@ -484,10 +484,10 @@ function openLedger(opts = {}) {
    * Spend by pipeline role since `sinceMs`, classified at query time (stored attribution is
    * never touched). Explicit: a subagent request whose agent_id joins agents.agent_type for
    * the same session and that type is in roleMap. Inferred: a subagent request with no such
-   * join whose model is in inferModels (model -> role). main/auxiliary stay their own buckets.
+   * join whose model is in inferModels (family -> role; the request's model is reduced to its family). main/auxiliary stay their own buckets.
    * @param {number} sinceMs
    * @param {Record<string, string>} roleMap agent_type -> role
-   * @param {Record<string, string>} inferModels model -> role
+   * @param {Record<string, string>} inferModels family -> role
    */
   function roleSpend(sinceMs, roleMap, inferModels) {
     live();
@@ -496,7 +496,9 @@ function openLedger(opts = {}) {
       FROM requests r LEFT JOIN agents a ON a.session_id = r.session_id AND a.agent_id = r.agent_id AND r.agent_id IS NOT NULL
       WHERE r.ts >= ? GROUP BY r.source, r.model, a.agent_type`).all(Number(sinceMs) || 0);
     const has = (/** @type {any} */ o, /** @type {any} */ k) => !!o && typeof k === 'string' && Object.prototype.hasOwnProperty.call(o, k);
+    const family = require('./pipeline.js').modelFamily;
     for (const r of rows) {
+      const fam = family(r.m) || r.m;
       const usd = Number(r.c) / 1e6;
       /** @type {string} */ let role = 'unattributed';
       /** @type {'explicit'|'inferred'|'unattributed'|null} */ let kind = 'unattributed';
@@ -505,7 +507,7 @@ function openLedger(opts = {}) {
       else if (r.s === 'subagent') {
         if (has(roleMap, r.t) && has(out.roles, roleMap[r.t]) && !['main', 'auxiliary', 'unattributed'].includes(roleMap[r.t])) { role = roleMap[r.t]; kind = 'explicit'; }
         // Inferred only when the request joins no agents row: a joined agent outside the role map stays unattributed.
-        else if (r.t == null && has(inferModels, r.m) && has(out.roles, inferModels[r.m]) && !['main', 'auxiliary', 'unattributed'].includes(inferModels[r.m])) { role = inferModels[r.m]; kind = 'inferred'; }
+        else if (r.t == null && has(inferModels, fam) && has(out.roles, inferModels[fam]) && !['main', 'auxiliary', 'unattributed'].includes(inferModels[fam])) { role = inferModels[fam]; kind = 'inferred'; }
       }
       const b = out.roles[role];
       b.costUsd += usd;

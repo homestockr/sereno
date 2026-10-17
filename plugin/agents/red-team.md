@@ -1,7 +1,7 @@
 ---
 name: red-team
 description: Adversarial pre-merge review of a task branch diff against its spec. Read-only; returns a verdict JSON (pass, block, needs_context, error). Default red team.
-model: claude-fable-5-1
+model: fable
 maxTurns: 60
 tools: Read, Grep, Glob, Bash
 disallowedTools: Write, Edit, NotebookEdit

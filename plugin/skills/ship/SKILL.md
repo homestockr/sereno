@@ -3,7 +3,7 @@ name: ship
 description: Test, review and gate a built task branch, repair once if needed, then hand off to /sereno:merge. Use after /sereno:build.
 argument-hint: <task>
 disable-model-invocation: true
-model: claude-sonnet-5-5
+model: sonnet
 allowed-tools: Bash, Read, Agent, Edit(.sereno/cache/verdict-*.json)
 ---
 
@@ -158,7 +158,7 @@ The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `n
 - **`decide`**: stop. Present exactly one decision, titled "Review needs a decision",
   with the `reason` and the findings or failure in one line each, and these choices:
   clarify the spec (run `/sereno:task` to revise it), use a stronger Builder (revise the
-  spec with a higher `builder`, then `/sereno:build <task>` starts a new attempt), or
+  spec with a higher `builder`, which must be in `roles.builder.allowed` (the `spec` command refuses otherwise, exit 21), then `/sereno:build <task>` starts a new attempt), or
   stop. Do not pick for the user and do not start another attempt. If they choose stop,
   record the latest attempt with `--outcome stopped` only if it is not final; otherwise
   just say the task is stopped.
