@@ -512,6 +512,7 @@ function agentModels(dir) {
 /**
  * Model family from an alias (haiku, sonnet, opus, fable) or a full model id, by the family
  * word in it (case-insensitive; dated and provider-prefixed ids included). Unknown -> null.
+ * If an id holds two family words, the leftmost one in the string wins.
  * @param {unknown} id @returns {'haiku' | 'sonnet' | 'opus' | 'fable' | null}
  */
 function modelFamily(id) {

@@ -45,7 +45,7 @@ function runDoctor(cwd) {
     try {
       loaded = loadConfig(root);
       const inert = inertKeys(loaded.config);
-      return { ok: true, detail: (loaded.source === 'builtin' ? 'defaults' : loaded.source.replace(/\\/g, '/')) + ', config_hash ' + loaded.config_hash + (inert.length ? '; note, no effect yet: ' + inert.join(', ') : '') };
+      return { ok: true, detail: (loaded.source === 'builtin' ? 'defaults' : loaded.source.replace(/\\/g, '/')) + ', config_hash ' + loaded.config_hash + (inert.length ? '; note, no effect yet: ' + inert.join(', ') : '') + (inert.some((k) => /\.model$/.test(k)) ? '; removed in 0.3.0: models are tier aliases; repoint a tier with ANTHROPIC_DEFAULT_<TIER>_MODEL in Claude Code settings' : '') };
     } catch (e) {
       if (e instanceof SerenoError) {
         const errs = Array.isArray(e.extra.errors) ? ': ' + e.extra.errors.join('; ') : '';

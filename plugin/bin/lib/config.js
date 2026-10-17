@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { SerenoError } = require('./fsafe.js');
+const { BUILDERS } = require('./records.js');
 
 const AGENTS = ['builder', 'builder-haiku', 'builder-opus', 'scribe', 'red-team', 'red-team-lean'];
 const ON_FALLBACK = ['ask', 'auto', 'never'];
@@ -91,12 +92,14 @@ function validate(c) {
     for (const k of Object.keys(b.options)) {
       const o = b.options[k];
       const p = 'roles.builder.options.' + k;
+      if (!BUILDERS.includes(k)) { bad(p + ': must be one of ' + BUILDERS.join(', ')); continue; }
       if (!isObj(o)) { bad(p + ': must be an object'); continue; }
       agent(p + '.agent', o.agent, false);
       if (!posInt(o.maxTurns)) bad(p + '.maxTurns: must be a positive integer');
     }
     if (typeof b.default !== 'string' || !Object.prototype.hasOwnProperty.call(b.options, b.default)) bad('roles.builder.default: must name an entry in roles.builder.options');
-    if (!Array.isArray(b.allowed) || !b.allowed.length || b.allowed.some((/** @type {unknown} */ t) => typeof t !== 'string' || !Object.prototype.hasOwnProperty.call(b.options, t)) || new Set(b.allowed).size !== b.allowed.length) bad('roles.builder.allowed: must be a non-empty list of distinct tiers named in roles.builder.options');
+    if (Array.isArray(b.allowed) && b.allowed.some((/** @type {unknown} */ t) => typeof t !== 'string' || !BUILDERS.includes(t))) bad('roles.builder.allowed: every entry must be one of ' + BUILDERS.join(', '));
+    else if (!Array.isArray(b.allowed) || !b.allowed.length || b.allowed.some((/** @type {unknown} */ t) => typeof t !== 'string' || !Object.prototype.hasOwnProperty.call(b.options, t)) || new Set(b.allowed).size !== b.allowed.length) bad('roles.builder.allowed: must be a non-empty list of distinct tiers named in roles.builder.options');
     else if (typeof b.default === 'string' && !b.allowed.includes(b.default)) bad('roles.builder.allowed: must include roles.builder.default (' + b.default + ')');
   }
   if (!isObj(c.roles.scribe)) bad('roles.scribe: must be an object'); else agent('roles.scribe.agent', c.roles.scribe.agent, false);
@@ -142,6 +145,8 @@ function inertKeys(c) {
   for (const k of Object.keys(opts)) {
     const o = opts[k], d = /** @type {any} */ (def)[k];
     if (!isObj(o) || !d) continue;
+    // Pre-0.3.0 files could set a model id per option; tiers are aliases now, so it is ignored.
+    if ('model' in o) out[out.length] = 'roles.builder.options.' + k + '.model';
     for (const f of ['maxTurns']) if (o[f] !== d[f]) out[out.length] = 'roles.builder.options.' + k + '.' + f;
   }
   if (c && c.recovery && c.recovery.taskBudgetUsd !== null && c.recovery.taskBudgetUsd !== undefined) out[out.length] = 'recovery.taskBudgetUsd';

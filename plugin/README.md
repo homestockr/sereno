@@ -111,7 +111,7 @@ invalid file stops the pipeline and lists the errors.
 | `preset` | `"default"` | `"default"` or `"lean"`. |
 | `roles.builder.default` | `"sonnet"` | Default Builder option: `haiku`, `sonnet` or `opus`. |
 | `roles.builder.options.<name>.agent` | per option | Agent name; must be a plugin agent. Validated and recorded. |
-| `roles.builder.allowed` | `["haiku","sonnet","opus"]` | Builder tiers a spec may choose. Must include `roles.builder.default`. `sereno.js spec` refuses any other tier with `builder_not_allowed` (exit 21). |
+| `roles.builder.allowed` | `["haiku","sonnet","opus"]` | Builder tiers a spec may choose. Must include `roles.builder.default`. `sereno.js spec` refuses any other tier with `builder_not_allowed` (exit 21). Entries must be `haiku`, `sonnet` or `opus`. A pre-0.3.0 file that still sets `roles.builder.options.<tier>.model` loads, but the key is ignored (listed under `inert`; `doctor` notes it): models are tier aliases now, so repoint a tier with `ANTHROPIC_DEFAULT_<TIER>_MODEL` in Claude Code settings. |
 | `roles.builder.options.<name>.maxTurns` | per option | Positive integer. Validated and recorded. The agent file's cap is the one that runs. Listed under `inert`. |
 | `roles.scribe.agent` | `"scribe"` | Agent that writes briefs and commit text. |
 | `roles.redTeam.agent` | `"red-team"` | Red team agent for `/sereno:ship`. |

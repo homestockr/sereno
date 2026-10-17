@@ -8016,6 +8016,26 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(mk(['haiku', 'opus']).some((m) => /include roles.builder.default/.test(m)));
       assert.deepStrictEqual(mk(['haiku'], 'haiku'), []);
     });
+    test('[tiers] config: option names and allowed entries must be haiku, sonnet or opus', () => {
+      const cfg = require(path.join(PLUGIN, 'bin', 'lib', 'config.js'));
+      const c1 = cfg.PRESETS.default(); c1.roles.builder.options.gpt = { agent: 'builder', maxTurns: 5 };
+      assert.ok(cfg.validate(c1).some((m) => /options\.gpt: must be one of haiku, sonnet, opus/.test(m)));
+      const c2 = cfg.PRESETS.default(); c2.roles.builder.allowed = ['sonnet', 'fable'];
+      assert.ok(cfg.validate(c2).some((m) => /allowed: every entry must be one of haiku, sonnet, opus/.test(m)));
+    });
+    test('[tiers] back-compat: a pre-0.3.0 options.*.model loads, is listed inert, and doctor notes it', () => {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      fs.writeFileSync(path.join(dir, 'package.json'), '{"scripts":{"test":"node -e 0"}}');
+      fs.mkdirSync(path.join(dir, '.sereno'));
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { builder: { options: { opus: { model: 'claude-opus-4-8' } } } } }));
+      const r = runS(dir, ['config']);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+      assert.ok(r.out.inert.includes('roles.builder.options.opus.model'));
+      const d = runS(dir, ['doctor']).out.checks.find((x) => x.name === 'pipeline.json');
+      assert.strictEqual(d.ok, true);
+      assert.match(d.detail, /removed in 0\.3\.0: models are tier aliases; repoint a tier with ANTHROPIC_DEFAULT_<TIER>_MODEL in Claude Code settings/);
+    });
     test('[tiers] spec refuses a builder outside roles.builder.allowed; the task skill reads it', () => {
       const dir = mk();
       git(dir, 'init', '-q', '-b', 'main');
@@ -8026,7 +8046,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const body = '## Goal\nx.\n\n## Acceptance criteria\n- ok\n';
       const sp = (b) => runS(dir, ['spec', '--task', 't1', '--builder', b, '--kind', 'feature', '--reason', 'r', '--stdin'], body);
       const bad = sp('opus');
-      assert.strictEqual(bad.out.ok, false); assert.strictEqual(bad.out.code, 'builder_not_allowed'); assert.match(bad.out.error, /sonnet/);
+      assert.strictEqual(bad.out.ok, false); assert.strictEqual(bad.status, 21); assert.strictEqual(bad.out.code, 'builder_not_allowed'); assert.match(bad.out.error, /sonnet/);
       assert.ok(!fs.existsSync(path.join(dir, '.sereno', 'specs', 't1.md')));
       assert.strictEqual(sp('sonnet').out.ok, true);
       assert.ok(front(path.join(PLUGIN, 'skills', 'task', 'SKILL.md')).body.includes('roles.builder.allowed'));
@@ -10518,6 +10538,8 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     test('[a2] modelFamily: aliases, dated ids, provider-prefixed ids, case, unknown', () => {
       for (const [id, f] of [['haiku', 'haiku'], ['sonnet', 'sonnet'], ['opus', 'opus'], ['fable', 'fable'], ['claude-haiku-5-5', 'haiku'], ['claude-haiku-4-5-20251001', 'haiku'], ['us.anthropic.claude-sonnet-4-6-v1:0', 'sonnet'], ['claude-opus-4-8[1m]', 'opus'], ['us.anthropic.Claude-FABLE-1', 'fable']]) assert.strictEqual(pl.modelFamily(id), f, id);
+      assert.strictEqual(pl.modelFamily('claude-sonnet-opus-1'), 'sonnet'); // leftmost family word wins
+      assert.strictEqual(pl.modelFamily('opus-sonnet'), 'opus');
       for (const id of ['gpt-5', '', null, undefined, 42, {}]) assert.strictEqual(pl.modelFamily(id), null);
     });
     test('[a2] roleSpend: Haiku 4.5 and 5.5 share a family; only Fable (family) infers, Sonnet/Opus/Haiku never', () => {
