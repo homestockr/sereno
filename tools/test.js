@@ -7967,12 +7967,12 @@ test('missing rate_limits degrades instead of throwing', () => {
     const agentFiles = fs.readdirSync(path.join(PLUGIN, 'agents')).filter((f) => f.endsWith('.md'));
     const skillDirs = fs.readdirSync(path.join(PLUGIN, 'skills'));
     const AGENT_SPEC = {
-      'builder': { model: 'claude-sonnet-5-5', maxTurns: '80' },
-      'builder-haiku': { model: 'claude-haiku-4-5-20251001', maxTurns: '40' },
-      'builder-opus': { model: 'claude-opus-5-5', maxTurns: '120' },
-      'red-team': { model: 'claude-fable-5-1' },
-      'red-team-lean': { model: 'claude-opus-5-5' },
-      'scribe': { model: 'claude-haiku-4-5-20251001' },
+      'builder': { model: 'sonnet', maxTurns: '80' },
+      'builder-haiku': { model: 'haiku', maxTurns: '40' },
+      'builder-opus': { model: 'opus', maxTurns: '120' },
+      'red-team': { model: 'fable' },
+      'red-team-lean': { model: 'opus' },
+      'scribe': { model: 'haiku' },
     };
     const IGNORED_KEYS = ['permissionMode', 'hooks', 'mcpServers'];
     const list = (v) => (v || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -7995,6 +7995,41 @@ test('missing rate_limits degrades instead of throwing', () => {
         for (const k of IGNORED_KEYS) assert.ok(!(k in fm), name + ' must not set ' + k + ' (plugin agents ignore it)');
         assert.ok(body.trim().length > 200, name + ' has a real prompt');
       }
+    });
+    test('[tiers] every plugin agent and skill model: is exactly one of the four aliases; config options carry no model', () => {
+      const ALIASES = ['haiku', 'sonnet', 'opus', 'fable'];
+      for (const f of agentFiles) assert.ok(ALIASES.includes(front(path.join(PLUGIN, 'agents', f)).fm.model), f);
+      for (const d of skillDirs) assert.ok(ALIASES.includes(front(path.join(PLUGIN, 'skills', d, 'SKILL.md')).fm.model), d);
+      const cfg = require(path.join(PLUGIN, 'bin', 'lib', 'config.js'));
+      for (const p of Object.values(cfg.PRESETS)) {
+        const b = p().roles.builder;
+        for (const o of Object.values(b.options)) assert.deepStrictEqual(Object.keys(o).sort(), ['agent', 'maxTurns']);
+        assert.deepStrictEqual(b.allowed, ['haiku', 'sonnet', 'opus']);
+      }
+    });
+    test('[tiers] config: roles.builder.allowed is validated and must include the default', () => {
+      const cfg = require(path.join(PLUGIN, 'bin', 'lib', 'config.js'));
+      const mk = (allowed, def) => { const c = cfg.PRESETS.default(); c.roles.builder.allowed = allowed; if (def) c.roles.builder.default = def; return cfg.validate(c); };
+      assert.deepStrictEqual(mk(['haiku', 'sonnet', 'opus']), []);
+      assert.deepStrictEqual(mk(['sonnet']), []);
+      assert.ok(mk([]).length); assert.ok(mk('sonnet').length); assert.ok(mk(['gpt', 'sonnet']).length); assert.ok(mk(['sonnet', 'sonnet']).length);
+      assert.ok(mk(['haiku', 'opus']).some((m) => /include roles.builder.default/.test(m)));
+      assert.deepStrictEqual(mk(['haiku'], 'haiku'), []);
+    });
+    test('[tiers] spec refuses a builder outside roles.builder.allowed; the task skill reads it', () => {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      fs.mkdirSync(path.join(dir, '.sereno'));
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { builder: { allowed: ['sonnet'] } } }));
+      const body = '## Goal\nx.\n\n## Acceptance criteria\n- ok\n';
+      const sp = (b) => runS(dir, ['spec', '--task', 't1', '--builder', b, '--kind', 'feature', '--reason', 'r', '--stdin'], body);
+      const bad = sp('opus');
+      assert.strictEqual(bad.out.ok, false); assert.strictEqual(bad.out.code, 'builder_not_allowed'); assert.match(bad.out.error, /sonnet/);
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno', 'specs', 't1.md')));
+      assert.strictEqual(sp('sonnet').out.ok, true);
+      assert.ok(front(path.join(PLUGIN, 'skills', 'task', 'SKILL.md')).body.includes('roles.builder.allowed'));
     });
     test('[4a3] agents: red teams are read-only; builders never edit .sereno or send commits out', () => {
       for (const name of ['red-team', 'red-team-lean']) {
@@ -8369,7 +8404,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     /* ---- cheaper orchestration: skill models, /sereno:merge, recovery head and spec guards ---- */
     const fmOf = (name) => { const t = fs.readFileSync(path.join(PLUGIN, 'skills', name, 'SKILL.md'), 'utf8'); const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(t); assert.ok(m, name); return { fm: m[1], text: t }; };
     test('[4a-cost] every orchestration skill runs on Sonnet', () => {
-      for (const n of ['task', 'build', 'ship', 'brief', 'merge']) assert.ok(/^model: claude-sonnet-5-5$/m.test(fmOf(n).fm), n);
+      for (const n of ['task', 'build', 'ship', 'brief', 'merge']) assert.ok(/^model: sonnet$/m.test(fmOf(n).fm), n);
     });
     test('[4a-cost] merge skill: user-only, scribe is the only agent, recovery before git merge, ship never merges', () => {
       const { fm, text } = fmOf('merge');
@@ -8808,9 +8843,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       let r = S(dir, ['config']);
       assert.deepStrictEqual(r.out.inert, []);
       fs.mkdirSync(path.join(dir, '.sereno'));
-      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { builder: { options: { opus: { model: 'claude-x', maxTurns: 7 } } } }, recovery: { taskBudgetUsd: 5 } }));
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { builder: { options: { opus: { maxTurns: 7 } } } }, recovery: { taskBudgetUsd: 5 } }));
       r = S(dir, ['config']);
-      assert.deepStrictEqual(r.out.inert.slice().sort(), ['recovery.taskBudgetUsd', 'roles.builder.options.opus.maxTurns', 'roles.builder.options.opus.model']);
+      assert.deepStrictEqual(r.out.inert.slice().sort(), ['recovery.taskBudgetUsd', 'roles.builder.options.opus.maxTurns']);
       r = S(dir, ['doctor']);
       const c = r.out.checks.find((x) => x.name === 'pipeline.json');
       assert.strictEqual(c.ok, true); assert.match(c.detail, /note, no effect yet:.*taskBudgetUsd/);
@@ -10478,9 +10513,27 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     test('[4b-signals] inferModels on the bundled files is exactly Fable -> red-team', () => {
-      assert.deepStrictEqual(pl.inferModels(), { [FABLE]: 'red-team' });
+      assert.deepStrictEqual(pl.inferModels(), { fable: 'red-team' });
     });
 
+    test('[a2] modelFamily: aliases, dated ids, provider-prefixed ids, case, unknown', () => {
+      for (const [id, f] of [['haiku', 'haiku'], ['sonnet', 'sonnet'], ['opus', 'opus'], ['fable', 'fable'], ['claude-haiku-5-5', 'haiku'], ['claude-haiku-4-5-20251001', 'haiku'], ['us.anthropic.claude-sonnet-4-6-v1:0', 'sonnet'], ['claude-opus-4-8[1m]', 'opus'], ['us.anthropic.Claude-FABLE-1', 'fable']]) assert.strictEqual(pl.modelFamily(id), f, id);
+      for (const id of ['gpt-5', '', null, undefined, 42, {}]) assert.strictEqual(pl.modelFamily(id), null);
+    });
+    test('[a2] roleSpend: Haiku 4.5 and 5.5 share a family; only Fable (family) infers, Sonnet/Opus/Haiku never', () => {
+      const l = mem();
+      l.ingestRequests([
+        rq({ source: 'subagent', requestKey: 'a', requestId: 'ra', model: 'claude-fable-5-1', costMicros: 1000000 }),
+        rq({ source: 'subagent', requestKey: 'b', requestId: 'rb', model: 'claude-haiku-4-5-20251001', costMicros: 2000000 }),
+        rq({ source: 'subagent', requestKey: 'c', requestId: 'rc', model: 'claude-haiku-5-5', costMicros: 4000000 }),
+        rq({ source: 'subagent', requestKey: 'd', requestId: 'rd', model: 'claude-sonnet-5-5', costMicros: 8000000 }),
+      ]);
+      const r = l.roleSpend(0, pl.roleMap(), pl.inferModels()).roles;
+      assert.strictEqual(r['red-team'].inferred, 1);
+      assert.strictEqual(r.builder.costUsd + r.scribe.costUsd, 0);
+      const h = l.roleSpend(0, pl.roleMap(), { haiku: 'scribe' }).roles;
+      assert.strictEqual(h.scribe.inferred, 6);
+    });
     test('[4b-signals] inferModels: a skill sharing a model with an agent removes it; an orchestration-only model is not a role', () => {
       const d = fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-4bs-'));
       fs.mkdirSync(path.join(d, 'agents')); fs.mkdirSync(path.join(d, 'skills', 's1'), { recursive: true }); fs.mkdirSync(path.join(d, 'skills', 's2'), { recursive: true });
@@ -10512,7 +10565,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         { requestId: 'r7', sessionId: 's1', agentId: 'ag-x', ts: NOW }]);
       const snap = () => JSON.stringify(l._db.prepare('SELECT request_id, attribution, agent_id FROM requests ORDER BY request_id').all());
       const before = snap();
-      const r = l.roleSpend(NOW - 86400000, pl.roleMap(), { [FABLE]: 'red-team' }).roles;
+      const r = l.roleSpend(NOW - 86400000, pl.roleMap(), { fable: 'red-team' }).roles;
       assert.deepStrictEqual(r.builder, { costUsd: 1, explicit: 1, inferred: 0, unattributed: 0 });
       assert.deepStrictEqual(r['red-team'], { costUsd: 1.5, explicit: 1, inferred: 0.5, unattributed: 0 });
       assert.strictEqual(r.scribe.costUsd, 0);
@@ -10521,7 +10574,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(r.unattributed.costUsd, 0.85);
       assert.strictEqual(r.unattributed.unattributed, 0.85);
       assert.strictEqual(snap(), before);
-      assert.strictEqual(l.roleSpend(NOW - 20 * 86400000, pl.roleMap(), { [FABLE]: 'red-team' }).roles['red-team'].inferred, 9.5);
+      assert.strictEqual(l.roleSpend(NOW - 20 * 86400000, pl.roleMap(), { fable: 'red-team' }).roles['red-team'].inferred, 9.5);
       l.close();
     });
 
@@ -10536,7 +10589,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       ]);
       l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag-x', ts: NOW }, { requestId: 'r2', sessionId: 's1', agentId: 'ag-rt', ts: NOW },
         { requestId: 'r4', sessionId: 's1', agentId: 'ag-gone', ts: NOW }]);
-      const r = l.roleSpend(0, pl.roleMap(), { [FABLE]: 'red-team' }).roles;
+      const r = l.roleSpend(0, pl.roleMap(), { fable: 'red-team' }).roles;
       assert.deepStrictEqual(r['red-team'], { costUsd: 0.75, explicit: 0, inferred: 0.75, unattributed: 0 });
       assert.strictEqual(r.unattributed.costUsd, 2);
       l.close();
@@ -10544,13 +10597,13 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     test('[4b-signals] roleSpend: an agent_id in another session does not join; empty ledger is all zeros', () => {
       const l = mem();
-      const z = l.roleSpend(0, pl.roleMap(), { [FABLE]: 'red-team' });
+      const z = l.roleSpend(0, pl.roleMap(), { fable: 'red-team' });
       assert.deepStrictEqual(Object.keys(z.roles).sort(), ['auxiliary', 'builder', 'main', 'red-team', 'scribe', 'unattributed']);
       for (const k of Object.keys(z.roles)) assert.deepStrictEqual(z.roles[k], { costUsd: 0, explicit: 0, inferred: 0, unattributed: 0 });
       agent(l, 'other', 'ag1', 'sereno:builder');
       l.ingestRequests([rq({ requestKey: '1', requestId: 'r1', sessionId: 's1' })]);
       l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'ag1', ts: NOW }]);
-      const r = l.roleSpend(0, pl.roleMap(), { [FABLE]: 'red-team' }).roles;
+      const r = l.roleSpend(0, pl.roleMap(), { fable: 'red-team' }).roles;
       assert.strictEqual(r.builder.costUsd, 0); assert.strictEqual(r.unattributed.costUsd, 1);
       assert.strictEqual(l.spendForAgent('s1', 'ag1'), 1);
       assert.strictEqual(l.spendForAgent('s1', 'nope'), 0);
@@ -10700,7 +10753,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(b.signals.outcomes.n, 3);
         // routing: bundled models, plus only the red-team fields per project
         assert.deepStrictEqual(b.routing.models, pl.agentModels());
-        assert.ok(b.routing.models.some((m) => m.agent === 'sereno:red-team' && m.model === 'claude-fable-5-1'));
+        assert.ok(b.routing.models.some((m) => m.agent === 'sereno:red-team' && m.model === 'fable'));
         assert.deepStrictEqual(b.routing.projects.find((p) => p.id === 'p1').redTeam, { agent: 'red-team', fallback: 'red-team-lean', onFallback: 'ask' });
         assert.deepStrictEqual(b.routing.projects.find((p) => p.id === 'p2').redTeam, { agent: 'red-team-lean', fallback: null, onFallback: 'never' });
         assert.strictEqual(b.routing.projects.find((p) => p.id === 'p4').redTeam, null);

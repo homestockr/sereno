@@ -509,11 +509,22 @@ function agentModels(dir) {
   return out;
 }
 
+/**
+ * Model family from an alias (haiku, sonnet, opus, fable) or a full model id, by the family
+ * word in it (case-insensitive; dated and provider-prefixed ids included). Unknown -> null.
+ * @param {unknown} id @returns {'haiku' | 'sonnet' | 'opus' | 'fable' | null}
+ */
+function modelFamily(id) {
+  if (typeof id !== 'string') return null;
+  const m = /haiku|sonnet|opus|fable/i.exec(id);
+  return m ? /** @type {any} */ (m[0].toLowerCase()) : null;
+}
+
 /** @type {Map<string, Record<string, string>>} */
 const inferCache = new Map();
 
 /**
- * model -> role for models that exactly one role uses, computed from the bundled agent
+ * family -> role for model families (an id with no known family keys as itself) that exactly one role uses, computed from the bundled agent
  * files' `name:` and `model:` front matter and the skills' `model:` (the orchestration
  * role: the main-thread commands run on it). A model also used by orchestration, or by
  * two agent roles, never infers. Bounded reads, no links, cached per directory pair.
@@ -532,6 +543,7 @@ function inferModels(dir, skillsDir) {
   const byModel = new Map();
   const head = headOf;
   const addRole = (/** @type {string} */ model, /** @type {string} */ role) => {
+    model = modelFamily(model) || model;
     let set = byModel.get(model);
     if (!set) { set = new Set(); byModel.set(model, set); }
     set.add(role);
@@ -651,4 +663,4 @@ function redTeamPerMerge(projects, spendForAgent) {
   return { mean: n ? sum / n : null, n, excluded };
 }
 
-module.exports = { roleMap, inferModels, agentModels, signals, redTeamPerMerge, recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView, isExpired };
+module.exports = { roleMap, modelFamily, inferModels, agentModels, signals, redTeamPerMerge, recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView, isExpired };

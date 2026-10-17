@@ -7,7 +7,7 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.2.0, in development. Windows is the first
+can observe the files it writes. Version 0.3.0, in development. Windows is the first
 platform; other systems are not yet tested.
 
 ## Install
@@ -70,18 +70,18 @@ or by this command is read the same way. Run it whenever you want the brief refr
 
 ## Roles and models
 
-| Role | Agent | Model | Turn cap |
-|------|-------|-------|----------|
+| Role | Agent | Tier | Turn cap |
+|------|-------|------|----------|
 | Architect, your session | main session (no agent) | your session's model | n/a |
-| Orchestration (`task`, `build`, `ship`, `merge`, `brief`) | skills | claude-sonnet-5-5 | n/a |
-| Builder, default | `sereno:builder` | claude-sonnet-5-5 | 80 |
-| Builder, mechanical | `sereno:builder-haiku` | claude-haiku-4-5-20251001 | 40 |
-| Builder, substantial | `sereno:builder-opus` | claude-opus-5-5 | 120 |
-| Red team, `default` preset | `sereno:red-team` | claude-fable-5-1 | 60 |
-| Red team, `lean` preset (and fallback) | `sereno:red-team-lean` | claude-opus-5-5 | 60 |
-| Scribe (briefs, commit text) | `sereno:scribe` | claude-haiku-4-5-20251001 | 20 |
+| Orchestration (`task`, `build`, `ship`, `merge`, `brief`) | skills | sonnet | n/a |
+| Builder, default | `sereno:builder` | sonnet | 80 |
+| Builder, mechanical | `sereno:builder-haiku` | haiku | 40 |
+| Builder, substantial | `sereno:builder-opus` | opus | 120 |
+| Red team, `default` preset | `sereno:red-team` | fable | 60 |
+| Red team, `lean` preset (and fallback) | `sereno:red-team-lean` | opus | 60 |
+| Scribe (briefs, commit text) | `sereno:scribe` | haiku | 20 |
 
-The model and turn cap are fixed in each agent file, and the orchestration model in each skill's front matter (`model: claude-sonnet-5-5`, which applies to that turn only; your session model resumes on the next prompt). Config cannot change them. The
+Models are tier aliases (`haiku`, `sonnet`, `opus`, `fable`) set in each agent file and, for orchestration, in each skill's front matter (`model: sonnet`, which applies to that turn only; your session model resumes on the next prompt). An alias tracks the current model of that tier on your provider. To repoint a tier, set `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL` or `ANTHROPIC_DEFAULT_FABLE_MODEL` in your Claude Code settings. `roles.builder.allowed` restricts which Builder tiers a spec may choose, and the preset chooses the red team. The turn cap is fixed in each agent file. The
 spec chooses the Builder per task, and that choice is never changed automatically.
 
 **Cheapest setup:** start the session on Sonnet (`claude --model sonnet`) when you run the pipeline. A result that arrives in a later turn, such as a background agent or the ship test retry, runs on the session model, so on an Opus session it can cost an extra cold-cache Opus turn. In our small-task benchmark, Opus leaked this way in 2 of 3 `default` ships, adding about $0.44 each (an estimate).
@@ -111,7 +111,7 @@ invalid file stops the pipeline and lists the errors.
 | `preset` | `"default"` | `"default"` or `"lean"`. |
 | `roles.builder.default` | `"sonnet"` | Default Builder option: `haiku`, `sonnet` or `opus`. |
 | `roles.builder.options.<name>.agent` | per option | Agent name; must be a plugin agent. Validated and recorded. |
-| `roles.builder.options.<name>.model` | per option | Model id. Validated and recorded. The agent file's model is the one that runs. Listed under `inert` by `config` and noted by `doctor`. |
+| `roles.builder.allowed` | `["haiku","sonnet","opus"]` | Builder tiers a spec may choose. Must include `roles.builder.default`. `sereno.js spec` refuses any other tier with `builder_not_allowed` (exit 21). |
 | `roles.builder.options.<name>.maxTurns` | per option | Positive integer. Validated and recorded. The agent file's cap is the one that runs. Listed under `inert`. |
 | `roles.scribe.agent` | `"scribe"` | Agent that writes briefs and commit text. |
 | `roles.redTeam.agent` | `"red-team"` | Red team agent for `/sereno:ship`. |
@@ -184,7 +184,7 @@ keep the generated parts out of git:
 .sereno/attempts/
 ```
 
-`sereno.js test --deadline-sec <n>` sets one wall-clock budget for the whole call. When it runs out the script kills every running suite (the whole process tree), removes its temporary worktree, keeps a base cache only if the base suite already passed in full (never a partial one), prints `{"ok":false,"status":"deadline","code":"deadline",...}` and exits 20. The other exit codes are 2 usage, 3 config_invalid, 4 invalid_arg, 5 not_a_repo, 6 path_refused, 7 exists, 8 head_mismatch, 9 no_test_command, 10 worktree_failed, 11 dirty_tree, 12-19 record and spec refusals, and 130 interrupted. `/sereno:ship` passes 540 so the script stops before the Bash tool's 600 s cap.
+`sereno.js test --deadline-sec <n>` sets one wall-clock budget for the whole call. When it runs out the script kills every running suite (the whole process tree), removes its temporary worktree, keeps a base cache only if the base suite already passed in full (never a partial one), prints `{"ok":false,"status":"deadline","code":"deadline",...}` and exits 20. The other exit codes are 2 usage, 3 config_invalid, 4 invalid_arg, 5 not_a_repo, 6 path_refused, 7 exists, 8 head_mismatch, 9 no_test_command, 10 worktree_failed, 11 dirty_tree, 12-19 record and spec refusals, 21 builder_not_allowed, and 130 interrupted. `/sereno:ship` passes 540 so the script stops before the Bash tool's 600 s cap.
 
 A failing head is passed only when it provably completed: it printed a TAP plan (`1..N`) that was reached, or a TAP summary (`# tests N`, plus `# pass`/`# fail` when printed) that matches the result lines seen, as `node --test --test-reporter=tap` and tape do. Without either (no plan or summary, or a non-TAP runner), `sereno.js test` reports `unknown_baseline` ("cannot confirm the head suite completed") and the run goes to a decision; a head that exits 0 still passes. On every path (named failures or exit-code mode), a head re-run that exits 0 only excuses flaky failures if it printed at least as many results as the first run and the base.
 

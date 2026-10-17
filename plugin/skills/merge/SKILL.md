@@ -3,7 +3,7 @@ name: merge
 description: Merge a shipped task branch into its base branch locally. Use after /sereno:ship says it is ready.
 argument-hint: <task>
 disable-model-invocation: true
-model: claude-sonnet-5-5
+model: sonnet
 allowed-tools: Bash, Read, Agent(sereno:scribe)
 ---
 

@@ -42,7 +42,7 @@ function agentModel(name) {
   return m ? m[1] : null;
 }
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, builder_not_allowed: 21, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -412,7 +412,7 @@ const COMMANDS = {
       cacheRel = cf.rel;
       body = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
     }
-    const out = speclib.writeSpec({ root, fsafe, task, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), body });
+    const out = speclib.writeSpec({ root, fsafe, task, allowed: loadConfig(root).config.roles.builder.allowed, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), body });
     if (cacheRel) fsafe.removeFile(cacheRel);
     return out;
   },

@@ -3,7 +3,7 @@ name: brief
 description: Write or refresh this branch's Sereno brief. Use to record where the work stands.
 argument-hint: [task]
 disable-model-invocation: true
-model: claude-sonnet-5-5
+model: sonnet
 allowed-tools: Bash, Read, Grep, Glob
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: scribe
 description: Refreshes the branch brief with the brief command and writes short commit or PR text from the repo's actual state.
-model: claude-haiku-4-5-20251001
+model: haiku
 maxTurns: 20
 tools: Read, Grep, Glob, Bash
 disallowedTools: Edit, NotebookEdit

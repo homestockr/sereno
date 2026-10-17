@@ -3,7 +3,7 @@ name: ship
 description: Test, review and gate a built task branch, repair once if needed, then hand off to /sereno:merge. Use after /sereno:build.
 argument-hint: <task>
 disable-model-invocation: true
-model: claude-sonnet-5-5
+model: sonnet
 allowed-tools: Bash, Read, Agent, Edit(.sereno/cache/verdict-*.json)
 ---
 
