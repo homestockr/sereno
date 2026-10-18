@@ -34,11 +34,22 @@ the commit message → architect commits on the feature branch. Before merge: re
 on the whole branch; `block` or `needs-context` means fix and re-run, not merge.
 Agents live in `.claude/agents/`; change a role's model there.
 
+Working notes:
+- Look at UI work in a browser before committing it. Tests check markup, not layout. Serve
+  the working tree on a spare port with `node tools/serve.js 8790`, never 8787 or 8797,
+  because the installed app runs on 8787.
+- Stop that server before running `npm test`, never in the same batch of tool calls.
+  Stopping it mid-run kills the suite with exit 127.
+- Builders on Windows sometimes write CRLF or raw control bytes. Scan diffs for bytes
+  0x00-0x08, 0x0e-0x1f and 0x7f before committing. `.gitattributes` normalises line endings.
+- A privacy canary in `tools/test.js` forbids `console.js` from reading `.text` or
+  destructuring `text`. Don't work around it; rename the field instead.
+
 ## Commands
 
 ```sh
 npm install
-npm test            # GUI-free suite (776 tests); CI runs it on every push/PR
+npm test            # GUI-free suite (785 tests, several minutes); CI runs it on every push/PR
 npm start           # the widget
 npm run serve       # collector only, http://127.0.0.1:8787/
 npm run wire        # install hooks + statusline (merges, backs up first)
@@ -72,36 +83,59 @@ npm run dist        # Windows installer + zip
 ## Layout
 
 ```
-bin/emit.js            hook + statusline shim
-src/main.js            Electron main: window, tray, toasts, lifecycle
-src/collector.js       node:http: /hook /status /events /state /
-src/store.js           live session state machine (in memory)
-src/config.js          ~/.sereno settings, auto-start contract
-src/wiring.js          install/uninstall into ~/.claude/settings.json
-src/renderer/          widget page (also works in a browser tab)
-tools/test.js          the suite
-docs/payloads.md       captured payload contract (Claude Code 2.1.270, re-probed 2.1.289 in §6)
-docs/plans/            one plan per phase; the Builder works from these
-docs/design/console/   console + widget mockups
+bin/emit.js              hook + statusline shim
+src/main.js              Electron main: window, tray, toasts, lifecycle
+src/collector.js         node:http: /hook /status /events /state /v1/* /api/* /console
+src/store.js             live session state machine (in memory)
+src/config.js            ~/.sereno settings, auto-start contract
+src/wiring.js            install/uninstall into ~/.claude/settings.json; pluginStatus (read-only)
+src/otlp.js              OTLP logs/traces ingest (allowlist)
+src/ledger.js            SQLite spend ledger (node:sqlite); role spend at query time
+src/projects.js          ~/.sereno/projects.json registry (hide, pin)
+src/repos.js             repo poller: git state, briefs, commits, pipeline views
+src/briefs.js            hardened brief reader
+src/pipeline.js          reads the plugin's .sereno records; requires plugin/bin/lib rules
+src/pipeline-alerts.js   "Review needs a decision" / stall state machine
+src/renderer/            widget page (also works in a browser tab)
+src/renderer/console/    console: Projects, Spend, Pipeline tabs (navy theme tokens)
+plugin/                  the Sereno Claude Code plugin (marketplace at .claude-plugin/)
+templates/agents/        agent templates
+tools/test.js            the suite
+docs/payloads.md         captured payload contract (Claude Code 2.1.270, re-probed 2.1.289 in §6)
+docs/plans/              one plan per phase or release; the Builder works from these
+docs/design/console/     console + widget mockups (older ones predate the navy theme)
 ```
 
-Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
-`src/renderer/console/`, `templates/agents/`, `templates/commands/`.
+The app bundles exactly four plugin modules (`recovery.js`, `config.js`, `records.js`,
+`fsafe.js`) plus the plugin's agent and skill files (`package.json` `build.files`). A test
+checks that list.
 
 ## Roadmap
 
 1. **Spend ledger (shipped `2.0.0-alpha.1`).** Plan: `docs/plans/phase-1-ledger.md`.
 2. **Spend in view (shipped `2.0.0-alpha.2`).** Plan: `docs/plans/phase-2-spend-in-view.md`.
 3. **Projects + briefs (shipped `2.0.0-alpha.3`).** Plan: `docs/plans/phase-3-projects-briefs.md`.
-4. **Pipeline (in progress), in two releases.** Decided 2026-10-13: a standalone Claude
-   Code plugin owns everything that acts; the app only observes the files it writes.
+4. **Pipeline, in two parts.** Decided 2026-10-13: a standalone Claude Code plugin owns
+   everything that acts; the app only observes the files it writes.
    - 4a, the plugin (`plugin/`, marketplace at the repo root), shipped in `2.0.0-alpha.4` as
-     plugin `0.1.0`: plan `docs/plans/phase-4a-plugin.md`.
-   - 4b, the app side (Pipeline tab, role spend, pipeline alerts, offer the plugin): built on
-     `feat/pipeline-view`, ships in `2.0.0-alpha.6` (alpha.5 skipped). Plan: `docs/plans/phase-4b-pipeline-view.md`.
-5. **Projects navigator + navy theme + Spend redesign (in progress, `2.0.0-alpha.6`).** Plan:
-   `docs/plans/alpha6-projects-navigator-theme.md`.
-6. **Sessions tab (planned, `2.0.0-alpha.7`).** Plan: `docs/plans/alpha7-sessions.md`.
+     plugin `0.1.0`: plan `docs/plans/phase-4a-plugin.md`. Then:
+     - plugin 0.2.0: Sonnet orchestration and `/sereno:merge` (`docs/plans/phase-4a-cost.md`);
+     - plugin 0.3.0: model tier aliases (`docs/plans/plugin-0.3-model-aliases.md`).
+   - 4b, the app side (Pipeline tab, role spend, pipeline alerts, offer the plugin): merged.
+     Plan: `docs/plans/phase-4b-pipeline-view.md`, including its one-screen layout addendum.
+5. **alpha.6 (merged to `main` as 41c72a8, not yet released; alpha.5 skipped).** Phase 4b
+   plus the navy theme, the Projects navigator, the Spend redesign and the Pipeline restyle.
+   Plan: `docs/plans/alpha6-projects-navigator-theme.md`. Before release:
+   - Fix the plugin row: `pluginStatus` reads only the first install record, but installs are
+     per project, so it can show 0.2.0 where this repo has 0.3.0.
+   - Rebuild the installer, have Robe look it over, then write release notes and publish
+     the pre-release (ask first).
+6. **Sessions tab (planned, `2.0.0-alpha.7`).** Brief, concept and data decision (new
+   `session_events` table: tool names, permission waits, prompt counts, timings, never
+   inputs): `docs/plans/alpha7-sessions.md`.
+
+Open: Dependabot #33 (`sprintf-js`, dev-only, no fix released yet). The v1.3.x draft release
+is undecided.
 
 ### Phase 1 notes
 
@@ -110,8 +144,8 @@ Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
   packaged Windows build (plan step 7).
 - 2.1.289 re-probe (`docs/payloads.md` §6): `SubagentStart` exists; hook `agent_id` ==
   span `agent_id`; spans join `api_request` on `request_id`; statusline cost lags the ledger.
-- v1.3.1 fixed background subagents (`Stop.background_tasks` is authoritative), but
-  `wiring.js` does not register `SubagentStart` yet (plan step 0).
+- v1.3.1 fixed background subagents (`Stop.background_tasks` is authoritative);
+  `wiring.js` registers `SubagentStart`.
 
 ## Key decisions (2026-10-04)
 
@@ -123,3 +157,29 @@ Planned (spec): `src/otlp.js`, `src/ledger.js`, `src/repos.js`,
 - Merge requires passing tests and a gate `pass` (or `skipped` when the gate is off).
 - Console tabs: Projects (default), Spend, Pipeline, Sessions. The widget stays the "now" view.
 - Versioning: 2.0.0 when the console ships; alphas before that.
+
+## Later decisions
+
+- **Attribution, as built.**
+  - `explicit`: an agents join supplies the agent type.
+  - `inferred`: only for a request with no known agent type, and only when its model family is
+    used by exactly one role across the plugin's agent and skill files. Today that means only
+    Fable, for the red team.
+  - Main session and auxiliary spend stay their own buckets. The Pipeline tab counts only the
+    Builder, Red team and Scribe.
+- **Plugin models are tier aliases** (`haiku`, `sonnet`, `opus`, `fable`), not pinned IDs.
+  - Claude Code has no supported way for a plugin to set a model from config at runtime, and
+    the plugin cache is replaced on every update.
+  - Users repoint a tier with `ANTHROPIC_DEFAULT_<TIER>_MODEL`, which applies to all of
+    Claude Code.
+  - `roles.builder.allowed` restricts Builder tiers, enforced with exit 21.
+  - The app matches models by family (`modelFamily`).
+- **The Builder is chosen per task in the spec.** The default is Sonnet; Haiku is for
+  mechanical work, Opus for work needing judgment.
+- **Theme.** Navy palette in `:root` tokens in `console.css` and `app.css`.
+  - `--accent` marks selection and focus.
+  - Amber only for "needs you" or a pending decision.
+  - Tests check contrast and that no hex colour sits outside the tokens.
+- **Cost.** The app's Cache view shows token shares only. There is no savings figure, because
+  the ledger stores no prices.
+- **Pinning and hiding** are Sereno's own config in `projects.json`, not actions on a repo.
