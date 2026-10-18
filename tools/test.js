@@ -10741,7 +10741,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const ROLES = ['builder', 'red-team', 'scribe'];
     const same = (o, keys, where) => assert.deepStrictEqual(Object.keys(o).sort(), keys.slice().sort(), where);
     const checkBody = (b) => {
-      same(b, KEYS.body, 'body'); same(b.plugin, ['installed', 'detected', 'version'], 'plugin');
+      same(b, KEYS.body, 'body'); same(b.plugin, ['installed', 'detected', 'version', 'versions'], 'plugin');
       for (const p of b.projects) { same(p, KEYS.project, 'project'); for (const t of p.tasks) { same(t, KEYS.task, 'task'); if (t.gate) same(t.gate, KEYS.gate, 'gate'); for (const f of t.findings) same(f, KEYS.finding, 'finding'); for (const a of t.attempts) same(a, KEYS.attempt, 'attempt'); for (const e of t.activity) same(e, KEYS.activity, 'activity'); } }
       same(b.signals, KEYS.signals, 'signals'); same(b.signals.outcomes, KEYS.outcomes, 'outcomes'); same(b.signals.rework, KEYS.rework, 'rework');
       for (const p of b.signals.projects) { same(p, KEYS.sigProject, 'sigProject'); if (p.gate) same(p.gate, KEYS.sigGate, 'sigGate'); }
@@ -10761,7 +10761,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(r.status, 200);
         const b = JSON.parse(r.text);
         checkBody(b);
-        assert.deepStrictEqual(b.plugin, { installed: false, detected: false, version: null });
+        assert.deepStrictEqual(b.plugin, { installed: false, detected: false, version: null, versions: [] });
         assert.deepStrictEqual(b.projects.map((p) => p.id), ['p1', 'p2', 'p3', 'p4'], 'hidden projects and repos without plugin data are left out');
         assert.strictEqual(b.projects[0].tasks.length, 2, 'merged and stopped leave the cards');
         assert.deepStrictEqual(b.projects[0].tasks[0].findings, [{ severity: 'high', kind: 'bug', file: 'src/a.js', line: 12, summary: 'boom' }]);
@@ -11908,9 +11908,9 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     test('[4b-plugin] pluginStatus: installed (array entry), installed (object entry, no version), absent', () => {
       let h = mkHome({ version: 2, plugins: { 'other@market': entry('9.9.9'), 'sereno@sereno': entry('0.1.0') } });
-      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: true, version: '0.1.0' }); } finally { h.done(); }
+      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: true, version: '0.1.0', versions: ['0.1.0'] }); } finally { h.done(); }
       h = mkHome({ version: 2, plugins: { 'sereno@sereno': { scope: 'user' } } });
-      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: true, version: null }); } finally { h.done(); }
+      try { assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: true, version: null, versions: [] }); } finally { h.done(); }
       h = mkHome({ version: 2, plugins: { 'other@market': entry('1.0.0') } });
       try { assert.deepStrictEqual(wiring.pluginStatus(h.home), { installed: false, detected: true }); } finally { h.done(); }
       h = mkHome({ version: 2, plugins: {} });
@@ -11954,6 +11954,36 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.ok(fs.readFileSync(h.file).equals(before)); assert.strictEqual(fs.statSync(h.file).mtimeMs, m);
         assert.deepStrictEqual(fs.readdirSync(path.dirname(h.file)), ['installed_plugins.json']);
       } finally { h.done(); }
+    });
+
+    test('[alpha6-plugin-row] pluginStatus considers every record: newest wins, versions newest first', () => {
+      const rec = (v, o) => Object.assign({ scope: 'project', projectPath: 'X:\synthetic', installPath: 'X:\p', version: v }, o);
+      const run = (arr) => { const h = mkHome({ version: 2, plugins: { 'sereno@sereno': arr } }); try { return wiring.pluginStatus(h.home); } finally { h.done(); } };
+      assert.deepStrictEqual(run([rec('0.2.0'), rec('0.3.0'), rec('0.3.0', { scope: 'user' })]), { installed: true, version: '0.3.0', versions: ['0.3.0', '0.2.0'] });
+      assert.deepStrictEqual(run([rec('0.9.0'), rec('0.10.0')]).version, '0.10.0');
+      assert.deepStrictEqual(run([rec('1.0.0-beta'), rec('1.0.0')]).versions, ['1.0.0', '1.0.0-beta']);
+      assert.deepStrictEqual(run([rec('weird'), rec('0.1.0')]).versions, ['0.1.0', 'weird']);
+      assert.deepStrictEqual(run([rec('b-odd'), rec('a-odd')]).versions, ['b-odd', 'a-odd'], 'unparseable keep first-seen order');
+      assert.deepStrictEqual(run([null, 'x', 7, {}, { version: 3 }, rec('0.1.0')]), { installed: true, version: '0.1.0', versions: ['0.1.0'] });
+      assert.deepStrictEqual(run([null, {}, { version: 3 }]), { installed: true, version: null, versions: [] });
+      assert.deepStrictEqual(run([]), { installed: true, version: null, versions: [] });
+      assert.deepStrictEqual(run([{ version: '' }, { version: '  ' }, { version: ' 0.3.0 ' }]), { installed: true, version: '0.3.0', versions: ['0.3.0'] });
+      assert.deepStrictEqual(run([{ version: '' }, { version: '  ' }]), { installed: true, version: null, versions: [] });
+      assert.strictEqual(run([rec('9'.repeat(40) + '.0.0')]).version.length, 32);
+      const many = []; for (let i = 0; i < 20; i++) many.push(rec('0.' + i + '.0'));
+      const r = run(many); assert.strictEqual(r.versions.length, 8); assert.strictEqual(r.version, '0.19.0');
+      const late = []; for (let i = 0; i < 256; i++) late.push(rec('0.1.0')); late.push(rec('9.9.9'));
+      assert.strictEqual(run(late).version, '0.1.0', 'scan is capped at 256 records');
+    });
+
+    test('[alpha6-plugin-row] pluginRowModel text: single version unchanged, mixed versions list the older ones', () => {
+      const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+      const model = new Function(app.match(/const PLUGIN_CMDS = [^\n]*\n/)[0] + app.match(/function pluginRowModel[\s\S]*?\n}\n/)[0] + '\nreturn pluginRowModel;')();
+      assert.strictEqual(model({ installed: true, version: '0.3.0', versions: ['0.3.0'] }, 'none').pluginText, 'Pipeline plugin 0.3.0 installed');
+      assert.strictEqual(model({ installed: true, version: '0.3.0' }, 'none').pluginText, 'Pipeline plugin 0.3.0 installed');
+      assert.strictEqual(model({ installed: true, version: '0.3.0', versions: ['0.3.0', '0.2.0'] }, 'none').pluginText, 'Pipeline plugin 0.3.0 installed (older versions in some projects: 0.2.0)');
+      assert.strictEqual(model({ installed: true, version: '0.3.0', versions: ['0.3.0', '0.2.0', '0.1.0'] }, 'none').pluginText, 'Pipeline plugin 0.3.0 installed (older versions in some projects: 0.2.0, 0.1.0)');
+      assert.strictEqual(model({ installed: false, detected: true, versions: ['0.3.0', '0.2.0'] }, 'none').pluginText, 'Not installed. Run these in Claude Code:');
     });
 
     test('[4b-plugin] pluginStatus source: no write, no link-following call', () => {
@@ -12048,12 +12078,15 @@ test('missing rate_limits degrades instead of throwing', () => {
         }).on('error', reject);
       });
       const cases = [
-        [() => ({ installed: true, version: '0.1.0', installPath: 'C:\\secret', gitCommitSha: 'abc' }), { installed: true, detected: true, version: '0.1.0' }],
-        [() => ({ installed: true, version: 7 }), { installed: true, detected: true, version: null }],
-        [() => ({ installed: false, detected: true, version: '9' }), { installed: false, detected: true, version: null }],
-        [() => ({ installed: false, detected: false }), { installed: false, detected: false, version: null }],
-        [() => { throw new Error('boom'); }, { installed: false, detected: false, version: null }],
-        [() => null, { installed: false, detected: false, version: null }],
+        [() => ({ installed: true, version: '0.1.0', installPath: 'C:\\secret', gitCommitSha: 'abc' }), { installed: true, detected: true, version: '0.1.0', versions: [] }],
+        [() => ({ installed: true, version: 7 }), { installed: true, detected: true, version: null, versions: [] }],
+        [() => ({ installed: false, detected: true, version: '9', versions: ['9'] }), { installed: false, detected: true, version: null, versions: [] }],
+        [() => ({ installed: false, detected: false }), { installed: false, detected: false, version: null, versions: [] }],
+        [() => { throw new Error('boom'); }, { installed: false, detected: false, version: null, versions: [] }],
+        [() => null, { installed: false, detected: false, version: null, versions: [] }],
+        [() => ({ installed: true, version: '0.3.0', versions: ['0.3.0', 7, '0.2.0', null] }), { installed: true, detected: true, version: '0.3.0', versions: ['0.3.0', '0.2.0'] }],
+        [() => ({ installed: true, version: '0.3.0', versions: ['1.0.0','1.0.1','1.0.2','1.0.3','1.0.4','1.0.5','1.0.6','1.0.7','1.0.8','x'.repeat(50)] }), { installed: true, detected: true, version: '0.3.0', versions: ['1.0.0','1.0.1','1.0.2','1.0.3','1.0.4','1.0.5','1.0.6','1.0.7'] }],
+        [() => ({ installed: true, version: '0.3.0', versions: 'nope' }), { installed: true, detected: true, version: '0.3.0', versions: [] }],
       ];
       for (const [fn, want] of cases) {
         const c = await mk(fn);
@@ -12224,7 +12257,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       try {
         const text = await getText(c.port);
         const b = JSON.parse(text);
-        const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin',
+        const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin', 'versions',
           'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt', 'endedAt', 'at',
           'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'severity', 'kind', 'file', 'line', 'summary',
           'days', 'outcomes', 'seq', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
@@ -12279,7 +12312,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         absent: mkHome(JSON.stringify({ version: 2, plugins: { 'other@market': [{ version: '1.0.0' }] } })),
         corrupt: mkHome('{ not json'),
       };
-      const want = { installed: { installed: true, detected: true, version: '0.2.0' }, absent: { installed: false, detected: true, version: null }, corrupt: { installed: false, detected: false, version: null } };
+      const want = { installed: { installed: true, detected: true, version: '0.2.0', versions: ['0.2.0'] }, absent: { installed: false, detected: true, version: null, versions: [] }, corrupt: { installed: false, detected: false, version: null, versions: [] } };
       for (const k of Object.keys(homes)) {
         const c = await boot({ projects: { list: () => [] }, repos: { snapshot: () => ({}) }, pluginStatus: () => wiring.pluginStatus(homes[k]) });
         try { assert.deepStrictEqual(JSON.parse(await getText(c.port)).plugin, want[k], k); } finally { await halt(c); }

@@ -743,7 +743,8 @@ function createCollector(store, port, opts) {
         try { ps = pluginStatusFn(); } catch (_) { ps = null; }
         ps = ps && typeof ps === 'object' ? ps : {};
         const installed = ps.installed === true;
-        return { installed, detected: installed || ps.detected === true, version: installed && typeof ps.version === 'string' ? pStr(ps.version, 32) : null };
+        const versions = installed && Array.isArray(ps.versions) ? ps.versions.filter((x) => typeof x === 'string').slice(0, 8).map((x) => pStr(x, 32)) : [];
+        return { installed, detected: installed || ps.detected === true, version: installed && typeof ps.version === 'string' ? pStr(ps.version, 32) : null, versions };
       })(),
     };
   }
