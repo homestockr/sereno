@@ -181,6 +181,32 @@ A0 is small enough to ship first as plugin 0.3.1.
   result in this plan. The release waits on it.
 - Then the red team on the whole branch, then merge.
 
+## Found in use: a failing repo hook stalls the Builder (homestockr, 2026-10-18)
+
+What happened:
+- The pre-commit hook failed on Expo patch drift, which has nothing to do with the task.
+- The Builder stopped with its files staged and no commit, and the attempt was recorded as a
+  plain `error`.
+- `recovery` could only say `decide`, with no hint of the cause or the options.
+- The architect then had to commit by hand (with `--no-verify`, which the user approved) and
+  record it as a new attempt, a path the plugin doesn't support.
+
+To handle, in A1/A3:
+- **Preflight.** `/sereno:task`, or `next` before the build, runs the repo's commit hooks against
+  the base, for example `git hook run pre-commit` or the husky equivalent. It reports a failure
+  before any Builder tokens are spent. It is a read-only check, and nothing gets fixed.
+- **A distinct diagnosis.** A Builder whose commit is refused by a hook records
+  `diagnosis: hook_failed` with the first lines of the hook output, and leaves the tree as it is.
+  `recovery` returns `decide` with the reason "repo hook failed: <line>", and the options are
+  "fix it on its own branch" or "approve `--no-verify` for this commit". Nothing ever skips a
+  hook without the user's explicit yes.
+- **Adopting a commit.** `sereno.js attempt --adopt` records a user-approved commit of the
+  Builder's staged work as a new `built` attempt, so ship can continue from it.
+
+Also seen: the task's migration was 508 lines in one task. `/sereno:task` could warn when a
+spec's scope looks too big for one review, and suggest splitting it. That is a heuristic only,
+never a block.
+
 ## Open
 
 - Should `next` also offer to write the next queued spec's branch when the previous merge lands?
