@@ -26,12 +26,19 @@ Start the main session on Opus from the repo root (`claude --model opus`). It is
 |---|---|---|---|
 | Architect | main session | opus | Plans in `docs/plans/`, reviewing Builder diffs, commits |
 | Builder | `builder` | sonnet | One plan step at a time: code + its tests, `npm test` green, no commits |
-| Scribe | `scribe` | haiku | Commit messages, briefs, changelog, PR text |
+| Scribe | `scribe` | haiku | Release notes, briefs, changelog, PR text |
 | Red team | `red-team` | fable | Read-only adversarial review of `main...<branch>` before merge |
 
-Loop per step: architect hands the Builder one step → reviews the diff → Scribe drafts
-the commit message → architect commits on the feature branch. Before merge: red team
-on the whole branch; `block` or `needs-context` means fix and re-run, not merge.
+Loop per step: architect hands the Builder one step → reviews the diff → architect commits
+on the feature branch. Before merge: red team on the whole branch; `block` or
+`needs-context` means fix and re-run, not merge.
+
+Keep it lean (decided 2026-10-18, token efficiency):
+- One Builder run per fix. Bundle every known point into it; don't send follow-ups one at a time.
+- The architect writes one-line commit messages. The Scribe is for release notes, PR text,
+  changelogs and briefs.
+- One red-team pass per branch, not per fix. Fold its lows into one follow-up commit on the same
+  branch before merging. Re-run the red team only if that commit is non-trivial.
 Agents live in `.claude/agents/`; change a role's model there.
 
 Working notes:
@@ -126,13 +133,21 @@ checks that list.
 5. **alpha.6 (merged to `main` as 41c72a8, not yet released; alpha.5 skipped).** Phase 4b
    plus the navy theme, the Projects navigator, the Spend redesign and the Pipeline restyle.
    Plan: `docs/plans/alpha6-projects-navigator-theme.md`. Before release:
-   - Fix the plugin row: `pluginStatus` reads only the first install record, but installs are
-     per project, so it can show 0.2.0 where this repo has 0.3.0.
+   - Done 2026-10-18: the plugin row reads every per-project install record and shows the newest
+     version (merges 1035d5e, fb35efa).
    - Rebuild the installer, have Robe look it over, then write release notes and publish
      the pre-release (ask first).
 6. **Sessions tab (planned, `2.0.0-alpha.7`).** Brief, concept and data decision (new
    `session_events` table: tool names, permission waits, prompt counts, timings, never
    inputs): `docs/plans/alpha7-sessions.md`.
+7. **Plugin 0.4.0 (planned).** `/sereno:next` runs build and ship in one turn and stops at the
+   first human gate. It adds holds, queued tasks (`--after`) and token-efficiency work:
+   - a review sized to the task;
+   - bookkeeping done in code;
+   - the leak proven gone;
+   - a review pack for the red team;
+   - cost shown in the app.
+   Plan: `docs/plans/plugin-0.4-next.md`.
 
 Open: Dependabot #33 (`sprintf-js`, dev-only, no fix released yet). The v1.3.x draft release
 is undecided.
