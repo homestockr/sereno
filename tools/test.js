@@ -11957,7 +11957,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     test('[alpha6-plugin-row] pluginStatus considers every record: newest wins, versions newest first', () => {
-      const rec = (v, o) => Object.assign({ scope: 'project', projectPath: 'X:\synthetic', installPath: 'X:\p', version: v }, o);
+      const rec = (v, o) => Object.assign({ scope: 'project', projectPath: 'X:\\synthetic', installPath: 'X:\\p', version: v }, o);
       const run = (arr) => { const h = mkHome({ version: 2, plugins: { 'sereno@sereno': arr } }); try { return wiring.pluginStatus(h.home); } finally { h.done(); } };
       assert.deepStrictEqual(run([rec('0.2.0'), rec('0.3.0'), rec('0.3.0', { scope: 'user' })]), { installed: true, version: '0.3.0', versions: ['0.3.0', '0.2.0'] });
       assert.deepStrictEqual(run([rec('0.9.0'), rec('0.10.0')]).version, '0.10.0');
@@ -11984,6 +11984,36 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(model({ installed: true, version: '0.3.0', versions: ['0.3.0', '0.2.0'] }, 'none').pluginText, 'Pipeline plugin 0.3.0 installed (older versions in some projects: 0.2.0)');
       assert.strictEqual(model({ installed: true, version: '0.3.0', versions: ['0.3.0', '0.2.0', '0.1.0'] }, 'none').pluginText, 'Pipeline plugin 0.3.0 installed (older versions in some projects: 0.2.0, 0.1.0)');
       assert.strictEqual(model({ installed: false, detected: true, versions: ['0.3.0', '0.2.0'] }, 'none').pluginText, 'Not installed. Run these in Claude Code:');
+    });
+
+    test('[alpha6-plugin-row] pluginStatus: control and bidi characters are stripped from versions', () => {
+      const run = (arr) => { const h = mkHome({ version: 2, plugins: { 'sereno@sereno': arr } }); try { return wiring.pluginStatus(h.home); } finally { h.done(); } };
+      assert.deepStrictEqual(run([{ version: '0.1.0\n' }]).versions, ['0.1.0']);
+      assert.deepStrictEqual(run([{ version: '0.3.0\u202e' }]).versions, ['0.3.0']);
+      assert.deepStrictEqual(run([{ version: '\u200b0.2\u0000.0\u007f\u2067' }]).versions, ['0.2.0']);
+    });
+
+    test('[alpha6-plugin-row] pluginStatus: dedupe on a normalised key, first-seen string kept', () => {
+      const run = (arr) => { const h = mkHome({ version: 2, plugins: { 'sereno@sereno': arr.map((v) => ({ version: v })) } }); try { return wiring.pluginStatus(h.home); } finally { h.done(); } };
+      assert.deepStrictEqual(run(['1.0.0', 'v1.0.0', '1.0.0+b2']).versions, ['1.0.0']);
+      assert.deepStrictEqual(run(['v1.0.0', '1.0.0']).versions, ['v1.0.0']);
+      assert.deepStrictEqual(run(['01.0.0', '1.0.0']).versions, ['01.0.0']);
+      assert.deepStrictEqual(run(['odd', 'odd', 'Odd']).versions, ['odd', 'Odd']);
+    });
+
+    test('[alpha6-plugin-row] pluginStatus: prerelease order follows semver', () => {
+      const run = (arr) => { const h = mkHome({ version: 2, plugins: { 'sereno@sereno': arr.map((v) => ({ version: v })) } }); try { return wiring.pluginStatus(h.home).versions; } finally { h.done(); } };
+      assert.deepStrictEqual(run(['1.0.0-beta.9', '1.0.0-beta.10']), ['1.0.0-beta.10', '1.0.0-beta.9']);
+      assert.deepStrictEqual(run(['1.0.0-alpha', '1.0.0-alpha.1']), ['1.0.0-alpha.1', '1.0.0-alpha']);
+      assert.deepStrictEqual(run(['1.0.0-alpha.beta', '1.0.0-alpha.1']), ['1.0.0-alpha.beta', '1.0.0-alpha.1']);
+    });
+
+    test('[alpha6-plugin-row] pluginRowModel: at most 3 older versions then +N more; no clause without a version', () => {
+      const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+      const model = new Function(app.match(/const PLUGIN_CMDS = [^\n]*\n/)[0] + app.match(/function pluginRowModel[\s\S]*?\n}\n/)[0] + '\nreturn pluginRowModel;')();
+      assert.strictEqual(model({ installed: true, version: '0.9.0', versions: ['0.9.0', '0.8.0', '0.7.0', '0.6.0', '0.5.0', '0.4.0'] }, 'none').pluginText,
+        'Pipeline plugin 0.9.0 installed (older versions in some projects: 0.8.0, 0.7.0, 0.6.0 +2 more)');
+      assert.strictEqual(model({ installed: true, version: null, versions: ['0.2.0', '0.1.0'] }, 'none').pluginText, 'Pipeline plugin installed');
     });
 
     test('[4b-plugin] pluginStatus source: no write, no link-following call', () => {
