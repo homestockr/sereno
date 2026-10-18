@@ -752,8 +752,11 @@ const PLUGIN_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin insta
 function pluginRowModel(plugin, brief) {
   const installed = !!(plugin && plugin.installed);
   const ver = installed && plugin.version ? String(plugin.version) : '';
+  const others = installed && plugin && Array.isArray(plugin.versions) && plugin.versions.length > 1
+    ? plugin.versions.map(String).filter((x) => x !== ver) : [];
+  const older = others.length ? ' (older versions in some projects: ' + others.join(', ') + ')' : '';
   return {
-    pluginText: installed ? 'Pipeline plugin' + (ver ? ' ' + ver : '') + ' installed' : 'Not installed. Run these in Claude Code:',
+    pluginText: installed ? 'Pipeline plugin' + (ver ? ' ' + ver : '') + ' installed' + older : 'Not installed. Run these in Claude Code:',
     cmds: installed ? [] : PLUGIN_CMDS,
     brief: brief === 'installed' ? 'remove' : brief === 'conflict' ? 'conflict' : 'none',
     briefText: brief === 'conflict' ? 'A different brief.md exists in ~/.claude/commands. Left as it is.' : 'Replaced by /sereno:brief',

@@ -455,12 +455,34 @@ function uninstallCommands() {
 
 const MAX_PLUGINS_FILE = 1024 * 1024;
 
+const MAX_PLUGIN_RECORDS = 256;
+const MAX_PLUGIN_VERSIONS = 8;
+
+/** Parse "major.minor.patch[-pre]" into numbers, or null when it is not dotted numeric semver. */
+function parseSemver(s) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(s);
+  return m ? { n: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] || '' } : null;
+}
+
+/** Negative when a sorts after b (newer first). Unparseable sorts below parseable; ties return 0. */
+function compareVersionsDesc(a, b) {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return pa ? -1 : pb ? 1 : 0;
+  for (let i = 0; i < 3; i++) if (pa.n[i] !== pb.n[i]) return pb.n[i] - pa.n[i];
+  if (pa.pre === pb.pre) return 0;
+  if (!pa.pre) return -1;
+  if (!pb.pre) return 1;
+  return pa.pre < pb.pre ? 1 : -1;
+}
+
 /**
  * Whether the Sereno pipeline plugin is installed in Claude Code. Reads
  * <home>/.claude/plugins/installed_plugins.json read-only: bounded, lstat'd, never
- * through a link. Never throws.
+ * through a link. Never throws. Installs are per project, so every record is
+ * considered: `version` is the newest, `versions` the distinct ones, newest first.
  * @param {string} [home]
- * @returns {{installed: boolean, detected?: boolean, version?: string|null}}
+ * @returns {{installed: boolean, detected?: boolean, version?: string|null, versions?: string[]}}
  */
 function pluginStatus(home) {
   const none = { installed: false, detected: false };
@@ -480,9 +502,16 @@ function pluginStatus(home) {
     if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return none;
     if (!Object.prototype.hasOwnProperty.call(plugins, 'sereno@sereno')) return { installed: false, detected: true };
     const v = plugins['sereno@sereno'];
-    const entry = Array.isArray(v) ? v[0] : v;
-    const ver = entry && typeof entry === 'object' && typeof entry.version === 'string' ? entry.version.slice(0, 32) : null;
-    return { installed: true, version: ver };
+    const records = (Array.isArray(v) ? v.slice(0, MAX_PLUGIN_RECORDS) : [v]);
+    const seen = [];
+    for (const r of records) {
+      if (r && typeof r === 'object' && typeof r.version === 'string') {
+        const s = r.version.trim().slice(0, 32);
+        if (s && !seen.includes(s)) seen.push(s);
+      }
+    }
+    const versions = seen.sort(compareVersionsDesc).slice(0, MAX_PLUGIN_VERSIONS);
+    return { installed: true, version: versions.length ? versions[0] : null, versions };
   } catch (_) { return none; }
 }
 
