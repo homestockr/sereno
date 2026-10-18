@@ -133,8 +133,31 @@ Build and ship run in one Sonnet turn instead of two. The cache stays warm betwe
 the cost should be equal or a little lower. Check it with the existing bench on one task before
 release.
 
+## Living with Superpowers (A0)
+
+The two plugins share no hooks, commands or paths. Two risks were found by reading the code on
+2026-10-18; neither has been seen happen.
+- **Builders have every tool, including Skill.** A Builder could run Superpowers'
+  `using-git-worktrees` (the commit lands off `task/<x>`), `finishing-a-development-branch`
+  (it offers a merge or push) or `requesting-code-review` (a second, paid reviewer). The red
+  team and Scribe are already read-only.
+- **The main session** gets Superpowers' "MUST invoke a skill" rule at session start. It could
+  run brainstorming inside `/sereno:task`, adding question turns and a second design doc.
+
+Fix:
+- Builder agents get explicit `tools: Read, Edit, Write, Bash, Grep, Glob`. That is a hard
+  block.
+- Every Sereno skill gets one line: "This skill is the process for this run. Don't invoke other
+  plugins' skills (planning, worktrees, review, branch finishing) while it runs."
+- A README note.
+- Before release, one end-to-end `/sereno:next` run with Superpowers on, confirming that no
+  foreign skill ran.
+
+A0 is small enough to ship first as plugin 0.3.1.
+
 ## Steps
 
+- **A0, coexistence:** the above. It can ship alone as 0.3.1.
 - **A1, plugin core:**
   - `lib/next.js`: the state table, queue pick, `after` check;
   - `sereno.js next`;
