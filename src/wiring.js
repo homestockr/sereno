@@ -473,7 +473,32 @@ function compareVersionsDesc(a, b) {
   if (pa.pre === pb.pre) return 0;
   if (!pa.pre) return -1;
   if (!pb.pre) return 1;
-  return pa.pre < pb.pre ? 1 : -1;
+  return -comparePre(pa.pre, pb.pre);
+}
+
+/** Semver prerelease precedence (ascending): numeric < alphanumeric, shorter prefix lower. */
+function comparePre(a, b) {
+  const x = a.split('.');
+  const y = b.split('.');
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue;
+    const nx = /^\d+$/.test(x[i]);
+    const ny = /^\d+$/.test(y[i]);
+    if (nx && ny) { const d = Number(x[i]) - Number(y[i]); if (d) return d < 0 ? -1 : 1; continue; }
+    if (nx) return -1;
+    if (ny) return 1;
+    return x[i] < y[i] ? -1 : 1;
+  }
+  return x.length === y.length ? 0 : x.length < y.length ? -1 : 1;
+}
+
+/** Control and bidi/format characters never belong in a version string. */
+const VERSION_JUNK = /[\x00-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/** Dedupe key: semver strings drop a leading v, build metadata and leading zeros; others stay as cleaned. */
+function versionKey(s) {
+  const p = parseSemver(s);
+  return p ? p.n.join('.') + (p.pre ? '-' + p.pre : '') : s;
 }
 
 /**
@@ -504,10 +529,12 @@ function pluginStatus(home) {
     const v = plugins['sereno@sereno'];
     const records = (Array.isArray(v) ? v.slice(0, MAX_PLUGIN_RECORDS) : [v]);
     const seen = [];
+    const keys = new Set();
     for (const r of records) {
       if (r && typeof r === 'object' && typeof r.version === 'string') {
-        const s = r.version.trim().slice(0, 32);
-        if (s && !seen.includes(s)) seen.push(s);
+        const s = r.version.replace(VERSION_JUNK, '').trim().slice(0, 32);
+        const k = s ? versionKey(s) : '';
+        if (s && !keys.has(k)) { keys.add(k); seen.push(s); }
       }
     }
     const versions = seen.sort(compareVersionsDesc).slice(0, MAX_PLUGIN_VERSIONS);
