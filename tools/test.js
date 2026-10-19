@@ -11991,6 +11991,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual(run([{ version: '0.1.0\n' }]).versions, ['0.1.0']);
       assert.deepStrictEqual(run([{ version: '0.3.0\u202e' }]).versions, ['0.3.0']);
       assert.deepStrictEqual(run([{ version: '\u200b0.2\u0000.0\u007f\u2067' }]).versions, ['0.2.0']);
+      for (const junk of ['\u061c', '\u0085', '\u00ad', '\ufeff']) assert.deepStrictEqual(run([{ version: '0.3.0' + junk }]).versions, ['0.3.0']);
     });
 
     test('[alpha6-plugin-row] pluginStatus: dedupe on a normalised key, first-seen string kept', () => {
@@ -11999,6 +12000,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual(run(['v1.0.0', '1.0.0']).versions, ['v1.0.0']);
       assert.deepStrictEqual(run(['01.0.0', '1.0.0']).versions, ['01.0.0']);
       assert.deepStrictEqual(run(['odd', 'odd', 'Odd']).versions, ['odd', 'Odd']);
+      assert.deepStrictEqual(run(['1.0.0-01', '1.0.0-1']).versions, ['1.0.0-01']);
+      assert.deepStrictEqual(run(['1.0.0-alpha.007', '1.0.0-alpha.7']).versions, ['1.0.0-alpha.007']);
     });
 
     test('[alpha6-plugin-row] pluginStatus: prerelease order follows semver', () => {
@@ -12006,6 +12009,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual(run(['1.0.0-beta.9', '1.0.0-beta.10']), ['1.0.0-beta.10', '1.0.0-beta.9']);
       assert.deepStrictEqual(run(['1.0.0-alpha', '1.0.0-alpha.1']), ['1.0.0-alpha.1', '1.0.0-alpha']);
       assert.deepStrictEqual(run(['1.0.0-alpha.beta', '1.0.0-alpha.1']), ['1.0.0-alpha.beta', '1.0.0-alpha.1']);
+      assert.deepStrictEqual(run(['1.0.0-2', '1.0.0-1a']), ['1.0.0-1a', '1.0.0-2']);
     });
 
     test('[alpha6-plugin-row] pluginRowModel: at most 3 older versions then +N more; no clause without a version', () => {

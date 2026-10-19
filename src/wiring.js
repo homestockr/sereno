@@ -492,13 +492,13 @@ function comparePre(a, b) {
   return x.length === y.length ? 0 : x.length < y.length ? -1 : 1;
 }
 
-/** Control and bidi/format characters never belong in a version string. */
-const VERSION_JUNK = /[\x00-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+/** A version string keeps only these characters; everything else (control, bidi, format, space) is removed. */
+const VERSION_DISALLOWED = /[^0-9A-Za-z.+-]/g;
 
 /** Dedupe key: semver strings drop a leading v, build metadata and leading zeros; others stay as cleaned. */
 function versionKey(s) {
   const p = parseSemver(s);
-  return p ? p.n.join('.') + (p.pre ? '-' + p.pre : '') : s;
+  return p ? p.n.join('.') + (p.pre ? '-' + p.pre.split('.').map((id) => (/^\d+$/.test(id) ? String(Number(id)) : id)).join('.') : '') : s;
 }
 
 /**
@@ -532,7 +532,7 @@ function pluginStatus(home) {
     const keys = new Set();
     for (const r of records) {
       if (r && typeof r === 'object' && typeof r.version === 'string') {
-        const s = r.version.replace(VERSION_JUNK, '').trim().slice(0, 32);
+        const s = r.version.replace(VERSION_DISALLOWED, '').trim().slice(0, 32);
         const k = s ? versionKey(s) : '';
         if (s && !keys.has(k)) { keys.add(k); seen.push(s); }
       }
