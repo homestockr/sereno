@@ -54,6 +54,7 @@ Write the specs, then let `/sereno:next` carry them. It runs every step that nee
 - **`--after <task>`** queues a task behind another. `/sereno:build` refuses it (`after_not_merged`) until that task is merged into the base. With no argument, `/sereno:next` takes the one task in progress, else the oldest spec that is ready; with two in progress it asks which.
 - **`--hold "<one line>"`** on `/sereno:task` names a human step outside the pipeline, such as applying a migration to staging. `next` and `merge` print it before the merge. Typing `/sereno:merge` confirms it is done; the plugin never runs it.
 - **Preflight.** Before the first build, `next` runs the repo's pre-commit hook (`sereno.js preflight`) and stops, before any Builder tokens are spent, if it fails.
+- **Squash merges done outside `/sereno:merge` are not detected.** Use `/sereno:merge`; if the branch was squash-merged and deleted by hand, run `sereno.js stop --task <name>` to retire the task.
 - **A hook that refuses the Builder's commit** is recorded as `hook_failed`, and the work stays staged. Fix the hook on its own branch, or approve a commit that skips it, then run `sereno.js attempt --adopt --task <name>` to record that commit so ship can go on. Nothing skips a hook without your yes.
 - `next` runs at most 3 build or ship steps per invocation, never merges and never touches a remote.
 

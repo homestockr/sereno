@@ -48,6 +48,9 @@
  *                           dirty tree. With the last attempt's start_commit (see attempt --start-commit) the
  *                           tip must differ from it and descend from it (tip_not_moved, tip_unrelated);
  *                           without one, the tip must be newer than the attempt's end by commit time.
+ *   stop --task <t>         retires a task: records a new attempt with outcome `stopped` (recovery maps it to done,
+ *                           so the task leaves the in-progress list). Refused while the newest attempt is running
+ *                           or when there is none. Writes one record; never touches git.
  *   attempt --start-commit <sha>
  *                           records the commit the Builder started from, on the running record.
  */
@@ -346,6 +349,45 @@ const COMMANDS = {
     fsafe.writeJson(rel, gate);
     if (cacheRel) fsafe.removeFile(cacheRel);
     return { path: rel, review_run_id: runId, outcome: gate.outcome, findings: gate.findings.length, tests_passed: gate.tests_passed };
+  },
+
+  stop(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root, fsafe } = needRepo();
+    const re = attemptRe(task);
+    const nums = [];
+    for (const f of fsafe.listDir('.sereno/attempts')) { const m = re.exec(f); if (m) nums[nums.length] = parseInt(m[1], 10); }
+    nums.sort((x, y) => x - y);
+    if (!nums.length) throw new SerenoError('not_found', 'no attempts recorded for task ' + task + '; nothing to stop');
+    /** @type {any} */
+    let last = null;
+    try {
+      const file = path.join(root, '.sereno', 'attempts', task + '-' + nums[nums.length - 1] + '.json');
+      const st = fs.lstatSync(file);
+      if (st.isFile() && st.size <= MAX_INPUT) last = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (_e) { last = null; }
+    if (!last || typeof last !== 'object') throw new SerenoError('not_found', 'the latest attempt record is unreadable');
+    if (last.outcome === 'running') throw new SerenoError('invalid_arg', 'attempt ' + nums[nums.length - 1] + ' is still running; finish it with --update first');
+    if (last.outcome === 'stopped') throw new SerenoError('invalid_arg', 'task ' + task + ' is already stopped');
+    const { config_hash } = loadConfig(root);
+    const now = new Date().toISOString();
+    return allocateAttempt(fsafe, task, {
+      project_id: typeof last.project_id === 'string' && last.project_id ? last.project_id : projectId(root),
+      task_id: task,
+      spec_revision: Number.isInteger(last.spec_revision) && last.spec_revision > 0 ? last.spec_revision : 1,
+      attempt: 0,
+      builder_requested: rec.enumOr(last.builder_requested, rec.BUILDERS),
+      agent_id: null,
+      config_hash,
+      kind: rec.enumOr(last.kind, rec.KINDS),
+      fixes: null,
+      diagnosis: 'none',
+      outcome: 'stopped',
+      review_run_id: null,
+      started_at: now,
+      ended_at: now,
+    });
   },
 
   attempt(/** @type {string[]} */ argv) {

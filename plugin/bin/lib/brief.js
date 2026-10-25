@@ -101,7 +101,7 @@ function wordCut(s, max) {
   if (s.length <= max) return s;
   const head = s.slice(0, max - 1);
   const sp = head.lastIndexOf(' ');
-  return (sp > 0 ? head.slice(0, sp) : head).replace(/[s,;:.-]+$/, '') + '…';
+  return (sp > 0 ? head.slice(0, sp) : head).replace(/[\s,;:.-]+$/, '') + '…';
 }
 
 /**
@@ -186,4 +186,4 @@ function writeAutoBrief(a) {
   return writeBrief({ root: a.root, fsafe: a.fsafe, branch: a.branch, now: p.now, next: p.next, blocked: p.blocked, task: a.task });
 }
 
-module.exports = { writeAutoBrief, autoParts, writeBrief, currentVersion, briefRel, oneLine, LINE_MAX };
+module.exports = { writeAutoBrief, autoParts, writeBrief, wordCut, currentVersion, briefRel, oneLine, LINE_MAX };

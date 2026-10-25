@@ -33,6 +33,7 @@ const recovery = require('./recovery.js');
  * @property {(task: string) => string | null} lastOutcome outcome of the newest attempt, or null
  * @property {(task: string) => { next: string, reason: string }} recover recovery.decide for the task
  * @property {(task: string, base: string) => boolean} isMerged is task/<task> an ancestor of <base>
+ * @property {(task: string) => string | null} [recordedHead] the commit the newest success was recorded at
  * @property {(task: string) => boolean} [branchExists] does refs/heads/task/<task> resolve (when absent, assumed yes)
  */
 
@@ -99,13 +100,18 @@ function stateOf(d, m) {
   let r;
   try { r = d.recover(task); } catch (_e) { r = { next: 'decide', reason: 'the attempt records for this task could not be read' }; }
   switch (r.next) {
-    case 'review':
-      // The branch was deleted and its reviewed commit is not in the base (for example a squash
-      // merge, which leaves no ancestor): nothing can be shipped, a person decides.
-      if (r.reason.startsWith('head_moved') && typeof d.branchExists === 'function' && !d.branchExists(task)) {
-        return mk('decide', 'branch task/' + task + ' is gone and its reviewed commit is not in ' + (m.base_branch || 'the base branch'), null, null);
+    case 'review': {
+      // The branch was deleted and the work is not in the base (for example a squash merge, which
+      // leaves no ancestor): nothing can be shipped, a person decides. Covers a built attempt too.
+      if (typeof d.branchExists === 'function' && !d.branchExists(task)) {
+        const h = typeof d.recordedHead === 'function' ? d.recordedHead(task) : null;
+        const stop = 'run `sereno.js stop --task ' + task + '` to retire it';
+        return mk('decide', 'branch task/' + task + ' is gone and ' + (h ? 'its reviewed commit is not in ' + (m.base_branch || 'the base branch') + ': recreate the branch at ' + h.slice(0, 7) + ' and run /sereno:merge ' + task + ', or ' + stop : 'nothing reviewed is on record: ' + stop), null, null);
       }
+      // The branch moved after the review: ship refuses that state, so it is a build (or a person's call), never a ship loop.
+      if (r.reason.startsWith('head_moved')) return mk('decide', r.reason, commandForDecide(task, r.reason), null);
       return mk('ship', r.reason, null, null);
+    }
     case 'retry': return mk('retry', r.reason, null, null);
     case 'repair': return mk('repair', r.reason, null, null);
     case 'merge': return mk('merge', r.reason, '/sereno:merge ' + task, m.hold_before_merge);
@@ -197,6 +203,7 @@ function realDeps(a) {
       headMerged: headMergedFor(root, fsafe, task),
     }),
     isMerged: (task, base) => branchMerged(root, fsafe, task, base),
+    recordedHead: (task) => recovery.recordedHead({ root, task, listAttempts: () => fsafe.listDir('.sereno/attempts') }),
     branchExists: (task) => !!gitlib.resolveCommit(root, 'refs/heads/task/' + task),
   };
 }

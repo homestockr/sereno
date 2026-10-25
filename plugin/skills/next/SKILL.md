@@ -42,7 +42,7 @@ If `passed` is false, stop with one line naming the `hook` and the first line of
 - `build`: read `${CLAUDE_PLUGIN_ROOT}/skills/build/SKILL.md` and follow it for the task, then go back to step 1.
 - `ship`, `repair` or `retry`: read `${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md` and follow it for the task (it includes its one repair), then go back to step 1. If ship ends at "Review needs a decision" or at its merge prompt, do not repeat that message: go back to step 1 and let the next result be the single stop line.
 
-Which ship step to enter: for `step: "retry"` (an environment failure) and for `step: "repair"` (one repair is due: a defect), go straight to the `retry` / `repair` bullet in ship's step 5 and skip its steps 1 to 4: the latest attempt is final, so nothing is left to test or review yet. Key on `step` only, never on the wording of `reason`. A `ship` step for a built attempt (or `head_moved`) starts at ship's step 1.
+Which ship step to enter: for `step: "retry"` (an environment failure) and for `step: "repair"` (one repair is due: a defect), go straight to the `retry` / `repair` bullet in ship's step 5 and skip its steps 1 to 4: the latest attempt is final, so nothing is left to test or review yet. Key on `step` only, never on the wording of `reason`. A `ship` step for a built attempt starts at ship's step 1.
 
 Follow those skills as written, in the foreground, in this same turn. Where they say to tell the user to run the next command, do not stop for that: the loop here runs it.
 
@@ -53,7 +53,7 @@ Safety cap: run at most 3 `build` / `ship` / `repair` / `retry` steps in one inv
 Stop at the first step that is not `build`, `ship`, `repair` or `retry`. Print exactly one final line:
 
 - `merge`: "Gate passed for <task>. Before merging: <hold>. Run /sereno:merge <task>." Leave out the "Before merging" sentence when `hold` is null.
-- `decide`: the `reason`, then the `command` if there is one (its options are a person's call, so list them if the reason does).
+- `decide`: the `reason`, then the `command` if there is one (its options are a person's call, so list them if the reason does). When the reason says the branch is gone, tell the user the whole reason line (it names both options, one of them the `stop` command); never run `stop` yourself.
 - `done` or `idle`: the `reason`, then "Nothing queued." (skip it when the reason already says so) or, when another task is waiting, that task's name.
 - `pick`: list the tasks and ask which one to run, then stop. Do not guess.
 
