@@ -9078,6 +9078,427 @@ test('missing rate_limits degrades instead of throwing', () => {
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 
+  /* ---- [plugin-0.4 A1] next, queue, hold, after, preflight, hook_failed, adopt ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const nextLib = require('../plugin/bin/lib/next.js');
+    const preflightLib = require('../plugin/bin/lib/preflight.js');
+    const speclib = require('../plugin/bin/lib/spec.js');
+    const recoveryLib = require('../plugin/bin/lib/recovery.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-a1-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const readJ = (dir, rel) => JSON.parse(fs.readFileSync(path.join(dir, rel), 'utf8'));
+    function repo() {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      return dir;
+    }
+    const spec = (dir, task, extra) => S(dir, ['spec', '--task', task, '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', 'main'].concat(extra || [], ['--stdin']), '## Goal\nx\n');
+    const wait = (ms) => { const t = Date.now() + ms; while (Date.now() < t) { /* spin */ } };
+
+    // ---- the state table, with injected fakes ----
+    /** fake({ t: { meta, n, last, next, reason, merged } }) */
+    function fake(tasks) {
+      const m = (t) => tasks[t] && tasks[t].meta ? Object.assign({ task: t, base_branch: 'main', after: null, hold_before_merge: null, created_at: null }, tasks[t].meta, { task: t }) : null;
+      return {
+        listSpecs: () => Object.keys(tasks),
+        spec: (t) => m(t),
+        attemptCount: (t) => (tasks[t] ? tasks[t].n || 0 : 0),
+        lastOutcome: (t) => (tasks[t] ? tasks[t].last || null : null),
+        recover: (t) => ({ next: tasks[t].next, reason: tasks[t].reason || 'r' }),
+        isMerged: (t, base) => !!(tasks[t] && tasks[t].merged === base),
+      };
+    }
+    const dec = (tasks, task) => nextLib.decide({ task: task || null, deps: fake(tasks) });
+    test('[plugin-0.4 A1] next: spec with no attempts -> build, and next itself continues', () => {
+      const r = dec({ a: { meta: {} } }, 'a');
+      assert.deepStrictEqual([r.task, r.step, r.command, r.hold], ['a', 'build', null, null]);
+    });
+    test('[plugin-0.4 A1] next: review, repair and retry run the ship step in place; no command to type', () => {
+      for (const [n, step] of [['review', 'ship'], ['repair', 'ship'], ['retry', 'retry']]) {
+        const r = dec({ a: { meta: {}, n: 1, last: 'built', next: n, reason: 'why ' + n } }, 'a');
+        assert.deepStrictEqual([r.step, r.command, r.reason], [step, null, 'why ' + n]);
+      }
+    });
+    test('[plugin-0.4 A1] next: merge stops with the command and the hold text', () => {
+      let r = dec({ a: { meta: { hold_before_merge: 'Apply the migration to staging' }, n: 1, last: 'pass', next: 'merge' } }, 'a');
+      assert.deepStrictEqual([r.step, r.command, r.hold], ['merge', '/sereno:merge a', 'Apply the migration to staging']);
+      r = dec({ a: { meta: {}, n: 1, last: 'pass', next: 'merge' } }, 'a');
+      assert.strictEqual(r.hold, null);
+    });
+    test('[plugin-0.4 A1] next: decide carries the reason and the command merge already suggests', () => {
+      const t = (reason) => dec({ a: { meta: {}, n: 1, last: 'block', next: 'decide', reason } }, 'a');
+      assert.deepStrictEqual([t('head_moved: x').step, t('head_moved: x').command], ['decide', '/sereno:build a']);
+      assert.strictEqual(t('spec_changed: x').command, '/sereno:task a');
+      assert.strictEqual(t('a second defect').command, '/sereno:ship a');
+      assert.strictEqual(t('a second defect').reason, 'a second defect');
+      assert.strictEqual(t('hook_failed: x').command, null);
+    });
+    test('[plugin-0.4 A1] next: done, and a branch merged into its base, are done; a fresh branch with no pass is not', () => {
+      let r = dec({ a: { meta: {}, n: 1, last: 'stopped', next: 'done', reason: 'stopped' } }, 'a');
+      assert.deepStrictEqual([r.step, r.command], ['done', '/sereno:next']);
+      r = dec({ a: { meta: {}, n: 1, last: 'pass', next: 'merge', merged: 'main' } }, 'a');
+      assert.strictEqual(r.step, 'done');
+      r = dec({ a: { meta: {}, n: 1, last: 'error', next: 'decide', merged: 'main' } }, 'a');
+      assert.strictEqual(r.step, 'decide', 'merged alone is not enough without a recorded success');
+      r = dec({ a: { meta: {}, n: 1, last: 'pass', next: 'merge', merged: 'other' } }, 'a');
+      assert.strictEqual(r.step, 'merge');
+    });
+    test('[plugin-0.4 A1] next: an explicit task with no spec is not_found', () => {
+      assert.throws(() => dec({}, 'zzz'), (e) => e.code === 'not_found');
+    });
+    test('[plugin-0.4 A1] next: no task picks the one in progress, ignoring done and merged tasks', () => {
+      const r = dec({
+        old: { meta: { created_at: '2026-01-01T00:00:00Z' }, n: 2, last: 'pass', next: 'merge', merged: 'main' },
+        cur: { meta: { created_at: '2026-02-01T00:00:00Z' }, n: 1, last: 'built', next: 'review' },
+        later: { meta: { created_at: '2026-03-01T00:00:00Z' } },
+      });
+      assert.deepStrictEqual([r.task, r.step], ['cur', 'ship']);
+    });
+    test('[plugin-0.4 A1] next: two in progress -> pick, never a guess', () => {
+      const r = dec({
+        b: { meta: { created_at: '2026-02-01T00:00:00Z' }, n: 1, last: 'built', next: 'review' },
+        a: { meta: { created_at: '2026-01-01T00:00:00Z' }, n: 1, last: 'pass', next: 'merge' },
+      });
+      assert.deepStrictEqual([r.task, r.step, r.command, r.tasks], [null, 'pick', null, ['a', 'b']]);
+    });
+    test('[plugin-0.4 A1] next: none in progress -> the oldest spec with no attempts whose after is merged or absent', () => {
+      const r = dec({
+        first: { meta: { created_at: '2026-01-01T00:00:00Z', after: 'dep' } },
+        second: { meta: { created_at: '2026-02-01T00:00:00Z' } },
+        dep: { meta: { created_at: '2026-03-01T00:00:00Z' }, n: 1, last: 'pass', next: 'merge', merged: 'other' },
+      });
+      // dep is in progress (not merged into main), so it wins before the queue is consulted
+      assert.deepStrictEqual([r.task, r.step], ['dep', 'merge']);
+      const q = dec({
+        first: { meta: { created_at: '2026-01-01T00:00:00Z', after: 'dep' } },
+        second: { meta: { created_at: '2026-02-01T00:00:00Z' } },
+        dep: { meta: { created_at: '2026-03-01T00:00:00Z' }, n: 1, last: 'pass', next: 'merge', merged: 'main' },
+      });
+      assert.deepStrictEqual([q.task, q.step], ['first', 'build'], 'after is merged, so the older spec goes first');
+      const w = dec({
+        first: { meta: { created_at: '2026-01-01T00:00:00Z', after: 'gone' } },
+        second: { meta: { created_at: '2026-02-01T00:00:00Z' } },
+      });
+      assert.deepStrictEqual([w.task, w.step], ['second', 'build'], 'an unmerged (or unknown) after is skipped');
+    });
+    test('[plugin-0.4 A1] next: nothing ready is idle; a waiting task says why; an explicit waiting task is idle too', () => {
+      assert.deepStrictEqual([dec({}).step, dec({}).reason], ['idle', 'Nothing queued.']);
+      const r = dec({ b: { meta: { after: 'a' } } });
+      assert.strictEqual(r.step, 'idle'); assert.match(r.reason, /b \(after a\)/);
+      const e = dec({ b: { meta: { after: 'a' } } }, 'b');
+      assert.strictEqual(e.step, 'idle'); assert.match(e.reason, /^after_not_merged: /);
+    });
+    test('[plugin-0.4 A1] next: a task without a known base is never reported merged', () => {
+      const r = dec({ a: { meta: { base_branch: null }, n: 1, last: 'pass', next: 'merge', merged: 'main' } }, 'a');
+      assert.strictEqual(r.step, 'merge');
+      const q = dec({ b: { meta: { base_branch: null, after: 'a' } }, a: { meta: { base_branch: null }, n: 1, last: 'pass', next: 'merge', merged: 'main' } });
+      assert.strictEqual(q.task, 'a');
+    });
+    test('[plugin-0.4 A1] next: an unreadable recovery becomes a decision, never a crash', () => {
+      const d = fake({ a: { meta: {}, n: 1, last: 'error' } });
+      d.recover = () => { throw new Error('boom'); };
+      const r = nextLib.decide({ task: 'a', deps: d });
+      assert.strictEqual(r.step, 'decide');
+    });
+
+    // ---- spec: after / hold ----
+    test('[plugin-0.4 A1] spec: after and hold round-trip, with JSON-quoted free text', () => {
+      const dir = repo();
+      const r = spec(dir, 'b', ['--after', 'a', '--hold', 'Apply "the" migration\tto staging']);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+      const text = fs.readFileSync(path.join(dir, '.sereno', 'specs', 'b.md'), 'utf8');
+      assert.match(text, /^after: "a"$/m);
+      assert.match(text, /^hold_before_merge: "Apply \\"the\\" migration to staging"$/m);
+      const m = speclib.readSpecMeta(dir, 'b');
+      assert.deepStrictEqual([m.after, m.hold_before_merge, m.base_branch, m.spec_revision, m.builder], ['a', 'Apply "the" migration to staging', 'main', 1, 'sonnet']);
+    });
+    test('[plugin-0.4 A1] spec: omitted after/hold are kept on revision; none and "" clear them', () => {
+      const dir = repo();
+      spec(dir, 'b', ['--after', 'a', '--hold', 'h']);
+      assert.strictEqual(spec(dir, 'b').out.spec_revision, 2);
+      let m = speclib.readSpecMeta(dir, 'b');
+      assert.deepStrictEqual([m.after, m.hold_before_merge], ['a', 'h']);
+      assert.strictEqual(spec(dir, 'b', ['--after', 'none', '--hold', '']).out.ok, true);
+      m = speclib.readSpecMeta(dir, 'b');
+      assert.deepStrictEqual([m.after, m.hold_before_merge], [null, null]);
+      assert.match(fs.readFileSync(path.join(dir, '.sereno', 'specs', 'b.md'), 'utf8'), /^after: null$/m);
+    });
+    test('[plugin-0.4 A1] spec: after uses the task-name rules; it cannot name the task; hold is capped at 200 and single line', () => {
+      const dir = repo();
+      for (const bad of ['../x', 'a/b', '.hidden', 'a b', 'x'.repeat(65)]) assert.strictEqual(spec(dir, 'b', ['--after', bad]).out.ok, false, bad);
+      const self = spec(dir, 'b', ['--after', 'b']);
+      assert.deepStrictEqual([self.out.ok, self.out.code], [false, 'invalid_arg']);
+      assert.strictEqual(spec(dir, 'b', ['--hold', 'x'.repeat(200)]).out.ok, true);
+      const long = spec(dir, 'b', ['--hold', 'x'.repeat(201)]);
+      assert.deepStrictEqual([long.out.ok, long.out.code], [false, 'invalid_arg']);
+      spec(dir, 'c', ['--hold', 'one\ntwo\r\nthree']);
+      const text = fs.readFileSync(path.join(dir, '.sereno', 'specs', 'c.md'), 'utf8');
+      assert.match(text, /^hold_before_merge: "one two three"$/m);
+      assert.strictEqual(spec(dir, 'd', ['--hold', '​\u0007']).out.ok, false);
+    });
+    test('[plugin-0.4 A1] spec: a spec written before 0.4 (no after/hold) still reads and still works with next', () => {
+      const dir = repo();
+      fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'specs', 'old.md'), '---\ntask: "old"\nbuilder: sonnet\nkind: feature\nreason: "r"\nfixes: null\nbase_branch: "main"\nspec_revision: 3\ncreated_at: "2026-01-01T00:00:00.000Z"\n---\n\n## Goal\nx\n');
+      const m = speclib.readSpecMeta(dir, 'old');
+      assert.deepStrictEqual([m.after, m.hold_before_merge, m.spec_revision, m.base_branch, m.created_at], [null, null, 3, 'main', '2026-01-01T00:00:00.000Z']);
+      const r = S(dir, ['next']);
+      assert.deepStrictEqual([r.out.ok, r.out.task, r.out.step], [true, 'old', 'build']);
+      assert.strictEqual(spec(dir, 'old').out.spec_revision, 4);
+    });
+    test('[plugin-0.4 A1] spec: a symlinked or oversized spec reads as absent', () => {
+      const dir = repo();
+      fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'specs', 'big.md'), '---\ntask: "big"\n---\n' + 'x'.repeat(1024 * 1024 + 1));
+      assert.strictEqual(speclib.readSpecMeta(dir, 'big'), null);
+      assert.strictEqual(speclib.readSpecMeta(dir, 'missing'), null);
+    });
+
+    // ---- next, end to end, on real repos ----
+    test('[plugin-0.4 A1] sereno.js next: build, queue order, after-check, and done once the dependency is merged', () => {
+      const dir = repo();
+      assert.deepStrictEqual([S(dir, ['next']).out.step, S(dir, ['next']).out.reason], ['idle', 'Nothing queued.']);
+      assert.strictEqual(S(dir, ['next', '--task', 'nope']).out.code, 'not_found');
+      for (const t of ['a', 'b']) assert.strictEqual(S(dir, ['branch', '--task', t]).out.ok, true);
+      spec(dir, 'b', ['--after', 'a']); wait(15); spec(dir, 'a');
+      // b is the older spec but waits for a
+      let r = S(dir, ['next']).out;
+      assert.deepStrictEqual([r.ok, r.task, r.step, r.command], [true, 'a', 'build', null]);
+      r = S(dir, ['next', '--task', 'b']).out;
+      assert.strictEqual(r.step, 'idle'); assert.match(r.reason, /^after_not_merged/);
+      r = S(dir, ['after-check', '--task', 'b']);
+      assert.deepStrictEqual([r.out.ok, r.out.code, r.out.after, r.out.base], [false, 'after_not_merged', 'a', 'main']);
+      assert.ok(r.status > 1, 'non-zero exit');
+      assert.match(r.out.error, /not merged/);
+      assert.deepStrictEqual([S(dir, ['after-check', '--task', 'a']).out.ok, S(dir, ['after-check', '--task', 'a']).out.after], [true, null]);
+      assert.strictEqual(S(dir, ['after-check', '--task', 'nope']).out.code, 'not_found');
+      // a: build, commit, pass, merge
+      git(dir, 'switch', '-q', 'task/a');
+      S(dir, ['attempt', '--task', 'a', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'built', '--spec', '.sereno/specs/a.md']);
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); git(dir, 'commit', '-q', '-am', 'work');
+      r = S(dir, ['next', '--task', 'a']).out;
+      assert.deepStrictEqual([r.step, r.command], ['ship', null], JSON.stringify(r));
+      git(dir, 'switch', '-q', 'main');
+      git(dir, 'merge', '-q', '--no-ff', '-m', 'merge a', 'task/a');
+      // the attempt is only 'built': merged is not claimed without a recorded success
+      S(dir, ['attempt', '--task', 'a', '--update', '1', '--outcome', 'pass', '--diagnosis', 'none', '--ended-at', 'now']);
+      r = S(dir, ['next', '--task', 'a']).out;
+      assert.deepStrictEqual([r.step, r.command], ['done', '/sereno:next']);
+      assert.strictEqual(S(dir, ['after-check', '--task', 'b']).out.ok, true);
+      r = S(dir, ['next']).out;
+      assert.deepStrictEqual([r.task, r.step], ['b', 'build']);
+    });
+    test('[plugin-0.4 A1] sereno.js next: writes nothing', () => {
+      const dir = repo();
+      S(dir, ['branch', '--task', 'a']); spec(dir, 'a');
+      const snap = () => git(dir, 'status', '--porcelain', '--untracked-files=all') + '|' + fs.readdirSync(path.join(dir, '.sereno', 'specs')).join(',') + '|' + fs.statSync(path.join(dir, '.sereno', 'specs', 'a.md')).mtimeMs;
+      const before = snap();
+      S(dir, ['next']); S(dir, ['next', '--task', 'a']); S(dir, ['after-check', '--task', 'a']);
+      assert.strictEqual(snap(), before);
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno', 'attempts')));
+    });
+    test('[plugin-0.4 A1] sereno.js next: a merge stop carries the hold from the spec', () => {
+      const dir = repo();
+      S(dir, ['branch', '--task', 'a']); spec(dir, 'a', ['--hold', 'Run the staging checks']);
+      git(dir, 'switch', '-q', 'task/a');
+      S(dir, ['attempt', '--task', 'a', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--spec', '.sereno/specs/a.md']);
+      fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { redTeam: { enabled: false } } }));
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); git(dir, 'commit', '-q', '-am', 'work');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      assert.strictEqual(S(dir, ['attempt', '--task', 'a', '--update', '1', '--outcome', 'skipped', '--diagnosis', 'none', '--head', head, '--ended-at', 'now']).out.ok, true);
+      const r = S(dir, ['next', '--task', 'a']).out;
+      assert.deepStrictEqual([r.step, r.command, r.hold], ['merge', '/sereno:merge a', 'Run the staging checks'], JSON.stringify(r));
+    });
+
+    // ---- hook_failed ----
+    test('[plugin-0.4 A1] attempt accepts diagnosis hook_failed and recovery returns decide with a hook_failed reason', () => {
+      const dir = repo();
+      S(dir, ['branch', '--task', 'h']); spec(dir, 'h');
+      assert.strictEqual(S(dir, ['attempt', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--spec', '.sereno/specs/h.md']).out.ok, true);
+      const u = S(dir, ['attempt', '--task', 'h', '--update', '1', '--outcome', 'error', '--diagnosis', 'hook_failed', '--ended-at', 'now']);
+      assert.deepStrictEqual([u.out.ok, u.out.diagnosis], [true, 'hook_failed']);
+      assert.strictEqual(readJ(dir, '.sereno/attempts/h-1.json').diagnosis, 'hook_failed');
+      const r = S(dir, ['recovery', '--task', 'h']).out;
+      assert.strictEqual(r.next, 'decide'); assert.match(r.reason, /^hook_failed:/);
+      const n = S(dir, ['next', '--task', 'h']).out;
+      assert.deepStrictEqual([n.step, n.command], ['decide', null]); assert.match(n.reason, /^hook_failed:/);
+      // a plain error stays the generic decision; an environment error still retries
+      S(dir, ['attempt', '--task', 'h2', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'error', '--diagnosis', 'environment']);
+      assert.strictEqual(S(dir, ['recovery', '--task', 'h2']).out.next, 'retry');
+      S(dir, ['attempt', '--task', 'h3', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'error', '--diagnosis', 'none']);
+      assert.doesNotMatch(S(dir, ['recovery', '--task', 'h3']).out.reason, /^hook_failed/);
+    });
+    test('[plugin-0.4 A1] recovery.decide: hook_failed with the injected lookups', () => {
+      const dir = repo();
+      fs.mkdirSync(path.join(dir, '.sereno', 'attempts'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'attempts', 'x-1.json'), JSON.stringify({ outcome: 'error', diagnosis: 'hook_failed' }));
+      const config = require('../plugin/bin/lib/config.js').loadConfig(dir).config;
+      const r = recoveryLib.decide({ root: dir, task: 'x', config, listAttempts: () => ['x-1.json'] });
+      assert.strictEqual(r.next, 'decide'); assert.ok(r.reason.startsWith('hook_failed:'));
+    });
+
+    // ---- attempt --adopt ----
+    function adoptRepo(endedAt) {
+      const dir = repo();
+      S(dir, ['branch', '--task', 'h']); spec(dir, 'h');
+      git(dir, 'switch', '-q', 'task/h');
+      S(dir, ['attempt', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--started-at', '2020-01-01T00:00:00Z', '--spec', '.sereno/specs/h.md']);
+      S(dir, ['attempt', '--task', 'h', '--update', '1', '--outcome', 'error', '--diagnosis', 'hook_failed', '--ended-at', endedAt || '2020-01-01T00:05:00Z']);
+      return dir;
+    }
+    test('[plugin-0.4 A1] attempt --adopt: records a built attempt for a new tip, then ship can go on', () => {
+      const dir = adoptRepo();
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); git(dir, 'commit', '-q', '-am', 'approved manual commit');
+      const tip = git(dir, 'rev-parse', 'HEAD');
+      const r = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.attempt], [true, 2], JSON.stringify(r.out));
+      const a = readJ(dir, '.sereno/attempts/h-2.json');
+      assert.deepStrictEqual([a.outcome, a.diagnosis, a.head_commit, a.builder_requested, a.kind, a.attempt], ['built', 'none', tip, 'sonnet', 'feature', 2]);
+      assert.strictEqual(a.spec_hash, readJ(dir, '.sereno/attempts/h-1.json').spec_hash, 'the spec pin carries over');
+      assert.strictEqual(S(dir, ['recovery', '--task', 'h']).out.next, 'review');
+      assert.strictEqual(S(dir, ['next', '--task', 'h']).out.step, 'ship');
+    });
+    test('[plugin-0.4 A1] attempt --adopt: refuses a tip that has not moved, one already adopted, a dirty tree, another branch, and no attempts', () => {
+      // the tip is older than attempt 1's end (only true here because that end is in the future)
+      const early = adoptRepo('2099-01-01T00:00:00Z');
+      let r = S(early, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'tip_not_moved']);
+      fs.writeFileSync(path.join(early, 'a.txt'), 'two\n'); git(early, 'commit', '-q', '-am', 'manual');
+      r = S(early, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'tip_not_moved'], 'commit is not newer than the 2099 end');
+      // a new commit, adopted once, then not again
+      const dir = adoptRepo();
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); git(dir, 'commit', '-q', '-am', 'manual');
+      assert.strictEqual(S(dir, ['attempt', '--adopt', '--task', 'h']).out.ok, true);
+      r = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'tip_not_moved']);
+      // dirty tree
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'three\n'); git(dir, 'commit', '-q', '-am', 'manual 2');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'dirty\n');
+      r = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'dirty_tree']);
+      git(dir, 'checkout', '-q', '--', 'a.txt');
+      // wrong branch
+      git(dir, 'switch', '-q', 'main');
+      r = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'branch_mismatch']);
+      // no attempts at all
+      S(dir, ['branch', '--task', 'n']); git(dir, 'switch', '-q', 'task/n');
+      r = S(dir, ['attempt', '--adopt', '--task', 'n']);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'not_found']);
+    });
+    test('[plugin-0.4 A1] attempt --adopt: cannot be combined with other attempt flags, and refuses a running attempt', () => {
+      const dir = adoptRepo();
+      for (const f of [['--outcome', 'built'], ['--builder', 'opus'], ['--update', '1'], ['--head', 'abc1234']]) {
+        const r = S(dir, ['attempt', '--adopt', '--task', 'h'].concat(f));
+        assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'usage'], f.join(' '));
+      }
+      S(dir, ['attempt', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--started-at', '2020-02-01T00:00:00Z', '--spec', '.sereno/specs/h.md']);
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); git(dir, 'commit', '-q', '-am', 'manual');
+      const r = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'invalid_arg']);
+    });
+    test('[plugin-0.4 A1] attempt --adopt: a changed spec is refused like any other step (spec_changed)', () => {
+      const dir = adoptRepo();
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); git(dir, 'commit', '-q', '-am', 'manual');
+      spec(dir, 'h', ['--hold', 'edited after the build opened']);
+      const r = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'spec_changed']);
+    });
+
+    // ---- preflight ----
+    const hookRepo = (body) => {
+      const dir = repo();
+      if (body !== null) fs.writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\n' + body + '\n', { mode: 0o755 });
+      return dir;
+    };
+    test('[plugin-0.4 A1] preflight: no hook means passed with hook null', () => {
+      const dir = hookRepo(null);
+      const r = S(dir, ['preflight']).out;
+      assert.deepStrictEqual([r.ok, r.hook, r.passed, r.dirty_after, r.output_head], [true, null, true, false, []]);
+    });
+    test('[plugin-0.4 A1] preflight: a passing hook', () => {
+      const dir = hookRepo('echo checking');
+      const r = S(dir, ['preflight']).out;
+      assert.deepStrictEqual([r.ok, r.hook, r.passed, r.timed_out, r.dirty_after], [true, '.git/hooks/pre-commit', true, false, false]);
+      assert.deepStrictEqual(r.output_head, ['checking']);
+    });
+    test('[plugin-0.4 A1] preflight: a failing hook reports the first 5 lines, each cut to 200 characters, and changes nothing', () => {
+      const dir = hookRepo('for i in 1 2 3 4 5 6 7 8; do echo "line $i"; done\nprintf "%0300d\\n" 0 >&2\nexit 1');
+      const before = git(dir, 'status', '--porcelain', '--untracked-files=all');
+      const r = S(dir, ['preflight']).out;
+      assert.deepStrictEqual([r.ok, r.passed, r.dirty_after], [true, false, false]);
+      assert.ok(r.output_head.length <= 5 && r.output_head[0] === 'line 1', JSON.stringify(r.output_head));
+      for (const l of r.output_head) assert.ok(l.length <= 200);
+      assert.strictEqual(git(dir, 'status', '--porcelain', '--untracked-files=all'), before);
+      assert.strictEqual(git(dir, 'rev-list', '--count', 'HEAD'), '1', 'no commit was made');
+    });
+    test('[plugin-0.4 A1] preflight: a hook that modifies a file is run, dirty_after is reported, and nothing is undone', () => {
+      const dir = hookRepo('echo fixed >> a.txt\nexit 0');
+      const r = S(dir, ['preflight']).out;
+      assert.deepStrictEqual([r.ok, r.passed, r.dirty_after], [true, true, true]);
+      assert.match(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8'), /fixed/, 'the change is left in place');
+      // a second run on the already modified tree changes nothing more in porcelain, but the diff differs again
+      assert.strictEqual(S(dir, ['preflight']).out.dirty_after, true);
+    });
+    test('[plugin-0.4 A1] preflight: core.hooksPath is honoured, and a .husky/pre-commit is the fallback', () => {
+      const dir = repo();
+      fs.mkdirSync(path.join(dir, 'myhooks'));
+      fs.writeFileSync(path.join(dir, 'myhooks', 'pre-commit'), '#!/bin/sh\necho from-hookspath\nexit 1\n', { mode: 0o755 });
+      git(dir, 'config', 'core.hooksPath', 'myhooks');
+      let r = S(dir, ['preflight']).out;
+      assert.deepStrictEqual([r.hook, r.passed, r.output_head], ['myhooks/pre-commit', false, ['from-hookspath']]);
+      const d2 = repo();
+      fs.mkdirSync(path.join(d2, '.husky'));
+      fs.writeFileSync(path.join(d2, '.husky', 'pre-commit'), '#!/bin/sh\necho from-husky\nexit 0\n', { mode: 0o755 });
+      r = S(d2, ['preflight']).out;
+      assert.deepStrictEqual([r.hook, r.passed, r.output_head], ['.husky/pre-commit', true, ['from-husky']]);
+    });
+    test('[plugin-0.4 A1] preflight: a timeout or an unrunnable hook is a failure, not a pass', () => {
+      const dir = hookRepo('exit 0');
+      const wrap = (hookResult) => (f, a, o) => (a.includes('hook') ? hookResult : spawnSync(f, a, o));
+      let r = preflightLib.preflight({ root: dir, timeoutMs: 1000, spawn: wrap({ status: null, stdout: '', stderr: '', error: Object.assign(new Error('t'), { code: 'ETIMEDOUT' }) }) });
+      assert.deepStrictEqual([r.passed, r.timed_out], [false, true]);
+      assert.match(r.output_head[0], /did not finish/);
+      r = preflightLib.preflight({ root: dir, spawn: wrap({ status: null, stdout: '', stderr: '', error: Object.assign(new Error('x'), { code: 'ENOENT' }) }) });
+      assert.deepStrictEqual([r.passed, r.timed_out], [false, false]);
+      assert.deepStrictEqual([preflightLib.hasHookRun('git version 2.35.9'), preflightLib.hasHookRun('git version 2.36.0.windows.1'), preflightLib.hasHookRun('git version 3.0.0')], [false, true, true]);
+      assert.strictEqual(S(dir, ['preflight', '--timeout-sec', '0']).out.code, 'invalid_arg');
+    });
+
+    // ---- the plugin text ----
+    test('[plugin-0.4 A1] build skill calls after-check and records hook_failed; task skill documents --after and --hold; Builders never skip hooks', () => {
+      const rd = (p) => fs.readFileSync(path.join(PLUGIN, p), 'utf8');
+      const b = rd('skills/build/SKILL.md');
+      assert.ok(b.includes('sereno.js" after-check --task <task>') && b.includes('after_not_merged'));
+      assert.ok(b.includes('--outcome error --diagnosis hook_failed') && b.includes('attempt --adopt'));
+      const t = rd('skills/task/SKILL.md');
+      assert.ok(t.includes('--after <task>') && t.includes('--hold "<one line>"'));
+      for (const n of ['builder', 'builder-haiku', 'builder-opus']) {
+        const a = rd('agents/' + n + '.md');
+        assert.ok(a.includes('do not use `--no-verify`') && a.includes('hook_failed'), n);
+      }
+    });
+    test('[plugin-0.4 A1] next.js is not in the app bundle list yet (A4)', () => {
+      const files = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files;
+      assert.ok(!files.some((f) => /next\.js|preflight\.js/.test(f)));
+    });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
   /* ---- Phase 4a: heredoc stdin ---- */
   {
     const PLUGIN = path.join(ROOT, 'plugin');

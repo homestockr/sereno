@@ -8,7 +8,8 @@
  * require anything outside plugin/, so the two are kept in step by hand.
  * Only local commands are used. Every git verb the plugin runs, anywhere (git.js,
  * spec.js, testrun.js, doctor.js, sereno.js):
- *   rev-parse, symbolic-ref, status (the clean-tree check, `cleanFiles`), merge-base
+ *   rev-parse, symbolic-ref, status (the clean-tree check, `cleanFiles`), merge-base (also
+ *   `--is-ancestor`, `isAncestor`: is a task merged into its base)
  *   (skills), ls-tree, show, show-ref (spec.js: does the branch exist), branch (spec.js:
  *   create task/<name>), worktree add / list / remove / prune (the base-suite checkout
  *   and the stale sweep), and --version (doctor).
@@ -98,6 +99,20 @@ function resolveCommit(cwd, rev) {
   return out && /^[0-9a-f]{40}$/.test(out) ? out : null;
 }
 
+/**
+ * Is commit `a` an ancestor of (or equal to) commit `b`? Both are resolved first, so only
+ * 40-hex ids reach git. null when either does not resolve or git fails.
+ * @param {string} cwd @param {string} a @param {string} b @returns {boolean | null}
+ */
+function isAncestor(cwd, a, b) {
+  const x = resolveCommit(cwd, a), y = resolveCommit(cwd, b);
+  if (!x || !y) return null;
+  try {
+    execImpl('git', SAFE_ARGS.concat(['merge-base', '--is-ancestor', x, y]), { cwd, env: safeEnv(), timeout: GIT_TIMEOUT_MS, windowsHide: true, stdio: 'ignore' });
+    return true;
+  } catch (e) { return /** @type {any} */ (e) && /** @type {any} */ (e).status === 1 ? false : null; }
+}
+
 /** Current branch name, or null when detached. @param {string} cwd */
 function currentBranch(cwd) {
   const out = git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']);
@@ -126,4 +141,4 @@ function showBlob(cwd, commit, rel, maxBytes) {
   return { kind: 'blob', size: parseInt(m[3], 10), bytes: Buffer.from(r.stdout).subarray(0, maxBytes) };
 }
 
-module.exports = { cleanFiles, GENERATED_DIRS, setExec, SAFE_ARGS, safeEnv, git, showBlob, isSha, isRefName, toplevel, resolveCommit, currentBranch };
+module.exports = { cleanFiles, GENERATED_DIRS, setExec, SAFE_ARGS, safeEnv, git, showBlob, isSha, isRefName, toplevel, resolveCommit, currentBranch, isAncestor };

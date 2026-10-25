@@ -88,7 +88,14 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|s
 ```
 
 Add `--base-branch <from_branch>` when you just created the branch (a spec revision keeps
-the earlier value when you omit it). Add `--fixes "<task>"` when it applies. The result is `{ ok, path, spec_revision, spec_hash }`.
+the earlier value when you omit it). Add `--fixes "<task>"` when it applies.
+
+Two optional arguments in `$ARGUMENTS` pass straight through to the same `spec` command:
+`--after <task>` queues this task behind another (`/sereno:build` refuses it until that task is
+merged into the base; the branch is still created now, from the current HEAD) and
+`--hold "<one line>"` records a human step to do before merge, for example "Apply the migration to
+staging". A hold is printed, never run. Both are kept when you revise the spec without them;
+`--after none` and `--hold ""` clear them. The result is `{ ok, path, spec_revision, spec_hash }`.
 
 ## 5. Report
 

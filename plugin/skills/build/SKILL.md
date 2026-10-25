@@ -25,6 +25,10 @@ Read `.sereno/specs/<task>.md`. From its front matter take `builder` (`haiku`,
 missing or `builder` is not one of those three, stop and tell the user to run
 `/sereno:task` first.
 
+Then run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" after-check --task <task>`. If the spec has an
+`after` task that is not merged into the base yet, it returns `ok: false` with code
+`after_not_merged`: show the `error` and stop. Do not start the Builder, write an attempt or work around it.
+
 ## 2. Get on the task branch
 
 The working tree must have no uncommitted changes to tracked files. Check with
@@ -80,7 +84,11 @@ Omit `--agent-id` if the Agent tool result gave none. Use `--outcome built` when
 records the final outcome). Use `--outcome error` when it did not commit or the run
 failed. For `error`, use `--diagnosis environment` if the cause was the environment (a
 StopFailure, an API or rate-limit error, a missing tool or key), and `--diagnosis none`
-otherwise, including a turn or budget stop. The result is `{ ok, path, attempt }`; if
+otherwise, including a turn or budget stop. If the Builder reports that `git commit` was refused by
+a repo hook (it will have left its work staged and quoted the first lines of the hook output), record
+`--outcome error --diagnosis hook_failed`, show those lines, and tell the user: fix the hook on its own
+branch, or approve a commit that skips it and then run
+`node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --adopt --task <task>`. Never skip a hook yourself. The result is `{ ok, path, attempt }`; if
 `ok` is false, show the error.
 
 ## 7. Stop

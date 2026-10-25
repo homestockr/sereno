@@ -11,7 +11,8 @@
  *   built           Builder committed; waiting for tests and review
  *   block           defect or blocking verdict; diagnosis says which
  *                   (defect = repairable; spec / unknown = needs a decision)
- *   error           environment failure (diagnosis environment) or any other
+ *   error           environment failure (diagnosis environment), a hook refusal
+ *                   (diagnosis hook_failed, always a decision) or any other
  *                   failure, including a budget or turn-cap stop (diagnosis none)
  *   needs_context   review could not finish, or the baseline said nothing
  *   pass / skipped  tests passed and the gate passed / was switched off
@@ -124,6 +125,7 @@ function decide(a) {
     return out('decide', 'attempt says pass but the gate record is missing or does not confirm it');
   }
   if (o === 'error') {
+    if (last.rec.diagnosis === 'hook_failed') return out('decide', "hook_failed: the repo's commit hook refused the Builder's commit; fix the hook on its own branch, or approve a commit that skips it and record it with sereno.js attempt --adopt");
     if (last.rec.diagnosis !== 'environment') return out('decide', 'the attempt failed for a reason that is not the environment');
     return infraRetriesUsed < rc.infraRetries
       ? out('retry', 'environment failure; the repair is not used')
