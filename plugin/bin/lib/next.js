@@ -34,6 +34,8 @@ const recovery = require('./recovery.js');
  * @property {(task: string) => { next: string, reason: string }} recover recovery.decide for the task
  * @property {(task: string, base: string) => boolean} isMerged is task/<task> an ancestor of <base>
  * @property {(task: string) => string | null} [recordedHead] the commit the newest success was recorded at
+ * @property {() => string[] | null} [cleanFiles] tracked files with uncommitted changes (null: unknown)
+ * @property {(task: string) => { pinned: string | null, current: string | null }} [specPin] the spec hash the newest pinned attempt carries, and the spec's hash now
  * @property {(task: string) => boolean} [branchExists] does refs/heads/task/<task> resolve (when absent, assumed yes)
  */
 
@@ -74,10 +76,48 @@ function afterState(d, m) {
 
 /** The slash command that `merge` already suggests for a `decide` reason. @param {string} task @param {string} reason @returns {string | null} */
 function commandForDecide(task, reason) {
-  if (reason.startsWith('hook_failed') || reason.startsWith('branch task/')) return null; // the options are a person's call, listed in the reason
+  if (reason.startsWith('hook_failed') || reason.startsWith('branch task/') || reason.startsWith('the latest attempt never finished') || reason.startsWith('dirty_tree')) return null; // the options are a person's call, listed in the reason
   if (reason.startsWith('head_moved')) return '/sereno:build ' + task;
-  if (reason.startsWith('spec_changed')) return '/sereno:task ' + task;
+  if (reason.startsWith('spec_changed')) return '/sereno:build ' + task; // a new build pins the new spec
   return '/sereno:ship ' + task;
+}
+
+/**
+ * The decide for a task whose branch is gone while its work is not merged.
+ * @param {Deps} d @param {Meta} m
+ * @returns {{ step: string, reason: string, hold: string | null, command: string | null }}
+ */
+function goneDecide(d, m) {
+  const task = m.task;
+  const h = typeof d.recordedHead === 'function' ? d.recordedHead(task) : null;
+  const stop = 'run `sereno.js stop --task ' + task + '` to retire it';
+  return { step: 'decide', reason: 'branch task/' + task + ' is gone and ' + (h ? 'its reviewed commit is not in ' + (m.base_branch || 'the base branch') + ': recreate the branch at ' + h.slice(0, 7) + ' and run /sereno:merge ' + task + ', or ' + stop : 'nothing reviewed is on record: ' + stop), hold: null, command: null };
+}
+
+/**
+ * The preconditions of the skills that build, ship, retry and repair, checked once here so `next`
+ * never hands out a step the skill would refuse (which loops to the step cap): (a) the tracked
+ * tree is clean, (b) task/<task> exists for ship, retry and repair, (c) a built attempt is shipped
+ * only while the spec is the one the build pinned. Any other step passes through unchanged.
+ * @param {Deps} d @param {Meta} m @param {{ step: string, reason: string, hold: string | null, command: string | null }} st
+ * @returns {{ step: string, reason: string, hold: string | null, command: string | null }}
+ */
+function guard(d, m, st) {
+  if (!['build', 'ship', 'retry', 'repair'].includes(st.step)) return st;
+  const task = m.task;
+  const files = typeof d.cleanFiles === 'function' ? d.cleanFiles() : null;
+  if (files && files.length) {
+    return { step: 'decide', reason: 'dirty_tree: ' + files.slice(0, 5).join(', ') + (files.length > 5 ? ' and ' + (files.length - 5) + ' more' : ''), hold: null, command: null };
+  }
+  if (st.step !== 'build' && typeof d.branchExists === 'function' && !d.branchExists(task)) return goneDecide(d, m);
+  if (st.step === 'ship' && typeof d.specPin === 'function') {
+    const p = d.specPin(task);
+    if (p.pinned && p.pinned !== p.current) {
+      const reason = 'spec_changed: the spec changed after the build; a new build pins it';
+      return { step: 'decide', reason, hold: null, command: commandForDecide(task, reason) };
+    }
+  }
+  return st;
 }
 
 /**
@@ -90,7 +130,7 @@ function stateOf(d, m) {
   const mk = (/** @type {string} */ step, /** @type {string} */ reason, /** @type {string | null} */ command, /** @type {string | null} */ hold) => ({ step, reason, hold: hold || null, command });
   if (d.attemptCount(task) === 0) {
     const a = afterState(d, m);
-    if (!a.ok) return mk('idle', 'after_not_merged: ' + task + ' waits for ' + a.after + ' to be merged' + (a.base ? ' into ' + a.base : ''), null, null);
+    if (!a.ok) return mk('idle', a.after && d.lastOutcome(a.after) === 'stopped' ? a.after + ' was stopped; run /sereno:task ' + task + ' --after none to unblock' : 'after_not_merged: ' + task + ' waits for ' + a.after + ' to be merged' + (a.base ? ' into ' + a.base : ''), null, null);
     return mk('build', 'the spec exists and nothing has been built yet', null, null);
   }
   if (mergedInto(d, task, m.base_branch)) {
@@ -103,11 +143,7 @@ function stateOf(d, m) {
     case 'review': {
       // The branch was deleted and the work is not in the base (for example a squash merge, which
       // leaves no ancestor): nothing can be shipped, a person decides. Covers a built attempt too.
-      if (typeof d.branchExists === 'function' && !d.branchExists(task)) {
-        const h = typeof d.recordedHead === 'function' ? d.recordedHead(task) : null;
-        const stop = 'run `sereno.js stop --task ' + task + '` to retire it';
-        return mk('decide', 'branch task/' + task + ' is gone and ' + (h ? 'its reviewed commit is not in ' + (m.base_branch || 'the base branch') + ': recreate the branch at ' + h.slice(0, 7) + ' and run /sereno:merge ' + task + ', or ' + stop : 'nothing reviewed is on record: ' + stop), null, null);
-      }
+      if (typeof d.branchExists === 'function' && !d.branchExists(task)) return goneDecide(d, m);
       // The branch moved after the review: ship refuses that state, so it is a build (or a person's call), never a ship loop.
       if (r.reason.startsWith('head_moved')) return mk('decide', r.reason, commandForDecide(task, r.reason), null);
       return mk('ship', r.reason, null, null);
@@ -116,7 +152,13 @@ function stateOf(d, m) {
     case 'repair': return mk('repair', r.reason, null, null);
     case 'merge': return mk('merge', r.reason, '/sereno:merge ' + task, m.hold_before_merge);
     case 'done': return mk('done', r.reason, '/sereno:next', null);
-    default: return mk('decide', r.reason, commandForDecide(task, r.reason), null);
+    default: {
+      if (r.reason.startsWith('the latest attempt never finished')) {
+        const n = typeof (/** @type {any} */ (r)).attempt === 'number' ? /** @type {any} */ (r).attempt : d.attemptCount(task);
+        return mk('decide', 'the latest attempt never finished: close it with `sereno.js attempt --task ' + task + ' --update ' + n + ' --outcome error --diagnosis none --ended-at now`', null, null);
+      }
+      return mk('decide', r.reason, commandForDecide(task, r.reason), null);
+    }
   }
 }
 
@@ -129,7 +171,7 @@ function decide(a) {
   if (a.task) {
     const m = d.spec(a.task);
     if (!m) throw new SerenoError('not_found', 'no spec for task ' + a.task + '; run /sereno:task first');
-    return Object.assign({ task: a.task }, stateOf(d, m));
+    return Object.assign({ task: a.task }, guard(d, m, stateOf(d, m)));
   }
   /** @type {Meta[]} */
   const metas = [];
@@ -138,16 +180,16 @@ function decide(a) {
   metas.sort((x, y) => (x.created_at || '9').localeCompare(y.created_at || '9') || x.task.localeCompare(y.task));
 
   const inProgress = metas.filter((m) => d.attemptCount(m.task) > 0 && stateOf(d, m).step !== 'done');
-  if (inProgress.length === 1) return Object.assign({ task: inProgress[0].task }, stateOf(d, inProgress[0]));
+  if (inProgress.length === 1) return Object.assign({ task: inProgress[0].task }, guard(d, inProgress[0], stateOf(d, inProgress[0])));
   if (inProgress.length > 1) {
     const names = inProgress.map((m) => m.task);
     return { task: null, step: 'pick', reason: names.length + ' tasks are in progress: ' + names.join(', ') + '; say which one to run', hold: null, command: null, tasks: names };
   }
   const fresh = metas.filter((m) => d.attemptCount(m.task) === 0);
   const ready = fresh.find((m) => afterState(d, m).ok);
-  if (ready) return Object.assign({ task: ready.task }, stateOf(d, ready));
+  if (ready) return Object.assign({ task: ready.task }, guard(d, ready, stateOf(d, ready)));
   if (fresh.length) {
-    const waiting = fresh.map((m) => m.task + ' (after ' + m.after + ')');
+    const waiting = fresh.map((m) => m.task + ' (after ' + m.after + (m.after && d.lastOutcome(m.after) === 'stopped' ? ', stopped; run /sereno:task ' + m.task + ' --after none to unblock' : '') + ')');
     return { task: null, step: 'idle', reason: 'nothing ready: ' + waiting.join(', ') + ' wait for an earlier task to be merged', hold: null, command: null };
   }
   return { task: null, step: 'idle', reason: 'Nothing queued.', hold: null, command: null };
@@ -203,6 +245,15 @@ function realDeps(a) {
       headMerged: headMergedFor(root, fsafe, task),
     }),
     isMerged: (task, base) => branchMerged(root, fsafe, task, base),
+    cleanFiles: () => gitlib.cleanFiles(root),
+    specPin: (task) => {
+      let pinned = null;
+      const ns = nums(task);
+      for (let i = ns.length - 1; i >= 0; i--) { const j = readAttempt(task, ns[i]); if (j && typeof j.spec_hash === 'string') { pinned = j.spec_hash; break; } }
+      let current = null;
+      try { current = rec.sha256(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'))); } catch (_e) { current = null; }
+      return { pinned, current };
+    },
     recordedHead: (task) => recovery.recordedHead({ root, task, listAttempts: () => fsafe.listDir('.sereno/attempts') }),
     branchExists: (task) => !!gitlib.resolveCommit(root, 'refs/heads/task/' + task),
   };

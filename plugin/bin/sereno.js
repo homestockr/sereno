@@ -370,7 +370,9 @@ const COMMANDS = {
     if (!last || typeof last !== 'object') throw new SerenoError('not_found', 'the latest attempt record is unreadable');
     if (last.outcome === 'running') throw new SerenoError('invalid_arg', 'attempt ' + nums[nums.length - 1] + ' is still running; finish it with --update first');
     if (last.outcome === 'stopped') throw new SerenoError('invalid_arg', 'task ' + task + ' is already stopped');
-    const { config_hash } = loadConfig(root);
+    const { config, config_hash } = loadConfig(root);
+    const sm = speclib.readSpecMeta(root, task);
+    if (sm && nextLib.mergedInto(nextLib.realDeps({ root, fsafe, config }), task, sm.base_branch)) throw new SerenoError('already_merged', 'task ' + task + ' is already merged into ' + sm.base_branch + '; there is nothing to retire');
     const now = new Date().toISOString();
     return allocateAttempt(fsafe, task, {
       project_id: typeof last.project_id === 'string' && last.project_id ? last.project_id : projectId(root),
