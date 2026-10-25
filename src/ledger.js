@@ -51,6 +51,11 @@ const MAX_NAME = 128;       // tool_name cap
 const MAX_ID = 128;         // id caps (tool_use_id, agent_id, prompt_id)
 const RECEIVED_SKEW_MS = 5000;   // trust the shim's receivedAt only within this of the collector clock
 const PRUNE_EVERY_MS = DAY_MS;
+const SESS_LIST_CAP = 500;
+const SESS_COLS = `s.session_id AS id, s.cwd AS cwd, s.project AS project, s.branch AS branch, s.model AS model,
+  s.first_seen AS first_seen, s.last_seen AS last_seen, s.ended_at AS ended_at,
+  (SELECT COALESCE(SUM(r.cost_micros),0) FROM requests r WHERE r.session_id = s.session_id) AS cost_micros,
+  (SELECT COUNT(*) FROM session_events e WHERE e.session_id = s.session_id AND e.kind = 'turn') AS turns`;
 
 /** @returns {{ roles: Record<string, { costUsd: number, explicit: number, inferred: number, unattributed: number }> }} */
 function emptyRoleSpend() {
@@ -154,6 +159,22 @@ function openLedger(opts = {}) {
     sessEnd: db.prepare(`INSERT INTO sessions (session_id, first_seen, last_seen, ended_at) VALUES (?,?,?,?)
       ON CONFLICT(session_id) DO UPDATE SET ended_at=excluded.ended_at, last_seen=MAX(last_seen, excluded.last_seen)`),
     setBranch: db.prepare('UPDATE sessions SET branch=? WHERE session_id=? AND branch IS NULL'),
+    // Sessions API (alpha.7 S2). Reads only, and only allowlisted columns exist to be read.
+    sessList: db.prepare(`SELECT ${SESS_COLS} FROM sessions s WHERE s.last_seen >= ? ORDER BY s.first_seen DESC, s.session_id LIMIT ${SESS_LIST_CAP}`),
+    sessOne: db.prepare(`SELECT ${SESS_COLS} FROM sessions s WHERE s.session_id = ?`),
+    evTools: db.prepare(`SELECT ts, ended, duration_ms, tool_name, agent_id, outcome FROM session_events
+      WHERE session_id=? AND kind='tool' ORDER BY ts DESC, id DESC LIMIT ?`),
+    evWaits: db.prepare(`SELECT ts, ended, duration_ms, outcome, agent_id FROM session_events
+      WHERE session_id=? AND kind='wait' ORDER BY ts DESC, id DESC LIMIT ?`),
+    agentsOf: db.prepare(`SELECT a.agent_id AS agent_id, a.agent_type AS agent_type, a.started AS started, a.stopped AS stopped,
+      (SELECT COALESCE(SUM(r.cost_micros),0) FROM requests r WHERE r.session_id = a.session_id AND r.agent_id = a.agent_id) AS cost_micros
+      FROM agents a WHERE a.session_id=? ORDER BY COALESCE(a.started, a.stopped, 0), a.agent_id LIMIT 200`),
+    agentModelRows: db.prepare(`SELECT agent_id, model, COUNT(*) AS n FROM requests
+      WHERE session_id=? AND agent_id IS NOT NULL AND model IS NOT NULL GROUP BY agent_id, model`),
+    costRows: db.prepare('SELECT ts, cost_micros FROM requests WHERE session_id=? ORDER BY ts, rowid LIMIT 50000'),
+    attribRows: db.prepare(`SELECT r.source AS s, r.model AS m, a.agent_type AS t, COUNT(*) AS n
+      FROM requests r LEFT JOIN agents a ON a.session_id = r.session_id AND a.agent_id = r.agent_id AND r.agent_id IS NOT NULL
+      WHERE r.session_id=? GROUP BY r.source, r.model, a.agent_type`),
   };
 
   /** @template T @param {() => T} fn @returns {T} */
@@ -660,6 +681,90 @@ function openLedger(opts = {}) {
     return { ledgerMicros, statusMicros, deltaPct, ok: deltaPct !== null && Math.abs(deltaPct) <= 2 };
   }
 
+  /** @param {any} r */
+  const sessRow = (r) => ({
+    id: String(r.id), cwd: r.cwd == null ? null : String(r.cwd), project: r.project == null ? null : String(r.project),
+    branch: r.branch == null ? null : String(r.branch), model: r.model == null ? null : String(r.model),
+    firstSeen: Number(r.first_seen), lastSeen: Number(r.last_seen), endedAt: r.ended_at == null ? null : Number(r.ended_at),
+    costMicros: Number(r.cost_micros), turns: Number(r.turns),
+  });
+
+  /** Sessions seen at or after `sinceMs`, newest start first (at most 500). @param {number} sinceMs */
+  function sessionList(sinceMs) {
+    live();
+    return q.sessList.all(Number(sinceMs) || 0).map(sessRow);
+  }
+
+  /** One session's row (same shape as sessionList), or null. @param {string} sessionId */
+  function sessionRow(sessionId) {
+    live();
+    const r = q.sessOne.get(String(sessionId));
+    return r ? sessRow(r) : null;
+  }
+
+  /**
+   * Tool and wait rows of one session, newest kept when over the cap, returned oldest first.
+   * Names, times and outcomes only. @param {string} sessionId @param {number} [toolCap]
+   */
+  function sessionEvents(sessionId, toolCap = 2000) {
+    live();
+    const cap = Math.max(1, Math.floor(toolCap));
+    const num = (/** @type {any} */ v) => (v == null ? null : Number(v));
+    const txt = (/** @type {any} */ v) => (v == null ? null : String(v));
+    const tools = q.evTools.all(sessionId, cap + 1);
+    const truncated = tools.length > cap;
+    if (truncated) tools.length = cap;
+    const waits = q.evWaits.all(sessionId, 500);
+    return {
+      truncated,
+      tools: tools.reverse().map((r) => ({ ts: Number(r.ts), ended: num(r.ended), duration_ms: num(r.duration_ms), tool_name: txt(r.tool_name), agent_id: txt(r.agent_id), outcome: txt(r.outcome) })),
+      waits: waits.reverse().map((r) => ({ ts: Number(r.ts), ended: num(r.ended), duration_ms: num(r.duration_ms), outcome: txt(r.outcome), agent_id: txt(r.agent_id) })),
+    };
+  }
+
+  /** The session's agents with their dominant request model and summed cost. @param {string} sessionId */
+  function sessionAgents(sessionId) {
+    live();
+    /** @type {Map<string, { model: string, n: number }>} */
+    const best = new Map();
+    for (const r of q.agentModelRows.all(sessionId)) {
+      const cur = best.get(String(r.agent_id));
+      if (!cur || Number(r.n) > cur.n) best.set(String(r.agent_id), { model: String(r.model), n: Number(r.n) });
+    }
+    return q.agentsOf.all(sessionId).map((a) => ({
+      agentId: String(a.agent_id), agentType: a.agent_type == null || a.agent_type === '' ? null : String(a.agent_type),
+      started: a.started == null ? null : Number(a.started), stopped: a.stopped == null ? null : Number(a.stopped),
+      model: best.has(String(a.agent_id)) ? /** @type {any} */ (best.get(String(a.agent_id))).model : null,
+      costMicros: Number(a.cost_micros),
+    }));
+  }
+
+  /** Request times with their cost (micros), oldest first, for a cumulative curve. @param {string} sessionId */
+  function sessionCostPoints(sessionId) {
+    live();
+    return q.costRows.all(sessionId).map((r) => ({ ts: Number(r.ts), costMicros: Number(r.cost_micros) }));
+  }
+
+  /**
+   * Request counts by attribution, classified at query time like roleSpend: main and auxiliary are
+   * explicit; a subagent request is explicit when it joins an agents row, inferred only when it joins
+   * none and its model family is in inferModels, else unattributed.
+   * @param {string} sessionId @param {Record<string, string>} inferModels family -> role
+   */
+  function sessionAttribution(sessionId, inferModels) {
+    live();
+    const out = { explicit: 0, inferred: 0, unattributed: 0 };
+    const family = require('./pipeline.js').modelFamily;
+    for (const r of q.attribRows.all(sessionId)) {
+      const n = Number(r.n);
+      if (r.s === 'main' || r.s === 'auxiliary') out.explicit += n;
+      else if (r.s === 'subagent' && r.t != null) out.explicit += n;
+      else if (r.s === 'subagent' && Object.prototype.hasOwnProperty.call(inferModels || {}, family(r.m) || r.m)) out.inferred += n;
+      else out.unattributed += n;
+    }
+    return out;
+  }
+
   /** @param {number} [days] */
   function prune(days = retentionDays) {
     live();
@@ -681,7 +786,7 @@ function openLedger(opts = {}) {
   // Prune again daily while the app runs, not only at open. unref: never keeps the process alive.
   const pruneTimer = setInterval(() => { try { if (!closed) prune(retentionDays); } catch (_) { /* next tick retries */ } }, pruneEveryMs);
   if (typeof pruneTimer.unref === 'function') pruneTimer.unref();
-  return { file, setBranch, _pruneTimer: pruneTimer, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, breakdown, cacheTotals, projectDetail, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, prune, close, _db: db };
+  return { file, setBranch, _pruneTimer: pruneTimer, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, breakdown, cacheTotals, projectDetail, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, sessionList, sessionRow, sessionEvents, sessionAgents, sessionCostPoints, sessionAttribution, prune, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }

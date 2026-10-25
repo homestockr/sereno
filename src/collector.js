@@ -10,6 +10,7 @@
  *   POST /v1/logs, /v1/traces <- OTLP/JSON (only with a ledger; else 200 and drop)
  *   GET  /ledger/summary -> ledger totals
  *   GET  /api/spend/{today,series,projects,top-prompts,overview,where,cache,project} -> spend views (ledger only)
+ *   GET  /api/sessions?range=today|7d|30d, /api/sessions/<id> -> session list and detail (ledger history, store live state)
  *   GET  /api/projects, /api/pipeline, /api/token; POST /api/review, /api/projects/<id>/hide|pin (guarded)
  *   GET  /console[/*] -> the console pages (src/renderer/console)
  *   GET  /        -> the widget page (also works in a plain browser tab)
@@ -29,6 +30,7 @@ const pipelineLib = require('./pipeline.js');
 const wiring = require('./wiring.js');
 const { emptyRoleSpend } = require('./ledger.js');
 const { normalizePath } = require('./projects.js');
+const { branchForCwd } = require('./repos.js');
 
 const RENDERER_DIR = path.join(__dirname, 'renderer');
 const CONSOLE_DIR = path.join(RENDERER_DIR, 'console');
@@ -768,6 +770,184 @@ function createCollector(store, port, opts) {
     };
   }
 
+  /*
+   * GET /api/sessions?range=today|7d|30d and GET /api/sessions/<id> (alpha.7 S2).
+   * History comes from the ledger, live state only from the store. Every row is built
+   * from an explicit key list: names, times, counts and outcomes. No tool input, prompt,
+   * response, command, path or cwd, and no tool_use_id, leaves here.
+   */
+  const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+  const SESSION_RANGES = ['today', '7d', '30d'];
+  const SESSION_TOOL_CAP = 2000;
+  const COST_POINTS_MAX = 200;
+  const HELD_UP_MAX = 5;
+  const REVIEWS_MAX = 50;
+  const REVIEW_SLACK_MS = 60 * 1000;   // a verdict file lands shortly after the session's last event
+  const microsToCents = (m) => Math.round(m / 1e4) / 100;
+  const microsToUsd4 = (m) => Math.round(m / 100) / 1e4;
+
+  /** The registry project whose repo or worktree is the longest prefix of cwd, or null. */
+  function sessionOwner(cwd, reg, snap) {
+    if (typeof cwd !== 'string' || !cwd) return null;
+    let n;
+    try { n = normalizePath(cwd); } catch (_) { return null; }
+    let best = 0, hit = null;
+    for (const p of reg) {
+      const st = p.hidden ? undefined : snap[p.id];
+      for (const x of [p.repoPath].concat(st && Array.isArray(st.worktrees) ? st.worktrees.map((w) => w && w.path) : [])) {
+        if (typeof x !== 'string' || !x) continue;
+        let y;
+        try { y = normalizePath(x).replace(/\/$/, ''); } catch (_) { continue; }
+        if ((n === y || n.startsWith(y + '/')) && y.length > best) { best = y.length; hit = p; }
+      }
+    }
+    return hit;
+  }
+
+  /** Header fields shared by the list rows and the detail. `live` is the store's public session or null. */
+  function sessionHeader(row, ctx) {
+    let state = 'ended', isLive = false;
+    const ls = store.sessions.get(row.id);
+    if (ls) {
+      const ps = store.publicSession(ls);
+      if (!ps.stale) { isLive = true; state = ps.state === 'blocked' ? 'waiting' : (ps.state === 'idle' ? 'idle' : 'running'); }
+    }
+    const owner = sessionOwner(row.cwd, ctx.reg, ctx.snap);
+    const ended = isLive ? null : (row.endedAt !== null ? row.endedAt : row.lastSeen);
+    return {
+      owner, isLive,
+      out: {
+        session_id: row.id,
+        project: pStr(owner ? owner.name : row.project, 128),
+        project_id: owner ? pStr(owner.id, 64) : null,
+        branch: pStr(row.branch !== null ? row.branch : branchForCwd(ctx.snap, row.cwd), 256),
+        state,
+        started: row.firstSeen,
+        ended,
+        duration_ms: Math.max(0, (ended !== null ? ended : ctx.asOf) - row.firstSeen),
+        cost_est: microsToCents(row.costMicros),
+        turns: row.turns,
+      },
+    };
+  }
+
+  function sessionsCtx() {
+    let snap = {};
+    try { snap = repos ? repos.snapshot() : {}; } catch (_) { snap = {}; }
+    return { asOf: now(), reg: projects ? projects.list() : [], snap };
+  }
+
+  /** At most `max` points, always keeping the first and the last (the series is cumulative). */
+  function downsample(arr, max) {
+    if (arr.length <= max) return arr;
+    const out = [];
+    for (let i = 0; i < max; i++) out.push(arr[Math.round(i * (arr.length - 1) / (max - 1))]);
+    return out;
+  }
+
+  function buildSessionDetail(id) {
+    const row = ledger.sessionRow(id);
+    if (!row) return null;
+    const ctx = sessionsCtx();
+    const { owner, isLive, out } = sessionHeader(row, ctx);
+    const ev = ledger.sessionEvents(id, SESSION_TOOL_CAP);
+    const waits = ev.waits.map((w) => ({
+      ts: w.ts, ended: w.ended,
+      duration_ms: w.duration_ms !== null ? w.duration_ms : (w.ended === null && isLive ? Math.max(0, ctx.asOf - w.ts) : null),
+      outcome: pStr(w.outcome, 32), agent_id: pStr(w.agent_id, 128),
+    }));
+    const tools = ev.tools.map((t) => ({
+      ts: t.ts, ended: t.ended, duration_ms: t.duration_ms, tool_name: pStr(t.tool_name, 128), agent_id: pStr(t.agent_id, 128), outcome: pStr(t.outcome, 32),
+    }));
+
+    // Pipeline records for this session's repo: review markers, and which attempts followed a block.
+    const st = owner && !owner.hidden ? ctx.snap[owner.id] : null;
+    const ptasks = st && st.pipeline && Array.isArray(st.pipeline.tasks) ? st.pipeline.tasks : [];
+    const endEdge = (out.ended !== null ? out.ended : ctx.asOf) + REVIEW_SLACK_MS;
+    const reviews = [];
+    const repairAgents = new Set();
+    for (const t of ptasks.slice(0, 200)) {
+      if (!t || typeof t !== 'object') continue;
+      for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+        if (!g || typeof g !== 'object') continue;
+        const at = pTime(g.reviewed_at);
+        const mine = typeof g.session_id === 'string' && g.session_id
+          ? g.session_id === id
+          : (at !== null && at >= row.firstSeen - REVIEW_SLACK_MS && at <= endEdge);
+        if (mine) reviews.push({ task: pStr(t.task, 128), outcome: pStr(g.outcome, 32), findings: Array.isArray(g.findings) ? g.findings.length : 0, at });
+      }
+      const atts = Array.isArray(t.attempts) ? t.attempts : [];
+      for (const a of atts) {
+        if (!a || typeof a.agent_id !== 'string' || !a.agent_id || !Number.isInteger(a.attempt)) continue;
+        const prev = atts.find((x) => x && x.attempt === a.attempt - 1);
+        if (prev && prev.outcome === 'block') repairAgents.add(a.agent_id);
+      }
+    }
+    reviews.sort((x, y) => (x.at === null ? Infinity : x.at) - (y.at === null ? Infinity : y.at));
+
+    // Lanes: the main session (always explicit), then one per agents row. Never a Task description.
+    const rmap = pipelineLib.roleMap();
+    const agents = ledger.sessionAgents(id);
+    let agentMicros = 0;
+    const lanes = [{
+      id: 'main', kind: 'main', label: 'Main session', agent_type: null, role: 'main', model: pStr(row.model, 128), attribution: 'explicit',
+      started: row.firstSeen, stopped: out.ended, cost_est: 0, subtitle: null,
+    }];
+    for (const a of agents) {
+      agentMicros += a.costMicros;
+      const role = a.agentType !== null && Object.prototype.hasOwnProperty.call(rmap, a.agentType) ? rmap[a.agentType] : 'other';
+      lanes.push({
+        id: pStr(a.agentId, 128), kind: 'agent', label: pStr(a.agentType, 128) || 'agent', agent_type: pStr(a.agentType, 128), role,
+        model: pStr(a.model, 128), attribution: 'explicit', started: a.started, stopped: a.stopped,
+        cost_est: microsToCents(a.costMicros), subtitle: role === 'builder' && repairAgents.has(a.agentId) ? 'Repair' : null,
+      });
+    }
+    lanes[0].cost_est = microsToCents(Math.max(0, row.costMicros - agentMicros));
+
+    let cum = 0;
+    const series = downsample(ledger.sessionCostPoints(id).map((p) => { cum += p.costMicros; return { ts: p.ts, cost_est: microsToUsd4(cum) }; }), COST_POINTS_MAX);
+
+    const rc = ledger.reconcile(id);
+    const reconciliation = rc && rc.statusMicros !== null
+      ? { ok: rc.ok === true, statusline: microsToUsd4(rc.statusMicros), ledger: microsToUsd4(rc.ledgerMicros), diff: rc.deltaPct }
+      : null;
+    const held = waits.filter((w) => w.duration_ms !== null && w.duration_ms > 0)
+      .sort((x, y) => y.duration_ms - x.duration_ms).slice(0, HELD_UP_MAX)
+      .map((w) => ({ ts: w.ts, duration_ms: w.duration_ms, outcome: w.outcome, agent_id: w.agent_id }));
+    const attribution = ledger.sessionAttribution(id, pipelineLib.inferModels());
+    return Object.assign({}, out, {
+      reconciliation, lanes, tools, waits, truncated: ev.truncated, cost_series: series,
+      reviews: reviews.slice(0, REVIEWS_MAX), attribution: { explicit: attribution.explicit, inferred: attribution.inferred, unattributed: attribution.unattributed },
+      held_up: held,
+    });
+  }
+
+  function handleSessions(req, res, url) {
+    const text = (code, why) => res.writeHead(code, { 'content-type': 'text/plain' }).end(why);
+    if (!ledger) { sendJson(res, 200, { enabled: false }); return; }
+    try {
+      if (url === '/api/sessions') {
+        let sp;
+        try { sp = new URL(req.url, 'http://x').searchParams; } catch (_) { sp = new URLSearchParams(); }
+        const range = sp.get('range') === null ? '7d' : sp.get('range');
+        if (!SESSION_RANGES.includes(range)) return text(400, 'range must be today, 7d or 30d');
+        const asOf = now();
+        const since = range === 'today' ? spendtime.dayBounds(asOf).since : spendtime.lastNDays(range === '7d' ? 7 : 30, asOf)[0].since;
+        const ctx = sessionsCtx();
+        sendJson(res, 200, { range, sessions: ledger.sessionList(since).map((r) => sessionHeader(r, ctx).out) });
+        return;
+      }
+      const m = /^\/api\/sessions\/([^/]+)$/.exec(url);
+      if (!m) return text(404, 'not found');
+      if (!SESSION_ID_RE.test(m[1])) return text(400, 'bad session id');
+      const d = buildSessionDetail(m[1]);
+      if (!d) return text(404, 'not found');
+      sendJson(res, 200, d);
+    } catch (_) {
+      try { if (!res.headersSent) text(503, 'ledger unavailable'); } catch (_e) {}
+    }
+  }
+
   // The POST guard for console actions; localOnly (Host/Origin) has already run.
   // Every failure is a bare 403: no hint about which part failed.
   function actionGuard(req, res) {
@@ -948,6 +1128,7 @@ function createCollector(store, port, opts) {
     if (req.method === 'GET' && url === '/api/token') { sendJson(res, 200, { token }); return; }
     if (req.method === 'GET' && url === '/api/projects') { sendJson(res, 200, buildProjects()); return; }
     if (req.method === 'POST' && (url === '/api/review' || PROJECT_ACTION_RE.test(url))) { handleAction(req, res, url); return; }
+    if (req.method === 'GET' && (url === '/api/sessions' || url.startsWith('/api/sessions/'))) { handleSessions(req, res, url); return; }
 
     // --- spend API ----------------------------------------------------
     if (req.method === 'GET' && url.startsWith('/api/')) {

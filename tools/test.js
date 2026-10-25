@@ -14105,6 +14105,254 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+  /* ---- alpha7 S2: the sessions API ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const Hh = 3600000, Dd = 86400000;
+    const d0 = new Date(); const NOWX = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate(), 12, 0, 0).getTime();   // pinned local noon: ranges never straddle midnight
+    const CWD = 'C:\\w\\proj';
+    const iso = (t) => new Date(t).toISOString();
+    const ids = { ended: 'sess-ended', live: 'sess-live', wait: 'sess-wait', idle: 'sess-idle', stale: 'sess-stale', yday: 'sess-yday', old: 'sess-old', ancient: 'sess-ancient' };
+
+    const build = () => {
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      const addSess = (id, o) => l._db.prepare('INSERT INTO sessions (session_id, first_seen, last_seen, cwd, project, model, branch, ended_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(id, o.first, o.last, o.cwd === undefined ? CWD : o.cwd, o.project || 'proj', o.model || 'claude-opus-5-5', o.branch === undefined ? null : o.branch, o.ended === undefined ? null : o.ended);
+      addSess(ids.ended, { first: NOWX - 3 * Hh, last: NOWX - 2 * Hh, ended: NOWX - 2 * Hh, branch: 'feat/x' });
+      addSess(ids.live, { first: NOWX - 10 * 60000, last: NOWX - 60000 });
+      addSess(ids.wait, { first: NOWX - 20 * 60000, last: NOWX - 60000 });
+      addSess(ids.idle, { first: NOWX - 30 * 60000, last: NOWX - 60000 });
+      addSess(ids.stale, { first: NOWX - Hh, last: NOWX - 20 * 60000 });
+      addSess(ids.yday, { first: NOWX - 21 * Hh, last: NOWX - 20 * Hh });
+      addSess(ids.old, { first: NOWX - 20 * Dd - Hh, last: NOWX - 20 * Dd, cwd: 'C:\\elsewhere\\x', project: 'x' });
+      addSess(ids.ancient, { first: NOWX - 40 * Dd - Hh, last: NOWX - 40 * Dd });
+      const E = ids.ended;
+      const rq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: E, promptId: null, ts: NOWX - 150 * 60000, model: 'claude-sonnet-5-5', querySource: null, source: 'subagent',
+        agentName: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100000, durationMs: 0 }, o);
+      l.ingestRequests([
+        rq({ requestKey: '1', requestId: 'r1', source: 'main', model: 'claude-opus-5-5', costMicros: 1234567, ts: NOWX - 170 * 60000 }),
+        rq({ requestKey: '2', requestId: 'r2', source: 'main', model: 'claude-opus-5-5', costMicros: 2000000, ts: NOWX - 160 * 60000 }),
+        rq({ requestKey: '3', requestId: 'r3', costMicros: 500000 }),
+        rq({ requestKey: '4', requestId: 'r4', model: 'claude-fable-5-1', costMicros: 300000 }),
+        rq({ requestKey: '5', requestId: 'r5', model: 'claude-fable-5-1' }),   // no agents join, Fable: inferred
+        rq({ requestKey: '6', requestId: 'r6' }),                                // no agents join, Sonnet: unattributed
+      ]);
+      l.ingestSpans([{ requestId: 'r3', sessionId: E, agentId: 'ag-b1', ts: NOWX }, { requestId: 'r4', sessionId: E, agentId: 'ag-r', ts: NOWX }]);
+      const addAg = (aid, type, a, b) => l._db.prepare('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,?)').run(E, aid, type, a, b);
+      addAg('ag-b1', 'sereno:builder', NOWX - 170 * 60000, NOWX - 140 * 60000);
+      addAg('ag-r', 'sereno:red-team', NOWX - 135 * 60000, NOWX - 130 * 60000);
+      addAg('ag-b2', 'sereno:builder', NOWX - 125 * 60000, NOWX - 121 * 60000);
+      addAg('ag-x', 'Explore', NOWX - 120 * 60000, null);
+      const ev = (sid, ts, kind, o) => { o = o || {}; l._db.prepare('INSERT INTO session_events (session_id, ts, kind, tool_name, tool_use_id, agent_id, ended, duration_ms, outcome, prompt_id) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(sid, ts, kind, o.tool || null, o.tuid || null, o.agent || null, o.ended === undefined ? null : o.ended, o.dur === undefined ? null : o.dur, o.outcome || null, null); };
+      for (let i = 0; i < 3; i++) ev(E, NOWX - (175 - i) * 60000, 'turn');
+      ev(E, NOWX - 170 * 60000, 'tool', { tool: 'Bash', tuid: 'TUSECRET-1', ended: NOWX - 170 * 60000 + 900, dur: 900, outcome: 'ok' });
+      ev(E, NOWX - 165 * 60000, 'tool', { tool: 'mcp__srv__lookup', tuid: 'TUSECRET-2', agent: 'ag-b1', ended: NOWX - 165 * 60000 + 50, dur: 50, outcome: 'error' });
+      [1000, 90000, 30000, 5000, 7000, 2000, 60000].forEach((dur, i) => ev(E, NOWX - (160 - i) * 60000, 'wait', { tuid: 'TUSECRET-' + (3 + i), ended: NOWX - (160 - i) * 60000 + dur, dur, outcome: 'answered' }));
+      l.recordStatus(E, 4.234567, NOWX - 2 * Hh);
+      l.recordStatus(ids.stale, 1, NOWX - 30 * 60000);
+      return { l };
+    };
+
+    const finding = { severity: 'high', kind: 'bug', file: 'a.js', line: 1, summary: 'SECRET-SUMMARY' };
+    const snapshot = () => ({
+      p1: {
+        worktrees: [{ path: CWD, branch: 'main' }],
+        pipeline: { tasks: [{
+          task: 'demo', stage: 'ready',
+          gates: [
+            { review_run_id: 'g1', outcome: 'block', findings: [finding, finding], reviewed_at: iso(NOWX - 150 * 60000), session_id: null, agent_id: 'ag-r', prompt: 'SECRET-PROMPT' },
+            { review_run_id: 'g2', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 140 * 60000), session_id: ids.ended },
+            { review_run_id: 'g3', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 15 * Dd), session_id: null },
+            { review_run_id: 'g4', outcome: 'block', findings: [finding], reviewed_at: iso(NOWX - 150 * 60000), session_id: 'someone-else' },
+          ],
+          attempts: [{ attempt: 1, agent_id: 'ag-b1', outcome: 'block' }, { attempt: 2, agent_id: 'ag-b2', outcome: 'built' }],
+        }] },
+      },
+    });
+
+    const boot7 = async (l) => {
+      const store = new Store();
+      store.applyHook('SessionStart', { session_id: ids.idle, cwd: CWD });
+      store.applyHook('SessionStart', { session_id: ids.live, cwd: CWD });
+      store.applyHook('PreToolUse', { session_id: ids.live, tool_name: 'Bash', tool_use_id: 'tl', tool_input: { command: 'x' } });
+      store.applyHook('SessionStart', { session_id: ids.wait, cwd: CWD });
+      store.applyHook('PreToolUse', { session_id: ids.wait, tool_name: 'Bash', tool_use_id: 'tw', tool_input: { command: 'x' } });
+      store.applyHook('Notification', { session_id: ids.wait, notification_type: 'permission_prompt' });
+      const c = createCollector(store, 0, { now: () => NOWX, ledger: l, pluginStatus: () => ({ installed: false, detected: false }),
+        projects: { list: () => [{ id: 'p1', name: 'demo-proj', repoPath: CWD, hidden: false }] }, repos: { snapshot } });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      return c;
+    };
+    const halt7 = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const get7 = (port, p, headers) => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: p, agent: false, headers }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (x) => { t += x; });
+        r.on('end', () => resolve({ status: r.statusCode, text: t, body: /json/.test(String(r.headers['content-type'])) ? JSON.parse(t) : null }));
+      }).on('error', reject);
+    });
+
+    await atest('[alpha7 S2] list: ranges, newest first, default 7d, and the row shape', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const idsOf = async (q) => (await get7(c.port, '/api/sessions' + q)).body.sessions.map((s) => s.session_id);
+        assert.deepStrictEqual(await idsOf('?range=today'), ['sess-live', 'sess-wait', 'sess-idle', 'sess-stale', 'sess-ended']);
+        assert.deepStrictEqual(await idsOf('?range=7d'), ['sess-live', 'sess-wait', 'sess-idle', 'sess-stale', 'sess-ended', 'sess-yday']);
+        assert.deepStrictEqual(await idsOf(''), await idsOf('?range=7d'), 'default is 7d');
+        assert.deepStrictEqual(await idsOf('?range=30d'), ['sess-live', 'sess-wait', 'sess-idle', 'sess-stale', 'sess-ended', 'sess-yday', 'sess-old']);
+        const r = (await get7(c.port, '/api/sessions?range=30d')).body;
+        assert.strictEqual(r.range, '30d');
+        const by = Object.fromEntries(r.sessions.map((s) => [s.session_id, s]));
+        assert.deepStrictEqual(Object.keys(by['sess-ended']).sort(), ['branch', 'cost_est', 'duration_ms', 'ended', 'project', 'project_id', 'session_id', 'started', 'state', 'turns']);
+        assert.deepStrictEqual([by['sess-ended'].project, by['sess-ended'].project_id, by['sess-ended'].branch], ['demo-proj', 'p1', 'feat/x']);
+        assert.deepStrictEqual([by['sess-old'].project, by['sess-old'].project_id, by['sess-old'].branch], ['x', null, null], 'a project the registry does not know');
+        assert.strictEqual(by['sess-live'].branch, 'main', 'a null branch is backfilled from the poller snapshot, read-only');
+        assert.strictEqual((await get7(c.port, '/api/sessions?range=year')).status, 400);
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] list: state live vs ended, ended time, duration, cost to cents, turns', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const by = Object.fromEntries((await get7(c.port, '/api/sessions?range=30d')).body.sessions.map((s) => [s.session_id, s]));
+        assert.deepStrictEqual([by['sess-live'].state, by['sess-wait'].state, by['sess-idle'].state], ['running', 'waiting', 'idle']);
+        assert.strictEqual(by['sess-live'].ended, null);
+        assert.strictEqual(by['sess-live'].duration_ms, 10 * 60000, 'a live session runs to now');
+        assert.strictEqual(by['sess-ended'].state, 'ended');
+        assert.strictEqual(by['sess-ended'].ended, NOWX - 2 * Hh);
+        assert.strictEqual(by['sess-ended'].duration_ms, Hh);
+        assert.strictEqual(by['sess-stale'].state, 'ended', 'in the ledger but not in the store: ended');
+        assert.strictEqual(by['sess-stale'].ended, NOWX - 20 * 60000, 'a stale session ends at last_seen');
+        assert.strictEqual(by['sess-ended'].cost_est, 4.23, '4.234567 rounds to cents');
+        assert.strictEqual(by['sess-ended'].turns, 3);
+        assert.strictEqual(by['sess-live'].cost_est, 0);
+        assert.strictEqual(by['sess-live'].turns, 0);
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] detail: header, lanes (order, labels, roles, models), reconciliation', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const r = await get7(c.port, '/api/sessions/sess-ended');
+        assert.strictEqual(r.status, 200);
+        const d = r.body;
+        assert.deepStrictEqual([d.session_id, d.state, d.turns, d.cost_est, d.project_id], ['sess-ended', 'ended', 3, 4.23, 'p1']);
+        assert.deepStrictEqual(d.lanes.map((x) => x.label), ['Main session', 'sereno:builder', 'sereno:red-team', 'sereno:builder', 'Explore']);
+        assert.deepStrictEqual(d.lanes.map((x) => x.role), ['main', 'builder', 'red-team', 'builder', 'other']);
+        assert.deepStrictEqual(d.lanes.map((x) => x.id), ['main', 'ag-b1', 'ag-r', 'ag-b2', 'ag-x']);
+        assert.ok(d.lanes.every((x) => x.attribution === 'explicit'));
+        assert.deepStrictEqual(d.lanes.map((x) => x.model), ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', null, null]);
+        assert.deepStrictEqual(d.lanes.map((x) => x.subtitle), [null, null, null, 'Repair', null], 'a builder run after a block reads Repair');
+        assert.deepStrictEqual([d.lanes[0].started, d.lanes[0].stopped, d.lanes[4].stopped], [NOWX - 3 * Hh, NOWX - 2 * Hh, null]);
+        assert.deepStrictEqual(d.reconciliation, { ok: true, statusline: 4.2346, ledger: 4.2346, diff: 0 });
+        const live = (await get7(c.port, '/api/sessions/sess-live')).body;
+        assert.strictEqual(live.reconciliation, null, 'no statusline row: null');
+        assert.deepStrictEqual(live.lanes.map((x) => x.label), ['Main session']);
+        const st = (await get7(c.port, '/api/sessions/sess-stale')).body;
+        assert.deepStrictEqual([st.reconciliation.ok, st.reconciliation.diff], [false, -100]);
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] detail: tools, waits, held_up, attribution counts', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const d = (await get7(c.port, '/api/sessions/sess-ended')).body;
+        assert.deepStrictEqual(d.tools.map((t) => [t.tool_name, t.agent_id, t.outcome, t.duration_ms]), [['Bash', null, 'ok', 900], ['mcp__srv__lookup', 'ag-b1', 'error', 50]]);
+        assert.deepStrictEqual(Object.keys(d.tools[0]).sort(), ['agent_id', 'duration_ms', 'ended', 'outcome', 'tool_name', 'ts']);
+        assert.strictEqual(d.truncated, false);
+        assert.strictEqual(d.waits.length, 7);
+        assert.deepStrictEqual(Object.keys(d.waits[0]).sort(), ['agent_id', 'duration_ms', 'ended', 'outcome', 'ts']);
+        assert.deepStrictEqual(d.held_up.map((w) => w.duration_ms), [90000, 60000, 30000, 7000, 5000], 'top five by duration');
+        assert.deepStrictEqual(d.attribution, { explicit: 4, inferred: 1, unattributed: 1 });
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] detail: reviews join the repo records by session id or time window, outcome and findings count only', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const d = (await get7(c.port, '/api/sessions/sess-ended')).body;
+        assert.deepStrictEqual(d.reviews.map((x) => [x.task, x.outcome, x.findings]), [['demo', 'block', 2], ['demo', 'pass', 0]]);
+        assert.deepStrictEqual(Object.keys(d.reviews[0]).sort(), ['at', 'findings', 'outcome', 'task']);
+        assert.deepStrictEqual((await get7(c.port, '/api/sessions/sess-yday')).body.reviews, [], 'no review in its window');
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] detail: the cost series is cumulative and downsampled to at most 200 points; tools cap at 2000 with a flag', async () => {
+      const { l } = build();
+      const S = ids.yday;
+      const rows = [];
+      for (let i = 0; i < 450; i++) rows.push({ requestKey: 'bulk' + i, requestId: 'rb' + i, sessionId: S, promptId: null, ts: NOWX - 21 * Hh + i * 1000, model: 'claude-sonnet-5-5', querySource: null, source: 'main',
+        agentName: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 10000, durationMs: 0 });
+      l.ingestRequests(rows);
+      const ins = l._db.prepare("INSERT INTO session_events (session_id, ts, kind, tool_name, ended, duration_ms, outcome) VALUES (?,?,'tool','Read',?,1,'ok')");
+      l._db.exec('BEGIN'); for (let i = 0; i < 2005; i++) ins.run(S, NOWX - 21 * Hh + i, NOWX - 21 * Hh + i + 1); l._db.exec('COMMIT');
+      const c = await boot7(l);
+      try {
+        const d = (await get7(c.port, '/api/sessions/' + S)).body;
+        assert.ok(d.cost_series.length <= 200 && d.cost_series.length > 100, 'got ' + d.cost_series.length);
+        assert.strictEqual(d.cost_series[0].ts, NOWX - 21 * Hh);
+        assert.strictEqual(d.cost_series[d.cost_series.length - 1].ts, NOWX - 21 * Hh + 449 * 1000);
+        assert.strictEqual(d.cost_series[d.cost_series.length - 1].cost_est, 4.5, 'the last point is the whole session');
+        assert.ok(d.cost_series.every((p, i, a) => i === 0 || (p.ts >= a[i - 1].ts && p.cost_est >= a[i - 1].cost_est)), 'cumulative and in order');
+        assert.strictEqual(d.tools.length, 2000);
+        assert.strictEqual(d.truncated, true);
+        assert.strictEqual(d.tools[0].ts, NOWX - 21 * Hh + 5, 'the newest 2000 are kept');
+        assert.strictEqual(d.tools[1999].ts, NOWX - 21 * Hh + 2004);
+        const small = (await get7(c.port, '/api/sessions/sess-ended')).body.cost_series;
+        assert.strictEqual(small.length, 6, 'a short series is returned whole');
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] an unknown id is 404, a malformed id 400, no ledger is enabled:false', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        assert.strictEqual((await get7(c.port, '/api/sessions/no-such-session')).status, 404);
+        for (const bad of ['bad%20id', 'a%2Fb', 'x'.repeat(129), '..%5C..']) assert.strictEqual((await get7(c.port, '/api/sessions/' + bad)).status, 400, bad);
+        assert.strictEqual((await get7(c.port, '/api/sessions/sess-ended/extra')).status, 404);
+      } finally { await halt7(c); l.close(); }
+      const c2 = await boot7(null);
+      try {
+        assert.deepStrictEqual((await get7(c2.port, '/api/sessions')).body, { enabled: false });
+        assert.deepStrictEqual((await get7(c2.port, '/api/sessions/sess-ended')).body, { enabled: false });
+      } finally { await halt7(c2); }
+    });
+
+    await atest('[alpha7 S2] a foreign Host or Origin is refused on both routes', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        for (const p of ['/api/sessions', '/api/sessions/sess-ended']) {
+          assert.strictEqual((await get7(c.port, p, { host: 'evil.example' })).status, 403, 'host ' + p);
+          assert.strictEqual((await get7(c.port, p, { origin: 'https://evil.example' })).status, 403, 'origin ' + p);
+          assert.strictEqual((await get7(c.port, p, { origin: 'http://127.0.0.1:' + c.port })).status, 200, 'own origin ' + p);
+        }
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] privacy: the JSON holds no key outside the allowlist and no id, path or finding text', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const ALLOWED = new Set(['range', 'sessions', 'session_id', 'project', 'project_id', 'branch', 'state', 'started', 'ended', 'duration_ms', 'cost_est', 'turns',
+          'reconciliation', 'ok', 'statusline', 'ledger', 'diff', 'lanes', 'id', 'kind', 'label', 'agent_type', 'role', 'model', 'attribution', 'stopped', 'subtitle',
+          'tools', 'tool_name', 'agent_id', 'outcome', 'ts', 'waits', 'truncated', 'cost_series', 'reviews', 'task', 'findings', 'at',
+          'explicit', 'inferred', 'unattributed', 'held_up']);
+        const strays = []; let texts = '';
+        for (const p of ['/api/sessions?range=30d', '/api/sessions/sess-ended', '/api/sessions/sess-live', '/api/sessions/sess-stale', '/api/sessions/sess-old']) {
+          const r = await get7(c.port, p);
+          assert.strictEqual(r.status, 200, p);
+          texts += r.text;
+          const walk = (v, at) => {
+            if (Array.isArray(v)) v.forEach((x, i) => walk(x, at + '[' + i + ']'));
+            else if (v && typeof v === 'object') for (const k of Object.keys(v)) { if (!ALLOWED.has(k)) strays.push(p + ' ' + at + '.' + k); walk(v[k], at + '.' + k); }
+          };
+          walk(r.body, '$');
+        }
+        assert.deepStrictEqual(strays, []);
+        assert.ok(!/SECRET|tool_use_id|TUSECRET|C:\\\\w|elsewhere|cwd|prompt/.test(texts), 'no tool_use_id, path, cwd or free text');
+        assert.ok(/mcp__srv__lookup/.test(texts), 'tool names are the one thing that is kept');
+      } finally { await halt7(c); l.close(); }
+    });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();
