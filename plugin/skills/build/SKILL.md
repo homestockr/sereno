@@ -16,7 +16,7 @@ You do not write the feature code yourself.
 
 Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, ask for it.
 
-This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, review, branch finishing) while it runs.
+This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process.
 
 ## 1. Read the spec
 

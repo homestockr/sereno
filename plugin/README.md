@@ -221,8 +221,9 @@ The Builder agents are told to stage only the files they changed and never `.ser
 
 Sereno works alongside process plugins such as Superpowers. While a `/sereno:` step runs,
 Sereno is the process, and its skills tell the session not to start other plugins' skills.
-Builders have no Skill tool, so they cannot start worktrees, reviews or merges. Other
-plugins' skills stay useful outside the pipeline.
+Builders have no Skill tool, so they cannot start worktrees, reviews or merges. They also
+have no web, notebook or MCP tools: write specs that a Builder can follow from the repo
+alone. Other plugins' skills stay useful outside the pipeline.
 
 ## The Sereno app
 

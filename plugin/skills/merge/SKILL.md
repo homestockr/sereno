@@ -20,7 +20,7 @@ Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, ask 
 Rules that hold throughout: never run anything against a remote. Every script result is one
 JSON object; if `ok` is false, show the `error` and stop.
 
-This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, review, branch finishing) while it runs.
+This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process.
 
 ## 1. Check the rules
 

@@ -7433,7 +7433,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     for (const n of ['task', 'build', 'ship', 'merge', 'brief']) {
       test('[plugin-0.3.1] skill ' + n + ' carries the do-not-invoke-other-plugins line', () => {
         const src = fs.readFileSync(path.join(ROOT, 'plugin', 'skills', n, 'SKILL.md'), 'utf8');
-        assert.ok(src.includes("This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, review, branch finishing) while it runs."));
+        assert.ok(src.includes("This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process."));
       });
     }
     test('[plugin-0.3.1] plugin README has the coexistence section', () => {
@@ -7442,10 +7442,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(readme, /Superpowers/);
       assert.match(readme, /no Skill tool/);
     });
-    test('[plugin-0.3.1] plugin, marketplace and README versions are 0.3.1', () => {
-      assert.strictEqual(pj.version, '0.3.1');
-      assert.strictEqual(entry.version, '0.3.1');
-      assert.match(fs.readFileSync(path.join(ROOT, 'plugin', 'README.md'), 'utf8'), /Version 0\.3\.1\./);
+    test('[plugin-0.3.1] plugin, marketplace and README versions agree', () => {
+      assert.strictEqual(entry.version, pj.version);
+      assert.ok(fs.readFileSync(path.join(ROOT, 'plugin', 'README.md'), 'utf8').includes('Version ' + pj.version + '.'));
     });
     test('Electron build files do not include plugin/ or .claude-plugin/ (except the 4b bundled rules)', () => {
       const files = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files;

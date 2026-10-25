@@ -21,7 +21,7 @@ Rules that hold throughout: never run anything against a remote, never change wh
 Builder is used by yourself, and never merge: merging is `/sereno:merge`, which only the user can start.
 Every script result is one JSON object; if `ok` is false, show the `error` and stop.
 
-This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, review, branch finishing) while it runs.
+This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process.
 
 ## 0. Preconditions
 
