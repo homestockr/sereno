@@ -130,13 +130,11 @@ checks that list.
      - plugin 0.3.0: model tier aliases (`docs/plans/plugin-0.3-model-aliases.md`).
    - 4b, the app side (Pipeline tab, role spend, pipeline alerts, offer the plugin): merged.
      Plan: `docs/plans/phase-4b-pipeline-view.md`, including its one-screen layout addendum.
-5. **alpha.6 (merged to `main` as 41c72a8, not yet released; alpha.5 skipped).** Phase 4b
-   plus the navy theme, the Projects navigator, the Spend redesign and the Pipeline restyle.
-   Plan: `docs/plans/alpha6-projects-navigator-theme.md`. Before release:
-   - Done 2026-10-18: the plugin row reads every per-project install record and shows the newest
-     version (merges 1035d5e, fb35efa).
-   - Rebuild the installer, have Robe look it over, then write release notes and publish
-     the pre-release (ask first).
+5. **alpha.6 (shipped `2.0.0-alpha.6`, 2026-10-25; alpha.5 skipped).** Phase 4b plus the navy
+   theme, the Projects navigator, the Spend redesign and the Pipeline restyle. Plan:
+   `docs/plans/alpha6-projects-navigator-theme.md`. Known follow-up: the Pipeline tab layout (an
+   empty main area, a cramped right panel that clips, paths that wrap mid-word). Fix it with
+   alpha.7.
 6. **Sessions tab (planned, `2.0.0-alpha.7`).** Brief, concept and data decision (new
    `session_events` table: tool names, permission waits, prompt counts, timings, never
    inputs): `docs/plans/alpha7-sessions.md`.
