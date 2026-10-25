@@ -8463,7 +8463,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(rIdx > 0 && rIdx < text.indexOf('git merge --no-ff'));
       assert.ok(text.includes('git merge --no-ff -m "Merge task/<task>: <title>" <head_commit>') && !/git merge --no-ff task\//.test(text), 'merges the reviewed sha');
       assert.ok(text.indexOf('git rev-parse refs/heads/task/<task>') > cIdx && text.indexOf('git rev-parse refs/heads/task/<task>') < text.indexOf('git merge --no-ff'), 'tip re-checked right before the merge');
-      assert.ok(/head_moved[^\n]*\/sereno:build <task>/.test(text) && /spec_changed[^\n]*\/sereno:build <task>/.test(text) && /\/sereno:ship <task>/.test(text));
+      assert.ok(/head_moved[^\n]*\/sereno:build <task>/.test(text) && /spec_changed[^\n]*\/sereno:build <task>/.test(text) && /for anything else, `\/sereno:build <task>`/.test(text));
       assert.ok(cIdx > rIdx && cIdx < text.indexOf('git switch <base_branch>'));
       assert.ok(/git merge --abort/.test(text) && /## How to run commands/.test(text) && !/push/i.test(text));
       assert.deepStrictEqual([...text.matchAll(/`sereno:([^`]*)`/g)].map((m) => m[1]), [], 'merge names no agent');
@@ -9142,7 +9142,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const t = (reason) => dec({ a: { meta: {}, n: 1, last: 'block', next: 'decide', reason } }, 'a');
       assert.deepStrictEqual([t('head_moved: x').step, t('head_moved: x').command], ['decide', '/sereno:build a']);
       assert.strictEqual(t('spec_changed: x').command, '/sereno:build a');
-      assert.strictEqual(t('a second defect').command, '/sereno:ship a');
+      assert.strictEqual(t('a second defect').command, '/sereno:build a');
       assert.strictEqual(t('a second defect').reason, 'a second defect');
       assert.strictEqual(t('hook_failed: x').command, null);
     });
@@ -9255,6 +9255,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       fs.writeFileSync(path.join(dir, '.sereno', 'specs', 'old.md'), '---\ntask: "old"\nbuilder: sonnet\nkind: feature\nreason: "r"\nfixes: null\nbase_branch: "main"\nspec_revision: 3\ncreated_at: "2026-01-01T00:00:00.000Z"\n---\n\n## Goal\nx\n');
       const m = speclib.readSpecMeta(dir, 'old');
       assert.deepStrictEqual([m.after, m.hold_before_merge, m.spec_revision, m.base_branch, m.created_at], [null, null, 3, 'main', '2026-01-01T00:00:00.000Z']);
+      git(dir, 'branch', 'task/old');
       const r = S(dir, ['next']);
       assert.deepStrictEqual([r.out.ok, r.out.task, r.out.step], [true, 'old', 'build']);
       assert.strictEqual(spec(dir, 'old').out.spec_revision, 4);
@@ -9870,7 +9871,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       S(dir, ['attempt', '--task', 'stuck', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'needs_context', '--diagnosis', 'none']);
       S(dir, ['brief', '--auto', '--branch', 'main']);
       const text = briefOf(dir);
-      assert.match(text, /^Next: stuck \(decide\), run \/sereno:ship stuck$/m);
+      assert.match(text, /^Next: stuck \(decide\), run \/sereno:build stuck$/m);
       assert.match(text, /^Blocked: stuck: the review needs context$/m);
       assert.match(text, /^Now: Merged done1: Add the widget$/m);
     });
@@ -10360,7 +10361,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       }
       assert.strictEqual(nextLib.decide({ task: 'a', deps: rt4Deps({ attemptCount: () => 0, cleanFiles: () => ['x'] }) }).reason, 'dirty_tree: x');
       assert.strictEqual(nextLib.decide({ task: 'a', deps: rt4Deps({ cleanFiles: () => [] }) }).step, 'ship');
-      assert.strictEqual(nextLib.decide({ task: 'a', deps: rt4Deps({ cleanFiles: () => null }) }).step, 'ship', 'unknown is not blocking');
+      assert.strictEqual(nextLib.decide({ task: 'a', deps: rt4Deps({ cleanFiles: () => null }) }).reason, 'could not read the working tree state', 'unknown state blocks ship');
+      for (const nx of ['retry', 'repair']) {
+        const r = nextLib.decide({ task: 'a', deps: rt4Deps({ recover: () => ({ next: nx, reason: 'why' }), cleanFiles: () => null }) });
+        assert.deepStrictEqual([r.step, r.command, r.reason], ['decide', null, 'could not read the working tree state'], nx);
+      }
+      assert.strictEqual(nextLib.decide({ task: 'a', deps: rt4Deps({ attemptCount: () => 0, cleanFiles: () => null }) }).step, 'build', '[plugin-0.4 rt5] unknown state does not block build');
     });
     test('[plugin-0.4 rt4] next (real repo): a modified tracked file blocks build with dirty_tree', () => {
       const dir = repo(NOGATE);
@@ -10383,7 +10389,9 @@ test('missing rate_limits degrades instead of throwing', () => {
         r = nextLib.decide({ task: 'a', deps: rt4Deps({ recover: () => ({ next: nx, reason: 'why' }), branchExists: () => false, recordedHead: () => head }) });
         assert.match(r.reason, /recreate the branch at 0123456 and run \/sereno:merge a, or run `sereno\.js stop --task a` to retire it$/, nx);
       }
-      assert.strictEqual(nextLib.decide({ task: 'a', deps: rt4Deps({ attemptCount: () => 0, branchExists: () => false }) }).step, 'build', 'build does not need the branch');
+      const nb = nextLib.decide({ task: 'a', deps: rt4Deps({ attemptCount: () => 0, branchExists: () => false }) });
+      assert.deepStrictEqual([nb.step, nb.reason, nb.command], ['decide', 'task/a does not exist; run /sereno:task a', '/sereno:task a'], '[plugin-0.4 rt5] no attempts and no branch');
+      assert.strictEqual(nextLib.decide({ task: 'a', deps: rt4Deps({ attemptCount: () => 0, branchExists: () => true }) }).step, 'build');
     });
     test('[plugin-0.4 rt4] next: ship of a built attempt needs the pinned spec; a changed spec decides spec_changed with /sereno:build', () => {
       const nextLib = require('../plugin/bin/lib/next.js');
@@ -10406,8 +10414,10 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('[plugin-0.4 rt4] next skill: stops at a skill precondition without asking next again; switches to task/<t> for ship, retry, repair, never to the base', () => {
       const n = rd('skills/next/SKILL.md');
-      assert.ok(/If the build or ship skill stops at one of its preconditions \(or says to run another command\), print that line as the final line and stop\. Do not ask `next` again\./.test(n));
-      assert.ok(/For `ship`, `retry` and `repair`, run `git switch task\/<task>` first if you are not on it\. Never switch to the base branch\./.test(n));
+      assert.ok(/If the build or ship skill stops before it writes or updates an attempt record \(a precondition refusal\), or says to run another command, print that line as the final line and stop\. Do not ask `next` again\./.test(n));
+      assert.ok(/After a step completed and recorded its attempt, where the skill says to tell the user to run the next command, do not stop for that: the loop here runs it\./.test(n));
+      assert.ok(!/\nWhere they say to tell the user/.test(n) && !/Follow those skills as written[^\n]*\n[^\n]*Where they say/.test(n));
+      assert.ok(/if you are not on `task\/<task>`: run `node "\$\{CLAUDE_PLUGIN_ROOT\}\/bin\/sereno\.js" clean` first; if it is not clean, print the `files` and stop\. Otherwise run `git switch task\/<task>`\. Never switch to the base branch\./.test(n));
       assert.ok(/Do not merge, switch to the base branch, or touch a remote/.test(n));
     });
     test('[plugin-0.4 rt4] next: a running attempt decides with no command and the exact closing command, which works', () => {
@@ -10444,6 +10454,15 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual([r.step, r.reason], ['idle', 'c was stopped; run /sereno:task b --after none to unblock'], JSON.stringify(r));
       assert.strictEqual(mkSpec(dir2, 'b', ['--after', 'none']).out.ok, true);
       assert.strictEqual(S(dir2, ['next', '--task', 'b']).out.step, 'build', 'spec --after none clears it');
+    });
+    test('[plugin-0.4 rt5] next (real repo): a spec with no branch and no attempts decides /sereno:task; a stale final attempt suggests /sereno:build', () => {
+      const dir = repo(NOGATE);
+      mkSpec(dir, 'a'); // spec written, branch never cut
+      const r = S(dir, ['next', '--task', 'a']).out;
+      assert.deepStrictEqual([r.step, r.command, r.reason], ['decide', '/sereno:task a', 'task/a does not exist; run /sereno:task a'], JSON.stringify(r));
+      const nextLib = require('../plugin/bin/lib/next.js');
+      const d = rt4Deps({ recover: () => ({ next: 'decide', reason: 'a second defect' }) });
+      assert.strictEqual(nextLib.decide({ task: 'a', deps: d }).command, '/sereno:build a');
     });
     test('[plugin-0.4 rt3] next: a gone branch is decide for every review state, with the recreate option only when a head is on record', () => {
       const nextLib = require('../plugin/bin/lib/next.js');
@@ -10556,7 +10575,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       S(dir, ['attempt', '--task', 'd', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'needs_context', '--diagnosis', 'none', '--spec', '.sereno/specs/d.md']);
       const text = taskBrief(dir, 'd');
       assert.match(text, /^Now: d: Title of d, needs a decision$/m);
-      assert.match(text, /^Next: run \/sereno:ship d$/m);
+      assert.match(text, /^Next: run \/sereno:build d$/m);
       assert.match(text, /^Blocked: the review needs context/m);
     });
     test('[plugin-0.4 rt] brief --auto on the base branch keeps describing the last merge', () => {

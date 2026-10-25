@@ -44,11 +44,11 @@ If `passed` is false, stop with one line naming the `hook` and the first line of
 
 Which ship step to enter: for `step: "retry"` (an environment failure) and for `step: "repair"` (one repair is due: a defect), go straight to the `retry` / `repair` bullet in ship's step 5 and skip its steps 1 to 4: the latest attempt is final, so nothing is left to test or review yet. Key on `step` only, never on the wording of `reason`. A `ship` step for a built attempt starts at ship's step 1.
 
-For `ship`, `retry` and `repair`, run `git switch task/<task>` first if you are not on it. Never switch to the base branch.
+For `ship`, `retry` and `repair`, if you are not on `task/<task>`: run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" clean` first; if it is not clean, print the `files` and stop. Otherwise run `git switch task/<task>`. Never switch to the base branch.
 
-If the build or ship skill stops at one of its preconditions (or says to run another command), print that line as the final line and stop. Do not ask `next` again.
+If the build or ship skill stops before it writes or updates an attempt record (a precondition refusal), or says to run another command, print that line as the final line and stop. Do not ask `next` again.
 
-Follow those skills as written, in the foreground, in this same turn. Where they say to tell the user to run the next command, do not stop for that: the loop here runs it.
+Follow those skills as written, in the foreground, in this same turn. After a step completed and recorded its attempt, where the skill says to tell the user to run the next command, do not stop for that: the loop here runs it.
 
 Safety cap: run at most 3 `build` / `ship` / `repair` / `retry` steps in one invocation. This is a backstop, not a hard limit: you count the steps yourself and pass the count, so keep it carefully. Keep a count of the steps you have done and pass it every time you ask what is next: `next ... --steps-done <n>`. When the result has `cap_reached: true`, stop without starting another step, report the current state in one line (the latest `reason`) and tell the user to run `/sereno:next` again.
 

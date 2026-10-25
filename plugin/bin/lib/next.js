@@ -79,7 +79,7 @@ function commandForDecide(task, reason) {
   if (reason.startsWith('hook_failed') || reason.startsWith('branch task/') || reason.startsWith('the latest attempt never finished') || reason.startsWith('dirty_tree')) return null; // the options are a person's call, listed in the reason
   if (reason.startsWith('head_moved')) return '/sereno:build ' + task;
   if (reason.startsWith('spec_changed')) return '/sereno:build ' + task; // a new build pins the new spec
-  return '/sereno:ship ' + task;
+  return '/sereno:build ' + task; // a stale final attempt: ship step 0 would only bounce to a build
 }
 
 /**
@@ -105,9 +105,13 @@ function goneDecide(d, m) {
 function guard(d, m, st) {
   if (!['build', 'ship', 'retry', 'repair'].includes(st.step)) return st;
   const task = m.task;
-  const files = typeof d.cleanFiles === 'function' ? d.cleanFiles() : null;
+  const files = typeof d.cleanFiles === 'function' ? d.cleanFiles() : [];
+  if (files === null && st.step !== 'build') return { step: 'decide', reason: 'could not read the working tree state', hold: null, command: null };
   if (files && files.length) {
     return { step: 'decide', reason: 'dirty_tree: ' + files.slice(0, 5).join(', ') + (files.length > 5 ? ' and ' + (files.length - 5) + ' more' : ''), hold: null, command: null };
+  }
+  if (st.step === 'build' && typeof d.branchExists === 'function' && !d.branchExists(task)) {
+    return { step: 'decide', reason: 'task/' + task + ' does not exist; run /sereno:task ' + task, hold: null, command: '/sereno:task ' + task };
   }
   if (st.step !== 'build' && typeof d.branchExists === 'function' && !d.branchExists(task)) return goneDecide(d, m);
   if (st.step === 'ship' && typeof d.specPin === 'function') {

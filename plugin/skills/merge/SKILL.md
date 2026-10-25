@@ -38,7 +38,7 @@ passed (or was skipped because the gate is off), the reviewed commit is still th
 reviewed. Take `head_commit` from the result: that is the commit you merge. For any other `next`,
 show the `reason` in one line and stop. Tell the user what to run: if the reason starts with
 `head_moved`, `/sereno:build <task>`; if it starts with `spec_changed`, `/sereno:build <task>` (a new build pins the new spec);
-for anything else, `/sereno:ship <task>`.
+for anything else, `/sereno:build <task>`.
 
 Then read the spec's hold, if any:
 
