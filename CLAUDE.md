@@ -148,6 +148,13 @@ checks that list.
    - a review pack for the red team;
    - cost shown in the app.
    Plan: `docs/plans/plugin-0.4-next.md`.
+8. **Plugin 0.5.0 (planned, after 0.4.0).** Lessons from Anthropic's harness-design article:
+   - runnable acceptance checks in specs (cmd, http, browse);
+   - a spec review before larger builds;
+   - stub detection in the review pack;
+   - escaped-defect measurement per reviewer, in the app with alpha.8.
+
+   Plan: `docs/plans/plugin-0.5-harness.md`.
 
 Open: Dependabot #33 (`sprintf-js`, dev-only, no fix released yet). The v1.3.x draft release
 is undecided.
