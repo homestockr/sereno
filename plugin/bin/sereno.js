@@ -636,7 +636,8 @@ function allocateAttempt(fsafe, task, record) {
 
 /**
  * attempt --adopt: the user approved a manual commit of the Builder's work (for example past
- * a failing hook). Record a new `built` attempt for the tip of task/<task> so ship can go on.
+ * a failing hook). It accepts any newest attempt that ended as `error`; the typical case is
+ * hook_failed. A record without `start_commit` falls back to the commit-time rule. Record a new `built` attempt for the tip of task/<task> so ship can go on.
  * Refuses a dirty tree, another branch, and a tip that is not a new commit since the last
  * attempt (the tip was already adopted, or is not newer than the last attempt's end).
  * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, string | boolean>} a

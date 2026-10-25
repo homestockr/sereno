@@ -25,7 +25,7 @@ Rules that hold throughout: never merge (merging is `/sereno:merge`, which only 
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" next [--task <task>] --steps-done <n>
 ```
 
-Pass `--task` only when the user gave a task. `<n>` is the number of build / ship / retry steps you have done so far in this run (0 the first time). The result has `task`, `step`, `reason`, `hold`, `command` (and `tasks` for `pick`). Act on `step`.
+Pass `--task` only when the user gave a task. `<n>` is the number of build / ship / repair / retry steps you have done so far in this run (0 the first time). The result has `task`, `step`, `reason`, `hold`, `command` (and `tasks` for `pick`). Act on `step`.
 
 ## 2. Before the first build of a task
 
@@ -40,17 +40,17 @@ If `passed` is false, stop with one line naming the `hook` and the first line of
 ## 3. Do the step
 
 - `build`: read `${CLAUDE_PLUGIN_ROOT}/skills/build/SKILL.md` and follow it for the task, then go back to step 1.
-- `ship` or `retry`: read `${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md` and follow it for the task (it includes its one repair), then go back to step 1. If ship ends at "Review needs a decision" or at its merge prompt, do not repeat that message: go back to step 1 and let the next result be the single stop line.
+- `ship`, `repair` or `retry`: read `${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md` and follow it for the task (it includes its one repair), then go back to step 1. If ship ends at "Review needs a decision" or at its merge prompt, do not repeat that message: go back to step 1 and let the next result be the single stop line.
 
-Which ship step to enter: for `step: "retry"` (an environment failure) and for a `ship` step whose `reason` says one repair is due (a defect), go straight to the `retry` / `repair` bullet in ship's step 5 and skip its steps 1 to 4: the latest attempt is final, so nothing is left to test or review yet. A `ship` step for a built attempt (or `head_moved`) starts at ship's step 1.
+Which ship step to enter: for `step: "retry"` (an environment failure) and for `step: "repair"` (one repair is due: a defect), go straight to the `retry` / `repair` bullet in ship's step 5 and skip its steps 1 to 4: the latest attempt is final, so nothing is left to test or review yet. Key on `step` only, never on the wording of `reason`. A `ship` step for a built attempt (or `head_moved`) starts at ship's step 1.
 
 Follow those skills as written, in the foreground, in this same turn. Where they say to tell the user to run the next command, do not stop for that: the loop here runs it.
 
-Safety cap: run at most 3 `build` / `ship` / `retry` steps in one invocation. Keep a count of the steps you have done and pass it every time you ask what is next: `next ... --steps-done <n>`. When the result has `cap_reached: true`, stop without starting another step, report the current state in one line (the latest `reason`) and tell the user to run `/sereno:next` again.
+Safety cap: run at most 3 `build` / `ship` / `repair` / `retry` steps in one invocation. This is a backstop, not a hard limit: you count the steps yourself and pass the count, so keep it carefully. Keep a count of the steps you have done and pass it every time you ask what is next: `next ... --steps-done <n>`. When the result has `cap_reached: true`, stop without starting another step, report the current state in one line (the latest `reason`) and tell the user to run `/sereno:next` again.
 
 ## 4. Stop
 
-Stop at the first step that is not `build`, `ship` or `retry`. Print exactly one final line:
+Stop at the first step that is not `build`, `ship`, `repair` or `retry`. Print exactly one final line:
 
 - `merge`: "Gate passed for <task>. Before merging: <hold>. Run /sereno:merge <task>." Leave out the "Before merging" sentence when `hold` is null.
 - `decide`: the `reason`, then the `command` if there is one (its options are a person's call, so list them if the reason does).

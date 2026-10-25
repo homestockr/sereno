@@ -96,6 +96,14 @@ function writeBrief(a) {
 
 const BLOCKED_MAX = 3;
 
+/** Cut to at most `max` characters at a word boundary, with an ellipsis when cut. @param {string} s @param {number} max */
+function wordCut(s, max) {
+  if (s.length <= max) return s;
+  const head = s.slice(0, max - 1);
+  const sp = head.lastIndexOf(' ');
+  return (sp > 0 ? head.slice(0, sp) : head).replace(/[s,;:.-]+$/, '') + '…';
+}
+
 /**
  * Now / Next / Blocked for one task branch, from next's state and recovery.
  * @param {string} root @param {any} deps @param {any} m the task's spec meta
@@ -122,7 +130,7 @@ function taskParts(root, deps, m) {
   const cmd = s.command || (s.step === 'idle' ? null : '/sereno:next');
   let next = cmd ? 'run ' + cmd : s.reason;
   if (s.hold) next += ' (before merging: ' + s.hold + ')';
-  const blocked = s.step === 'decide' ? rec.cleanText(String(s.reason), 80) : '';
+  const blocked = s.step === 'decide' ? wordCut(rec.cleanText(String(s.reason), 200), 80) : '';
   return { now: m.task + ': ' + title + ', ' + state, next, blocked };
 }
 
@@ -167,7 +175,7 @@ function autoParts(a) {
     if (blocked.length >= BLOCKED_MAX) break;
     if (!deps.attemptCount(m.task)) continue;
     const s = nextLib.stateOf(deps, m);
-    if (s.step === 'decide') blocked[blocked.length] = m.task + ': ' + rec.cleanText(String(s.reason).split(/[,;:]/)[0], 30); // the first clause keeps three entries inside the 120-character line
+    if (s.step === 'decide') blocked[blocked.length] = m.task + ': ' + wordCut(rec.cleanText(String(s.reason).split(/[,;:]/)[0], 200), 30); // the first clause keeps three entries inside the 120-character line
   }
   return { now, next, blocked: blocked.join('; ') };
 }

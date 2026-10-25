@@ -4,9 +4,10 @@
  * sereno.js next: what /sereno:next does, as code. Read-only; it writes nothing.
  *
  * Answers { task, step, reason, hold, command }:
- *   step     build | ship | retry | merge | decide | done | pick | idle
+ *   step     build | ship | repair | retry | merge | decide | done | pick | idle
+ *            (repair: recovery says one repair is due; ship is entered at its repair bullet)
  *   command  the exact slash command the user types next, or null when `next` itself
- *            carries on (build, ship, retry) or there is nothing to type (pick, idle)
+ *            carries on (build, ship, repair, retry) or there is nothing to type (pick, idle)
  *   hold     the spec's hold_before_merge text, only on a `merge` stop
  * `pick` also carries `tasks`: the tasks in progress, oldest first.
  *
@@ -32,6 +33,7 @@ const recovery = require('./recovery.js');
  * @property {(task: string) => string | null} lastOutcome outcome of the newest attempt, or null
  * @property {(task: string) => { next: string, reason: string }} recover recovery.decide for the task
  * @property {(task: string, base: string) => boolean} isMerged is task/<task> an ancestor of <base>
+ * @property {(task: string) => boolean} [branchExists] does refs/heads/task/<task> resolve (when absent, assumed yes)
  */
 
 /**
@@ -71,7 +73,7 @@ function afterState(d, m) {
 
 /** The slash command that `merge` already suggests for a `decide` reason. @param {string} task @param {string} reason @returns {string | null} */
 function commandForDecide(task, reason) {
-  if (reason.startsWith('hook_failed')) return null; // the options are a person's call, listed in the reason
+  if (reason.startsWith('hook_failed') || reason.startsWith('branch task/')) return null; // the options are a person's call, listed in the reason
   if (reason.startsWith('head_moved')) return '/sereno:build ' + task;
   if (reason.startsWith('spec_changed')) return '/sereno:task ' + task;
   return '/sereno:ship ' + task;
@@ -97,9 +99,15 @@ function stateOf(d, m) {
   let r;
   try { r = d.recover(task); } catch (_e) { r = { next: 'decide', reason: 'the attempt records for this task could not be read' }; }
   switch (r.next) {
-    case 'review': return mk('ship', r.reason, null, null);
+    case 'review':
+      // The branch was deleted and its reviewed commit is not in the base (for example a squash
+      // merge, which leaves no ancestor): nothing can be shipped, a person decides.
+      if (r.reason.startsWith('head_moved') && typeof d.branchExists === 'function' && !d.branchExists(task)) {
+        return mk('decide', 'branch task/' + task + ' is gone and its reviewed commit is not in ' + (m.base_branch || 'the base branch'), null, null);
+      }
+      return mk('ship', r.reason, null, null);
     case 'retry': return mk('retry', r.reason, null, null);
-    case 'repair': return mk('ship', r.reason, null, null);
+    case 'repair': return mk('repair', r.reason, null, null);
     case 'merge': return mk('merge', r.reason, '/sereno:merge ' + task, m.hold_before_merge);
     case 'done': return mk('done', r.reason, '/sereno:next', null);
     default: return mk('decide', r.reason, commandForDecide(task, r.reason), null);
@@ -189,6 +197,7 @@ function realDeps(a) {
       headMerged: headMergedFor(root, fsafe, task),
     }),
     isMerged: (task, base) => branchMerged(root, fsafe, task, base),
+    branchExists: (task) => !!gitlib.resolveCommit(root, 'refs/heads/task/' + task),
   };
 }
 
@@ -247,6 +256,7 @@ function refreshQueuedBranch(a) {
   return { refreshed: true };
 }
 
+// The cap is counted by the model (it passes --steps-done), so it is a backstop, not a hard limit.
 const STEP_CAP = 3;
 
 module.exports = { STEP_CAP, decide, realDeps, refreshQueuedBranch, branchMerged, headMergedFor, afterState, baseFor, commandForDecide, stateOf, mergedInto };

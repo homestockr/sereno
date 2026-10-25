@@ -20,8 +20,9 @@
  * is not a hook git would run, so it is ignored. No hook means passed.
  *
  * Result: { hook: path | null, passed, timed_out, may_still_run, dirty_after, output_head }.
- * On a timeout the process tree is killed with taskkill on Windows (best effort); may_still_run
- * is true either way and dirty_after is the tree as of now.
+ * On a timeout spawnSync has already killed the direct child, and nothing else is killed: its pid is
+ * dead by then and may be reused, so a kill by pid could hit an unrelated process. The hook's own
+ * children may survive, so may_still_run is true and dirty_after is the tree as of now.
  * output_head is the first 5 lines of the hook's output, each cut to 200 characters.
  * Nothing is written to disk and nothing is sent anywhere.
  */
@@ -91,10 +92,6 @@ function preflight(a) {
   if (hasHookRun(gv)) r = spawn('git', ['hook', 'run', 'pre-commit'], opts);
   else if (process.platform === 'win32') r = spawn('sh', [hookAbs], opts);
   else r = spawn(hookAbs, [], opts);
-  if (r && r.error && /** @type {any} */ (r.error).code === 'ETIMEDOUT' && process.platform === 'win32' && r.pid) {
-    // spawnSync only kills the direct child; on Windows the hook's own children survive. Best effort.
-    try { spawn('taskkill', ['/T', '/F', '/PID', String(r.pid)], { timeout: 5000, windowsHide: true, stdio: 'ignore' }); } catch (_e) { /* best effort */ }
-  }
   const after = snapshot(root, spawn);
 
   const timedOut = !!(r && r.error && /** @type {any} */ (r.error).code === 'ETIMEDOUT');

@@ -132,6 +132,7 @@ function validate(c) {
     agent('roles.redTeam.agent', r.agent, false);
     if (typeof r.agent === 'string' && !r.agent.startsWith('red-team')) bad('roles.redTeam.agent: must be a red-team agent (red-team or red-team-lean)');
     agent('roles.redTeam.fallback', r.fallback, true);
+    if (typeof r.fallback === 'string' && !r.fallback.startsWith('red-team')) bad('roles.redTeam.fallback: must be a red-team agent (red-team or red-team-lean) or null');
     if (!ON_FALLBACK.includes(r.onFallback)) bad('roles.redTeam.onFallback: must be ask, auto or never');
     if (!posInt(r.maxBlockedRuns)) bad('roles.redTeam.maxBlockedRuns: must be a positive integer');
     if (typeof r.enabled !== 'boolean') bad('roles.redTeam.enabled: must be true or false');

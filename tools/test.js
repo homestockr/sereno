@@ -9127,7 +9127,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual([r.task, r.step, r.command, r.hold], ['a', 'build', null, null]);
     });
     test('[plugin-0.4 A1] next: review, repair and retry run the ship step in place; no command to type', () => {
-      for (const [n, step] of [['review', 'ship'], ['repair', 'ship'], ['retry', 'retry']]) {
+      for (const [n, step] of [['review', 'ship'], ['repair', 'repair'], ['retry', 'retry']]) {
         const r = dec({ a: { meta: {}, n: 1, last: 'built', next: n, reason: 'why ' + n } }, 'a');
         assert.deepStrictEqual([r.step, r.command, r.reason], [step, null, 'why ' + n]);
       }
@@ -9539,7 +9539,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(n.includes('bin/sereno.js" next [--task <task>]'));
       assert.ok(n.includes('bin/sereno.js" preflight') && /passed. is false/.test(n) && n.includes('--no-verify') && /Never skip a hook yourself/.test(n));
       assert.ok(n.includes('${CLAUDE_PLUGIN_ROOT}/skills/build/SKILL.md') && n.includes('${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md'));
-      assert.ok(/at most 3 `build` \/ `ship` \/ `retry` steps/.test(n));
+      assert.ok(/at most 3 `build` \/ `ship` \/ `repair` \/ `retry` steps/.test(n));
       assert.ok(/never merge/.test(n) && /never run anything against a remote/.test(n) && /Do not merge/.test(n));
       for (const s of ['merge', 'decide', 'done', 'idle', 'pick']) assert.ok(n.includes('`' + s + '`'), s);
       assert.ok(n.includes('Gate passed for <task>.') && n.includes('Run /sereno:merge <task>.'));
@@ -10250,7 +10250,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual([r.passed, r.timed_out, r.may_still_run], [true, false, false]);
       assert.strictEqual(S(repo(), ['preflight']).out.may_still_run, false, 'no hook');
     });
-    test('[plugin-0.4 rt] preflight: on Windows a timeout runs taskkill /T /F on the hook pid, with its own timeout', () => {
+    test('[plugin-0.4 rt] preflight: a timeout kills nothing by pid (it may be reused); the result says the hook may still run', () => {
       const dir = repo();
       fs.writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
       const calls = [];
@@ -10260,11 +10260,54 @@ test('missing rate_limits degrades instead of throwing', () => {
       };
       const r = preflightLib.preflight({ root: dir, timeoutMs: 1000, spawn });
       assert.deepStrictEqual([r.timed_out, r.may_still_run], [true, true]);
-      if (process.platform === 'win32') {
-        assert.strictEqual(calls.length, 1);
-        assert.deepStrictEqual(calls[0][1], ['/T', '/F', '/PID', '4242']);
-        assert.ok(calls[0][2].timeout > 0 && calls[0][2].timeout <= 10000);
-      } else assert.strictEqual(calls.length, 0, 'taskkill is Windows only');
+      assert.strictEqual(calls.length, 0, 'no taskkill is attempted');
+      assert.match(r.output_head[0], /dirty_after is as of now/);
+    });
+    test('[plugin-0.4 rt2] preflight: the source has no taskkill', () => {
+      const src = fs.readFileSync(path.join(PLUGIN, 'bin', 'lib', 'preflight.js'), 'utf8');
+      assert.ok(!/taskkill/.test(src.slice(src.indexOf('*/') + 2)), 'no taskkill in the code');
+    });
+    test('[plugin-0.4 rt2] config: roles.redTeam.fallback must be a red-team agent', () => {
+      let r = S(repo({ roles: { redTeam: { fallback: 'builder' } } }), ['config']).out;
+      assert.strictEqual(r.code, 'config_invalid', JSON.stringify(r));
+      assert.match(r.errors.join('|'), /redTeam.fallback[^|]*red-team/);
+      r = S(repo({ roles: { redTeam: { fallback: 'red-team-lean' } } }), ['config']).out;
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      r = S(repo({ roles: { redTeam: { fallback: null } } }), ['config']).out;
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+    });
+    test('[plugin-0.4 rt2] next: a deleted branch whose reviewed commit is not in the base (squash merge) is decide, with a clear reason and long entries cut at a word', () => {
+      const dir = repo(NOGATE);
+      const head = work(dir, 'abcdefghijklmnopqrstuvwxyz', []);
+      skipAttempt(dir, 'abcdefghijklmnopqrstuvwxyz', head);
+      git(dir, 'branch', '-D', 'task/abcdefghijklmnopqrstuvwxyz');
+      const r = S(dir, ['next', '--task', 'abcdefghijklmnopqrstuvwxyz']).out;
+      assert.deepStrictEqual([r.step, r.command], ['decide', null], JSON.stringify(r));
+      assert.strictEqual(r.reason, 'branch task/abcdefghijklmnopqrstuvwxyz is gone and its reviewed commit is not in main');
+      assert.strictEqual(S(dir, ['brief', '--auto', '--branch', 'main']).out.ok, true);
+      const b = fs.readFileSync(path.join(dir, '.sereno', 'briefs', 'main.md'), 'utf8');
+      const line = /^Blocked: (.*)$/m.exec(b)[1];
+      assert.ok(line.endsWith('…') && line.length <= 'abcdefghijklmnopqrstuvwxyz: '.length + 30, line);
+      assert.strictEqual(line, 'abcdefghijklmnopqrstuvwxyz: branch…', 'cut at a word boundary, not inside task/abc...');
+    });
+    test('[plugin-0.4 rt2] next: a deleted branch merged by squash stays decide for the task branch brief too (no ship step)', () => {
+      const nextLib = require('../plugin/bin/lib/next.js');
+      const deps = { listSpecs: () => ['a'], spec: () => ({ task: 'a', base_branch: 'main', after: null, hold_before_merge: null, created_at: null }), attemptCount: () => 1, lastOutcome: () => 'skipped', recover: () => ({ next: 'review', reason: 'head_moved: the branch tip is not the commit the gate reviewed' }), isMerged: () => false, branchExists: () => false };
+      const r = nextLib.decide({ task: 'a', deps });
+      assert.deepStrictEqual([r.step, r.reason], ['decide', 'branch task/a is gone and its reviewed commit is not in main']);
+      deps.branchExists = () => true;
+      assert.strictEqual(nextLib.decide({ task: 'a', deps }).step, 'ship', 'branch present: head_moved still goes to ship');
+    });
+    test('[plugin-0.4 rt2] next: repair is its own step; the skill keys on it, not on the reason wording; the cap is documented as a backstop', () => {
+      const n = rd('skills/next/SKILL.md');
+      assert.ok(/for `step: "repair"`/.test(n) && /Key on `step` only, never on the wording of `reason`/.test(n));
+      assert.ok(!/whose `reason` says/.test(n));
+      assert.ok(/a backstop, not a hard limit/.test(n));
+      assert.ok(/counted by the model/.test(fs.readFileSync(path.join(PLUGIN, 'bin', 'lib', 'next.js'), 'utf8')));
+    });
+    test('[plugin-0.4 rt2] attempt --adopt: the header comment says any error attempt is accepted and start_commit falls back', () => {
+      const src = fs.readFileSync(SERENO, 'utf8');
+      assert.ok(/accepts any newest attempt that ended as `error`/.test(src) && /hook_failed/.test(src) && /falls back to the commit-time rule/.test(src));
     });
 
     // ---- 7 never globs and words ----
