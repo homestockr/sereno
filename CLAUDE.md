@@ -127,7 +127,9 @@ checks that list.
    - 4a, the plugin (`plugin/`, marketplace at the repo root), shipped in `2.0.0-alpha.4` as
      plugin `0.1.0`: plan `docs/plans/phase-4a-plugin.md`. Then:
      - plugin 0.2.0: Sonnet orchestration and `/sereno:merge` (`docs/plans/phase-4a-cost.md`);
-     - plugin 0.3.0: model tier aliases (`docs/plans/plugin-0.3-model-aliases.md`).
+     - plugin 0.3.0: model tier aliases (`docs/plans/plugin-0.3-model-aliases.md`);
+     - plugin 0.3.1: Builders get a fixed tool list, skills guard against other plugins' skills
+       (step A0 of `docs/plans/plugin-0.4-next.md`).
    - 4b, the app side (Pipeline tab, role spend, pipeline alerts, offer the plugin): merged.
      Plan: `docs/plans/phase-4b-pipeline-view.md`, including its one-screen layout addendum.
 5. **alpha.6 (shipped `2.0.0-alpha.6`, 2026-10-25; alpha.5 skipped).** Phase 4b plus the navy

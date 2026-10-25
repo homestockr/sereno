@@ -7,7 +7,7 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.3.0. Windows is the first
+can observe the files it writes. Version 0.3.1. Windows is the first
 platform; other systems are not yet tested.
 
 ## Install
@@ -216,6 +216,14 @@ The Builder agents are told to stage only the files they changed and never `.ser
   once. To approve it for good, add `Edit(/.sereno/cache/**)` to the project's
   `.claude/settings.json` `permissions.allow` (there a leading `/` anchors at the
   project root).
+
+## Using Sereno with other plugins
+
+Sereno works alongside process plugins such as Superpowers. While a `/sereno:` step runs,
+Sereno is the process, and its skills tell the session not to start other plugins' skills.
+Builders have no Skill tool, so they cannot start worktrees, reviews or merges. They also
+have no web, notebook or MCP tools: write specs that a Builder can follow from the repo
+alone. Other plugins' skills stay useful outside the pipeline.
 
 ## The Sereno app
 

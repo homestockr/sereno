@@ -14,6 +14,8 @@ Run every shell command in this skill with the Bash tool, never PowerShell or cm
 Write or refresh the Sereno brief for the branch I am on. Sereno reads this file to show
 where the project stands. Arguments: `$ARGUMENTS` (an optional task name).
 
+This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process.
+
 ## 1. Find the branch
 
 Run `git branch --show-current`. If it prints nothing (detached HEAD), stop and say

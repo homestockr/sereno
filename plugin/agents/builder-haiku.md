@@ -3,6 +3,7 @@ name: builder-haiku
 description: Haiku Builder for mechanical work with named files. Implements one task from its spec on the current task branch and commits. Spawned by /sereno:build.
 model: haiku
 maxTurns: 40
+tools: Read, Edit, Write, Bash, Grep, Glob
 color: green
 ---
 
