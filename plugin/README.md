@@ -7,7 +7,7 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.3.0, in development. Windows is the first
+can observe the files it writes. Version 0.3.0. Windows is the first
 platform; other systems are not yet tested.
 
 ## Install
@@ -219,6 +219,6 @@ The Builder agents are told to stage only the files they changed and never `.ser
 
 ## The Sereno app
 
-The app reads briefs in its Projects tab. The gate and attempt files are written now.
-The app's Pipeline view that reads them is planned for the next phase. Until then, the
-app's `/brief` command still works, and it writes the same brief format.
+The app (2.0.0-alpha.6 and later) reads briefs in its Projects tab, and the gate and
+attempt files in its Pipeline tab. It shows the install commands when the plugin is
+missing. The app's old `/brief` command is retired; use `/sereno:brief`.
