@@ -7418,6 +7418,35 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('plugin/ has no package.json (no dependencies, no install step)', () => {
       assert.ok(!fs.existsSync(path.join(ROOT, 'plugin', 'package.json')));
     });
+    // ---- [plugin-0.3.1] living with other process plugins (Superpowers) ----
+    for (const n of ['builder', 'builder-haiku', 'builder-opus']) {
+      test('[plugin-0.3.1] ' + n + ' has an explicit tools list without Skill or Agent', () => {
+        const src = fs.readFileSync(path.join(ROOT, 'plugin', 'agents', n + '.md'), 'utf8').replace(/\r\n/g, '\n');
+        const fm = src.match(/^---\n([\s\S]*?)\n---/)[1];
+        const m = fm.match(/^tools:\s*(.+)$/m);
+        assert.ok(m, 'tools line present');
+        const tools = m[1].split(',').map((s) => s.trim());
+        assert.deepStrictEqual(tools, ['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob']);
+        assert.ok(!tools.includes('Skill') && !tools.includes('Agent') && !tools.includes('Task'));
+      });
+    }
+    for (const n of ['task', 'build', 'ship', 'merge', 'brief']) {
+      test('[plugin-0.3.1] skill ' + n + ' carries the do-not-invoke-other-plugins line', () => {
+        const src = fs.readFileSync(path.join(ROOT, 'plugin', 'skills', n, 'SKILL.md'), 'utf8');
+        assert.ok(src.includes("This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, review, branch finishing) while it runs."));
+      });
+    }
+    test('[plugin-0.3.1] plugin README has the coexistence section', () => {
+      const readme = fs.readFileSync(path.join(ROOT, 'plugin', 'README.md'), 'utf8');
+      assert.match(readme, /^## Using Sereno with other plugins$/m);
+      assert.match(readme, /Superpowers/);
+      assert.match(readme, /no Skill tool/);
+    });
+    test('[plugin-0.3.1] plugin, marketplace and README versions are 0.3.1', () => {
+      assert.strictEqual(pj.version, '0.3.1');
+      assert.strictEqual(entry.version, '0.3.1');
+      assert.match(fs.readFileSync(path.join(ROOT, 'plugin', 'README.md'), 'utf8'), /Version 0\.3\.1\./);
+    });
     test('Electron build files do not include plugin/ or .claude-plugin/ (except the 4b bundled rules)', () => {
       const files = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files;
       const bundledRules = ['plugin/bin/lib/recovery.js', 'plugin/bin/lib/config.js', 'plugin/bin/lib/records.js', 'plugin/bin/lib/fsafe.js', 'plugin/agents/*.md', 'plugin/skills/*/SKILL.md'];

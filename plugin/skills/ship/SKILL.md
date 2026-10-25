@@ -21,6 +21,8 @@ Rules that hold throughout: never run anything against a remote, never change wh
 Builder is used by yourself, and never merge: merging is `/sereno:merge`, which only the user can start.
 Every script result is one JSON object; if `ok` is false, show the `error` and stop.
 
+This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, review, branch finishing) while it runs.
+
 ## 0. Preconditions
 
 - You are on branch `task/<task>` with no uncommitted changes to tracked files

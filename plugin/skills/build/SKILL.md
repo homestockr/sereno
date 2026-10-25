@@ -16,6 +16,8 @@ You do not write the feature code yourself.
 
 Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, ask for it.
 
+This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, review, branch finishing) while it runs.
+
 ## 1. Read the spec
 
 Read `.sereno/specs/<task>.md`. From its front matter take `builder` (`haiku`,

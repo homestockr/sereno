@@ -17,6 +17,8 @@ into a spec a Builder can follow with no other context, then create its branch.
 Arguments: `$ARGUMENTS`. The first word is the task name (letters, digits, `.`, `_`,
 `-`; up to 64 characters). The rest is the goal. If the name is missing, ask for it.
 
+This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, review, branch finishing) while it runs.
+
 ## 1. Understand the work
 
 Read what you need in the repo (CLAUDE.md or README, the files involved). Decide the
