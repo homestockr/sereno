@@ -78,9 +78,23 @@ step 5. Otherwise make the run id:
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" run-id --head <head>
 ```
 
-Spawn the red team with the Agent tool, `subagent_type` set to `sereno:` plus
-`roles.redTeam.agent` from the config. Use that configured name only and pass no `model`
-parameter. Prompt: the spec path, the base commit and the head commit, and "review
+Choose the reviewer. This is code, not your judgment: the gate always runs, only the agent changes.
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" reviewer --task <task> --base <base> --head <head>
+```
+
+The result has `agent`, `light` and `reason`. Keep `reason` for the gate. Then write the review pack, a short map of the change for the reviewer:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" review-pack --task <task> --base <base> --head <head>
+```
+
+Take `abs` from its result. If either command fails, carry on without it: no `reviewer` answer means `roles.redTeam.agent`, no pack means no pack path.
+
+Spawn the red team with the Agent tool, `subagent_type` set to `sereno:` plus the `agent` from the `reviewer` result
+(`roles.redTeam.agent` if it failed). Use that name only and pass no `model`
+parameter. Prompt: the spec path, the base commit and the head commit, the review pack path (`abs`) if there is one, and "review
 `git diff <base>...<head>` against the spec and answer with the verdict JSON".
 
 - **Context requests.** If the verdict is `needs_context` with `context_requests`, fetch
@@ -110,10 +124,10 @@ JSON (or any `{"`) on a Bash command line, and never use heredocs, `echo` or pip
 run the gate (its `--file` is the same `<cacheDir>/verdict-<review_run_id>.json` path, exactly as given), which reads that file and deletes it:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file <cacheDir>/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file <cacheDir>/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true --reviewer-reason "<reason from reviewer>"
 ```
 
-The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.
+Leave out `--reviewer-reason` when `reviewer` failed. The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.
 
 ## 4. Record the outcome
 

@@ -191,4 +191,4 @@ function realDeps(a) {
   };
 }
 
-module.exports = { decide, realDeps, afterState, baseFor, commandForDecide };
+module.exports = { decide, realDeps, afterState, baseFor, commandForDecide, stateOf, mergedInto };

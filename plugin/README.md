@@ -140,6 +140,7 @@ invalid file stops the pipeline and lists the errors.
 | `roles.redTeam.onFallback` | `"ask"` | `"ask"`, `"auto"` or `"never"`. |
 | `roles.redTeam.maxBlockedRuns` | `2` | Blocks in a row before the run asks you for a decision. |
 | `roles.redTeam.enabled` | `true` | `false` switches the review off. The gate is then `skipped`. |
+| `roles.redTeam.light` | off in `default`; `kinds: ["mechanical"]` in `lean` | A lighter reviewer for small plain tasks: `{ kinds, maxDiffLines: 80, agent: "red-team-lean", never: [] }`. `sereno.js reviewer` picks it only when the spec kind is listed, the diff is at most `maxDiffLines` lines and no touched path matches a `never` glob. `**/migrations/**`, `supabase/**` and any path containing auth, permission, payment, delete or secret always get the full red team; `never` can only add globs. The gate still has to pass. |
 | `recovery.repairs` | `1` | Repairs allowed for a defect. |
 | `recovery.infraRetries` | `2` | Retries allowed for an environment failure. |
 | `recovery.taskBudgetUsd` | `null` | Validated (null or a positive number). No plugin script enforces it yet. Listed under `inert` when set. |

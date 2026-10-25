@@ -8421,7 +8421,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(fmm && /^name: ship$/m.test(fmm[1]) && /^disable-model-invocation: true$/m.test(fmm[1]) && /^argument-hint:/m.test(fmm[1]));
       const order = [];
       for (const m of SHIP.matchAll(/sereno\.js" ([a-z-]+)/g)) if (!order.includes(m[1])) order[order.length] = m[1];
-      assert.deepStrictEqual(order, ['clean', 'config', 'test', 'attempt', 'run-id', 'context', 'paths', 'gate', 'brief', 'recovery']);
+      assert.deepStrictEqual(order, ['clean', 'config', 'test', 'attempt', 'run-id', 'reviewer', 'review-pack', 'context', 'paths', 'gate', 'brief', 'recovery']);
       const at = (s) => SHIP.indexOf(s);
       const seq = ['bin/sereno.js" test --task', 'bin/sereno.js" run-id --head', 'bin/sereno.js" context --head', 'bin/sereno.js" gate --file', '--review-run-id <review_run_id> --diagnosis', 'bin/sereno.js" recovery --task', '## 6. Merge prompt'];
       for (let i = 1; i < seq.length; i++) assert.ok(at(seq[i - 1]) >= 0 && at(seq[i]) > at(seq[i - 1]), seq[i] + ' after ' + seq[i - 1]);
@@ -8438,7 +8438,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[4a4] ship skill: spawns the red team by configured agent name only', () => {
       const names = [...SHIP.matchAll(/`sereno:([^`]*)`/g)].map((m) => m[1]);
       for (const n of names) assert.ok(['red-team-lean', 'scribe', ''].includes(n), 'only the fallback and the scribe are named: ' + n);
-      assert.ok(/`sereno:` plus `roles\.redTeam\.agent`/.test(SHIP1));
+      assert.ok(/`sereno:` plus the `agent` from the `reviewer` result/.test(SHIP1) && SHIP1.includes('`roles.redTeam.agent` if it failed'));
       assert.ok(!/sereno:red-team`/.test(SHIP) && !/sereno:builder/.test(SHIP), 'no hard-coded red team or builder');
       assert.ok(!/\bnpm\b|\bnpx\b/.test(SHIP));
     });
@@ -8454,19 +8454,19 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[4a-cost] every orchestration skill runs on Sonnet', () => {
       for (const n of ['task', 'build', 'ship', 'brief', 'merge']) assert.ok(/^model: sonnet$/m.test(fmOf(n).fm), n);
     });
-    test('[4a-cost] merge skill: user-only, scribe is the only agent, recovery before git merge, ship never merges', () => {
+    test('[4a-cost] merge skill: user-only, spawns no agent, recovery before git merge, ship never merges', () => {
       const { fm, text } = fmOf('merge');
       assert.ok(/^name: merge$/m.test(fm) && /^disable-model-invocation: true$/m.test(fm));
       const tools = (/^allowed-tools: (.*)$/m.exec(fm) || [])[1] || '';
-      assert.deepStrictEqual(tools.split(',').map((x) => x.trim()), ['Bash', 'Read', 'Agent(sereno:scribe)']);
+      assert.deepStrictEqual(tools.split(',').map((x) => x.trim()), ['Bash', 'Read']);
       const rIdx = text.indexOf('sereno.js" recovery --task'), cIdx = text.indexOf('sereno.js" clean');
       assert.ok(rIdx > 0 && rIdx < text.indexOf('git merge --no-ff'));
-      assert.ok(text.includes(`git merge --no-ff -m "Merge branch 'task/<task>'" <head_commit>`) && !/git merge --no-ff task\//.test(text), 'merges the reviewed sha');
+      assert.ok(text.includes('git merge --no-ff -m "Merge task/<task>: <title>" <head_commit>') && !/git merge --no-ff task\//.test(text), 'merges the reviewed sha');
       assert.ok(text.indexOf('git rev-parse refs/heads/task/<task>') > cIdx && text.indexOf('git rev-parse refs/heads/task/<task>') < text.indexOf('git merge --no-ff'), 'tip re-checked right before the merge');
       assert.ok(/head_moved[^\n]*\/sereno:build <task>/.test(text) && /spec_changed[^\n]*\/sereno:task <task>/.test(text) && /\/sereno:ship <task>/.test(text));
       assert.ok(cIdx > rIdx && cIdx < text.indexOf('git switch <base_branch>'));
       assert.ok(/git merge --abort/.test(text) && /## How to run commands/.test(text) && !/push/i.test(text));
-      for (const n of [...text.matchAll(/`sereno:([^`]*)`/g)].map((m) => m[1])) assert.strictEqual(n, 'scribe');
+      assert.deepStrictEqual([...text.matchAll(/`sereno:([^`]*)`/g)].map((m) => m[1]), [], 'merge names no agent');
       assert.ok(!/git merge(?!-base)/.test(SHIP), 'ship never runs git merge');
     });
     {
@@ -9547,7 +9547,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const h = m.indexOf('bin/sereno.js" next --task <task>');
       assert.ok(h > m.indexOf('sereno.js" recovery --task') && h < m.indexOf('git merge --no-ff'));
       assert.ok(m.includes('Before merging: <hold>.') && /do not ask again/.test(m));
-      assert.deepStrictEqual(fmKey(m, 'allowed-tools').split(',').map((x) => x.trim()), ['Bash', 'Read', 'Agent(sereno:scribe)']);
+      assert.deepStrictEqual(fmKey(m, 'allowed-tools').split(',').map((x) => x.trim()), ['Bash', 'Read']);
     });
     test('[plugin-0.4 A2] build and ship pass --start-commit on the running record', () => {
       assert.ok(/outcome running --started-at <start> --start-commit <starting commit> --spec/.test(rd('skills/build/SKILL.md')));
@@ -9645,6 +9645,394 @@ test('missing rate_limits degrades instead of throwing', () => {
       commit(dir, 'two\n', 'manual');
       assert.strictEqual(S(dir, ['attempt', '--adopt', '--task', 'h']).out.code, 'tip_not_moved', 'commit time is not after the 2099 end');
     });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
+  /* ---- [plugin-0.4 A3] efficiency: sized review, bookkeeping in code, review pack ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const reviewLib = require('../plugin/bin/lib/review.js');
+    const speclib = require('../plugin/bin/lib/spec.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-a3-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const rd = (p) => fs.readFileSync(path.join(PLUGIN, p), 'utf8').replace(/\r\n/g, '\n');
+    const fmKey = (src, k) => { const m = new RegExp('^' + k + ':\\s*(.*)$', 'm').exec(src.match(/^---\n([\s\S]*?)\n---/)[1]); return m ? m[1].trim() : null; };
+    function repo(cfg) {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      if (cfg) { fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true }); fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify(cfg)); }
+      return dir;
+    }
+    /** Branch task/<task> with a spec and one commit adding `files`; back on main. Returns { base, head }. */
+    function mkTask(dir, task, kind, files, body) {
+      const base = git(dir, 'rev-parse', 'main');
+      assert.strictEqual(S(dir, ['branch', '--task', task]).out.ok, true);
+      assert.strictEqual(S(dir, ['spec', '--task', task, '--builder', 'sonnet', '--kind', kind, '--reason', 'r', '--base-branch', 'main', '--stdin'], body || '## Goal\nx\n').out.ok, true);
+      git(dir, 'switch', '-q', 'task/' + task);
+      for (const [f, c] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true }); fs.writeFileSync(path.join(dir, f), c); }
+      git(dir, 'add', '--', ...Object.keys(files)); git(dir, 'commit', '-q', '-m', 'work');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      git(dir, 'switch', '-q', 'main');
+      return { base, head };
+    }
+    const reviewer = (dir, task, t) => S(dir, ['reviewer', '--task', task, '--base', t.base, '--head', t.head]).out;
+    const LEAN = { preset: 'lean' };
+
+    // ---- reviewer ----
+    test('[plugin-0.4 A3] config: light is off in default, on for mechanical in lean, with the documented keys', () => {
+      const d = S(repo(), ['config']).out.config.roles.redTeam.light;
+      assert.deepStrictEqual(d, { kinds: [], maxDiffLines: 80, agent: 'red-team-lean', never: [] });
+      const l = S(repo(LEAN), ['config']).out.config.roles.redTeam;
+      assert.deepStrictEqual(l.light, { kinds: ['mechanical'], maxDiffLines: 80, agent: 'red-team-lean', never: [] });
+      assert.strictEqual(l.agent, 'red-team-lean');
+    });
+    test('[plugin-0.4 A3] config: light is validated', () => {
+      const bad = (light) => { const r = S(repo({ roles: { redTeam: { light } } }), ['config']).out; assert.strictEqual(r.code, 'config_invalid', JSON.stringify(light)); return r.errors.join('|'); };
+      assert.match(bad({ kinds: ['bogus'] }), /light\.kinds/);
+      assert.match(bad({ kinds: 'mechanical' }), /light\.kinds/);
+      assert.match(bad({ maxDiffLines: 0 }), /maxDiffLines/);
+      assert.match(bad({ maxDiffLines: 1.5 }), /maxDiffLines/);
+      assert.match(bad({ agent: 'nope' }), /light\.agent/);
+      assert.match(bad({ never: 'x' }), /light\.never/);
+      assert.match(bad({ never: [''] }), /light\.never/);
+      assert.match(bad({ never: [1] }), /light\.never/);
+    });
+    test('[plugin-0.4 A3] reviewer: light is chosen for a small mechanical diff in lean', () => {
+      const dir = repo(LEAN);
+      const t = mkTask(dir, 'm1', 'mechanical', { 'src/util.js': 'a\nb\nc\n' });
+      const r = reviewer(dir, 'm1', t);
+      assert.deepStrictEqual([r.ok, r.agent, r.light], [true, 'red-team-lean', true]);
+      assert.match(r.reason, /mechanical/);
+      assert.ok(!/["`$\\']/.test(r.reason), 'the reason is safe inside double quotes');
+    });
+    test('[plugin-0.4 A3] reviewer: the default preset never goes light, and says why', () => {
+      const dir = repo();
+      const t = mkTask(dir, 'm1', 'mechanical', { 'src/util.js': 'a\n' });
+      const r = reviewer(dir, 'm1', t);
+      assert.deepStrictEqual([r.ok, r.agent, r.light], [true, 'red-team', false]);
+      assert.match(r.reason, /off/);
+      // The same repo switched on: light.kinds under the default preset.
+      fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { redTeam: { light: { kinds: ['mechanical'] } } } }));
+      const on = reviewer(dir, 'm1', t);
+      assert.deepStrictEqual([on.agent, on.light], ['red-team-lean', true]);
+    });
+    test('[plugin-0.4 A3] reviewer: refused by kind; the normal agent is the configured red team', () => {
+      const dir = repo(LEAN);
+      for (const kind of ['feature', 'fix', 'refactor']) {
+        const t = mkTask(dir, 'k-' + kind, kind, { ['src/' + kind + '.js']: 'a\n' });
+        const r = reviewer(dir, 'k-' + kind, t);
+        assert.deepStrictEqual([r.agent, r.light], ['red-team-lean', false], kind);
+        assert.match(r.reason, new RegExp('kind ' + kind));
+      }
+      const d2 = repo({ preset: 'default', roles: { redTeam: { light: { kinds: ['mechanical'] } } } });
+      const t2 = mkTask(d2, 'f', 'feature', { 'src/f.js': 'a\n' });
+      const r2 = reviewer(d2, 'f', t2);
+      assert.deepStrictEqual([r2.agent, r2.light], ['red-team', false]);
+    });
+    test('[plugin-0.4 A3] reviewer: refused by size, with the limit from the config', () => {
+      const dir = repo(LEAN);
+      const t = mkTask(dir, 'big', 'mechanical', { 'src/big.js': Array.from({ length: 81 }, (_, i) => 'line ' + i).join('\n') + '\n' });
+      const r = reviewer(dir, 'big', t);
+      assert.strictEqual(r.light, false);
+      assert.match(r.reason, /81 lines, over the limit of 80/);
+      const ok = mkTask(dir, 'edge', 'mechanical', { 'src/edge.js': Array.from({ length: 80 }, (_, i) => 'line ' + i).join('\n') + '\n' });
+      assert.strictEqual(reviewer(dir, 'edge', ok).light, true, 'exactly maxDiffLines is still light');
+      const d2 = repo({ preset: 'lean', roles: { redTeam: { light: { maxDiffLines: 2 } } } });
+      const t2 = mkTask(d2, 'three', 'mechanical', { 'src/t.js': 'a\nb\nc\n' });
+      assert.strictEqual(reviewer(d2, 'three', t2).light, false);
+    });
+    test('[plugin-0.4 A3] reviewer: each never rule sends a small mechanical diff to the normal reviewer', () => {
+      const dir = repo(LEAN);
+      const paths = ['db/migrations/001_init.sql', 'migrations/002.sql', 'supabase/functions/x.ts', 'src/Auth.js', 'src/user-permissions.js', 'lib/payments/charge.js', 'src/deleteAll.js', 'config/secrets.json'];
+      paths.forEach((p, i) => {
+        const t = mkTask(dir, 'n' + i, 'mechanical', { [p]: 'a\n' });
+        const r = reviewer(dir, 'n' + i, t);
+        assert.strictEqual(r.light, false, p);
+        assert.match(r.reason, /touches /, p);
+      });
+      // One sensitive file among plain ones is enough.
+      const t = mkTask(dir, 'mixed', 'mechanical', { 'src/a.js': 'a\n', 'src/b.js': 'b\n', 'supabase/d.sql': 'd\n' });
+      assert.strictEqual(reviewer(dir, 'mixed', t).light, false);
+      // Plain paths stay light.
+      assert.strictEqual(reviewer(dir, 'plain', mkTask(dir, 'plain', 'mechanical', { 'src/readme-notes.js': 'a\n' })).light, true);
+    });
+    test('[plugin-0.4 A3] reviewer: a repo adds globs to never, and cannot remove the defaults', () => {
+      const dir = repo({ preset: 'lean', roles: { redTeam: { light: { never: ['docs/legal/**', '*.lock'] } } } });
+      const own = mkTask(dir, 'own', 'mechanical', { 'docs/legal/terms.md': 'a\n' });
+      assert.strictEqual(reviewer(dir, 'own', own).light, false, 'the repo glob applies');
+      const lock = mkTask(dir, 'lock', 'mechanical', { 'yarn.lock': 'a\n' });
+      assert.strictEqual(reviewer(dir, 'lock', lock).light, false);
+      const nested = mkTask(dir, 'nested', 'mechanical', { 'sub/yarn.lock': 'a\n' });
+      assert.strictEqual(reviewer(dir, 'nested', nested).light, true, '* stays inside one directory level');
+      const mig = mkTask(dir, 'mig', 'mechanical', { 'db/migrations/1.sql': 'a\n' });
+      assert.strictEqual(reviewer(dir, 'mig', mig).light, false, 'the defaults still apply with a repo list');
+      // Setting never to [] cannot switch a default off.
+      const d2 = repo({ preset: 'lean', roles: { redTeam: { light: { never: [] } } } });
+      const s1 = mkTask(d2, 'sup', 'mechanical', { 'supabase/x.sql': 'a\n' });
+      assert.strictEqual(reviewer(d2, 'sup', s1).light, false);
+      const s2 = mkTask(d2, 'sec', 'mechanical', { 'src/secret.js': 'a\n' });
+      assert.strictEqual(reviewer(d2, 'sec', s2).light, false);
+      for (const g of ['**/migrations/**', 'supabase/**']) assert.ok(reviewLib.DEFAULT_NEVER.includes(g));
+      for (const w of ['auth', 'permission', 'payment', 'delete', 'secret']) assert.ok(reviewLib.NEVER_WORDS.includes(w));
+    });
+    test('[plugin-0.4 A3] reviewer: globs and word rules, directly', () => {
+      const n = reviewLib.neverRule;
+      assert.ok(n('a/b/migrations/x.sql', []) && n('migrations/x.sql', []) && n('supabase/a/b.ts', []));
+      assert.strictEqual(n('src/supabase/a.ts', []), null, 'supabase/** is rooted');
+      assert.ok(n('SRC/AUTH.JS', []), 'case-insensitive');
+      assert.strictEqual(n('src/util.js', ['src/*.md']), null);
+      assert.ok(n('src/x.md', ['src/*.md']));
+      assert.strictEqual(n('src/a/x.md', ['src/*.md']), null);
+      assert.ok(n('src/a/x.md', ['src/**/*.md']));
+    });
+    test('[plugin-0.4 A3] reviewer: read-only, refuses a missing spec or bad commits; a binary file is never small', () => {
+      const dir = repo(LEAN);
+      const t = mkTask(dir, 'bin', 'mechanical', { 'src/blob.dat': Buffer.from([0, 1, 2, 3, 0, 255]) });
+      const before = git(dir, 'status', '--porcelain', '--untracked-files=all');
+      const r = reviewer(dir, 'bin', t);
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.light, false);
+      assert.match(r.reason, /1000 lines/);
+      assert.strictEqual(git(dir, 'status', '--porcelain', '--untracked-files=all'), before, 'writes nothing');
+      assert.strictEqual(S(dir, ['reviewer', '--task', 'nope', '--base', t.base, '--head', t.head]).out.code, 'not_found');
+      assert.strictEqual(S(dir, ['reviewer', '--task', 'bin', '--base', 'nonexistent', '--head', t.head]).out.code, 'invalid_arg');
+      assert.strictEqual(S(dir, ['reviewer', '--task', 'bin', '--base', t.base]).out.code, 'invalid_arg');
+    });
+    await atest('[plugin-0.4 A3] gate: reviewer_reason is stored, and the app reader still reads the gate', async () => {
+      const dir = repo(LEAN);
+      const t = mkTask(dir, 'g', 'mechanical', { 'src/a.js': 'a\n' });
+      const g = S(dir, ['gate', '--stdin', '--task', 'g', '--spec', '.sereno/specs/g.md', '--base', t.base, '--head', t.head, '--branch', 'task/g', '--tests-passed', 'true', '--reviewer-reason', 'kind mechanical, 1 lines (limit 80), no sensitive path'], '{"outcome":"pass","findings":[]}').out;
+      assert.strictEqual(g.ok, true, JSON.stringify(g));
+      const j = JSON.parse(fs.readFileSync(path.join(dir, g.path), 'utf8'));
+      assert.strictEqual(j.reviewer_reason, 'kind mechanical, 1 lines (limit 80), no sensitive path');
+      assert.strictEqual(j.outcome, 'pass');
+      // Without the flag the record has no such key (the older shape).
+      const t2 = mkTask(dir, 'g2', 'mechanical', { 'src/b.js': 'a\n' });
+      const g2 = S(dir, ['gate', '--stdin', '--task', 'g2', '--spec', '.sereno/specs/g2.md', '--base', t2.base, '--head', t2.head, '--branch', 'task/g2', '--tests-passed', 'true'], '{"outcome":"pass","findings":[]}').out;
+      assert.ok(!('reviewer_reason' in JSON.parse(fs.readFileSync(path.join(dir, g2.path), 'utf8'))));
+      const pl = require('../src/pipeline.js');
+      const out = await pl.readRepo(dir);
+      assert.ok(out);
+      const gt = out.tasks.find((x) => x.task === 'g');
+      assert.strictEqual(gt.gates.length, 1);
+      assert.strictEqual(gt.gates[0].outcome, 'pass');
+    });
+    test('[plugin-0.4 A3] ship skill: asks reviewer for the agent, stores the reason; merge still needs a gate pass', () => {
+      const s = rd('skills/ship/SKILL.md');
+      assert.ok(s.includes('bin/sereno.js" reviewer --task <task> --base <base> --head <head>'));
+      assert.ok(/`sereno:` plus the `agent` from the `reviewer` result/.test(s));
+      assert.ok(s.includes('--reviewer-reason "<reason from reviewer>"'));
+      assert.ok(s.indexOf('sereno.js" reviewer') < s.indexOf('Spawn the red team') && s.indexOf('sereno.js" review-pack') < s.indexOf('Spawn the red team'));
+      assert.ok(/review pack path/.test(s) && s.includes('`abs`'));
+      assert.ok(/gate always runs, only the agent changes/.test(s));
+      assert.ok(!/sereno:red-team`/.test(s) && !/sereno:builder/.test(s), 'still no hard-coded agent');
+      assert.ok(/Merge only when `next` is `merge`/.test(rd('skills/merge/SKILL.md')));
+    });
+
+    // ---- brief --auto and merge without the scribe ----
+    function mergedRepo() {
+      const dir = repo();
+      const t = mkTask(dir, 'done1', 'feature', { 'src/w.js': 'w\n' }, '# Add the widget\n\n## Acceptance criteria\n- it works\n');
+      assert.strictEqual(S(dir, ['attempt', '--task', 'done1', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'pass', '--diagnosis', 'none']).out.ok, true);
+      git(dir, 'merge', '-q', '--no-ff', '-m', 'merge', t.head);
+      return dir;
+    }
+    const briefOf = (dir, branch) => fs.readFileSync(path.join(dir, '.sereno', 'briefs', encodeURIComponent(branch || 'main') + '.md'), 'utf8');
+    test('[plugin-0.4 A3] brief --auto: Now names the last merged task and its spec title; Next is what next says; Blocked says None', () => {
+      const dir = mergedRepo();
+      const r = S(dir, ['brief', '--auto', '--branch', 'main']).out;
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      const text = briefOf(dir);
+      assert.match(text, /^Now: Merged done1: Add the widget$/m);
+      assert.match(text, /^Next: Nothing queued\.$/m);
+      assert.match(text, /^Blocked: None$/m);
+      assert.match(text, /^branch: main$/m);
+      assert.strictEqual(S(dir, ['brief', '--auto', '--branch', 'main']).out.version, 2, 'rewrites through the same writer, version bumps');
+    });
+    test('[plugin-0.4 A3] brief --auto: Next is the task plus the command; Blocked lists decide tasks with their reason', () => {
+      const dir = mergedRepo();
+      mkTask(dir, 'stuck', 'feature', { 'src/s.js': 's\n' });
+      S(dir, ['attempt', '--task', 'stuck', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'needs_context', '--diagnosis', 'none']);
+      S(dir, ['brief', '--auto', '--branch', 'main']);
+      const text = briefOf(dir);
+      assert.match(text, /^Next: stuck \(decide\), run \/sereno:ship stuck$/m);
+      assert.match(text, /^Blocked: stuck: the review needs context$/m);
+      assert.match(text, /^Now: Merged done1: Add the widget$/m);
+    });
+    test('[plugin-0.4 A3] brief --auto: Blocked is capped at three tasks; a ready task is Next with /sereno:next', () => {
+      const dir = repo();
+      for (const n of ['b1', 'b2', 'b3', 'b4']) {
+        mkTask(dir, n, 'feature', { ['src/' + n + '.js']: 'x\n' });
+        S(dir, ['attempt', '--task', n, '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'needs_context', '--diagnosis', 'none']);
+      }
+      S(dir, ['brief', '--auto', '--branch', 'main']);
+      const text = briefOf(dir);
+      assert.match(text, /^Now: No task merged yet$/m);
+      const blocked = /^Blocked: (.*)$/m.exec(text)[1];
+      assert.ok(blocked.startsWith('b1: the review needs context'), blocked);
+      assert.strictEqual(blocked.split('; ').length, 3, blocked);
+      assert.ok(blocked.includes('b3') && !blocked.includes('b4'), blocked);
+      assert.match(text, /^Next: 4 tasks are in progress/m);
+      const d2 = repo();
+      S(d2, ['branch', '--task', 'fresh']);
+      S(d2, ['spec', '--task', 'fresh', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', 'main', '--stdin'], '## Goal\nx\n');
+      S(d2, ['brief', '--auto', '--branch', 'main']);
+      assert.match(briefOf(d2), /^Next: fresh \(build\), run \/sereno:next$/m);
+    });
+    test('[plugin-0.4 A3] brief --auto: guards stay (branch must be checked out), and it takes no hand-written parts', () => {
+      const dir = mergedRepo();
+      assert.strictEqual(S(dir, ['brief', '--auto', '--branch', 'other']).out.code, 'branch_mismatch');
+      assert.strictEqual(S(dir, ['brief', '--auto']).out.code, 'usage');
+      assert.strictEqual(S(dir, ['brief', '--auto', '--branch', 'main', '--now', 'x']).out.code, 'usage');
+      assert.strictEqual(S(dir, ['brief', '--auto', '--branch', '--evil']).status === 0, false);
+      // Without --auto the old form is unchanged.
+      assert.strictEqual(S(dir, ['brief', '--branch', 'main', '--now', 'a', '--next', 'b', '--blocked', 'None']).out.ok, true);
+      assert.strictEqual(S(dir, ['brief', '--branch', 'main']).out.code, 'usage');
+    });
+    test('[plugin-0.4 A3] spec title: front matter title, else the first heading, else the task; shell-safe and short', () => {
+      const dir = mk();
+      const put = (task, text) => { fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true }); fs.writeFileSync(path.join(dir, '.sereno', 'specs', task + '.md'), text); };
+      put('fm', '---\ntask: "fm"\ntitle: "From front matter"\n---\n\n# Heading\n');
+      put('h1', '---\ntask: "h1"\nkind: feature\n---\n\nintro line\n\n## Add the `thing` "now" $HOME \\ it\'s\n- x\n');
+      put('none', '---\ntask: "none"\n---\n\nno heading here\n');
+      put('long', '---\ntask: "long"\n---\n\n# ' + 'word '.repeat(40) + '\n');
+      put('nofm', '# Plain file\nbody\n');
+      assert.strictEqual(speclib.readSpecTitle(dir, 'fm'), 'From front matter');
+      assert.strictEqual(speclib.readSpecTitle(dir, 'h1'), 'Add the thing now HOME its');
+      assert.strictEqual(speclib.readSpecTitle(dir, 'none'), 'none');
+      assert.strictEqual(speclib.readSpecTitle(dir, 'missing'), 'missing');
+      assert.ok(speclib.readSpecTitle(dir, 'long').length <= 72);
+      assert.strictEqual(speclib.readSpecTitle(dir, 'nofm'), 'Plain file');
+    });
+    test('[plugin-0.4 A3] next --task carries the spec title the merge message uses', () => {
+      const dir = repo();
+      mkTask(dir, 't1', 'feature', { 'src/a.js': 'a\n' }, '# Fix the "login" flow\n\nbody\n');
+      const r = S(dir, ['next', '--task', 't1']).out;
+      assert.strictEqual(r.title, 'Fix the login flow');
+      assert.strictEqual(S(dir, ['next']).out.title, 'Fix the login flow');
+      assert.ok(!('title' in S(repo(), ['next']).out), 'no task, no title');
+    });
+    test('[plugin-0.4 A3] merge skill: no scribe, no agent tool, brief --auto, and the commit message is Merge task/<task>: <title>', () => {
+      const m = rd('skills/merge/SKILL.md');
+      assert.ok(!/scribe/i.test(m) && !/Agent/.test(m));
+      assert.ok(!/--now|--next "|--blocked/.test(m));
+      assert.ok(m.includes('bin/sereno.js" brief --auto --branch <base_branch>'));
+      assert.ok(m.includes('git merge --no-ff -m "Merge task/<task>: <title>" <head_commit>'));
+      assert.ok(m.indexOf('brief --auto') > m.indexOf('git merge --no-ff'));
+      assert.deepStrictEqual(fmKey(m, 'allowed-tools').split(',').map((x) => x.trim()), ['Bash', 'Read']);
+      assert.ok(/`title`/.test(m));
+      // The message the skill builds, run for real with a title straight from `next`.
+      const dir = mergedRepo();
+      const t = mkTask(dir, 'x2', 'feature', { 'src/x2.js': 'x\n' }, '# Speed up the "export" path\n');
+      const title = S(dir, ['next', '--task', 'x2']).out.title;
+      const msg = m.match(/git merge --no-ff -m "([^"]*)"/)[1].replace('<task>', 'x2').replace('<title>', title);
+      git(dir, 'merge', '-q', '--no-ff', '-m', msg, t.head);
+      assert.strictEqual(git(dir, 'log', '-1', '--format=%s'), 'Merge task/x2: Speed up the export path');
+    });
+
+    // ---- review pack ----
+    const SPEC_BODY = '# Export report\n\nContext line that is not criteria.\n\n## Acceptance criteria\n- exports a CSV\n- the header row is stable\n\n```js\nverbatim code in the spec\n```\n\n## Notes\nNOT-IN-THE-PACK\n';
+    function logFor(dir, head, body) {
+      fs.mkdirSync(path.join(dir, '.sereno', 'cache'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'cache', 'test-rr_20261001T000000Z_' + head.slice(0, 7) + '.log'), body);
+    }
+    const pack = (dir, task, t) => S(dir, ['review-pack', '--task', task, '--base', t.base, '--head', t.head]).out;
+    test('[plugin-0.4 A3] review-pack: acceptance criteria verbatim, diffstat, touched files, test summary, files without tests', () => {
+      const dir = repo();
+      const t = mkTask(dir, 'rp', 'feature', { 'src/export.js': 'const MARKER_CONTENT_XYZ = 1;\n', 'src/covered.js': 'c\n', 'test/covered.test.js': 'MARKER_TEST_BODY\n', 'README.md': 'docs\n' }, SPEC_BODY);
+      logFor(dir, t.head, '===== base (exit 0) =====\nok 1 - old one\n# tests 1\n# pass 1\n# fail 0\n\n===== head (exit 1) =====\nok 1 - good one\nnot ok 2 - broken one\n# tests 2\n# pass 1\n# fail 1\n');
+      const r = pack(dir, 'rp', t);
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      assert.strictEqual(r.path, '.sereno/cache/review-rp.md');
+      const text = fs.readFileSync(path.join(dir, r.path), 'utf8');
+      assert.ok(text.includes('## Acceptance criteria (the spec, verbatim)\n## Acceptance criteria\n- exports a CSV\n- the header row is stable\n\n```js\nverbatim code in the spec\n```\n'), text);
+      assert.ok(!text.includes('NOT-IN-THE-PACK') && !text.includes('Context line'), 'only the criteria section');
+      assert.ok(/## Diffstat\n[\s\S]*src\/export\.js[\s\S]*4 files changed/.test(text));
+      assert.ok(/## Touched files \(4, 4 lines changed\)[\s\S]*- README\.md[\s\S]*- src\/export\.js/.test(text));
+      assert.ok(text.includes('Head run (exit 1): 2 tests, 1 pass, 1 fail.') && text.includes('- broken one') && !text.includes('good one') && !text.includes('old one'));
+      const un = text.split('## Touched source files with no test change')[1];
+      assert.ok(un.includes('- src/export.js') && !un.includes('src/covered.js') && !un.includes('README') && !un.includes('test/covered.test.js'), un);
+      assert.ok(!text.includes('MARKER_CONTENT_XYZ') && !text.includes('MARKER_TEST_BODY'), 'no file contents');
+    });
+    test('[plugin-0.4 A3] review-pack: no test changes at all lists every source file; no test record says so', () => {
+      const dir = repo();
+      const t = mkTask(dir, 'nt', 'feature', { 'src/a.js': 'a\n', 'src/b.py': 'b\n', 'notes.txt': 'n\n' }, SPEC_BODY);
+      const text = fs.readFileSync(path.join(dir, pack(dir, 'nt', t).path), 'utf8');
+      assert.ok(text.includes('No test record for this head'));
+      const un = text.split('## Touched source files with no test change')[1];
+      assert.ok(un.includes('- src/a.js') && un.includes('- src/b.py') && !un.includes('notes.txt'));
+      const t2 = mkTask(dir, 'ok', 'feature', { 'docs/a.md': 'a\n' }, SPEC_BODY);
+      assert.ok(fs.readFileSync(path.join(dir, pack(dir, 'ok', t2).path), 'utf8').includes('\nNone.\n'));
+    });
+    test('[plugin-0.4 A3] review-pack: a spec with no acceptance heading is all criteria; the whole pack is capped at 200 lines', () => {
+      const dir = repo();
+      const files = {};
+      for (let i = 0; i < 120; i++) files['src/f' + String(i).padStart(3, '0') + '.js'] = 'x\n';
+      const body = '# Big\n' + Array.from({ length: 500 }, (_, i) => '- criterion ' + i).join('\n') + '\n';
+      const t = mkTask(dir, 'cap', 'feature', files, body);
+      const failing = Array.from({ length: 40 }, (_, i) => 'not ok ' + (i + 1) + ' - failing test ' + i).join('\n');
+      logFor(dir, t.head, '===== head (exit 1) =====\n' + failing + '\n# tests 40\n# pass 0\n# fail 40\n');
+      const r = pack(dir, 'cap', t);
+      const lines = fs.readFileSync(path.join(dir, r.path), 'utf8').split('\n');
+      assert.strictEqual(lines[lines.length - 1], '');
+      assert.ok(lines.length - 1 <= 200, 'lines: ' + (lines.length - 1));
+      assert.strictEqual(r.lines, lines.length - 1);
+      const text = lines.join('\n');
+      assert.ok(text.includes('- criterion 0') && text.includes('- criterion 58') && !text.includes('- criterion 70'), 'spec lines are bounded');
+      assert.match(text, /more spec lines not shown/);
+      assert.ok(text.includes('- ... and 70 more') && text.includes('- ... and 25 more'), 'files and failing names are bounded');
+      assert.strictEqual(r.truncated, true);
+      assert.ok(lines[lines.length - 2].includes('pack truncated at 200 lines'));
+    });
+    test('[plugin-0.4 A3] review-pack: written only inside .sereno/cache, as review-<task>.md; bad tasks and commits are refused', () => {
+      const dir = repo();
+      const t = mkTask(dir, 'in', 'feature', { 'src/a.js': 'a\n' }, SPEC_BODY);
+      const r = pack(dir, 'in', t);
+      assert.ok(r.abs.startsWith(dir.split(path.sep).join('/') + '/.sereno/cache/review-in.md'), r.abs);
+      assert.ok(fs.existsSync(path.join(dir, '.sereno', 'cache', 'review-in.md')));
+      assert.strictEqual(S(dir, ['review-pack', '--task', '../evil', '--base', t.base, '--head', t.head]).status === 0, false);
+      assert.strictEqual(S(dir, ['review-pack', '--task', 'nospec', '--base', t.base, '--head', t.head]).out.code, 'not_found');
+      assert.strictEqual(S(dir, ['review-pack', '--task', 'in', '--base', 'nope', '--head', t.head]).out.code, 'invalid_arg');
+      // A symlink already at the target is refused by fsafe, never followed (skipped where symlinks cannot be made).
+      const outside = mk();
+      const target = path.join(dir, '.sereno', 'cache', 'review-sym.md');
+      let linked = true;
+      try { fs.symlinkSync(path.join(outside, 'x.md'), target); } catch (_e) { linked = false; }
+      if (linked) {
+        const t3 = mkTask(dir, 'sym', 'feature', { 'src/s.js': 's\n' }, SPEC_BODY);
+        assert.strictEqual(pack(dir, 'sym', t3).ok, false);
+        assert.ok(!fs.existsSync(path.join(outside, 'x.md')));
+      }
+    });
+    test('[plugin-0.4 A3] ship skill runs review-pack before the red team and passes the path; both red teams read the pack first', () => {
+      const s = rd('skills/ship/SKILL.md');
+      assert.ok(s.includes('bin/sereno.js" review-pack --task <task> --base <base> --head <head>'));
+      assert.ok(s.indexOf('sereno.js" review-pack') < s.indexOf('Spawn the red team'));
+      for (const a of ['red-team', 'red-team-lean']) {
+        const t = rd('agents/' + a + '.md');
+        const lines = t.split('\n').filter((l) => /review pack/i.test(l));
+        assert.strictEqual(lines.length, 1, a);
+        assert.ok(/read it first, then verify independently: the pack is a map, not evidence/.test(lines[0]), a);
+      }
+    });
+    test('[plugin-0.4 A3] review.js needs only built-ins and plugin files, and writes only through fsafe', () => {
+      const code = fs.readFileSync(path.join(PLUGIN, 'bin', 'lib', 'review.js'), 'utf8');
+      assert.ok(!/require\('(?!node:|\.\/)/.test(code), 'built-ins and plugin files only');
+      assert.ok(!/child_process|writeFileSync|fetch\(/.test(code));
+    });
+
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 

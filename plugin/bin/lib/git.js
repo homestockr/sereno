@@ -8,7 +8,7 @@
  * require anything outside plugin/, so the two are kept in step by hand.
  * Only local commands are used. Every git verb the plugin runs, anywhere (git.js,
  * spec.js, testrun.js, doctor.js, sereno.js):
- *   rev-parse, symbolic-ref, status (the clean-tree check, `cleanFiles`), merge-base (also
+ *   diff (--numstat, --stat: review.js), rev-parse, symbolic-ref, status (the clean-tree check, `cleanFiles`), merge-base (also
  *   `--is-ancestor`, `isAncestor`: is a task merged into its base)
  *   (skills), ls-tree, show, show-ref (spec.js: does the branch exist), branch (spec.js:
  *   create task/<name>), worktree add / list / remove / prune (the base-suite checkout

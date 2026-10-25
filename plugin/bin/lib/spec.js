@@ -104,6 +104,32 @@ function readSpecMeta(root, task) {
 }
 
 /**
+ * The spec's title for a commit message: `title:` in the front matter if it has one, else the
+ * first markdown heading of the body, else the task name. One line, at most 72 characters, and
+ * the characters a shell treats specially inside double quotes (" ` $ \ ') are removed, so the
+ * result is safe to place inside "..." on a command line.
+ * @param {string} root real repo root @param {string} task @returns {string}
+ */
+function readSpecTitle(root, task) {
+  const file = path.join(root, '.sereno', 'specs', task + '.md');
+  let raw = null;
+  try {
+    const st = fs.lstatSync(file);
+    if (st.isFile() && !st.isSymbolicLink() && st.size <= 1024 * 1024) {
+      const text = fs.readFileSync(file, 'utf8');
+      const parts = /^---\r?\n/.test(text) ? text.replace(/^---\r?\n/, '').split(/\r?\n---\r?\n/) : null;
+      const head = parts ? parts[0] : '';
+      const body = parts ? parts.slice(1).join('\n---\n') : text;
+      const m = /^title:[ \t]*(.*?)[ \t]*$/m.exec(head);
+      if (m && m[1]) { try { const v = JSON.parse(m[1]); raw = typeof v === 'string' ? v : null; } catch (_e) { raw = m[1]; } }
+      if (!raw) { const h = /^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/m.exec(body); if (h) raw = h[1]; }
+    }
+  } catch (_e) { raw = null; }
+  const clean = rec.cleanText(raw || '', 200).replace(/["`$\\']/g, '').replace(/ {2,}/g, ' ').trim().slice(0, 72).trim();
+  return clean || task;
+}
+
+/**
  * Build the spec file text.
  * @param {{ task: string, builder: string, kind: string, reason: string, fixes: string | null, baseBranch?: string | null, after?: string | null, hold?: string | null, revision: number, body: string, now?: Date }} p
  */
@@ -191,4 +217,4 @@ function createTaskBranch(a) {
   return { branch, base_commit: head, from_branch: gitlib.currentBranch(a.root) };
 }
 
-module.exports = { validBranchName, previousRevision, previousBaseBranch, readSpecMeta, HOLD_MAX, renderSpec, writeSpec, createTaskBranch };
+module.exports = { validBranchName, previousRevision, previousBaseBranch, readSpecMeta, readSpecTitle, HOLD_MAX, renderSpec, writeSpec, createTaskBranch };

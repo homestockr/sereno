@@ -13,7 +13,19 @@
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
  * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, clean, context, recovery, brief, doctor,
- * next, after-check, preflight.
+ * next, after-check, preflight, reviewer, review-pack.
+ *
+ *   reviewer --task <t> --base <sha> --head <sha>
+ *                           read-only: { agent, light, reason }. Light only when the spec's kind is in
+ *                           roles.redTeam.light.kinds, the diff is at most maxDiffLines, and no touched
+ *                           path trips a `never` rule (the built-in ones always apply). Ship stores the
+ *                           reason in the gate as reviewer_reason (gate --reviewer-reason).
+ *   review-pack --task <t> --base <sha> --head <sha>
+ *                           writes .sereno/cache/review-<t>.md (<= 200 lines): the spec's acceptance
+ *                           criteria, diffstat, touched files, test counts and failing names, and source
+ *                           files without test changes. No file contents.
+ *   brief --auto --branch <b>
+ *                           writes Now / Next / Blocked from the records instead of taking them as flags.
  *
  *   next [--task <t>]       what /sereno:next does: { task, step, reason, hold, command }. Read-only.
  *   after-check --task <t>  ok when the spec's `after` task is merged into the base (or there is none);
@@ -50,6 +62,7 @@ const recovery = require('./lib/recovery.js');
 const briefLib = require('./lib/brief.js');
 const doctorLib = require('./lib/doctor.js');
 const nextLib = require('./lib/next.js');
+const reviewLib = require('./lib/review.js');
 const preflightLib = require('./lib/preflight.js');
 const { projectId } = require('./lib/projectid.js');
 
@@ -257,7 +270,7 @@ const COMMANDS = {
 
   gate(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['file', 'task', 'spec', 'base', 'head', 'branch', 'session', 'agent', 'agent-name', 'model', 'tests-passed', 'run-id'],
+      value: ['file', 'task', 'spec', 'base', 'head', 'branch', 'session', 'agent', 'agent-name', 'model', 'tests-passed', 'run-id', 'reviewer-reason'],
       bool: ['json', 'stdin'],
     });
     if (!!a.file === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --file or --stdin');
@@ -304,6 +317,7 @@ const COMMANDS = {
     }
     const v = rec.sanitizeVerdict(parseVerdict(text));
     const { config_hash } = loadConfig(root);
+    const reviewerReason = rec.cleanText(str(a, 'reviewer-reason'), 200);
 
     const gate = {
       review_run_id: runId,
@@ -323,6 +337,7 @@ const COMMANDS = {
       reviewed_at: new Date().toISOString(),
       config_hash,
     };
+    if (reviewerReason) /** @type {any} */ (gate).reviewer_reason = reviewerReason;
     const rel = '.sereno/gates/' + runId + '.json';
     fsafe.writeJson(rel, gate);
     if (cacheRel) fsafe.removeFile(cacheRel);
@@ -473,8 +488,14 @@ const COMMANDS = {
   },
 
   brief(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['branch', 'now', 'next', 'blocked', 'task', 'expect-version'], bool: ['json'] });
+    const a = parseArgs(argv, { value: ['branch', 'now', 'next', 'blocked', 'task', 'expect-version'], bool: ['json', 'auto'] });
     const branch = str(a, 'branch'), now = str(a, 'now'), next = str(a, 'next');
+    if (a.auto) {
+      if (branch === undefined) throw new SerenoError('usage', 'brief --auto needs --branch');
+      if (now !== undefined || next !== undefined || a.blocked !== undefined || a['expect-version'] !== undefined) throw new SerenoError('usage', '--auto writes Now, Next and Blocked itself; do not pass --now, --next, --blocked or --expect-version');
+      const r = needRepo();
+      return briefLib.writeAutoBrief({ root: r.root, fsafe: r.fsafe, config: loadConfig(r.root).config, branch, task: str(a, 'task') });
+    }
     if (branch === undefined || now === undefined || next === undefined) throw new SerenoError('usage', 'brief needs --branch, --now, --next and --blocked');
     const ev = str(a, 'expect-version');
     if (ev !== undefined && !/^\d{1,9}$/.test(ev)) throw new SerenoError('invalid_arg', '--expect-version must be a non-negative integer');
@@ -492,7 +513,37 @@ const COMMANDS = {
     const t = str(a, 'task');
     const { root, fsafe } = needRepo();
     const { config } = loadConfig(root);
-    return nextLib.decide({ task: t === undefined ? null : rec.checkTask(t), deps: nextLib.realDeps({ root, fsafe, config }) });
+    const r = nextLib.decide({ task: t === undefined ? null : rec.checkTask(t), deps: nextLib.realDeps({ root, fsafe, config }) });
+    // The merge skill puts the title in the merge commit message; it is shell-safe (see readSpecTitle).
+    return r.task ? Object.assign({}, r, { title: speclib.readSpecTitle(root, r.task) }) : r;
+  },
+
+  reviewer(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task', 'base', 'head'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root } = needRepo();
+    const base = gitlib.resolveCommit(root, str(a, 'base') || '');
+    const head = gitlib.resolveCommit(root, str(a, 'head') || '');
+    if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
+    if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
+    const meta = speclib.readSpecMeta(root, task);
+    if (!meta) throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first');
+    const { config } = loadConfig(root);
+    return reviewLib.chooseReviewer({ root, config, kind: meta.kind, base, head });
+  },
+
+  'review-pack'(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task', 'base', 'head'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root, fsafe } = needRepo();
+    const base = gitlib.resolveCommit(root, str(a, 'base') || '');
+    const head = gitlib.resolveCommit(root, str(a, 'head') || '');
+    if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
+    if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
+    let specText;
+    try { specText = fsafe.readFile('.sereno/specs/' + task + '.md', MAX_INPUT).toString('utf8'); } catch (_e) { throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first'); }
+    const r = reviewLib.buildPack({ root, fsafe, task, base, head, specText });
+    return Object.assign({}, r, { abs: path.join(root, r.path).split(path.sep).join('/') });
   },
 
   'after-check'(/** @type {string[]} */ argv) {
