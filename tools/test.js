@@ -9499,6 +9499,155 @@ test('missing rate_limits degrades instead of throwing', () => {
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 
+  /* ---- [plugin-0.4 A2] next skill, merge hold, adopt by start_commit, 0.4.0 ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-a2-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const readJ = (dir, rel) => JSON.parse(fs.readFileSync(path.join(dir, rel), 'utf8'));
+    const rd = (p) => fs.readFileSync(path.join(PLUGIN, p), 'utf8').replace(/\r\n/g, '\n');
+    const fmOf = (src) => src.match(/^---\n([\s\S]*?)\n---/)[1];
+    const fmKey = (src, k) => { const m = new RegExp('^' + k + ':\\s*(.*)$', 'm').exec(fmOf(src)); return m ? m[1].trim() : null; };
+
+    // ---- the skill text ----
+    test('[plugin-0.4 A2] next skill: user-only, sonnet, argument-hint, and the tools are the union of build and ship', () => {
+      const n = rd('skills/next/SKILL.md');
+      assert.strictEqual(fmKey(n, 'name'), 'next');
+      assert.strictEqual(fmKey(n, 'disable-model-invocation'), 'true');
+      assert.strictEqual(fmKey(n, 'model'), 'sonnet');
+      assert.strictEqual(fmKey(n, 'argument-hint'), '[task]');
+      const tools = (s) => fmKey(s, 'allowed-tools').split(',').map((x) => x.trim());
+      const union = new Set([...tools(rd('skills/build/SKILL.md')), ...tools(rd('skills/ship/SKILL.md'))]);
+      assert.deepStrictEqual(new Set(tools(n)), union);
+      assert.ok(!tools(n).some((x) => /powershell/i.test(x)) && !tools(n).includes('Skill'));
+    });
+    test('[plugin-0.4 A2] next skill: guard line, Bash rule, runs build and ship in place, 3-step cap, never merges or touches a remote', () => {
+      const n = rd('skills/next/SKILL.md');
+      assert.ok(n.includes("This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process."));
+      assert.ok(/## How to run commands/.test(n) && /with the Bash tool, never PowerShell or cmd/.test(n) && n.includes('Never use `run_in_background`'));
+      assert.ok(n.includes('bin/sereno.js" next [--task <task>]'));
+      assert.ok(n.includes('bin/sereno.js" preflight') && /passed. is false/.test(n) && n.includes('--no-verify') && /Never skip a hook yourself/.test(n));
+      assert.ok(n.includes('${CLAUDE_PLUGIN_ROOT}/skills/build/SKILL.md') && n.includes('${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md'));
+      assert.ok(/at most 3 `build` \/ `ship` \/ `retry` steps/.test(n));
+      assert.ok(/never merge/.test(n) && /never run anything against a remote/.test(n) && /Do not merge/.test(n));
+      for (const s of ['merge', 'decide', 'done', 'idle', 'pick']) assert.ok(n.includes('`' + s + '`'), s);
+      assert.ok(n.includes('Gate passed for <task>.') && n.includes('Run /sereno:merge <task>.'));
+      assert.ok(!/git push|git fetch|git pull/.test(n));
+    });
+    test('[plugin-0.4 A2] merge skill: prints the spec hold in one line before merging, and does not ask again', () => {
+      const m = rd('skills/merge/SKILL.md');
+      const h = m.indexOf('bin/sereno.js" next --task <task>');
+      assert.ok(h > m.indexOf('sereno.js" recovery --task') && h < m.indexOf('git merge --no-ff'));
+      assert.ok(m.includes('Before merging: <hold>.') && /do not ask again/.test(m));
+      assert.deepStrictEqual(fmKey(m, 'allowed-tools').split(',').map((x) => x.trim()), ['Bash', 'Read', 'Agent(sereno:scribe)']);
+    });
+    test('[plugin-0.4 A2] build and ship pass --start-commit on the running record', () => {
+      assert.ok(/outcome running --started-at <start> --start-commit <starting commit> --spec/.test(rd('skills/build/SKILL.md')));
+      assert.ok(/outcome running --started-at <start> --start-commit <HEAD before the Builder starts> --spec/.test(rd('skills/ship/SKILL.md')));
+    });
+    test('[plugin-0.4 A2] README: Typical flow is built on /sereno:next, with --after, --hold, preflight and adopt', () => {
+      const r = rd('README.md');
+      const i = r.indexOf('## Typical flow'), j = r.indexOf('## The steps');
+      assert.ok(i > 0 && j > i);
+      const sec = r.slice(i, j);
+      for (const k of ['/sereno:next', '--after', '--hold', 'preflight', 'hook_failed', 'attempt --adopt', '/sereno:merge', 'after_not_merged']) assert.ok(sec.includes(k), k);
+      assert.ok(r.includes('`next`, `build`') || r.includes('`task`, `next`, `build`'));
+    });
+    test('[plugin-0.4 A2] plugin.json, marketplace and README all say 0.4.0', () => {
+      const pj = JSON.parse(rd('.claude-plugin/plugin.json'));
+      const mp = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
+      assert.strictEqual(pj.version, '0.4.0');
+      assert.strictEqual(mp.plugins[0].version, '0.4.0');
+      assert.ok(rd('README.md').includes('Version 0.4.0.'));
+    });
+    test('[plugin-0.4 A2] the skills directory is exactly task, next, build, ship, merge, brief', () => {
+      assert.deepStrictEqual(fs.readdirSync(path.join(PLUGIN, 'skills')).sort(), ['brief', 'build', 'merge', 'next', 'ship', 'task']);
+    });
+
+    // ---- attempt --start-commit and adopt ----
+    function scRepo(endedAt) {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      S(dir, ['branch', '--task', 'h']);
+      S(dir, ['spec', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', 'main', '--stdin'], '## Goal\nx\n');
+      git(dir, 'switch', '-q', 'task/h');
+      const start = git(dir, 'rev-parse', 'HEAD');
+      const r = S(dir, ['attempt', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--started-at', '2020-01-01T00:00:00Z', '--start-commit', start, '--spec', '.sereno/specs/h.md']);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+      S(dir, ['attempt', '--task', 'h', '--update', '1', '--outcome', 'error', '--diagnosis', 'hook_failed', '--ended-at', endedAt || '2020-01-01T00:05:00Z']);
+      return { dir, start };
+    }
+    const commit = (dir, content, msg) => { fs.writeFileSync(path.join(dir, 'a.txt'), content); git(dir, 'commit', '-q', '-am', msg); return git(dir, 'rev-parse', 'HEAD'); };
+    test('[plugin-0.4 A2] attempt --start-commit is stored as a full sha; a bad value, --update and --adopt refuse it', () => {
+      const { dir, start } = scRepo();
+      assert.strictEqual(readJ(dir, '.sereno/attempts/h-1.json').start_commit, start);
+      const abbreviated = S(dir, ['attempt', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--start-commit', start.slice(0, 9), '--spec', '.sereno/specs/h.md']);
+      assert.strictEqual(readJ(dir, '.sereno/attempts/h-' + abbreviated.out.attempt + '.json').start_commit, start);
+      let r = S(dir, ['attempt', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--start-commit', 'nonsense', '--spec', '.sereno/specs/h.md']);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'invalid_arg']);
+      r = S(dir, ['attempt', '--task', 'h', '--update', '2', '--outcome', 'built', '--start-commit', start]);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'usage']);
+      r = S(dir, ['attempt', '--adopt', '--task', 'h', '--start-commit', start]);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'usage']);
+    });
+    test('[plugin-0.4 A2] attempt --adopt with start_commit: a descendant is adopted even when the clock says the commit is older', () => {
+      const { dir, start } = scRepo('2099-01-01T00:00:00Z'); // the time rule would refuse this
+      const tip = commit(dir, 'two\n', 'approved manual commit');
+      const r = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.attempt], [true, 2], JSON.stringify(r.out));
+      const a = readJ(dir, '.sereno/attempts/h-2.json');
+      assert.deepStrictEqual([a.outcome, a.head_commit], ['built', tip]);
+      assert.notStrictEqual(a.head_commit, start);
+      assert.strictEqual(S(dir, ['recovery', '--task', 'h']).out.next, 'review');
+      // adopted once, not twice
+      const again = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([again.out.ok, again.out.code], [false, 'tip_not_moved']);
+    });
+    test('[plugin-0.4 A2] attempt --adopt with start_commit: a tip equal to the start commit is refused, however old the attempt', () => {
+      const { dir } = scRepo('2000-01-01T00:00:00Z'); // the time rule would accept any later commit time
+      const r = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.code, r.status], [false, 'tip_not_moved', 23]);
+    });
+    test('[plugin-0.4 A2] attempt --adopt with start_commit: a tip that does not descend from it is refused (tip_unrelated)', () => {
+      const { dir } = scRepo('2000-01-01T00:00:00Z');
+      const c1 = commit(dir, 'two\n', 'first try');
+      // record the second attempt as started at c1, then rewind the branch and commit something else
+      S(dir, ['attempt', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--started-at', '2020-02-01T00:00:00Z', '--start-commit', c1, '--spec', '.sereno/specs/h.md']);
+      S(dir, ['attempt', '--task', 'h', '--update', '2', '--outcome', 'error', '--diagnosis', 'hook_failed', '--ended-at', '2020-02-01T00:05:00Z']);
+      git(dir, 'reset', '-q', '--hard', 'HEAD~1');
+      const c2 = commit(dir, 'three\n', 'rewritten history');
+      assert.notStrictEqual(c1, c2);
+      const r = S(dir, ['attempt', '--adopt', '--task', 'h']);
+      assert.deepStrictEqual([r.out.ok, r.out.code, r.status], [false, 'tip_unrelated', 24]);
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno', 'attempts', 'h-3.json')));
+    });
+    test('[plugin-0.4 A2] attempt --adopt without start_commit: the commit-time rule still applies', () => {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n'); git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      S(dir, ['branch', '--task', 'h']);
+      S(dir, ['spec', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', 'main', '--stdin'], '## Goal\nx\n');
+      git(dir, 'switch', '-q', 'task/h');
+      S(dir, ['attempt', '--task', 'h', '--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--started-at', '2020-01-01T00:00:00Z', '--spec', '.sereno/specs/h.md']);
+      S(dir, ['attempt', '--task', 'h', '--update', '1', '--outcome', 'error', '--diagnosis', 'hook_failed', '--ended-at', '2099-01-01T00:00:00Z']);
+      assert.strictEqual(readJ(dir, '.sereno/attempts/h-1.json').start_commit, undefined);
+      commit(dir, 'two\n', 'manual');
+      assert.strictEqual(S(dir, ['attempt', '--adopt', '--task', 'h']).out.code, 'tip_not_moved', 'commit time is not after the 2099 end');
+    });
+    for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
+  }
+
   /* ---- Phase 4a: heredoc stdin ---- */
   {
     const PLUGIN = path.join(ROOT, 'plugin');
@@ -9515,7 +9664,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         }
         assert.ok(!/--stdin/.test(t), n + ': mentions --stdin');
         const fm = /^allowed-tools:(.*)$/m.exec(t)[1];
-        if (n !== 'ship' && n !== 'task') assert.ok(!/Write|Edit/.test(fm), n + ': unexpected write grant');
+        if (n !== 'ship' && n !== 'task' && n !== 'next') assert.ok(!/Write|Edit/.test(fm), n + ': unexpected write grant');
       }
       const ship = skills.find((x) => x[0] === 'ship')[1];
       const task = skills.find((x) => x[0] === 'task')[1];

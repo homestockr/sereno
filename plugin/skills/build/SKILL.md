@@ -43,10 +43,10 @@ One Builder run is one attempt record. Write it now, as `running`, so an interru
 still leaves a trace:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start> --spec .sereno/specs/<task>.md
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start> --start-commit <starting commit> --spec .sereno/specs/<task>.md
 ```
 
-`--spec` pins the spec: it records the sha256 of the spec file as `spec_hash`, and the later test and gate steps refuse with `spec_changed` if the spec is edited afterwards. Add `--fixes` only when the spec has one. The result is `{ ok, path, attempt }`; keep the
+`--start-commit` records the commit the Builder starts from; `--adopt` later uses it to tell a new commit from an old one. `--spec` pins the spec: it records the sha256 of the spec file as `spec_hash`, and the later test and gate steps refuse with `spec_changed` if the spec is edited afterwards. Add `--fixes` only when the spec has one. The result is `{ ok, path, attempt }`; keep the
 `attempt` number. If `ok` is false, show the error and stop.
 
 ## 4. Spawn the Builder

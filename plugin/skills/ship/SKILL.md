@@ -148,7 +148,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" recovery --task <task>
 The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `next`:
 
 - **`retry`** or **`repair`**: start a new attempt (write the `running` record first, then update it):
-  `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start> --spec .sereno/specs/<task>.md`
+  `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start> --start-commit <HEAD before the Builder starts> --spec .sereno/specs/<task>.md`
   (without `--spec` the script refuses with `spec_required`), then the same update as `/sereno:build`, spawning the SAME Builder agent
   by name that the spec names. For `repair`, give it the gate's findings (file, line,
   summary) and tell it to fix only those; for `retry` after a test failure, give it the

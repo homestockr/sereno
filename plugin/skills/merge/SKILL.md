@@ -40,6 +40,14 @@ show the `reason` in one line and stop. Tell the user what to run: if the reason
 `head_moved`, `/sereno:build <task>`; if it starts with `spec_changed`, `/sereno:task <task>`;
 for anything else, `/sereno:ship <task>`.
 
+Then read the spec's hold, if any:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" next --task <task>
+```
+
+If the result's `hold` is not null, print one line: "Before merging: <hold>." Typing `/sereno:merge` is the confirmation that the hold is done, so do not ask again and do not run the hold yourself. Then carry on.
+
 ## 2. Clean tree
 
 You are on any branch, but there must be no uncommitted changes to tracked files

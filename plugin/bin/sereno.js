@@ -29,7 +29,11 @@
  *   attempt --adopt --task <t>
  *                           records a new `built` attempt for the tip of task/<t> after the user approved a
  *                           manual commit of the Builder's work (e.g. past a failing hook). Refuses a
- *                           dirty tree or a tip that has not moved since the last attempt.
+ *                           dirty tree. With the last attempt's start_commit (see attempt --start-commit) the
+ *                           tip must differ from it and descend from it (tip_not_moved, tip_unrelated);
+ *                           without one, the tip must be newer than the attempt's end by commit time.
+ *   attempt --start-commit <sha>
+ *                           records the commit the Builder started from, on the running record.
  */
 
 const fs = require('node:fs');
@@ -61,7 +65,7 @@ function agentModel(name) {
   return m ? m[1] : null;
 }
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, builder_not_allowed: 21, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, after_not_merged: 22, tip_not_moved: 23, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, builder_not_allowed: 21, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, after_not_merged: 22, tip_not_moved: 23, tip_unrelated: 24, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -327,7 +331,7 @@ const COMMANDS = {
 
   attempt(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash', 'head'],
+      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash', 'head', 'start-commit'],
       bool: ['json', 'adopt'],
     });
     const task = rec.checkTask(str(a, 'task'));
@@ -345,6 +349,9 @@ const COMMANDS = {
     const shArg = str(a, 'spec-hash');
     if (shArg !== undefined && !/^sha256:[0-9a-f]{64}$/.test(shArg)) throw new SerenoError('invalid_arg', '--spec-hash must be sha256:<64 hex>');
     if (shArg !== undefined && str(a, 'spec') !== undefined) throw new SerenoError('usage', 'give --spec or --spec-hash, not both');
+    const scArg = str(a, 'start-commit');
+    const startCommit = scArg === undefined ? null : gitlib.resolveCommit(root, scArg);
+    if (scArg !== undefined && !startCommit) throw new SerenoError('invalid_arg', '--start-commit must name an existing commit');
     const specHash = shArg !== undefined ? shArg : (str(a, 'spec') !== undefined ? readSpec(root, /** @type {string} */ (str(a, 'spec'))).hash : null);
     if (specHash === null && newestPin(root, fsafe, task)) throw new SerenoError('spec_required', 'an earlier attempt of this task pinned a spec; pass --spec .sereno/specs/' + task + '.md');
     const agent = str(a, 'agent') !== undefined ? str(a, 'agent') : str(a, 'agent-id');
@@ -368,6 +375,7 @@ const COMMANDS = {
       ended_at: isoOrNull(str(a, 'ended-at'), '--ended-at'),
     };
     if (specHash !== null) /** @type {any} */ (record).spec_hash = specHash;
+    if (startCommit) /** @type {any} */ (record).start_commit = startCommit;
     return allocateAttempt(fsafe, task, record);
   },
 
@@ -569,7 +577,7 @@ function allocateAttempt(fsafe, task, record) {
  * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, string | boolean>} a
  */
 function adoptAttempt(root, fsafe, task, a) {
-  for (const k of ['update', 'spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'agent-id', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'head']) {
+  for (const k of ['update', 'spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'agent-id', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'head', 'start-commit']) {
     if (a[k] !== undefined) throw new SerenoError('usage', '--' + k + ' cannot be combined with --adopt');
   }
   if (gitlib.currentBranch(root) !== 'task/' + task) throw new SerenoError('branch_mismatch', 'check out task/' + task + ' first; --adopt records the tip of the branch you are on');
@@ -597,13 +605,21 @@ function adoptAttempt(root, fsafe, task, a) {
   if (!last || typeof last !== 'object') throw new SerenoError('not_found', 'the latest attempt record is unreadable');
   if (last.outcome === 'running') throw new SerenoError('invalid_arg', 'attempt ' + nums[nums.length - 1] + ' is still running; finish it with --update first');
   if (all.some((r) => r && r.head_commit === tip)) throw new SerenoError('tip_not_moved', 'the tip of task/' + task + ' is already recorded by an earlier attempt');
-  const ref = typeof last.ended_at === 'string' ? last.ended_at : (typeof last.started_at === 'string' ? last.started_at : null);
-  const refMs = ref ? new Date(ref).getTime() : NaN;
-  if (!isNaN(refMs)) {
-    const ct = gitlib.git(root, ['show', '-s', '--format=%ct', '--end-of-options', tip]);
-    const tipSec = ct && /^\d{1,12}$/.test(ct) ? parseInt(ct, 10) : NaN;
-    if (isNaN(tipSec)) throw new SerenoError('invalid_arg', 'could not read the commit time of the tip');
-    if (tipSec <= Math.floor(refMs / 1000)) throw new SerenoError('tip_not_moved', 'the tip of task/' + task + ' is not a new commit since attempt ' + nums[nums.length - 1] + ' ended');
+  const lastN = nums[nums.length - 1];
+  if (typeof last.start_commit === 'string' && gitlib.isSha(last.start_commit)) {
+    // The commit the Builder started from is the reference: a clock or an amend cannot fool it.
+    if (tip === last.start_commit.toLowerCase()) throw new SerenoError('tip_not_moved', 'the tip of task/' + task + ' is still the commit attempt ' + lastN + ' started from');
+    if (gitlib.isAncestor(root, last.start_commit, tip) !== true) throw new SerenoError('tip_unrelated', 'the tip of task/' + task + ' does not build on the commit attempt ' + lastN + ' started from');
+  } else {
+    // An older record with no start_commit: fall back to commit time against the attempt's end.
+    const ref = typeof last.ended_at === 'string' ? last.ended_at : (typeof last.started_at === 'string' ? last.started_at : null);
+    const refMs = ref ? new Date(ref).getTime() : NaN;
+    if (!isNaN(refMs)) {
+      const ct = gitlib.git(root, ['show', '-s', '--format=%ct', '--end-of-options', tip]);
+      const tipSec = ct && /^\d{1,12}$/.test(ct) ? parseInt(ct, 10) : NaN;
+      if (isNaN(tipSec)) throw new SerenoError('invalid_arg', 'could not read the commit time of the tip');
+      if (tipSec <= Math.floor(refMs / 1000)) throw new SerenoError('tip_not_moved', 'the tip of task/' + task + ' is not a new commit since attempt ' + lastN + ' ended');
+    }
   }
   const pinned = checkSpecPin(root, fsafe, task, '.sereno/specs/' + task + '.md');
   const { config_hash } = loadConfig(root);
@@ -636,7 +652,7 @@ function adoptAttempt(root, fsafe, task, a) {
  * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, string | boolean>} a
  */
 function updateAttempt(root, fsafe, task, a) {
-  for (const k of ['spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'started-at']) {
+  for (const k of ['spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'started-at', 'start-commit']) {
     if (a[k] !== undefined) throw new SerenoError('usage', '--' + k + ' cannot be combined with --update');
   }
   const nArg = str(a, 'update');

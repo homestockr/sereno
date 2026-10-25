@@ -7,7 +7,7 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.3.1. Windows is the first
+can observe the files it writes. Version 0.4.0. Windows is the first
 platform; other systems are not yet tested.
 
 ## Install
@@ -36,9 +36,30 @@ object with a check per item (Node, git, the repo, `pipeline.json`, the test com
 `.sereno/` layout, and the red-team agents) and exits non-zero if any check fails.
 The skills do not run it for you.
 
-## The flow
+## Typical flow
 
-Run the commands in this order for each task.
+Write the specs, then let `/sereno:next` carry them. It runs every step that needs no human in one turn and stops at the first step that does, with one line saying what you do next.
+
+```
+/sereno:task add-export "Export the report as CSV"
+/sereno:task export-ui "Add the export button" --after add-export
+/sereno:next     builds and ships add-export, then stops:
+                 "Gate passed for add-export. Before merging: <hold>. Run /sereno:merge add-export."
+(do the human step, if there is one)
+/sereno:merge add-export
+/sereno:next     export-ui is no longer waiting: builds, ships, stops at its merge line
+/sereno:merge export-ui
+```
+
+- **`--after <task>`** queues a task behind another. `/sereno:build` refuses it (`after_not_merged`) until that task is merged into the base. With no argument, `/sereno:next` takes the one task in progress, else the oldest spec that is ready; with two in progress it asks which.
+- **`--hold "<one line>"`** on `/sereno:task` names a human step outside the pipeline, such as applying a migration to staging. `next` and `merge` print it before the merge. Typing `/sereno:merge` confirms it is done; the plugin never runs it.
+- **Preflight.** Before the first build, `next` runs the repo's pre-commit hook (`sereno.js preflight`) and stops, before any Builder tokens are spent, if it fails.
+- **A hook that refuses the Builder's commit** is recorded as `hook_failed`, and the work stays staged. Fix the hook on its own branch, or approve a commit that skips it, then run `sereno.js attempt --adopt --task <name>` to record that commit so ship can go on. Nothing skips a hook without your yes.
+- `next` runs at most 3 build or ship steps per invocation, never merges and never touches a remote.
+
+## The steps
+
+The commands `/sereno:next` runs for you, and that you can also run one at a time.
 
 **`/sereno:task <name> [goal]`** writes the task spec at `.sereno/specs/<name>.md`. The
 spec holds the acceptance criteria, what is out of scope, the tests required, and the
@@ -73,7 +94,7 @@ or by this command is read the same way. Run it whenever you want the brief refr
 | Role | Agent | Tier | Turn cap |
 |------|-------|------|----------|
 | Architect, your session | main session (no agent) | your session's model | n/a |
-| Orchestration (`task`, `build`, `ship`, `merge`, `brief`) | skills | sonnet | n/a |
+| Orchestration (`task`, `next`, `build`, `ship`, `merge`, `brief`) | skills | sonnet | n/a |
 | Builder, default | `sereno:builder` | sonnet | 80 |
 | Builder, mechanical | `sereno:builder-haiku` | haiku | 40 |
 | Builder, substantial | `sereno:builder-opus` | opus | 120 |
