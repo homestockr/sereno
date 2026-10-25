@@ -2232,12 +2232,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(e instanceof Error); assert.strictEqual(e.code, 'LEDGER_UNAVAILABLE');
     });
 
-    test('ledger: WAL mode and user_version 1 on a file db', () => {
+    test('ledger: WAL mode and user_version 2 on a file db', () => {
       const f = tmpFile();
       try {
         const l = openLedger({ file: f });
         assert.strictEqual(l._db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
-        assert.strictEqual(l._db.prepare('PRAGMA user_version').get().user_version, 1);
+        assert.strictEqual(l._db.prepare('PRAGMA user_version').get().user_version, 2);
         l.close();
       } finally { rmDir(f); }
     });
@@ -2494,7 +2494,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('ledger: schema has no prompt/response/command/tool_input/email columns', () => {
       const l = mem();
       const tables = l._db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
-      assert.deepStrictEqual(tables.sort(), ['agents', 'requests', 'sessions', 'spans', 'status']);
+      assert.deepStrictEqual(tables.sort(), ['agents', 'requests', 'session_events', 'sessions', 'spans', 'status']);
       for (const t of tables) {
         for (const c of l._db.prepare('PRAGMA table_info(' + t + ')').all()) {
           assert.ok(c.name === 'prompt_id' || !/prompt|response|command|tool_input|email/i.test(c.name), t + '.' + c.name);
@@ -13755,6 +13755,354 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('[alpha6 exit] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
+  /* ---- alpha7 S1: ledger V2 (session_events, branch, ended_at) ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const { branchForCwd } = require('../src/repos.js');
+    const tmpFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-a7s1-')), 'sereno.db');
+    const rmDir = f => fs.rmSync(path.dirname(f), { recursive: true, force: true });
+    const T0 = Date.now();
+    // a ledger on a fake clock; ev() moves the clock and stamps receivedAt with it
+    const mk = (extra) => {
+      const clk = { t: T0 };
+      const l = openLedger(Object.assign({ file: ':memory:', now: () => clk.t, retentionDays: 36500 }, extra || {}));
+      const ev = (event, payload, t) => { clk.t = t; l.recordHook(event, payload, t); };
+      return { l, clk, ev };
+    };
+    const rows = (l, where) => l._db.prepare('SELECT * FROM session_events' + (where ? ' WHERE ' + where : '') + ' ORDER BY id').all();
+    const S = 'sess-a7';
+
+    test('[alpha7 S1] migration: a V1 database migrates in place and keeps its rows', () => {
+      const f = tmpFile();
+      try {
+        const sqlite = require('node:sqlite');
+        const v1 = new sqlite.DatabaseSync(f);
+        v1.exec(`CREATE TABLE requests (request_key TEXT PRIMARY KEY, request_id TEXT, session_id TEXT, prompt_id TEXT,
+          ts INTEGER NOT NULL, model TEXT, query_source TEXT, source TEXT, agent_name TEXT, agent_id TEXT, attribution TEXT NOT NULL,
+          input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cost_micros INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER NOT NULL DEFAULT 0);
+          CREATE INDEX requests_session_ts ON requests(session_id, ts);
+          CREATE INDEX requests_ts ON requests(ts);
+          CREATE INDEX requests_request_id ON requests(request_id);
+          CREATE TABLE spans (request_id TEXT PRIMARY KEY, session_id TEXT, agent_id TEXT, ts INTEGER NOT NULL);
+          CREATE TABLE sessions (session_id TEXT PRIMARY KEY, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, cwd TEXT, project TEXT, model TEXT);
+          CREATE TABLE agents (session_id TEXT NOT NULL, agent_id TEXT NOT NULL, agent_type TEXT, started INTEGER, stopped INTEGER, PRIMARY KEY (session_id, agent_id));
+          CREATE TABLE status (session_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, cost_micros INTEGER NOT NULL);
+          PRAGMA user_version=1;`);
+        v1.prepare('INSERT INTO sessions (session_id, first_seen, last_seen, cwd, project) VALUES (?,?,?,?,?)').run('old', T0, T0, 'C:\\w\\p', 'p');
+        v1.prepare(`INSERT INTO requests (request_key, request_id, session_id, ts, source, attribution, cost_micros) VALUES ('k','r','old',?,'main','explicit',500)`).run(T0);
+        v1.close();
+        const l = openLedger({ file: f, retentionDays: 36500 });
+        assert.strictEqual(l._db.prepare('PRAGMA user_version').get().user_version, 2);
+        const cols = l._db.prepare('PRAGMA table_info(sessions)').all().map(c => c.name);
+        assert.ok(cols.includes('branch') && cols.includes('ended_at'));
+        assert.deepStrictEqual(l._db.prepare('PRAGMA table_info(session_events)').all().map(c => c.name),
+          ['id', 'session_id', 'ts', 'kind', 'tool_name', 'tool_use_id', 'agent_id', 'ended', 'duration_ms', 'outcome', 'prompt_id']);
+        const idx = l._db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='session_events'").all().map(r => r.name);
+        assert.strictEqual(idx.length, 2);
+        assert.strictEqual(l.totals().costMicros, 500);
+        assert.strictEqual(l._db.prepare('SELECT project, branch, ended_at FROM sessions').get().project, 'p');
+        l.close();
+        const l2 = openLedger({ file: f, retentionDays: 36500 });   // re-open: no second migration
+        assert.strictEqual(l2._db.prepare('PRAGMA user_version').get().user_version, 2);
+        l2.close();
+      } finally { rmDir(f); }
+    });
+
+    test('[alpha7 S1] pairing: PostToolUse closes the open row by tool_use_id; duration from the payload when finite', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'tu1' }, T0 + 1000);
+      ev('PreToolUse', { session_id: S, tool_name: 'Read', tool_use_id: 'tu2' }, T0 + 1100);
+      ev('PostToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'tu1', duration_ms: 1234 }, T0 + 3000);
+      ev('PostToolUse', { session_id: S, tool_name: 'Read', tool_use_id: 'tu2', duration_ms: 'soon' }, T0 + 1600);
+      const [a, b] = rows(l, "kind='tool'");
+      assert.deepStrictEqual([a.tool_name, a.ts, a.ended, a.duration_ms, a.outcome], ['Bash', T0 + 1000, T0 + 3000, 1234, 'ok']);
+      assert.deepStrictEqual([b.ended, b.duration_ms, b.outcome], [T0 + 1600, 500, 'ok']);
+      ev('PostToolUse', { session_id: 'other', tool_use_id: 'tu1' }, T0 + 4000);   // other session: no match
+      ev('PostToolUse', { session_id: S, tool_use_id: 'nope' }, T0 + 4000);          // never started: nothing invented
+      assert.strictEqual(rows(l).length, 2);
+      l.close();
+    });
+
+    test('[alpha7 S1] a denied tool gets no PostToolUse and closes as unfinished at Stop', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'den' }, T0 + 100);
+      ev('Stop', { session_id: S }, T0 + 5100);
+      const t = rows(l, "kind='tool'")[0];
+      assert.deepStrictEqual([t.ended, t.duration_ms, t.outcome], [T0 + 5100, 5000, 'unfinished']);
+      const st = rows(l, "kind='stop'");
+      assert.strictEqual(st.length, 1); assert.strictEqual(st[0].ts, T0 + 5100);
+      ev('StopFailure', { session_id: S }, T0 + 6000);
+      assert.strictEqual(rows(l, "kind='stop'").length, 2);
+      l.close();
+    });
+
+    test('[alpha7 S1] a late PostToolUse repairs a row Stop closed as unfinished (background agents outlive Stop)', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Edit', tool_use_id: 'bg', agent_id: 'ag1' }, T0 + 100);
+      ev('Stop', { session_id: S }, T0 + 1000);
+      ev('PostToolUse', { session_id: S, tool_name: 'Edit', tool_use_id: 'bg', agent_id: 'ag1', duration_ms: 2000 }, T0 + 2100);
+      const t = rows(l, "kind='tool'")[0];
+      assert.deepStrictEqual([t.agent_id, t.ended, t.duration_ms, t.outcome], ['ag1', T0 + 2100, 2000, 'ok']);
+      l.close();
+    });
+
+    test('[alpha7 S1] subagent tool rows keep the agent_id as given', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Grep', tool_use_id: 'x1', agent_id: 'agent-9' }, T0 + 10);
+      ev('PreToolUse', { session_id: S, tool_name: 'Grep', tool_use_id: 'x2' }, T0 + 20);
+      assert.deepStrictEqual(rows(l, "kind='tool'").map(r => r.agent_id), ['agent-9', null]);
+      l.close();
+    });
+
+    test('[alpha7 S1] Agent rows: PostToolUse leaves the row open, SubagentStop closes the oldest open one, Stop closes the rest', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Agent', tool_use_id: 'a1' }, T0 + 100);
+      ev('SubagentStart', { session_id: S, agent_id: 'sub1', agent_type: 'builder' }, T0 + 150);
+      ev('PostToolUse', { session_id: S, tool_name: 'Agent', tool_use_id: 'a1', duration_ms: 40 }, T0 + 200);
+      let a = rows(l, "tool_name='Agent'")[0];
+      assert.strictEqual(a.ended, null); assert.strictEqual(a.outcome, null);
+      ev('PreToolUse', { session_id: S, tool_name: 'Agent', tool_use_id: 'a2' }, T0 + 300);
+      ev('SubagentStop', { session_id: S, agent_id: 'sub1', agent_type: 'builder' }, T0 + 4300);
+      const [r1, r2] = rows(l, "tool_name='Agent'");
+      assert.deepStrictEqual([r1.ended, r1.duration_ms, r1.outcome], [T0 + 4300, 4200, 'ok']);
+      assert.strictEqual(r2.ended, null);
+      assert.strictEqual(l._db.prepare('SELECT stopped FROM agents WHERE agent_id=?').get('sub1').stopped, T0 + 4300);   // existing behaviour kept
+      ev('SessionEnd', { session_id: S }, T0 + 9000);
+      assert.deepStrictEqual([rows(l, "tool_use_id='a2'")[0].outcome, rows(l, "tool_use_id='a2'")[0].ended], ['unfinished', T0 + 9000]);
+      l.close();
+    });
+
+    test('[alpha7 S1] a wait starts at the open tool, copies its tool_use_id, and PostToolUse closes it as answered', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'w1' }, T0 + 1000);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt', message: 'x' }, T0 + 4000);   // lags the tool
+      const w = rows(l, "kind='wait'")[0];
+      assert.deepStrictEqual([w.ts, w.tool_use_id, w.ended, w.agent_id], [T0 + 1000, 'w1', null, null]);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt' }, T0 + 4500);   // repeat for the same tool
+      assert.strictEqual(rows(l, "kind='wait'").length, 1);
+      ev('PostToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'w1', duration_ms: 9000 }, T0 + 12000);
+      const w2 = rows(l, "kind='wait'")[0];
+      assert.deepStrictEqual([w2.ended, w2.duration_ms, w2.outcome], [T0 + 12000, 11000, 'answered']);
+      l.close();
+    });
+
+    test('[alpha7 S1] an unanswered wait closes as unfinished at Stop', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Write', tool_use_id: 'w2' }, T0 + 1000);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt' }, T0 + 2000);
+      ev('Stop', { session_id: S }, T0 + 7000);
+      const w = rows(l, "kind='wait'")[0];
+      assert.deepStrictEqual([w.ts, w.ended, w.duration_ms, w.outcome], [T0 + 1000, T0 + 7000, 6000, 'unfinished']);
+      l.close();
+    });
+
+    test('[alpha7 S1] wait thread selection: agent_id match first, else the main thread, else the notification time', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'm1' }, T0 + 100);
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 's1', agent_id: 'ag' }, T0 + 500);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt', agent_id: 'ag' }, T0 + 900);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt' }, T0 + 950);
+      const w = rows(l, "kind='wait'");
+      assert.deepStrictEqual(w.map(r => [r.ts, r.tool_use_id, r.agent_id]), [[T0 + 500, 's1', 'ag'], [T0 + 100, 'm1', null]]);
+      ev('Notification', { session_id: 'empty', notification_type: 'permission_prompt' }, T0 + 2000);
+      const e = rows(l, "session_id='empty'")[0];
+      assert.deepStrictEqual([e.kind, e.ts, e.tool_use_id], ['wait', T0 + 2000, null]);
+      l.close();
+    });
+
+    test('[alpha7 S1] non-permission notifications are ignored', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'n1' }, T0 + 100);
+      for (const t of ['idle_prompt', 'auth_success', 'elicitation_dialog', '', undefined, 7]) {
+        ev('Notification', { session_id: S, notification_type: t }, T0 + 200);
+      }
+      ev('Notification', { session_id: S }, T0 + 200);
+      assert.strictEqual(rows(l, "kind='wait'").length, 0);
+      l.close();
+    });
+
+    test('[alpha7 S1] turns store ts and prompt_id only; PreCompact adds a compact row', () => {
+      const { l, ev } = mk();
+      ev('UserPromptSubmit', { session_id: S, prompt_id: 'p-1', prompt: 'hello world' }, T0 + 10);
+      ev('UserPromptSubmit', { session_id: S, prompt: '<task-notification>x' }, T0 + 20);
+      ev('PreCompact', { session_id: S, trigger: 'auto' }, T0 + 30);
+      const r = rows(l);
+      assert.deepStrictEqual(r.map(x => [x.kind, x.ts, x.prompt_id, x.tool_name, x.tool_use_id]),
+        [['turn', T0 + 10, 'p-1', null, null], ['turn', T0 + 20, null, null, null], ['compact', T0 + 30, null, null, null]]);
+      l.close();
+    });
+
+    test('[alpha7 S1] receivedAt is used within 5 s of the collector clock, otherwise Date.now()', () => {
+      const { l, clk } = mk();
+      clk.t = T0 + 100000;
+      const hit = (r) => { l.recordHook('PreCompact', { session_id: S }, r); return rows(l).pop().ts; };
+      assert.strictEqual(hit(clk.t - 4000), clk.t - 4000);
+      assert.strictEqual(hit(clk.t + 4999), clk.t + 4999);
+      assert.strictEqual(hit(clk.t - 6000), clk.t);
+      assert.strictEqual(hit(clk.t + 6000), clk.t);
+      assert.strictEqual(hit(NaN), clk.t);
+      assert.strictEqual(hit(Infinity), clk.t);
+      assert.strictEqual(hit('123'), clk.t);
+      assert.strictEqual(hit(undefined), clk.t);
+      l.close();
+    });
+
+    test('[alpha7 S1] SessionEnd closes open rows and sets ended_at; a new SessionStart clears it', () => {
+      const { l, ev } = mk();
+      ev('SessionStart', { session_id: S, cwd: 'C:\\w\\p' }, T0);
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'e1' }, T0 + 100);
+      ev('SessionEnd', { session_id: S }, T0 + 900);
+      assert.strictEqual(l._db.prepare('SELECT ended_at FROM sessions WHERE session_id=?').get(S).ended_at, T0 + 900);
+      assert.strictEqual(rows(l, "kind='tool'")[0].outcome, 'unfinished');
+      assert.strictEqual(rows(l, "kind='stop'").length, 0);
+      ev('SessionEnd', { session_id: 'never-started' }, T0 + 950);   // still gets a row to carry ended_at
+      assert.strictEqual(l._db.prepare('SELECT ended_at FROM sessions WHERE session_id=?').get('never-started').ended_at, T0 + 950);
+      ev('SessionStart', { session_id: S, cwd: 'C:\\w\\p' }, T0 + 2000);
+      assert.strictEqual(l._db.prepare('SELECT ended_at FROM sessions WHERE session_id=?').get(S).ended_at, null);
+      l.close();
+    });
+
+    test('[alpha7 S1] tool_name and ids are capped; events without a session_id are dropped', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'mcp__' + 'x'.repeat(400), tool_use_id: 'u'.repeat(400) }, T0 + 1);
+      ev('PreToolUse', { tool_name: 'Bash', tool_use_id: 'z' }, T0 + 2);
+      const r = rows(l);
+      assert.strictEqual(r.length, 1);
+      assert.strictEqual(r[0].tool_name.length, 128); assert.strictEqual(r[0].tool_use_id.length, 128);
+      l.close();
+    });
+
+    test('[alpha7 S1] setBranch fills a null branch and never overwrites', () => {
+      const { l, ev } = mk();
+      ev('SessionStart', { session_id: S, cwd: 'C:\\w\\p' }, T0);
+      assert.strictEqual(l.setBranch(S, 'main'), true);
+      assert.strictEqual(l.setBranch(S, 'other'), false);
+      assert.strictEqual(l.setBranch('missing', 'main'), false);
+      assert.strictEqual(l._db.prepare('SELECT branch FROM sessions WHERE session_id=?').get(S).branch, 'main');
+      l.close();
+    });
+
+    test('[alpha7 S1] branchForCwd: longest worktree prefix, case-insensitive on Windows paths, separators normalised', () => {
+      const snap = {
+        r1: { worktrees: [{ path: 'C:\\Work\\Repo', branch: 'main' }, { path: 'C:\\Work\\Repo\\wt\\feat', branch: 'feat/x' }, { path: 'C:\\Work\\Repo\\wt\\det', branch: null }] },
+        r2: { worktrees: [{ path: 'C:\\Work\\Repo2', branch: 'dev' }] },
+      };
+      assert.strictEqual(branchForCwd(snap, 'c:/work/repo'), 'main');
+      assert.strictEqual(branchForCwd(snap, 'C:\\WORK\\REPO\\src\\deep'), 'main');
+      assert.strictEqual(branchForCwd(snap, 'C:\\Work\\Repo\\wt\\feat\\src'), 'feat/x');
+      assert.strictEqual(branchForCwd(snap, 'C:\\Work\\Repo\\wt\\det\\src'), null);   // detached HEAD, never falls back to a shorter prefix
+      assert.strictEqual(branchForCwd(snap, 'C:\\Work\\Repo2\\a'), 'dev');
+      assert.strictEqual(branchForCwd(snap, 'C:\\Work\\RepoX'), null);   // a sibling that shares a string prefix
+      assert.strictEqual(branchForCwd(snap, 'D:\\elsewhere'), null);
+      assert.strictEqual(branchForCwd(snap, ''), null);
+      assert.strictEqual(branchForCwd({}, 'C:\\Work\\Repo'), null);
+    });
+
+    await atest('[alpha7 S1] collector: receivedAt is plumbed through; branch backfills once resolvable, at most once a minute, never overwritten', async () => {
+      const http = require('node:http');
+      const { Store } = require('../src/store.js');
+      const clk = { t: Date.now() };
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      let snap = {};
+      const repos = { snapshot: () => snap };
+      const c = createCollector(new Store(), 0, { ledger: l, repos, now: () => clk.t });
+      let port = 0;
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (port = a.port, res()))));
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const send = (event, payload, extra) => new Promise((res) => {
+        const body = JSON.stringify(Object.assign({ event, payload }, extra || {}));
+        const r = http.request({ host: '127.0.0.1', port, path: '/hook', method: 'POST', agent: false, headers: { 'content-type': 'application/json' } }, (x) => { x.resume(); x.on('end', res); });
+        r.on('error', res); r.end(body);
+      });
+      const branch = () => (l._db.prepare('SELECT branch FROM sessions WHERE session_id=?').get('cs1') || {}).branch;
+      try {
+        const recv = Date.now() - 2000;
+        await send('PreCompact', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' }, { receivedAt: recv });
+        await sleep(60);
+        assert.strictEqual(rows(l, "kind='compact'")[0].ts, recv, 'the shim receivedAt reaches the ledger');
+        await send('SessionStart', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' }, { receivedAt: Date.now() });
+        await sleep(60);
+        assert.strictEqual(branch() ?? null, null, 'repo not known yet');
+        snap = { r1: { worktrees: [{ path: 'C:\\Work\\Repo', branch: 'main' }] } };
+        await send('UserPromptSubmit', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' });
+        await sleep(60);
+        assert.strictEqual(branch() ?? null, null, 'throttled: no second attempt inside a minute');
+        clk.t += 61000;
+        await send('UserPromptSubmit', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' });
+        await sleep(60);
+        assert.strictEqual(branch(), 'main');
+        snap = { r1: { worktrees: [{ path: 'C:\\Work\\Repo', branch: 'other' }] } };
+        clk.t += 61000;
+        await send('UserPromptSubmit', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' });
+        await sleep(60);
+        assert.strictEqual(branch(), 'main', 'a set branch is never overwritten');
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+
+    test('[alpha7 S1] prune covers session_events by ts', () => {
+      const { l, ev } = mk();
+      const old = T0 - 100 * 86400000;
+      l._db.prepare("INSERT INTO session_events (session_id, ts, kind) VALUES ('s', ?, 'turn')").run(old);
+      ev('UserPromptSubmit', { session_id: 's' }, T0);
+      assert.strictEqual(rows(l).length, 2);
+      l.prune(90);
+      assert.deepStrictEqual(rows(l).map(r => r.ts), [T0]);
+      l.close();
+    });
+
+    await atest('[alpha7 S1] prune also runs on a daily timer that is unref\'d and cleared on close', async () => {
+      const clk = { t: T0 };
+      const l = openLedger({ file: ':memory:', now: () => clk.t, retentionDays: 90, pruneEveryMs: 25 });
+      assert.strictEqual(l._pruneTimer.hasRef(), false, 'never keeps the process alive');
+      l._db.prepare("INSERT INTO session_events (session_id, ts, kind) VALUES ('s', ?, 'turn')").run(T0 + 10 * 86400000);
+      assert.strictEqual(rows(l).length, 1);
+      clk.t = T0 + 200 * 86400000;   // the row is now older than retention; only the timer can notice
+      await new Promise(r => setTimeout(r, 120));
+      assert.strictEqual(rows(l).length, 0, 'the timer pruned');
+      l.close();
+      assert.doesNotThrow(() => l._pruneTimer.close());   // already cleared: closing again is harmless
+      const def = openLedger({ file: ':memory:' });
+      assert.strictEqual(def._pruneTimer._idleTimeout, 86400000, 'daily by default');
+      def.close();
+    });
+
+    test('[alpha7 S1] privacy canary: prompt, tool_input, tool_response and command text reach no table or file byte', () => {
+      const f = tmpFile();
+      try {
+        const m = (n) => 'SERENO-A7-CANARY-' + n + '-71c4';
+        const markers = ['pre', 'post', 'prompt', 'cmd', 'note', 'resp', 'path', 'sub', 'stop', 'start', 'compact'].map(m);
+        const forbidden = (n) => ({ prompt: m(n), command: m(n), tool_input: { command: m(n), file_path: m(n), nested: [m(n)] },
+          tool_response: { stdout: m(n), agentId: m(n) }, message: m(n), transcript_path: m(n), last_assistant_message: m(n), custom_instructions: m(n) });
+        const l = openLedger({ file: f, retentionDays: 36500 });
+        const hook = (e, p, n) => l.recordHook(e, Object.assign({ session_id: 'canary-s' }, p, forbidden(n)), Date.now());
+        hook('SessionStart', { cwd: 'C:\\w\\p', model: 'm' }, 'start');
+        hook('PreToolUse', { tool_name: 'Bash', tool_use_id: 'c1' }, 'pre');
+        hook('Notification', { notification_type: 'permission_prompt' }, 'note');
+        hook('PostToolUse', { tool_name: 'Bash', tool_use_id: 'c1', duration_ms: 5 }, 'post');
+        hook('PreToolUse', { tool_name: 'Agent', tool_use_id: 'c2' }, 'sub');
+        hook('UserPromptSubmit', { prompt_id: 'pid-1' }, 'prompt');
+        hook('PreCompact', {}, 'compact');
+        hook('Stop', {}, 'stop');
+        hook('SessionEnd', {}, 'cmd');
+        assert.ok(rows(l).length >= 6, 'events were recorded');
+        // table dump: every table, every column
+        const dump = [];
+        for (const t of l._db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
+          dump.push(JSON.stringify(l._db.prepare('SELECT * FROM ' + t.name).all()));
+        }
+        const all = dump.join('\n');
+        for (const mk2 of markers) assert.ok(!all.includes(mk2), 'marker in table dump: ' + mk2);
+        l.close();
+        for (const p of [f, f + '-wal', f + '-shm']) {
+          if (!fs.existsSync(p)) continue;
+          const bytes = fs.readFileSync(p);
+          for (const mk2 of markers) assert.ok(!bytes.includes(mk2), 'marker in ' + path.basename(p) + ': ' + mk2);
+        }
+      } finally { rmDir(f); }
+    });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

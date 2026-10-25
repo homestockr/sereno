@@ -34,7 +34,23 @@ CREATE TABLE agents (session_id TEXT NOT NULL, agent_id TEXT NOT NULL, agent_typ
   started INTEGER, stopped INTEGER, PRIMARY KEY (session_id, agent_id));
 CREATE TABLE status (session_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, cost_micros INTEGER NOT NULL);
 `;
-const MIGRATIONS = [SCHEMA_V1];
+// V2 (alpha.7): one row per tool call / permission wait / turn / stop / compact. Columns are an
+// allowlist; nothing from tool_input, tool_response or prompt text has a column.
+const SCHEMA_V2 = `
+CREATE TABLE session_events (
+  id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL,
+  tool_name TEXT, tool_use_id TEXT, agent_id TEXT, ended INTEGER, duration_ms INTEGER,
+  outcome TEXT, prompt_id TEXT);
+CREATE INDEX session_events_session_ts ON session_events(session_id, ts);
+CREATE INDEX session_events_session_tool ON session_events(session_id, tool_use_id);
+ALTER TABLE sessions ADD COLUMN branch TEXT;
+ALTER TABLE sessions ADD COLUMN ended_at INTEGER;
+`;
+const MIGRATIONS = [SCHEMA_V1, SCHEMA_V2];
+const MAX_NAME = 128;       // tool_name cap
+const MAX_ID = 128;         // id caps (tool_use_id, agent_id, prompt_id)
+const RECEIVED_SKEW_MS = 5000;   // trust the shim's receivedAt only within this of the collector clock
+const PRUNE_EVERY_MS = DAY_MS;
 
 /** @returns {{ roles: Record<string, { costUsd: number, explicit: number, inferred: number, unattributed: number }> }} */
 function emptyRoleSpend() {
@@ -46,9 +62,11 @@ function emptyRoleSpend() {
 
 /** @param {any} v @returns {string|null} */
 const str = v => (typeof v === 'string' && v !== '' ? v : null);
+/** @param {any} v @param {number} max @returns {string|null} */
+const strCap = (v, max) => { const s = str(v); return s === null ? null : s.slice(0, max); };
 
 /**
- * @param {{ file?: string, retentionDays?: number }} [opts]
+ * @param {{ file?: string, retentionDays?: number, now?: () => number, pruneEveryMs?: number }} [opts]
  */
 function openLedger(opts = {}) {
   /** @type {any} */
@@ -59,6 +77,9 @@ function openLedger(opts = {}) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const rd = Number(opts.retentionDays);
   const retentionDays = Number.isFinite(rd) && rd > 0 ? rd : 90;
+  const clock = typeof opts.now === 'function' ? opts.now : Date.now;   // injectable for tests
+  const pe = Number(opts.pruneEveryMs);
+  const pruneEveryMs = Number.isFinite(pe) && pe > 0 ? pe : PRUNE_EVERY_MS;
   const db = new sqlite.DatabaseSync(file, { timeout: 2000 });   // busy timeout: a second process waits instead of SQLITE_BUSY
   try {
   let closed = false;
@@ -91,7 +112,7 @@ function openLedger(opts = {}) {
     upgrade: db.prepare(`UPDATE requests SET agent_id=?, attribution='explicit' WHERE request_id=?
       AND source='subagent' AND attribution='unknown'`),
     sessStart: db.prepare(`INSERT INTO sessions (session_id, first_seen, last_seen, cwd, project, model)
-      VALUES (?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET cwd=COALESCE(excluded.cwd, cwd),
+      VALUES (?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET ended_at=NULL, cwd=COALESCE(excluded.cwd, cwd),
       project=COALESCE(excluded.project, project), model=COALESCE(excluded.model, model),
       first_seen=MIN(first_seen, excluded.first_seen), last_seen=MAX(last_seen, excluded.last_seen)`),
     agentGet: db.prepare('SELECT agent_type FROM agents WHERE session_id=? AND agent_id=?'),
@@ -112,6 +133,27 @@ function openLedger(opts = {}) {
     pruneAgents: db.prepare(`DELETE FROM agents WHERE COALESCE(stopped, started) < ?
       OR session_id NOT IN (SELECT session_id FROM sessions)`),
     pruneStatus: db.prepare('DELETE FROM status WHERE ts < ?'),
+    pruneEvents: db.prepare('DELETE FROM session_events WHERE ts < ?'),
+    // session_events
+    insEv: db.prepare(`INSERT INTO session_events (session_id, ts, kind, tool_name, tool_use_id, agent_id, prompt_id)
+      VALUES (?,?,?,?,?,?,?)`),
+    // a late PostToolUse may repair a row Stop already closed as unfinished (background agents outlive Stop)
+    toolOpen: db.prepare(`SELECT id, ts, tool_name FROM session_events WHERE session_id=? AND tool_use_id=? AND kind='tool'
+      AND (ended IS NULL OR outcome='unfinished') ORDER BY id DESC LIMIT 1`),
+    evClose: db.prepare('UPDATE session_events SET ended=?, duration_ms=?, outcome=? WHERE id=?'),
+    waitsOpen: db.prepare(`SELECT id, ts FROM session_events WHERE session_id=? AND tool_use_id=? AND kind='wait'
+      AND (ended IS NULL OR outcome='unfinished')`),
+    openTool: db.prepare(`SELECT ts, tool_use_id FROM session_events WHERE session_id=? AND kind='tool' AND ended IS NULL
+      AND agent_id IS ? ORDER BY ts DESC, id DESC LIMIT 1`),
+    openWaitFor: db.prepare(`SELECT 1 FROM session_events WHERE session_id=? AND kind='wait' AND ended IS NULL AND tool_use_id=?`),
+    insWait: db.prepare(`INSERT INTO session_events (session_id, ts, kind, tool_use_id, agent_id) VALUES (?,?,'wait',?,?)`),
+    openAgentRow: db.prepare(`SELECT id, ts FROM session_events WHERE session_id=? AND kind='tool' AND tool_name='Agent'
+      AND ended IS NULL ORDER BY ts ASC, id ASC LIMIT 1`),
+    closeAllOpen: db.prepare(`UPDATE session_events SET ended=?, duration_ms=MAX(0, ?-ts), outcome='unfinished'
+      WHERE session_id=? AND kind IN ('tool','wait') AND ended IS NULL`),
+    sessEnd: db.prepare(`INSERT INTO sessions (session_id, first_seen, last_seen, ended_at) VALUES (?,?,?,?)
+      ON CONFLICT(session_id) DO UPDATE SET ended_at=excluded.ended_at, last_seen=MAX(last_seen, excluded.last_seen)`),
+    setBranch: db.prepare('UPDATE sessions SET branch=? WHERE session_id=? AND branch IS NULL'),
   };
 
   /** @template T @param {() => T} fn @returns {T} */
@@ -157,27 +199,90 @@ function openLedger(opts = {}) {
     });
   }
 
-  /** @param {string} event @param {any} payload */
-  function recordHook(event, payload) {
+  /** The shim's receivedAt when it is within RECEIVED_SKEW_MS of our clock, else our clock. @param {any} receivedAt */
+  function stamp(receivedAt) {
+    const n = clock();
+    return typeof receivedAt === 'number' && Number.isFinite(receivedAt) && Math.abs(receivedAt - n) <= RECEIVED_SKEW_MS
+      ? Math.round(receivedAt) : n;
+  }
+
+  /** Close one row; duration falls back to ended - ts. @param {number} id @param {number} startTs @param {number} ts @param {any} dur @param {string} outcome */
+  function closeRow(id, startTs, ts, dur, outcome) {
+    const d = typeof dur === 'number' && Number.isFinite(dur) && dur >= 0 ? Math.round(dur) : Math.max(0, ts - startTs);
+    q.evClose.run(ts, d, outcome, id);
+  }
+
+  /**
+   * Records the allowlisted fields of one hook event. Reads named keys only: never `prompt`,
+   * `tool_input`, `tool_response` or any other free-text field. `receivedAt` is the shim's clock.
+   * Agent rows: Agent's PostToolUse returns at launch, and its payload only names the agent inside
+   * tool_response (never read), so the row cannot be linked by id. SubagentStop closes the OLDEST
+   * open Agent row of the session (FIFO; exact for sequential agents, approximate for parallel
+   * ones); anything left open closes as 'unfinished' at Stop/StopFailure/SessionEnd.
+   * @param {string} event @param {any} payload @param {number} [receivedAt]
+   */
+  function recordHook(event, payload, receivedAt) {
     live();
     const p = payload && typeof payload === 'object' ? payload : {};
     const sessionId = str(p.session_id);
     if (!sessionId) return;
-    const now = Date.now();
+    const ts = stamp(receivedAt);
+    const agentId = strCap(p.agent_id, MAX_ID);
     if (event === 'SessionStart') {
       const cwd = str(p.cwd);
       const project = cwd ? path.basename(cwd) || null : null;
-      q.sessStart.run(sessionId, now, now, cwd, project, str(p.model));
+      q.sessStart.run(sessionId, ts, ts, cwd, project, str(p.model));
     } else if (event === 'SubagentStart' || event === 'SubagentStop') {
-      const agentId = str(p.agent_id);
       if (!agentId) return;
       const type = typeof p.agent_type === 'string' ? p.agent_type : '';
-      if (event === 'SubagentStart') q.agentStart.run(sessionId, agentId, type, now);
+      if (event === 'SubagentStart') q.agentStart.run(sessionId, agentId, type, ts);
       else {
-        if (!q.agentGet.get(sessionId, agentId) && type === '') return;
-        q.agentStop.run(sessionId, agentId, type, now, now);
+        tx(() => {
+          const r = q.openAgentRow.get(sessionId);
+          if (r) closeRow(Number(r.id), Number(r.ts), ts, null, 'ok');
+          if (!q.agentGet.get(sessionId, agentId) && type === '') return;
+          q.agentStop.run(sessionId, agentId, type, ts, ts);
+        });
       }
+    } else if (event === 'PreToolUse') {
+      q.insEv.run(sessionId, ts, 'tool', strCap(p.tool_name, MAX_NAME), strCap(p.tool_use_id, MAX_ID), agentId, null);
+    } else if (event === 'PostToolUse' || event === 'PostToolUseFailure') {
+      const toolUseId = strCap(p.tool_use_id, MAX_ID);
+      if (!toolUseId) return;
+      tx(() => {
+        const r = q.toolOpen.get(sessionId, toolUseId);
+        const isAgent = r ? r.tool_name === 'Agent' : p.tool_name === 'Agent';
+        if (r && !isAgent) closeRow(Number(r.id), Number(r.ts), ts, p.duration_ms, event === 'PostToolUse' ? 'ok' : 'error');
+        for (const w of q.waitsOpen.all(sessionId, toolUseId)) closeRow(Number(w.id), Number(w.ts), ts, null, 'answered');
+      });
+    } else if (event === 'Notification') {
+      if (p.notification_type !== 'permission_prompt') return;
+      tx(() => {
+        // The wait began when the pending tool started, not when the notification (lagging ~8 s) arrived.
+        let open = q.openTool.get(sessionId, agentId);
+        if (!open && agentId) open = q.openTool.get(sessionId, null);
+        const toolUseId = open ? str(open.tool_use_id) : null;
+        if (toolUseId && q.openWaitFor.get(sessionId, toolUseId)) return;   // duplicate prompt for the same tool
+        q.insWait.run(sessionId, open ? Number(open.ts) : ts, toolUseId, agentId);
+      });
+    } else if (event === 'UserPromptSubmit') {
+      q.insEv.run(sessionId, ts, 'turn', null, null, null, strCap(p.prompt_id, MAX_ID));
+    } else if (event === 'PreCompact') {
+      q.insEv.run(sessionId, ts, 'compact', null, null, null, null);
+    } else if (event === 'Stop' || event === 'StopFailure' || event === 'SessionEnd') {
+      tx(() => {
+        if (event !== 'SessionEnd') q.insEv.run(sessionId, ts, 'stop', null, null, null, null);
+        q.closeAllOpen.run(ts, ts, sessionId);
+        if (event === 'SessionEnd') q.sessEnd.run(sessionId, ts, ts, ts);
+      });
     }
+  }
+
+  /** Sets sessions.branch only while it is null; never overwrites. @param {string} sessionId @param {string} branch */
+  function setBranch(sessionId, branch) {
+    live();
+    if (typeof sessionId !== 'string' || !sessionId || typeof branch !== 'string' || !branch) return false;
+    return Number(q.setBranch.run(branch.slice(0, 256), sessionId).changes) > 0;
   }
 
   /** @param {string} sessionId @param {number} costUsd @param {number} ts */
@@ -558,8 +663,9 @@ function openLedger(opts = {}) {
   /** @param {number} [days] */
   function prune(days = retentionDays) {
     live();
-    const cutoff = Date.now() - days * DAY_MS;
+    const cutoff = clock() - days * DAY_MS;
     tx(() => {
+      q.pruneEvents.run(cutoff);
       q.pruneReq.run(cutoff); q.pruneSpan.run(cutoff); q.pruneSess.run(cutoff);
       q.pruneAgents.run(cutoff); q.pruneStatus.run(cutoff);
     });
@@ -567,11 +673,15 @@ function openLedger(opts = {}) {
 
   function close() {
     if (closed) return;
+    clearInterval(pruneTimer);
     try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } finally { closed = true; db.close(); }
   }
 
   prune(retentionDays);
-  return { file, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, breakdown, cacheTotals, projectDetail, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, prune, close, _db: db };
+  // Prune again daily while the app runs, not only at open. unref: never keeps the process alive.
+  const pruneTimer = setInterval(() => { try { if (!closed) prune(retentionDays); } catch (_) { /* next tick retries */ } }, pruneEveryMs);
+  if (typeof pruneTimer.unref === 'function') pruneTimer.unref();
+  return { file, setBranch, _pruneTimer: pruneTimer, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, breakdown, cacheTotals, projectDetail, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, prune, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }

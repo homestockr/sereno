@@ -212,6 +212,25 @@ function createCollector(store, port, opts) {
       return pipelineAlerts.stalled().slice(0, 50).map((d) => ({ project: String(d.project).slice(0, 128), task: String(d.task).slice(0, 128), kind: d.kind === 'repair' ? 'repair' : 'build' }));
     } catch (_) { return []; }
   }
+  // Branch backfill: sessions.branch is often unknown at SessionStart, so any later hook retries.
+  // Resolved at most once per session per minute; once set it is never looked at again, and the
+  // ledger itself never overwrites a non-null branch.
+  const BRANCH_RETRY_MS = 60000;
+  const branchTried = new Map();   // session_id -> last attempt ms, or Infinity once set
+  function noteBranch(p) {
+    if (!repos || !ledger || typeof ledger.setBranch !== 'function' || !p) return;
+    const sid = p.session_id, cwd = p.cwd;
+    if (typeof sid !== 'string' || !sid || typeof cwd !== 'string' || !cwd) return;
+    const t = now();
+    const last = branchTried.get(sid);
+    if (last !== undefined && (last === Infinity || t - last < BRANCH_RETRY_MS)) return;
+    branchTried.delete(sid); branchTried.set(sid, t);
+    if (branchTried.size > 500) branchTried.delete(branchTried.keys().next().value);
+    let b = null;
+    try { b = require('./repos.js').branchForCwd(repos.snapshot(), cwd); } catch (_) { b = null; }
+    if (b && ledger.setBranch(sid, b)) branchTried.set(sid, Infinity);   // no row yet or already set: retry in a minute
+  }
+
   function snapshot() { return Object.assign(store.snapshot(), { spend: spendState(), decisions: decisionList(), stalled: stalledList() }); }
   function refreshSpend() { computeSpend(); broadcast(); }
   function tickSpend() {
@@ -841,7 +860,10 @@ function createCollector(store, port, opts) {
         // The ledger is a record, not the live view: its failures stay here.
         if (ledger) {
           try {
-            if (url === '/hook') ledger.recordHook(event, msg.payload);
+            if (url === '/hook') {
+              ledger.recordHook(event, msg.payload, msg.receivedAt);
+              noteBranch(msg.payload);
+            }
             else {
               const p = msg.payload;
               const cost = p.cost && p.cost.total_cost_usd;

@@ -326,10 +326,28 @@ Everything else never reaches disk.
 **LLM request spans** (`span.type == "llm_request"`): `span.type`, `request_id`,
 `session.id`, `agent_id`.
 
-**Hook events** (via `src/ledger.js` `recordHook`): `session_id`, `cwd`, `model`,
-`agent_id`, `agent_type`. Only `SessionStart`, `SubagentStart` and `SubagentStop` are
-recorded; `recordHook` ignores every other event. The `prompt`, `tool_input`,
-`tool_response`, `transcript_path` and `last_assistant_message` fields are never read.
+**Hook events** (via `src/ledger.js` `recordHook`, ledger schema V2): named keys only.
+`session_id`, `cwd`, `model`, `agent_id`, `agent_type`, `tool_name` (capped at 128
+characters), `tool_use_id`, `duration_ms`, `notification_type`, `prompt_id`. Every other
+event is ignored. `recordHook` also takes the shim's `receivedAt`, used only when it is within
+5 s of the collector clock. The `prompt`, `tool_input`, `tool_response`, `transcript_path` and
+`last_assistant_message` fields are never read, and `prompt` is not inspected at all (so
+"turns" are counted, not prompts).
+
+`session_events` columns: `id`, `session_id`, `ts`, `kind`, `tool_name`, `tool_use_id`,
+`agent_id`, `ended`, `duration_ms`, `outcome`, `prompt_id`. Kinds and the events that write them:
+
+| kind | written by | notes |
+|---|---|---|
+| `tool` | `PreToolUse` | closed by `PostToolUse` (`ok`) or `PostToolUseFailure` (`error`); `Agent` rows are closed by `SubagentStop` (oldest open `Agent` row first) |
+| `wait` | `Notification` with `notification_type: permission_prompt` only | `ts` is the start of the pending tool row; closed by that tool's `PostToolUse` (`answered`) |
+| `turn` | `UserPromptSubmit` | `ts` and `prompt_id` only |
+| `stop` | `Stop`, `StopFailure` | also closes every open `tool` and `wait` row as `unfinished` |
+| `compact` | `PreCompact` | |
+
+`SessionEnd` closes open rows the same way and sets `sessions.ended_at`. `sessions.branch` is
+set from the repo poller's worktrees (never overwritten once set). Retention prunes
+`session_events` by `ts`, at open and daily.
 
 **Statusline** (via `recordStatus`): `session_id` and `cost.total_cost_usd` only.
 

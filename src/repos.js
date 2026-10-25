@@ -684,4 +684,30 @@ function hotProjectIds(sessionCwds, projects, snap) {
   return hot;
 }
 
-module.exports = { hotProjectIds, createPoller, aggregateDirty, QUIET_MS, FULL_RECHECK_MS, parseGithubRemote, GH_INTERVAL_MS, GH_ARGS, parseWorktrees, parseBranches, parseCommits, RECENT_MS, MAX_BRANCHES };
+/**
+ * Branch checked out at a session's cwd: the worktree with the longest path that is a prefix
+ * of cwd (separators normalised, case-insensitive on Windows). null when no worktree matches
+ * or it is on a detached HEAD.
+ * @param {Record<string, { worktrees?: { path: string, branch: string | null }[] }>} snap repos.snapshot()
+ * @param {string} cwd
+ * @returns {string | null}
+ */
+function branchForCwd(snap, cwd) {
+  if (typeof cwd !== 'string' || !cwd || !snap || typeof snap !== 'object') return null;
+  let n;
+  try { n = normalizePath(cwd); } catch (_) { return null; }
+  let best = -1;
+  /** @type {string | null} */ let branch = null;
+  for (const id of Object.keys(snap)) {
+    const wts = snap[id] && Array.isArray(snap[id].worktrees) ? snap[id].worktrees : [];
+    for (const w of wts) {
+      if (!w || typeof w.path !== 'string' || !w.path) continue;
+      let x;
+      try { x = normalizePath(w.path).replace(/\/$/, ''); } catch (_) { continue; }
+      if ((n === x || n.startsWith(x + '/')) && x.length > best) { best = x.length; branch = typeof w.branch === 'string' && w.branch ? w.branch : null; }
+    }
+  }
+  return branch;
+}
+
+module.exports = { branchForCwd, hotProjectIds, createPoller, aggregateDirty, QUIET_MS, FULL_RECHECK_MS, parseGithubRemote, GH_INTERVAL_MS, GH_ARGS, parseWorktrees, parseBranches, parseCommits, RECENT_MS, MAX_BRANCHES };
