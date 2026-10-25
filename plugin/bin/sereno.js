@@ -27,8 +27,12 @@
  *   brief --auto --branch <b>
  *                           writes Now / Next / Blocked from the records instead of taking them as flags.
  *
+ *   next [--task <t>] [--steps-done <n>]
+ *                           with --steps-done, also cap_reached: true once n >= 3 (the step cap of /sereno:next).
  *   next [--task <t>]       what /sereno:next does: { task, step, reason, hold, command }. Read-only.
- *   after-check --task <t>  ok when the spec's `after` task is merged into the base (or there is none);
+ *   after-check --task <t>  ok when the spec's `after` task is merged into the base (or there is none); then, if
+ *                           task/<t> has no attempts and no commits of its own and the tree is clean, it
+ *                           fast-forwards task/<t> to the base tip (else a `warning`, branch untouched);
  *                           otherwise error code after_not_merged. /sereno:build calls it first.
  *   preflight [--timeout-sec <n>]
  *                           runs the repo's pre-commit hook against the current tree, without committing:
@@ -484,6 +488,7 @@ const COMMANDS = {
       listAttempts: () => fsafe.listDir('.sereno/attempts'),
       currentHead: () => gitlib.resolveCommit(root, 'refs/heads/task/' + task),
       currentSpecHash: () => { try { return readSpec(root, '.sereno/specs/' + task + '.md').hash; } catch (_e) { return null; } },
+      headMerged: nextLib.headMergedFor(root, fsafe, task),
     });
   },
 
@@ -509,13 +514,19 @@ const COMMANDS = {
   },
 
   next(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['task'], bool: ['json'] });
+    const a = parseArgs(argv, { value: ['task', 'steps-done'], bool: ['json'] });
     const t = str(a, 'task');
+    const sd = str(a, 'steps-done');
+    if (sd !== undefined && !/^\d{1,3}$/.test(sd)) throw new SerenoError('invalid_arg', '--steps-done must be a non-negative integer');
     const { root, fsafe } = needRepo();
     const { config } = loadConfig(root);
     const r = nextLib.decide({ task: t === undefined ? null : rec.checkTask(t), deps: nextLib.realDeps({ root, fsafe, config }) });
     // The merge skill puts the title in the merge commit message; it is shell-safe (see readSpecTitle).
-    return r.task ? Object.assign({}, r, { title: speclib.readSpecTitle(root, r.task) }) : r;
+    /** @type {Record<string, any>} */
+    const out = r.task ? Object.assign({}, r, { title: speclib.readSpecTitle(root, r.task) }) : Object.assign({}, r);
+    // /sereno:next runs at most STEP_CAP build/ship/retry steps per invocation; it passes the count it has done.
+    if (sd !== undefined) out.cap_reached = Number(sd) >= nextLib.STEP_CAP;
+    return out;
   },
 
   reviewer(/** @type {string[]} */ argv) {
@@ -558,7 +569,10 @@ const COMMANDS = {
     if (!st.ok) {
       throw new SerenoError('after_not_merged', 'task ' + task + ' comes after ' + st.after + ', which is not merged into ' + (st.base || 'its base branch') + ' yet' + (st.base ? '' : ' (no base branch is known)') + '; merge ' + st.after + ' first', { task, after: st.after, base: st.base });
     }
-    return { task, after: st.after, merged: true, base: st.base };
+    /** @type {Record<string, any>} */
+    const out = { task, after: st.after, merged: true, base: st.base };
+    if (st.after && st.base) Object.assign(out, nextLib.refreshQueuedBranch({ root, task, base: st.base, attempts: deps.attemptCount(task) }));
+    return out;
   },
 
   preflight(/** @type {string[]} */ argv) {
@@ -656,6 +670,7 @@ function adoptAttempt(root, fsafe, task, a) {
   if (!last || typeof last !== 'object') throw new SerenoError('not_found', 'the latest attempt record is unreadable');
   if (last.outcome === 'running') throw new SerenoError('invalid_arg', 'attempt ' + nums[nums.length - 1] + ' is still running; finish it with --update first');
   if (all.some((r) => r && r.head_commit === tip)) throw new SerenoError('tip_not_moved', 'the tip of task/' + task + ' is already recorded by an earlier attempt');
+  if (last.outcome !== 'error') throw new SerenoError('invalid_arg', 'attempt ' + nums[nums.length - 1] + ' ended as ' + String(last.outcome) + ', not error; --adopt is only for work that failed to commit (for example a hook refusal)');
   const lastN = nums[nums.length - 1];
   if (typeof last.start_commit === 'string' && gitlib.isSha(last.start_commit)) {
     // The commit the Builder started from is the reference: a clock or an amend cannot fool it.

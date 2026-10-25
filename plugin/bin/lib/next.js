@@ -186,9 +186,67 @@ function realDeps(a) {
       currentSpecHash: () => {
         try { return rec.sha256(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'))); } catch (_e) { return null; }
       },
+      headMerged: headMergedFor(root, fsafe, task),
     }),
-    isMerged: (task, base) => gitlib.isAncestor(root, 'refs/heads/task/' + task, 'refs/heads/' + base) === true,
+    isMerged: (task, base) => branchMerged(root, fsafe, task, base),
   };
 }
 
-module.exports = { decide, realDeps, afterState, baseFor, commandForDecide, stateOf, mergedInto };
+/**
+ * Is task/<task> merged into the branch `base`? With the branch present, its tip must be an
+ * ancestor of the base. With the branch gone (merged, then deleted), the commit the success was
+ * recorded at (the passing gate's head, or a skipped attempt's head) must be an ancestor.
+ * @param {string} root @param {{ listDir: (rel: string) => string[] }} fsafe @param {string} task @param {string} base
+ */
+function branchMerged(root, fsafe, task, base) {
+  const baseRef = 'refs/heads/' + base;
+  if (gitlib.resolveCommit(root, 'refs/heads/task/' + task)) return gitlib.isAncestor(root, 'refs/heads/task/' + task, baseRef) === true;
+  const h = recovery.recordedHead({ root, task, listAttempts: () => fsafe.listDir('.sereno/attempts') });
+  return !!h && gitlib.isAncestor(root, h, baseRef) === true;
+}
+
+/**
+ * recovery's headMerged lookup for a task: is this commit in the task's base branch.
+ * @param {string} root @param {{ listDir: (rel: string) => string[] }} fsafe @param {string} task @returns {(head: string) => boolean}
+ */
+function headMergedFor(root, fsafe, task) {
+  return (head) => {
+    const m = speclib.readSpecMeta(root, task);
+    return !!(m && m.base_branch && gitlib.isRefName(m.base_branch) && gitlib.isAncestor(root, head, 'refs/heads/' + m.base_branch) === true);
+  };
+}
+
+/**
+ * A queued task's branch is cut when its spec is written, so it can sit behind the base after
+ * the task it comes `after` is merged. Bring it up to the base tip, but only when that cannot
+ * lose anything: the task has no attempts, the branch has no commits of its own (its tip is an
+ * ancestor of the base tip, so every commit on it is already in the base), and the tracked tree
+ * is clean. Then it fast-forwards (`git merge --ff-only` when it is checked out here,
+ * `git branch -f` otherwise). It never touches any branch except task/<task>. Anything else
+ * leaves the branch alone and returns a warning.
+ * @param {{ root: string, task: string, base: string, attempts: number }} a
+ * @returns {{ refreshed: boolean, warning?: string }}
+ */
+function refreshQueuedBranch(a) {
+  const { root, task, base } = a;
+  if (!gitlib.isRefName(base)) return { refreshed: false };
+  const ref = 'refs/heads/task/' + task;
+  const tip = gitlib.resolveCommit(root, ref);
+  const baseTip = gitlib.resolveCommit(root, 'refs/heads/' + base);
+  if (!tip || !baseTip || tip === baseTip) return { refreshed: false };
+  const left = (/** @type {string} */ why) => ({ refreshed: false, warning: 'task/' + task + ' is behind ' + base + ' and was left alone: ' + why });
+  if (a.attempts > 0) return left('it already has attempts');
+  const own = gitlib.isAncestor(root, tip, baseTip);
+  if (own === null) return left('could not compare it with ' + base);
+  if (!own) return left('it has commits of its own, so it was not moved; bring it up to date by hand if the task needs the merged work');
+  const dirty = gitlib.cleanFiles(root);
+  if (dirty === null || dirty.length) return left('the working tree has uncommitted changes');
+  const onIt = gitlib.currentBranch(root) === 'task/' + task;
+  const r = onIt ? gitlib.git(root, ['merge', '--ff-only', '--end-of-options', baseTip]) : gitlib.git(root, ['branch', '-f', '--end-of-options', 'task/' + task, baseTip]);
+  if (r === null || gitlib.resolveCommit(root, ref) !== baseTip) return left('git could not move it');
+  return { refreshed: true };
+}
+
+const STEP_CAP = 3;
+
+module.exports = { STEP_CAP, decide, realDeps, refreshQueuedBranch, branchMerged, headMergedFor, afterState, baseFor, commandForDecide, stateOf, mergedInto };

@@ -10,7 +10,7 @@
  * spec.js, testrun.js, doctor.js, sereno.js):
  *   diff (--numstat, --stat: review.js), rev-parse, symbolic-ref, status (the clean-tree check, `cleanFiles`), merge-base (also
  *   `--is-ancestor`, `isAncestor`: is a task merged into its base)
- *   (skills), ls-tree, show, show-ref (spec.js: does the branch exist), branch (spec.js:
+ *   (skills), `merge --ff-only` and `branch -f` (next.js refreshQueuedBranch: only task/<name>), ls-tree, show, show-ref (spec.js: does the branch exist), branch (spec.js:
  *   create task/<name>), worktree add / list / remove / prune (the base-suite checkout
  *   and the stale sweep), and --version (doctor).
  * Every revision is validated first and follows --end-of-options.

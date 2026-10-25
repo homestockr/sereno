@@ -4,7 +4,7 @@ description: Run every pipeline step that needs no human (build, ship, retry) fo
 argument-hint: [task]
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Bash, Read, Agent, Edit(.sereno/cache/verdict-*.json)
+allowed-tools: Bash, Read, Agent, Write(.sereno/cache/verdict-*.json)
 ---
 
 ## How to run commands
@@ -22,10 +22,10 @@ Rules that hold throughout: never merge (merging is `/sereno:merge`, which only 
 ## 1. Ask what is next
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" next [--task <task>]
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" next [--task <task>] --steps-done <n>
 ```
 
-Pass `--task` only when the user gave a task. The result has `task`, `step`, `reason`, `hold`, `command` (and `tasks` for `pick`). Act on `step`.
+Pass `--task` only when the user gave a task. `<n>` is the number of build / ship / retry steps you have done so far in this run (0 the first time). The result has `task`, `step`, `reason`, `hold`, `command` (and `tasks` for `pick`). Act on `step`.
 
 ## 2. Before the first build of a task
 
@@ -42,9 +42,11 @@ If `passed` is false, stop with one line naming the `hook` and the first line of
 - `build`: read `${CLAUDE_PLUGIN_ROOT}/skills/build/SKILL.md` and follow it for the task, then go back to step 1.
 - `ship` or `retry`: read `${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md` and follow it for the task (it includes its one repair), then go back to step 1. If ship ends at "Review needs a decision" or at its merge prompt, do not repeat that message: go back to step 1 and let the next result be the single stop line.
 
+Which ship step to enter: for `step: "retry"` (an environment failure) and for a `ship` step whose `reason` says one repair is due (a defect), go straight to the `retry` / `repair` bullet in ship's step 5 and skip its steps 1 to 4: the latest attempt is final, so nothing is left to test or review yet. A `ship` step for a built attempt (or `head_moved`) starts at ship's step 1.
+
 Follow those skills as written, in the foreground, in this same turn. Where they say to tell the user to run the next command, do not stop for that: the loop here runs it.
 
-Safety cap: run at most 3 `build` / `ship` / `retry` steps in one invocation. After the third, stop and report the current state in one line (the latest `reason`) and tell the user to run `/sereno:next` again.
+Safety cap: run at most 3 `build` / `ship` / `retry` steps in one invocation. Keep a count of the steps you have done and pass it every time you ask what is next: `next ... --steps-done <n>`. When the result has `cap_reached: true`, stop without starting another step, report the current state in one line (the latest `reason`) and tell the user to run `/sereno:next` again.
 
 ## 4. Stop
 

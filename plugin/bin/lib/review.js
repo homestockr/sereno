@@ -19,7 +19,9 @@ const { SerenoError } = require('./fsafe.js');
 /** Always get the full red team. A repo's roles.redTeam.light.never adds to these and cannot remove them. */
 const DEFAULT_NEVER = ['**/migrations/**', 'supabase/**'];
 /** A touched path whose lowercased form contains any of these always gets the full red team. */
-const NEVER_WORDS = ['auth', 'permission', 'payment', 'delete', 'secret'];
+const NEVER_WORDS = ['auth', 'permission', 'payment', 'delete', 'secret', 'password', 'credential', 'token', 'billing', 'rbac', 'acl'];
+/** Short words that would match inside ordinary names ("oracle"): they must be a whole path word. */
+const NEVER_WHOLE_WORDS = ['rbac', 'acl'];
 
 /** Binary files have no line count in numstat; count them as this many lines so they never pass as small. */
 const BINARY_LINES = 1000;
@@ -53,7 +55,9 @@ function neverRule(p, extra) {
   const path_ = p.replace(/\\/g, '/');
   for (const g of DEFAULT_NEVER.concat(extra || [])) if (globToRegExp(g).test(path_)) return g;
   const low = path_.toLowerCase();
-  for (const w of NEVER_WORDS) if (low.includes(w)) return 'path contains ' + w;
+  for (const w of NEVER_WORDS) {
+    if (NEVER_WHOLE_WORDS.includes(w) ? new RegExp('(^|[^a-z0-9])' + w + '([^a-z0-9]|$)').test(low) : low.includes(w)) return 'path contains ' + w;
+  }
   return null;
 }
 

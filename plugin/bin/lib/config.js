@@ -92,6 +92,8 @@ function validateLight(l, bad, agent) {
   if (!Array.isArray(l.kinds) || l.kinds.some((/** @type {unknown} */ k) => typeof k !== 'string' || !KINDS.includes(k)) || new Set(l.kinds).size !== l.kinds.length) bad(p + '.kinds: must be a list of distinct kinds from ' + KINDS.join(', '));
   if (!(posInt(l.maxDiffLines) && l.maxDiffLines <= 100000)) bad(p + '.maxDiffLines: must be a positive integer of at most 100000');
   agent(p + '.agent', l.agent, false);
+  if (typeof l.agent === 'string' && !l.agent.startsWith('red-team')) bad(p + '.agent: must be a red-team agent (red-team or red-team-lean)');
+  if (Array.isArray(l.never) && l.never.some((/** @type {unknown} */ g) => typeof g === 'string' && /[\[\]{}]/.test(g))) bad(p + '.never: globs may use only *, ** and ? (the characters [ ] { } are not supported and would not match as written)');
   if (!Array.isArray(l.never) || l.never.length > MAX_NEVER || l.never.some((/** @type {unknown} */ g) => typeof g !== 'string' || !g || g.length > 200 || /[\u0000-\u001f\u007f]/.test(g))) bad(p + '.never: must be a list of at most ' + MAX_NEVER + ' non-empty glob strings (they add to the built-in ones)');
 }
 
@@ -128,6 +130,7 @@ function validate(c) {
   if (!isObj(r)) bad('roles.redTeam: must be an object');
   else {
     agent('roles.redTeam.agent', r.agent, false);
+    if (typeof r.agent === 'string' && !r.agent.startsWith('red-team')) bad('roles.redTeam.agent: must be a red-team agent (red-team or red-team-lean)');
     agent('roles.redTeam.fallback', r.fallback, true);
     if (!ON_FALLBACK.includes(r.onFallback)) bad('roles.redTeam.onFallback: must be ask, auto or never');
     if (!posInt(r.maxBlockedRuns)) bad('roles.redTeam.maxBlockedRuns: must be a positive integer');

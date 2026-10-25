@@ -16,9 +16,12 @@
  * Which hook: `git hook run pre-commit` when git is 2.36 or newer and the hook exists at
  * `git rev-parse --git-path hooks/pre-commit` (this honours core.hooksPath, so husky's
  * generated shim is found). Otherwise the file is executed directly (through `sh` on
- * Windows), falling back to `.husky/pre-commit`. No hook means passed.
+ * Windows). Only that path is used: a `.husky/pre-commit` that core.hooksPath does not point at
+ * is not a hook git would run, so it is ignored. No hook means passed.
  *
- * Result: { hook: path | null, passed, timed_out, dirty_after, output_head }.
+ * Result: { hook: path | null, passed, timed_out, may_still_run, dirty_after, output_head }.
+ * On a timeout the process tree is killed with taskkill on Windows (best effort); may_still_run
+ * is true either way and dirty_after is the tree as of now.
  * output_head is the first 5 lines of the hook's output, each cut to 200 characters.
  * Nothing is written to disk and nothing is sent anywhere.
  */
@@ -74,12 +77,9 @@ function preflight(a) {
     const cand = path.resolve(root, gp.trim());
     if (isFile(cand)) hookAbs = cand;
   }
-  const viaGit = hookAbs !== null;
-  if (!hookAbs) {
-    const husky = path.join(root, '.husky', 'pre-commit');
-    if (isFile(husky)) hookAbs = husky;
-  }
-  if (!hookAbs) return { hook: null, passed: true, timed_out: false, dirty_after: false, output_head: [] };
+  // Only the path git itself would run (core.hooksPath is honoured by --git-path). A bare
+  // .husky/pre-commit that git is not configured to use is not a hook git would run.
+  if (!hookAbs) return { hook: null, passed: true, timed_out: false, may_still_run: false, dirty_after: false, output_head: [] };
 
   const rel = path.relative(root, hookAbs).split(path.sep).join('/');
   const hookLabel = rel && !rel.startsWith('..') ? rel : hookAbs;
@@ -88,9 +88,13 @@ function preflight(a) {
   /** @type {any} */
   let r;
   const opts = { cwd: root, env: gitlib.safeEnv(), encoding: 'utf8', timeout, windowsHide: true, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] };
-  if (viaGit && hasHookRun(gv)) r = spawn('git', ['hook', 'run', 'pre-commit'], opts);
+  if (hasHookRun(gv)) r = spawn('git', ['hook', 'run', 'pre-commit'], opts);
   else if (process.platform === 'win32') r = spawn('sh', [hookAbs], opts);
   else r = spawn(hookAbs, [], opts);
+  if (r && r.error && /** @type {any} */ (r.error).code === 'ETIMEDOUT' && process.platform === 'win32' && r.pid) {
+    // spawnSync only kills the direct child; on Windows the hook's own children survive. Best effort.
+    try { spawn('taskkill', ['/T', '/F', '/PID', String(r.pid)], { timeout: 5000, windowsHide: true, stdio: 'ignore' }); } catch (_e) { /* best effort */ }
+  }
   const after = snapshot(root, spawn);
 
   const timedOut = !!(r && r.error && /** @type {any} */ (r.error).code === 'ETIMEDOUT');
@@ -100,8 +104,11 @@ function preflight(a) {
     hook: hookLabel,
     passed: !timedOut && !spawnFailed && !!r && r.status === 0,
     timed_out: timedOut,
+    // After a timeout the hook (or something it started) may still be running and changing files,
+    // so dirty_after only describes the tree as of now.
+    may_still_run: timedOut,
     dirty_after: before !== after,
-    output_head: head(timedOut ? 'the hook did not finish within ' + Math.round(timeout / 1000) + ' s\n' + out : out),
+    output_head: head(timedOut ? 'the hook did not finish within ' + Math.round(timeout / 1000) + ' s; it may still be running, and dirty_after is as of now\n' + out : out),
   };
 }
 

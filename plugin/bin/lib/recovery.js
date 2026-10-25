@@ -42,22 +42,49 @@ function gateHasDefect(gate) {
 }
 
 /**
- * @param {{ root: string, task: string, config: any, listAttempts: () => string[], currentHead?: () => string | null, currentSpecHash?: () => string | null }} a
+ * The attempts of a task, oldest first, each with the gate record it points at.
+ * @param {string} root @param {string} task @param {string[]} files
+ * @returns {{ n: number, rec: any, gate: any | null }[]}
  */
-function decide(a) {
-  const escaped = a.task.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
+function readAttempts(root, task, files) {
+  const escaped = task.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
   const re = new RegExp('^' + escaped + '-(\\d+)\\.json$');
   /** @type {{ n: number, rec: any, gate: any | null }[]} */
   const attempts = [];
-  for (const f of a.listAttempts()) {
+  for (const f of files) {
     const m = re.exec(f);
     if (!m) continue;
-    const r = readJson(a.root, '.sereno/attempts/' + f);
+    const r = readJson(root, '.sereno/attempts/' + f);
     if (!r || typeof r !== 'object') continue;
     const id = typeof r.review_run_id === 'string' && /^rr_\d{8}T\d{6}Z_[0-9a-f]{7}$/.test(r.review_run_id) ? r.review_run_id : null;
-    attempts.splice(attempts.length, 0, { n: parseInt(m[1], 10), rec: r, gate: id ? readJson(a.root, '.sereno/gates/' + id + '.json') : null });
+    attempts.splice(attempts.length, 0, { n: parseInt(m[1], 10), rec: r, gate: id ? readJson(root, '.sereno/gates/' + id + '.json') : null });
   }
   attempts.sort((x, y) => x.n - y.n);
+  return attempts;
+}
+
+/**
+ * The commit a task's success was recorded at: the newest attempt's passing gate head, or the
+ * head a skipped attempt carries. null when the newest attempt is neither. Used when the task
+ * branch has been deleted after a merge.
+ * @param {{ root: string, task: string, listAttempts: () => string[] }} a @returns {string | null}
+ */
+function recordedHead(a) {
+  const at = readAttempts(a.root, a.task, a.listAttempts());
+  const last = at[at.length - 1];
+  if (!last) return null;
+  const sha = (/** @type {unknown} */ v) => (typeof v === 'string' && /^[0-9a-f]{40}$/.test(v) ? v : null);
+  if (last.rec.outcome === 'skipped') return sha(last.rec.head_commit);
+  if (last.rec.outcome === 'pass' && last.gate && last.gate.outcome === 'pass' && last.gate.task_id === a.task) return sha(last.gate.head_commit);
+  return null;
+}
+
+/**
+ * @param {{ root: string, task: string, config: any, listAttempts: () => string[], currentHead?: () => string | null, currentSpecHash?: () => string | null, headMerged?: (head: string) => boolean }} a
+ *   headMerged: is this recorded commit already in the base branch (used when the task branch is gone)
+ */
+function decide(a) {
+  const attempts = readAttempts(a.root, a.task, a.listAttempts());
   if (!attempts.length) throw new SerenoError('not_found', 'no attempts recorded for task ' + a.task);
 
   const rc = a.config.recovery;
@@ -89,6 +116,8 @@ function decide(a) {
   const mergeGuard = (gateHead, specHash) => {
     if (typeof a.currentHead === 'function' && gateHead !== undefined) {
       const tip = a.currentHead();
+      // The branch was merged and deleted: the recorded head is already in the base. Done, not moved.
+      if (!tip && typeof a.headMerged === 'function' && typeof gateHead === 'string' && a.headMerged(gateHead)) return out('done', 'task/' + a.task + ' is already merged; its branch was deleted');
       if (!tip || gateHead !== tip) return out('review', 'head_moved: the branch tip is not the commit the gate reviewed');
     }
     if (typeof a.currentSpecHash === 'function' && specHash !== undefined) {
@@ -141,4 +170,4 @@ function decide(a) {
   return out('decide', 'the latest attempt has an unknown outcome');
 }
 
-module.exports = { decide, DEFECT_KINDS, gateHasDefect };
+module.exports = { decide, recordedHead, DEFECT_KINDS, gateHasDefect };

@@ -4,7 +4,7 @@ description: Test, review and gate a built task branch, repair once if needed, t
 argument-hint: <task>
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Bash, Read, Agent, Edit(.sereno/cache/verdict-*.json)
+allowed-tools: Bash, Read, Agent, Write(.sereno/cache/verdict-*.json)
 ---
 
 ## How to run commands
@@ -38,8 +38,12 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" config
   You need `roles.redTeam` (`enabled`, `agent`, `fallback`, `onFallback`).
 - Compute the base: `git merge-base task/<task> <base_branch>`. Compute the head:
   `git rev-parse HEAD`. Take the latest attempt number for the task from the newest file
-  `.sereno/attempts/<task>-<n>.json`; it should be `built`. If there is none, or it is
-  already final, tell the user to run `/sereno:build <task>` and stop.
+  `.sereno/attempts/<task>-<n>.json`; it should be `built`. If there is none, tell the user to
+  run `/sereno:build <task>` and stop. If it is final, run the `recovery --task <task>` command
+  from step 5 before deciding: when the latest attempt is `block` or `error` and `next` is `retry`
+  or `repair`, this is a continuation, so skip steps 1 to 4 and go straight to the `retry` /
+  `repair` bullet in step 5. For any other final attempt, tell the user to run
+  `/sereno:build <task>` and stop.
 
 ## 1. Run the tests
 
@@ -144,13 +148,11 @@ non-low finding has a kind of `defect`, `bug`, `security`, `privacy`, `test`,
 
 ## 5. Recovery
 
-Ask `sereno:scribe` to refresh the brief for this branch (after every gate run and every
-Builder failure). Agents cannot expand `${CLAUDE_PLUGIN_ROOT}`, so give the scribe the
-literal command line in its prompt, with only the angle-bracket values left for it to fill,
-and tell it to run that command verbatim and never construct a path itself:
+Refresh the brief for this branch (after every gate run and every Builder failure). It is
+built from the records, so no agent writes it:
 
 ```
-Run exactly: node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" brief --branch <branch> --now "<now>" --next "<next>" --blocked "<blocked>" --expect-version <version it read from the existing brief, 0 if none>
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" brief --auto --branch task/<task> --task <task>
 ```
 
 Then ask the rules what is next:
