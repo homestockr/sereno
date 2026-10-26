@@ -198,6 +198,47 @@ full browse reviewer. Without browse checks nothing changes.
 `red-team-browse` shows MCP browser tools and no Write or Edit. Spawn it once on a spec with a
 browse check.
 
+## H2 decisions (architect, 2026-10-26)
+
+- **When the review runs.** Before any build, the diff is unknown, so the choice uses only the
+  spec.
+  - The review is skipped when the spec's `kind` is in `roles.redTeam.light.kinds`. In the
+    default preset that list is empty, so nothing skips; in `lean` it is `mechanical`.
+  - It is also skipped when the new config `roles.redTeam.specReview` is `false`. That setting
+    is `true` in `default` and `false` in `lean`.
+  - `sereno.js spec-review-needed --task <t>` returns `{ needed, reason }`. It is read-only and
+    in code, so no model makes the call.
+- **Who reviews.** The configured red-team agent, which is Fable in `default`, in a spec-review
+  mode.
+  - The red-team agent files gain a short "Spec review" section. When the prompt says spec
+    review, the agent reads only the spec and the repo files it needs to judge three things:
+    whether each criterion is testable, whether runnable `checks` are present where they could
+    be, and whether the scope is one reviewable change (about 400 lines or fewer, one concern).
+  - It returns `{ "outcome": "agree" | "revise" | "split", "points": [<= 8 short strings] }`.
+  - It never sees a diff. There is none yet.
+- **The record.** `sereno.js spec-review --file <verdict.json> --task <t>` validates the verdict
+  and writes a `spec_review` record.
+  - The record holds `task`, `spec_revision`, `outcome`, `points` (cleaned, capped),
+    `agent_name`, `agent_id`, `session`, `reviewed_at`.
+  - It is written through the same fsafe and records path as gate records.
+  - Outcomes outside the three are refused.
+- **`sereno.js next`.** It adds a step `spec_review`, which comes before `build`. It applies
+  when the review is needed and there is no `agree` record for the spec's current
+  `spec_revision`.
+  - On `revise` or `split` for the current revision, it stops with `step: decide`. The reason is
+    "spec review: revise — <first point>" (or split), and the command is `/sereno:task <task>`.
+  - A new spec revision needs a new review.
+  - Escape hatch: running `/sereno:build <task>` directly still works, because build doesn't
+    require the review. The stop line says so in one clause.
+  - No new flag is added.
+- **The skills.** `skills/next/SKILL.md` runs the spec-review step before following build:
+  spawn the red team in spec-review mode, write the verdict to the cache dir, then run
+  `sereno.js spec-review`. It keeps the foreground and Bash-only rules. `build` itself is
+  unchanged.
+- **The app.** The app's pipeline reader must ignore or tolerate the new record type, and a
+  test proves it. Showing it in the Pipeline tab is out of scope (alpha.8). Its spend is
+  attributed to the Red team through the agents join, the same as other red-team spawns.
+
 ## Steps
 
 - **P1:** H3, the stubs in the review pack. It is small, so it goes first. Done: 73fadb4.
