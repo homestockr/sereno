@@ -20,7 +20,7 @@ const GATE_OUTCOMES = ['pass', 'block', 'needs_context', 'error', 'skipped'];
 const SEVERITIES = ['high', 'medium', 'low'];
 const BUILDERS = ['haiku', 'sonnet', 'opus'];
 const KINDS = ['mechanical', 'feature', 'fix', 'refactor'];
-const DIAGNOSES = ['environment', 'spec', 'defect', 'none'];
+const DIAGNOSES = ['environment', 'spec', 'defect', 'hook_failed', 'none'];
 const ATTEMPT_OUTCOMES = ['pass', 'block', 'needs_context', 'error', 'skipped', 'stopped', 'running', 'built'];
 const FINAL_OUTCOMES = ['pass', 'block', 'needs_context', 'error', 'skipped', 'stopped'];
 

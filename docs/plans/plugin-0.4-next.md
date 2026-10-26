@@ -1,6 +1,24 @@
 # Plugin 0.4.0: `/sereno:next`
 
-Status: planned. Ships with `2.0.0-alpha.7` or on its own if ready first.
+Status: A0-A3 and A5 done on `feat/plugin-0.4` (2026-10-25). The red team passed it on the
+fifth pass, and the field fixes were reviewed and passed too. A4 (the app side) is deferred.
+It ships on its own: merging to main is the release.
+
+**A5 result (the field test in homestockr, 2026-10-25, ledger figures, est.):**
+- **Run 1, default background subagents: $5.45.**
+  - $1.89 was Opus session-model turns picking up agent results.
+  - $0.43 was Fable agent summaries, which happen only for background agents.
+- **Run 2, with `CLAUDE_CODE_FORK_SUBAGENT=0`: $2.92.** It ran in one turn from build to the
+  merge line.
+- **The leak was proven and found.** E3's "$0.44 leak" was background subagents, which are
+  on by default in interactive Claude Code, plus plain replies starting turns on the session
+  model.
+- **The fixes:**
+  - doctor and README advice to set `CLAUDE_CODE_FORK_SUBAGENT=0`;
+  - decisions are taken by re-running a command, never by a plain reply;
+  - preflight runs inside build on the task branch.
+- **Other field findings:** a preflight false alarm on `dev`, and "Goal" as the merge title.
+  Both are fixed.
 
 ## Why
 

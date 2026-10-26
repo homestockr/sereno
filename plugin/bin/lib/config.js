@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { SerenoError } = require('./fsafe.js');
-const { BUILDERS } = require('./records.js');
+const { BUILDERS, KINDS } = require('./records.js');
 
 const AGENTS = ['builder', 'builder-haiku', 'builder-opus', 'scribe', 'red-team', 'red-team-lean'];
 const ON_FALLBACK = ['ask', 'auto', 'never'];
@@ -29,7 +29,12 @@ function defaultPreset() {
         },
       },
       scribe: { agent: 'scribe' },
-      redTeam: { agent: 'red-team', fallback: /** @type {string | null} */ ('red-team-lean'), onFallback: 'ask', maxBlockedRuns: 2, enabled: true },
+      redTeam: {
+        agent: 'red-team', fallback: /** @type {string | null} */ ('red-team-lean'), onFallback: 'ask', maxBlockedRuns: 2, enabled: true,
+        // A lighter reviewer for small, plain tasks; off while kinds is empty. `never` holds only the
+        // repo's EXTRA globs: review.js always applies its built-in ones on top.
+        light: { kinds: /** @type {string[]} */ ([]), maxDiffLines: 80, agent: 'red-team-lean', never: /** @type {string[]} */ ([]) },
+      },
     },
     recovery: { repairs: 1, infraRetries: 2, taskBudgetUsd: null },
     tests: { command: null },
@@ -44,6 +49,7 @@ const PRESETS = {
     c.preset = 'lean';
     c.roles.redTeam.agent = 'red-team-lean';
     c.roles.redTeam.fallback = null;
+    c.roles.redTeam.light.kinds = ['mechanical'];
     return c;
   },
 };
@@ -73,6 +79,23 @@ function deepMerge(/** @type {any} */ base, /** @type {any} */ over) {
 
 const posInt = (/** @type {unknown} */ n) => typeof n === 'number' && Number.isInteger(n) && n > 0;
 const nonNegInt = (/** @type {unknown} */ n) => typeof n === 'number' && Number.isInteger(n) && n >= 0;
+
+const MAX_NEVER = 50;
+
+/**
+ * roles.redTeam.light
+ * @param {any} l @param {(m: string) => void} bad @param {(p: string, v: unknown, nullable: boolean) => void} agent
+ */
+function validateLight(l, bad, agent) {
+  const p = 'roles.redTeam.light';
+  if (!isObj(l)) { bad(p + ': must be an object'); return; }
+  if (!Array.isArray(l.kinds) || l.kinds.some((/** @type {unknown} */ k) => typeof k !== 'string' || !KINDS.includes(k)) || new Set(l.kinds).size !== l.kinds.length) bad(p + '.kinds: must be a list of distinct kinds from ' + KINDS.join(', '));
+  if (!(posInt(l.maxDiffLines) && l.maxDiffLines <= 100000)) bad(p + '.maxDiffLines: must be a positive integer of at most 100000');
+  agent(p + '.agent', l.agent, false);
+  if (typeof l.agent === 'string' && !l.agent.startsWith('red-team')) bad(p + '.agent: must be a red-team agent (red-team or red-team-lean)');
+  if (Array.isArray(l.never) && l.never.some((/** @type {unknown} */ g) => typeof g === 'string' && /[\[\]{}]/.test(g))) bad(p + '.never: globs may use only *, ** and ? (the characters [ ] { } are not supported and would not match as written)');
+  if (!Array.isArray(l.never) || l.never.length > MAX_NEVER || l.never.some((/** @type {unknown} */ g) => typeof g !== 'string' || !g || g.length > 200 || /[\u0000-\u001f\u007f]/.test(g))) bad(p + '.never: must be a list of at most ' + MAX_NEVER + ' non-empty glob strings (they add to the built-in ones)');
+}
 
 /** @param {any} c effective config @returns {string[]} */
 function validate(c) {
@@ -107,10 +130,13 @@ function validate(c) {
   if (!isObj(r)) bad('roles.redTeam: must be an object');
   else {
     agent('roles.redTeam.agent', r.agent, false);
+    if (typeof r.agent === 'string' && !r.agent.startsWith('red-team')) bad('roles.redTeam.agent: must be a red-team agent (red-team or red-team-lean)');
     agent('roles.redTeam.fallback', r.fallback, true);
+    if (typeof r.fallback === 'string' && !r.fallback.startsWith('red-team')) bad('roles.redTeam.fallback: must be a red-team agent (red-team or red-team-lean) or null');
     if (!ON_FALLBACK.includes(r.onFallback)) bad('roles.redTeam.onFallback: must be ask, auto or never');
     if (!posInt(r.maxBlockedRuns)) bad('roles.redTeam.maxBlockedRuns: must be a positive integer');
     if (typeof r.enabled !== 'boolean') bad('roles.redTeam.enabled: must be true or false');
+    validateLight(r.light, bad, agent);
   }
   const rec = c.recovery;
   if (!isObj(rec)) bad('recovery: must be an object');
