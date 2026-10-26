@@ -22,6 +22,11 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+/** A path or branch name, escaped first, with a <wbr> after every '/' so it breaks between segments, not mid-word. */
+function pathBreak(s) {
+  return esc(s).replace(/\//g, '/<wbr>');
+}
+
 /** Integer percents that sum to exactly 100 (all 0 when there is nothing to split). */
 function largestRemainder(values) {
   const v = values.map((x) => (Number.isFinite(Number(x)) && Number(x) > 0 ? Number(x) : 0));
@@ -844,7 +849,7 @@ function findingsHtml(findings, open) {
   if (!list.length) return '';
   return '<details class="pfind"' + (open === true ? ' open' : '') + '><summary>' + list.length + (list.length === 1 ? ' finding' : ' findings') + '</summary><ul>'
     + list.map((f) => {
-      const loc = f && f.file ? esc(f.file) + (f.line !== null && Number.isFinite(f.line) ? ':' + esc(f.line) : '') : '';
+      const loc = f && f.file ? pathBreak(f.file) + (f.line !== null && Number.isFinite(f.line) ? ':' + esc(f.line) : '') : '';
       return '<li><span class="sev">' + esc(f && f.severity ? f.severity : '—') + '</span>'
         + '<span class="fkind">' + esc(f && f.kind ? f.kind : '') + '</span>'
         + (loc ? '<span class="mono floc">' + loc + '</span>' : '')
@@ -1066,7 +1071,7 @@ function rowHtml(r, selKey) {
   return '<div class="prow' + (on ? ' sel' : '') + (open ? ' decision' : '') + (exp ? ' expired' : '') + '" role="row" tabindex="0" data-sel="' + esc(r.key)
     + '" aria-selected="' + on + '">'
     + '<div class="pcell-task" role="gridcell"><span class="ptname">' + esc(t.task) + '</span><span class="ptproj">' + esc(r.project.name) + (exp ? ' · expired' : '') + '</span></div>'
-    + '<div class="pcell-branch mono" role="gridcell">task/' + esc(t.task) + '</div>' + cells
+    + '<div class="pcell-branch mono" role="gridcell">' + pathBreak('task/' + t.task) + '</div>' + cells
     + '<div class="pcell-cost num" role="gridcell">' + (money ? esc(money) : '') + '</div></div>';
 }
 
@@ -1123,7 +1128,8 @@ function workHtml(body, ui) {
   const table = rows.length
     ? '<div class="ptable" role="grid" aria-label="Active tasks">' + head + rows.map((r) => rowHtml(r, sel ? sel.key : null)).join('') + '</div>'
     : '<p class="empty-note">' + (all.length ? 'No tasks match these filters' : 'No active tasks') + '</p>';
-  return pipeFiltersHtml(body, ui) + table + idleHtml(body, ui) + stripHtml(body);
+  // The table fills the main area and scrolls inside #ptscroll; the selected task lives in the right column.
+  return '<div class="pwork">' + pipeFiltersHtml(body, ui) + '<div class="ptscroll" id="ptscroll">' + table + '</div>' + idleHtml(body, ui) + stripHtml(body) + '</div>';
 }
 
 /** Signals sub-tab: gate state per project, 30-day outcomes, rework, red-team cost per merge, role spend. */
@@ -1270,8 +1276,16 @@ function panelHtml(row, ctx) {
     ? '<h4>Recent activity</h4><ul class="plist2">' + actLines.map((x) => '<li><span>' + esc(x.line) + '</span><span class="quiet-text">' + esc(relTime(x.e.at, nowMs)) + '</span></li>').join('') + '</ul>' : '';
   const find = Array.isArray(t.findings) && t.findings.length ? '<h4>Latest findings</h4>' + findingsHtml(t.findings, true) : '';
   return '<section class="ppanel' + (open ? ' ppanel-dec' : '') + '" aria-label="Selected task"><div class="ppanel-head"><h2 class="mono">' + esc(t.task) + '</h2>' + pill + '</div>'
-    + '<div class="ppanel-sub"><span>' + esc(row.project.name) + '</span><span class="mono">task/' + esc(t.task) + '</span></div>'
+    + '<div class="ppanel-sub"><span>' + esc(row.project.name) + '</span><span class="mono">' + pathBreak('task/' + t.task) + '</span></div>'
     + tl + kv + revLink + review + find + attList + actList + '</section>';
+}
+
+/** Inputs panelHtml needs: the project entry, a live session, the sessions already offered in the pinned block. */
+function selectedCtx(row, st, c) {
+  const sids = [];
+  for (const d of (st && Array.isArray(st.decisions) ? st.decisions : [])) if (d.sessionId) sids.push(d.sessionId);
+  return { project: (Array.isArray(c.projectsList) ? c.projectsList : []).find((p) => p && p.id === row.project.id) || null,
+    sid: liveSessionId(row.project.id, c.projectsList, c.sessions), pinned: sids, opts: c.opts, nowMs: c.nowMs };
 }
 
 /**
@@ -1291,12 +1305,7 @@ function pipelineSideParts(st, body, ui, ctx) {
   let panel = '';
   if (body && u.sub === 'work' && (pipelineHasData(body) || (body.plugin && body.plugin.installed !== false))) {
     const row = resolveSel(pipeRows(body, u), u.sel);
-    if (row) {
-      const sids = [];
-      for (const d of (st && Array.isArray(st.decisions) ? st.decisions : [])) if (d.sessionId) sids.push(d.sessionId);
-      panel = panelHtml(row, { project: (Array.isArray(c.projectsList) ? c.projectsList : []).find((p) => p && p.id === row.project.id) || null,
-        sid: liveSessionId(row.project.id, c.projectsList, c.sessions), pinned: sids, opts: c.opts, nowMs: c.nowMs });
-    }
+    if (row) panel = panelHtml(row, selectedCtx(row, st, c));
   }
   return pinned || panel ? { attn: pinned, panel } : { attn: attentionHtml(st || { amber: false, count: 0, items: [] }, c.nowMs, c.opts), panel: '' };
 }
@@ -1924,9 +1933,12 @@ function renderPipeline() {
   const keep = ae && ae.getAttribute && view.contains(ae) ? (ae.getAttribute('data-sel') !== null ? '.prow[data-sel]' : ae.getAttribute('data-pf') !== null ? 'select[data-pf="' + ae.getAttribute('data-pf') + '"]' : '') : '';
   const oldScroll = view.querySelector('#pscroll');
   const scrollTop = oldScroll ? oldScroll.scrollTop : 0;
+  const tsTop = (view.querySelector('#ptscroll') || { scrollTop: 0 }).scrollTop;   // the Work table's own scroller
   setHtml(view, pipelineTitle() + pipelineBody(p.body, state.proj.list, pipeUiOf(), Date.now()));
   const newScroll = view.querySelector('#pscroll');
   if (newScroll && scrollTop) newScroll.scrollTop = scrollTop;
+  const newTs = view.querySelector('#ptscroll');
+  if (newTs && tsTop) newTs.scrollTop = tsTop;
   if (keep) { const el = keep.indexOf('.prow') === 0 ? view.querySelector('.prow.sel') : view.querySelector(keep); if (el) el.focus(); }   // a refresh must not drop keyboard focus
   renderAttention();
 }

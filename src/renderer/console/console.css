@@ -296,9 +296,21 @@ td.proj { font-weight: 500; }
 .xtable .num { text-align: right; }
 
 /* Pipeline tab: one-screen layout (Phase 4b addendum). Shapes carry state; amber appears only on a pending decision. */
-.body.pipe .attn-col { width: 340px; }
+.body.pipe .attn-col { width: clamp(360px, 30vw, 520px); min-width: 0; max-height: calc(100vh - 110px); overflow-x: hidden; overflow-y: auto; overflow-wrap: anywhere; }
 .body.pipe .main { max-width: none; padding-top: 16px; }
-@media (max-width: 1359px) { .body.pipe .attn-col { width: auto; } }
+@media (max-width: 1359px) { .body.pipe .attn-col { width: auto; max-height: none; overflow: visible; } }
+/* Work: one fixed-height column (same idea as .pscroll). The table scrolls inside .ptscroll with a sticky head; the filters, idle row and run strip stay put. */
+.pwork { display: flex; flex-direction: column; min-width: 0; height: calc(100vh - 270px); min-height: 320px; }
+.pwork > .pfilters, .pwork > .pidle, .pwork > .pstrip { flex: none; }
+.ptscroll { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+.ptscroll .phead-row { position: sticky; top: 0; z-index: 1; background: var(--bg); }
+/* Long values stay inside their panel: break at '/' (a <wbr> after each one), mid-word only for a single very long segment. */
+.ppanel-sub > *, .pfind .floc { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .pwork { height: auto; min-height: 0; }
+  .ptscroll { flex: none; max-height: none; overflow: visible; }
+  .body.pipe .attn-col { max-height: none; overflow: visible; }
+}
 /* Signals and Routing: the header, sub-tabs and right panel stay put; only .pscroll scrolls (same fixed-height idea as .pnav). */
 .body.pipe .main { min-height: 0; }
 .pscroll { margin-top: 10px; height: calc(100vh - 270px); min-height: 320px; min-width: 0; overflow-y: auto; padding-right: 4px; }

@@ -11369,7 +11369,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
       'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'cmdRow', 'installHtml', 'pipelineHasData',
       'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
-      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'sessionHash', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
+      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'sessionHash', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts', 'pathBreak', 'selectedCtx'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
     const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -11444,6 +11444,73 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(rules('.pscroll .table-wrap'), /overflow: visible/, 'a table-wrap scroller would capture the sticky head');
       assert.match(css, /@media \(max-width: 900px\) \{ \.pscroll \{ height: auto; min-height: 0; overflow: visible; \} \}/);
       assert.match(cj, /querySelector\('#pscroll'\)/, 'scroll position survives a refresh');
+    });
+
+    // ---- S6: Pipeline Work layout (the table fills the main area; the selected task sits in the right column) ----
+    test('[alpha7 S6] pathBreak escapes first, then puts a <wbr> after each slash', () => {
+      assert.strictEqual(T.pathBreak('task/fix-it'), 'task/<wbr>fix-it');
+      assert.strictEqual(T.pathBreak('src/renderer/console.js'), 'src/<wbr>renderer/<wbr>console.js');
+      const evil = '<img src=x onerror=alert(1)>/<script>';
+      const out = T.pathBreak(evil);
+      assert.ok(!/<img|<script/.test(out), out);
+      assert.strictEqual(out.replace(/<wbr>/g, ''), T.esc(evil));
+      assert.strictEqual(T.pathBreak(null), '');
+      assert.strictEqual((T.pathBreak('a&b/c').match(/<wbr>/g) || []).length, 1);
+    });
+
+    test('[alpha7 S6] paths and branches in the Pipeline tab break at slashes', () => {
+      const t = task('builder', { task: 'fix-x', findings: [{ severity: 'high', kind: 'bug', file: 'src/a/b.js', line: 3, summary: 's' }] });
+      assert.match(T.rowHtml(row(t), null), /task\/<wbr>fix-x/);
+      assert.match(T.panelHtml(row(t), { nowMs: NOW }), /<span class="mono">task\/<wbr>fix-x<\/span>/);
+      assert.match(T.panelHtml(row(t), { nowMs: NOW }), /src\/<wbr>a\/<wbr>b\.js:3/);
+    });
+
+    test('[S6] Work markup: the table fills a scroller, the panel stays in the right column, no layout toggle', () => {
+      const b = body([task('builder', { task: 'b1', findings: [{ severity: 'low', kind: 'k', file: 'x/y.js', line: null, summary: 's' }] })]);
+      const h = T.pipelineBody(b, [], WORK, NOW);
+      assert.match(h, /<div class="pwork"><div class="pfilters">/);
+      assert.match(h, /<div class="ptscroll" id="ptscroll"><div class="ptable" role="grid"/);
+      assert.ok(h.indexOf('class="ptscroll"') < h.indexOf('class="pstrip"'));
+      assert.ok(!/pdetail|pwork-/.test(h));
+      assert.ok(!/style=/.test(h), 'CSP: no inline styles');
+      assert.ok(!('layout' in T.pipeUi({ layout: 'b' }, null)));
+      const st = T.attentionState({ sessions: [] });
+      const parts = T.pipelineSideParts(st, b, WORK, { sessions: [], projectsList: [], opts: { review: true }, nowMs: NOW });
+      assert.match(parts.panel, /<section class="ppanel/);
+      assert.match(parts.panel, /Latest findings/);
+      assert.ok(!('detail' in parts));
+    });
+
+    test('[S6] console.js: no pipe= query parsing, no pdetail, #ptscroll scroll survives a refresh, privacy canary', () => {
+      assert.ok(!/location\.search|pipe=|pdetail|pipeLayoutOf|PIPE_LAYOUT|pipe-la|pipe-lb|pwork-b|detailHtml|S6 TEMP/.test(cj));
+      assert.match(cj, /const tsTop = \(view\.querySelector\('#ptscroll'\)/);
+      assert.match(cj, /const newTs = view\.querySelector\('#ptscroll'\);\s*if \(newTs && tsTop\) newTs\.scrollTop = tsTop;/);
+      assert.match(cj, /e\.target\.closest\('\.ptable'\)\)\) return;/);
+      assert.ok(!/\.text\b|\{[^}]*\btext\b[^}]*\}\s*=/.test(cj.slice(cj.indexOf('function panelHtml'), cj.indexOf('function selectedCtx'))));
+    });
+
+    test('[S6] css: right column clamp and contained overflow, fixed-height Work column, sticky table head, narrow widths flow', () => {
+      const rules = (sel) => [...css.matchAll(new RegExp('(^|\\n)' + sel.replace(/[.*>]/g, '\\$&') + ' \\{([^}]*)\\}', 'g'))].map((m) => m[2]).join(' ');
+      const col = rules('.body.pipe .attn-col');
+      assert.match(col, /width: clamp\(360px, 30vw, 520px\)/);
+      assert.match(col, /min-width: 0/);
+      assert.match(col, /overflow-x: hidden/);
+      assert.match(col, /overflow-y: auto/);
+      assert.match(col, /max-height: calc\(100vh - \d+px\)/);
+      assert.match(col, /overflow-wrap: anywhere/);
+      const pw = rules('.pwork');
+      assert.match(pw, /display: flex/); assert.match(pw, /flex-direction: column/); assert.match(pw, /height: calc\(100vh - \d+px\)/); assert.match(pw, /min-width: 0/);
+      const ts = rules('.ptscroll');
+      assert.match(ts, /overflow-y: auto/); assert.match(ts, /min-height: 0/); assert.match(ts, /min-width: 0/); assert.match(ts, /flex: 1 1 auto/);
+      const th = rules('.ptscroll .phead-row');
+      assert.match(th, /position: sticky/); assert.match(th, /top: 0/); assert.match(th, /background: var\(--bg\)/);
+      assert.match(rules('.ppanel-sub > *, .pfind .floc'), /min-width: 0; overflow-wrap: anywhere/);
+      assert.match(css, /@media \(max-width: 900px\) \{\s*\.pwork \{ height: auto; min-height: 0; \}\s*\.ptscroll \{ flex: none; max-height: none; overflow: visible; \}\s*\.body\.pipe \.attn-col \{ max-height: none; overflow: visible; \}/);
+      assert.match(css, /@media \(max-width: 1359px\) \{ \.body\.pipe \.attn-col \{ width: auto; max-height: none; overflow: visible; \} \}/);
+      assert.ok(css.indexOf('.body.pipe .attn-col { width: clamp') < css.indexOf('@media (max-width: 1359px) { .body.pipe .attn-col'), 'the narrow override comes after the clamp');
+      assert.ok(!/pdetail|pipe-la|pipe-lb|pwork-b/.test(css));
+      const block = css.slice(css.indexOf('.body.pipe .attn-col'), css.indexOf('/* Spend tab'));
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(block), 'tokens only, no hex colours');
     });
 
     test('[4b-tab] nav order is Projects, Spend, Pipeline and the tab is registered', () => {
@@ -11667,7 +11734,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const text = strip(h).replace(/\s+/g, ' ');
       assert.match(h, /<h2 class="mono">demo<\/h2>/);
       assert.match(h, /<span class="pill-neutral">Fixing 2 findings<\/span>/);
-      assert.match(text, /alpha task\/demo/);
+      assert.match(text, /alpha task\/ demo/);   // [S6] a <wbr> follows the slash, so the tag strip leaves a space
       assert.match(text, /Plan · Architect Spec written 25 min ago/);
       assert.match(text, /Build · Builder Fixing 2 20 min ago/);
       assert.match(text, /Review · Red team Review: Block/);
@@ -11679,7 +11746,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(h, /<dd title="claude-sonnet-x">Sonnet<\/dd>/);
       assert.match(text, /Brief Updated 5 min ago/);
       assert.match(h, /<details class="pfind" open>/);
-      assert.match(text, /src\/a\.js:12/);
+      assert.match(text, /src\/ a\.js:12/);
       assert.match(text, /#1 Block started 20 min ago · ended 12 min ago/);
       assert.match(text, /#2 Running started 3 min ago|#2 running started 3 min ago/);
       assert.match(text, /Attempt started 3 min ago/);
@@ -11788,7 +11855,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const h = T.pipelineBody(body([task('builder')]), [], WORK, NOW);
       const head = strip(h.match(/<div class="phead-row"[\s\S]*?<\/div><\/div>/)[0]).replace(/\s+/g, ' ');
       assert.match(head, /Task Branch Plan Architect Build Builder Review Red team Merge Cost/);
-      assert.match(h, /<div class="pcell-branch mono" role="gridcell">task\/demo<\/div>/);
+      assert.match(h, /<div class="pcell-branch mono" role="gridcell">task\/<wbr>demo<\/div>/);
       assert.strictEqual((h.match(/class="tcell tc-/g) || []).length, 4);
     });
 
