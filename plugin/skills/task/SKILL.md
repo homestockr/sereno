@@ -82,6 +82,29 @@ The file content is:
 - ...
 ```
 
+### Runnable checks (optional)
+
+Add a `checks` block under the acceptance criteria only for a criterion that can be checked by running something. Never invent a command, script, route or port the repo does not have: read `package.json`, the README and the code first, and if you cannot name the exact command, leave the check out and keep the criterion as prose.
+
+```checks
+- cmd: node scripts/lint.js
+  expect: exit 0
+- cmd: node bin/cli.js --version
+  expect: stdout contains 1.4.0
+- serve: node server.js
+  ready: http://localhost:3000/health
+- http: http://localhost:3000/api/items
+  expect: status 200
+- http: http://localhost:3000/
+  expect: body contains <h1>Items</h1>
+- browse: http://localhost:3000/items
+  look: the empty state says "No items yet"
+```
+
+- At most 20 items, at most one `serve`, each value on one line and at most 500 characters. Nothing else may appear in the block.
+- `cmd` expects `exit <n>` or `stdout contains <text>`. `http` is a GET only and expects `status <n>` or `body contains <text>`. `serve` (with an optional `ready` URL) starts a server for the `http` checks and is always stopped afterwards. `browse` is not run; it is listed for the reviewer and for the person merging.
+- URLs are `http:` or `https:` and the host must be `localhost`, `127.0.0.1` or `[::1]`. For any other host, use it only when the user named that host in this conversation, and pass it with `--check-hosts <host>[,<host>]` (bare host names). Never add a host the user did not name. `spec` refuses a malformed block with `invalid_checks`: fix the block and run it again.
+
 Then run:
 
 ```
@@ -96,7 +119,7 @@ Two optional arguments in `$ARGUMENTS` pass straight through to the same `spec` 
 merged into the base; the branch is still created now, from the current HEAD) and
 `--hold "<one line>"` records a human step to do before merge, for example "Apply the migration to
 staging". A hold is printed, never run. Both are kept when you revise the spec without them;
-`--after none` and `--hold ""` clear them. The result is `{ ok, path, spec_revision, spec_hash }`.
+`--after none` and `--hold ""` clear them. `--check-hosts` is kept the same way (`--check-hosts ""` clears it). The result is `{ ok, path, spec_revision, spec_hash }`.
 
 ## 5. Report
 

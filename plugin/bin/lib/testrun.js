@@ -360,8 +360,198 @@ async function runAtBase(root, sha, command, timeoutSec, setup, wtTimeoutSec) {
   }
 }
 
+/* ---- runnable checks (plugin 0.5 H1) ---- */
+
+const CHECK_CMD_TIMEOUT_MS = 120 * 1000;
+const CHECK_HTTP_TIMEOUT_MS = 10 * 1000;
+const CHECK_READY_TOTAL_MS = 60 * 1000;
+const CHECK_READY_POLL_MS = 500;
+const CHECK_STDOUT_MAX = 1024 * 1024;
+const CHECK_BODY_MAX = 256 * 1024;
+const CHECK_LOG_PART_MAX = 60 * 1024;
+const CHECK_TARGET_MAX = 200;
+const CHECK_DETAIL_MAX = 300;
+
+/** At most 3 lines and 300 characters of output, control bytes stripped, lines joined with " | ". @param {string} s */
+function checkDetail(s) {
+  const lines = stripAnsi(s).split(/\r?\n/).map((l) => l.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  return lines.slice(0, 3).join(' | ').slice(0, CHECK_DETAIL_MAX);
+}
+
+/** @param {string} s @param {number} n */
+function clip(s, n) { return s.length > n ? s.slice(0, n) : s; }
+
 /**
- * @param {{ root: string, fsafe: any, config: any, configHash: string, base: string, head: string, runId: string }} o
+ * Run one check command through the platform shell, keeping stdout apart from stderr. Tree-killed on
+ * timeout or abort. Never rejects.
+ * @param {string} command @param {string} cwd @param {number} timeoutMs
+ * @returns {Promise<{ exitCode: number | null, timedOut: boolean, startFailed: boolean, stdout: string, stderr: string }>}
+ */
+function runCheckCmd(command, cwd, timeoutMs) {
+  return new Promise((resolve) => {
+    if (aborted) { resolve({ exitCode: null, timedOut: false, startFailed: true, stdout: '', stderr: '' }); return; }
+    /** @type {Buffer[]} */ const out = [], err = [];
+    let so = 0, se = 0, timedOut = false, spawnError = false, done = false;
+    let child;
+    try {
+      child = spawn(command, { shell: true, cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    } catch (_e) { resolve({ exitCode: null, timedOut: false, startFailed: true, stdout: '', stderr: '' }); return; }
+    liveChildren.add(child);
+    if (child.stdout) child.stdout.on('data', (/** @type {Buffer} */ b) => { if (so < CHECK_STDOUT_MAX) { out[out.length] = b; so += b.length; } });
+    if (child.stderr) child.stderr.on('data', (/** @type {Buffer} */ b) => { if (se < CHECK_STDOUT_MAX) { err[err.length] = b; se += b.length; } });
+    /** @type {NodeJS.Timeout | undefined} */ let grace;
+    const fin = (/** @type {number | null} */ code) => {
+      if (done) return;
+      done = true; clearTimeout(timer); clearTimeout(grace);
+      liveChildren.delete(child);
+      resolve({ exitCode: code, timedOut, startFailed: spawnError, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') });
+    };
+    const timer = setTimeout(() => { timedOut = true; killTree(child); grace = setTimeout(() => fin(null), 3000); }, timeoutMs);
+    child.on('error', () => { spawnError = true; fin(null); });
+    child.on('close', (code) => fin(timedOut ? null : code));
+  });
+}
+
+/**
+ * GET one URL: no redirects followed, the body read up to 256 KiB, a 10 s overall limit. Never rejects.
+ * @param {string} url @param {number} timeoutMs
+ * @returns {Promise<{ status: number | null, body: string, error: string | null, timedOut: boolean }>}
+ */
+function httpGet(url, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    /** @type {Buffer[]} */ const chunks = [];
+    let size = 0;
+    /** @type {import('node:http').ClientRequest | null} */ let req = null;
+    const fin = (/** @type {number | null} */ status, /** @type {string | null} */ error, /** @type {boolean} */ to) => {
+      if (done) return;
+      done = true; clearTimeout(timer);
+      try { if (req) req.destroy(); } catch (_e) { /* best effort */ }
+      resolve({ status, body: Buffer.concat(chunks).toString('utf8'), error, timedOut: to });
+    };
+    const timer = setTimeout(() => fin(null, 'timed out', true), timeoutMs);
+    try {
+      const u = new URL(url);
+      const lib = u.protocol === 'https:' ? require('node:https') : require('node:http');
+      req = lib.get(u, { agent: false, headers: { 'user-agent': 'sereno-checks' } }, (/** @type {import('node:http').IncomingMessage} */ res) => {
+        const status = res.statusCode || 0;
+        res.on('data', (/** @type {Buffer} */ b) => {
+          if (size < CHECK_BODY_MAX) { const take = b.subarray(0, CHECK_BODY_MAX - size); chunks[chunks.length] = take; size += take.length; }
+          if (size >= CHECK_BODY_MAX) fin(status, null, false);
+        });
+        res.on('end', () => fin(status, null, false));
+        res.on('error', (/** @type {Error} */ e) => fin(status, 'read error: ' + (/** @type {any} */ (e).code || 'error'), false));
+      });
+      req.on('error', (/** @type {Error} */ e) => fin(null, String((/** @type {any} */ (e).code) || 'request failed'), false));
+    } catch (_e) { fin(null, 'request failed', false); }
+  });
+}
+
+/** @param {number} ms */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * @typedef {{ n: number, kind: string, target: string, result: 'pass' | 'fail' | 'timeout' | 'server_not_ready' | 'refused' | 'unverified', detail: string }} CheckResult
+ */
+
+/**
+ * Run a spec's checks at the working tree. cmd and http run in order; browse is recorded as
+ * unverified and never runs. A `serve` starts in the background first, is polled at its `ready` URL,
+ * and is ALWAYS killed (tree kill) before this returns: in the finally block, and, through
+ * liveChildren and cleanups, on SIGINT and the --deadline-sec abort. Never rejects.
+ * @param {import('./spec.js').Check[]} checks @param {string} cwd
+ * @param {{ cmdTimeoutMs?: number, httpTimeoutMs?: number, readyTotalMs?: number, readyPollMs?: number }} [opts] shorter limits for tests; the defaults are the contract
+ * @returns {Promise<{ results: CheckResult[], logs: string[], servePid: number | null }>}
+ */
+async function runChecks(checks, cwd, opts) {
+  const o = opts || {};
+  const cmdMs = o.cmdTimeoutMs || CHECK_CMD_TIMEOUT_MS, httpMs = o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS;
+  const readyMs = o.readyTotalMs || CHECK_READY_TOTAL_MS, pollMs = o.readyPollMs || CHECK_READY_POLL_MS;
+  /** @type {CheckResult[]} */ const results = [];
+  /** @type {string[]} */ const logs = [];
+  /** @type {import('node:child_process').ChildProcess | null} */ let server = null;
+  let servePid = null;
+  /** @type {Buffer[]} */ const serveOut = [];
+  let serveSize = 0, serveExited = false, serveCode = /** @type {number | null} */ (null);
+  const stopServer = () => {
+    if (!server) return;
+    const s = server; server = null;
+    killTree(s);
+    liveChildren.delete(s);
+  };
+  cleanups.add(stopServer);
+  const record = (/** @type {{ n: number }} */ c, /** @type {string} */ kind, /** @type {string} */ target, /** @type {CheckResult['result']} */ result, /** @type {string} */ detail, /** @type {string} */ log) => {
+    results[results.length] = { n: c.n, kind, target: clip(target, CHECK_TARGET_MAX), result, detail: clip(detail, CHECK_DETAIL_MAX) };
+    logs[logs.length] = '===== check ' + c.n + ': ' + kind + ' (' + result + ') =====\n' + clip(log, CHECK_LOG_PART_MAX) + '\n';
+  };
+  let serverReady = true;
+  try {
+    for (const c of checks) {
+      if (aborted) { record(c, c.kind, targetOf(c), 'refused', 'the run was interrupted', ''); continue; }
+      if (c.kind === 'browse') { record(c, 'browse', c.url, 'unverified', clip(c.look, CHECK_DETAIL_MAX), c.look); continue; }
+      if (c.kind === 'serve') {
+        let child;
+        try {
+          child = spawn(c.serve, { shell: true, cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+        } catch (_e) { record(c, 'serve', c.serve, 'fail', 'could not start', ''); serverReady = false; continue; }
+        server = child; servePid = child.pid || null;
+        liveChildren.add(child);
+        const take = (/** @type {Buffer} */ b) => { if (serveSize < CHECK_LOG_PART_MAX) { serveOut[serveOut.length] = b; serveSize += b.length; } };
+        if (child.stdout) child.stdout.on('data', take);
+        if (child.stderr) child.stderr.on('data', take);
+        child.on('error', () => { serveExited = true; });
+        child.on('close', (code) => { serveExited = true; serveCode = code; });
+        if (!c.ready) { record(c, 'serve', c.serve, 'pass', 'started (no ready URL)', ''); continue; }
+        const until = Date.now() + readyMs;
+        let ok = false;
+        while (!aborted && !serveExited && Date.now() < until) {
+          const r = await httpGet(c.ready, Math.min(2000, httpMs));
+          if (r.status !== null && r.status >= 200 && r.status < 400) { ok = true; break; }
+          await sleep(pollMs);
+        }
+        if (ok) record(c, 'serve', c.serve, 'pass', 'ready at ' + c.ready, '');
+        else {
+          serverReady = false;
+          const why = serveExited ? 'the server exited' + (serveCode === null ? '' : ' with code ' + serveCode) + ' before it was ready' : 'no 2xx or 3xx from ' + c.ready + ' within ' + Math.round(readyMs / 1000) + ' s';
+          record(c, 'serve', c.serve, 'server_not_ready', why, why + '\n' + Buffer.concat(serveOut).toString('utf8'));
+        }
+        continue;
+      }
+      if (c.kind === 'cmd') {
+        const r = await runCheckCmd(c.cmd, cwd, cmdMs);
+        const log = r.stdout + (r.stderr ? '\n[stderr]\n' + r.stderr : '');
+        if (r.timedOut) { record(c, 'cmd', c.cmd, 'timeout', 'no exit within ' + Math.round(cmdMs / 1000) + ' s; killed', log); continue; }
+        if (r.startFailed || r.exitCode === null) { record(c, 'cmd', c.cmd, 'fail', 'the command could not run', log); continue; }
+        if (c.expect.type === 'exit') {
+          if (r.exitCode === c.expect.code) record(c, 'cmd', c.cmd, 'pass', '', log);
+          else record(c, 'cmd', c.cmd, 'fail', 'exit ' + r.exitCode + ', expected ' + c.expect.code + (checkDetail(log) ? ': ' + checkDetail(log) : ''), log);
+        } else if (r.stdout.includes(c.expect.text)) record(c, 'cmd', c.cmd, 'pass', '', log);
+        else record(c, 'cmd', c.cmd, 'fail', 'exit ' + r.exitCode + '; stdout does not contain the expected text' + (checkDetail(r.stdout) ? ': ' + checkDetail(r.stdout) : ''), log);
+        continue;
+      }
+      // http
+      if (!serverReady) { record(c, 'http', c.url, 'server_not_ready', 'the serve step did not become ready', ''); continue; }
+      const r = await httpGet(c.url, httpMs);
+      if (r.timedOut) { record(c, 'http', c.url, 'timeout', 'no complete response within ' + Math.round(httpMs / 1000) + ' s', ''); continue; }
+      if (r.status === null) { record(c, 'http', c.url, 'fail', 'no response: ' + (r.error || 'error'), ''); continue; }
+      if (c.expect.type === 'status') {
+        if (r.status === c.expect.code) record(c, 'http', c.url, 'pass', '', 'status ' + r.status);
+        else record(c, 'http', c.url, 'fail', 'status ' + r.status + ', expected ' + c.expect.code, 'status ' + r.status + '\n' + r.body);
+      } else if (r.body.includes(c.expect.text)) record(c, 'http', c.url, 'pass', '', 'status ' + r.status);
+      else record(c, 'http', c.url, 'fail', 'status ' + r.status + '; body does not contain the expected text', 'status ' + r.status + '\n' + r.body);
+    }
+  } finally {
+    stopServer();
+    cleanups.delete(stopServer);
+  }
+  return { results, logs, servePid };
+}
+
+/** @param {import('./spec.js').Check} c */
+function targetOf(c) { return c.kind === 'cmd' ? c.cmd : c.kind === 'serve' ? c.serve : c.url; }
+
+/**
+ * @param {{ root: string, fsafe: any, config: any, configHash: string, base: string, head: string, runId: string, checks?: import('./spec.js').Check[], checkOpts?: object }} o
  */
 async function runTests(o) {
   const { root, fsafe, config } = o;
@@ -482,6 +672,25 @@ async function runTests(o) {
     if (newFailures.length && !incompleteRuns) { passed = false; diagnosis = 'defect'; }
   }
 
+  // Runnable checks (spec `checks` block): at head only, in the repo root, after the suite. They never touch
+  // the base/head comparison above. A failing or timed-out check is a new failure and a defect.
+  /** @type {CheckResult[]} */ let checkResults = [];
+  /** @type {string | null} */ let checksLog = null;
+  if (o.checks && o.checks.length && !headEnv && !aborted) {
+    const cr = await runChecks(o.checks, root, /** @type {any} */ (o.checkOpts));
+    checkResults = cr.results;
+    const bad = cr.results.filter((r) => r.result !== 'pass' && r.result !== 'unverified');
+    if (bad.length) {
+      for (const r of bad) newFailures[newFailures.length] = 'check ' + r.n + ': ' + r.kind;
+      passed = false;
+      if (diagnosis === 'none') diagnosis = 'defect';
+    }
+    let t = cr.logs.join('\n');
+    if (Buffer.byteLength(t) > MAX_LOG) t = Buffer.from(t).subarray(0, MAX_LOG).toString('utf8') + '\n[log truncated]\n';
+    const rel = '.sereno/cache/checks-' + o.runId + '.log';
+    try { fsafe.writeFile(rel, t); checksLog = rel; } catch (_e) { /* logs are best effort */ }
+  }
+
   const logRel = '.sereno/cache/test-' + o.runId + '.log';
   let text = '';
   for (const p of logParts) {
@@ -495,8 +704,8 @@ async function runTests(o) {
   return {
     passed, mode, newFailures, baseFailures, flaky, baseCached, baseUsable, timedOut, diagnosis,
     baseFailing, note, exit_codes: { base: baseSuite.exitCode, head: head.exitCode },
-    command, log,
+    command, log, checks: checkResults, checks_log: checksLog,
   };
 }
 
-module.exports = { sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };
+module.exports = { runChecks, httpGet, sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };

@@ -67,7 +67,7 @@ function previousBaseBranch(root, task) {
  * spec. Bounded read, no symlinks. Keys a spec does not have (older specs have no `after`
  * or `hold_before_merge`) come back null. `created_at` is the ISO string or null.
  * @param {string} root real repo root @param {string} task
- * @returns {{ task: string, builder: string | null, kind: string | null, base_branch: string | null, after: string | null, hold_before_merge: string | null, spec_revision: number, created_at: string | null } | null}
+ * @returns {{ task: string, builder: string | null, kind: string | null, base_branch: string | null, after: string | null, hold_before_merge: string | null, spec_revision: number, created_at: string | null, check_hosts: string[] } | null}
  */
 function readSpecMeta(root, task) {
   const file = path.join(root, '.sereno', 'specs', task + '.md');
@@ -100,7 +100,176 @@ function readSpecMeta(root, task) {
     hold_before_merge: hold ? rec.cleanText(hold, HOLD_MAX) || null : null,
     spec_revision: typeof rev === 'number' ? rev : 0,
     created_at: str('created_at'),
+    check_hosts: hostsOf(head),
   };
+}
+
+/* ---- runnable checks (plugin 0.5 H1) ---- */
+
+const CHECKS_MAX = 20;
+const CHECK_VALUE_MAX = 500;
+const CHECK_HOSTS_MAX = 10;
+const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
+
+/** @param {string} category @param {number} line 0 for none @param {string} detail */
+function badChecks(category, line, detail) {
+  return new SerenoError('invalid_checks', 'invalid_checks ' + category + (line ? ' (line ' + line + ')' : '') + ': ' + detail);
+}
+
+/** A bare host name or IP literal: no port, scheme, path or credentials. @param {string} h */
+function validHost(h) {
+  if (typeof h !== 'string' || !h || h.length > 253) return false;
+  return /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/.test(h) || /^\[[0-9A-Fa-f:.]+\]$/.test(h);
+}
+
+/** The `check_hosts` list of a spec head: valid lowercase host names only, at most 10. @param {string} head @returns {string[]} */
+function hostsOf(head) {
+  const m = /^check_hosts:[ \t]*(.*?)[ \t]*$/m.exec(head);
+  if (!m) return [];
+  let v;
+  try { v = JSON.parse(m[1]); } catch (_e) { return []; }
+  if (!Array.isArray(v)) return [];
+  /** @type {string[]} */
+  const out = [];
+  for (const h of v) if (typeof h === 'string' && validHost(h) && !out.includes(h.toLowerCase()) && out.length < CHECK_HOSTS_MAX) out[out.length] = h.toLowerCase();
+  return out;
+}
+
+/**
+ * Validate and normalise a --check-hosts value: a list of bare host names. Throws invalid_arg.
+ * @param {string[]} list @returns {string[]}
+ */
+function cleanCheckHosts(list) {
+  if (list.length > CHECK_HOSTS_MAX) throw new SerenoError('invalid_arg', '--check-hosts takes at most ' + CHECK_HOSTS_MAX + ' hosts');
+  /** @type {string[]} */
+  const out = [];
+  for (const raw of list) {
+    const h = raw.trim().toLowerCase();
+    if (!validHost(h)) throw new SerenoError('invalid_arg', '--check-hosts takes bare host names (no scheme, port or path): ' + rec.cleanText(raw, 60));
+    if (!out.includes(h)) out[out.length] = h;
+  }
+  return out;
+}
+
+/** @param {string} value @param {number} line @param {string[]} hosts @returns {string} */
+function checkUrl(value, line, hosts) {
+  let u;
+  try { u = new URL(value); } catch (_e) { throw badChecks('syntax', line, 'not a URL'); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw badChecks('scheme', line, 'only http: and https: URLs are accepted');
+  if (u.username || u.password) throw badChecks('host', line, 'a URL with credentials is refused');
+  const h = u.hostname.toLowerCase();
+  if (!LOCAL_HOSTS.includes(h) && !hosts.includes(h)) throw badChecks('host', line, h + ' is not localhost, 127.0.0.1, [::1] or listed in check_hosts');
+  return value;
+}
+
+/**
+ * @typedef {{ n: number, kind: 'cmd', cmd: string, expect: { type: 'exit', code: number } | { type: 'stdout', text: string } }
+ *   | { n: number, kind: 'serve', serve: string, ready: string | null }
+ *   | { n: number, kind: 'http', url: string, expect: { type: 'status', code: number } | { type: 'body', text: string } }
+ *   | { n: number, kind: 'browse', url: string, look: string }} Check
+ */
+
+/**
+ * Parse the `checks` fenced block of a spec. `text` is the whole spec file (its front matter
+ * supplies check_hosts) or just a body, in which case `hosts` supplies them. A fence inside another
+ * fence is example text and does not count. Returns [] when there is no block. Throws
+ * invalid_checks <category> for anything malformed (syntax, expect, limit, host, scheme, serve,
+ * multiple, unterminated). Nothing is executed here.
+ * @param {string} text @param {string[]} [hosts]
+ * @returns {Check[]}
+ */
+function parseChecks(text, hosts) {
+  let head = '', body = text;
+  if (/^---\r?\n/.test(text)) {
+    const parts = text.replace(/^---\r?\n/, '').split(/\r?\n---\r?\n/);
+    head = parts[0]; body = parts.slice(1).join('\n---\n');
+  }
+  const allowed = hosts ? hosts : hostsOf(head);
+  /** @type {string | null} */
+  let open = null;
+  let inChecks = false, seenBlock = false, closed = false;
+  /** @type {{ line: number, text: string }[]} */
+  const lines = [];
+  const all = body.split(/\r?\n/);
+  for (let i = 0; i < all.length; i++) {
+    const l = all[i];
+    if (open) {
+      const c = new RegExp('^ {0,3}' + (open[0] === '`' ? '`' : '~') + '{' + open.length + ',}[ \\t]*$');
+      if (c.test(l)) { open = null; if (inChecks) { inChecks = false; closed = true; } }
+      else if (inChecks) lines[lines.length] = { line: i + 1, text: l };
+      continue;
+    }
+    const o = /^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/.exec(l);
+    if (o) {
+      open = o[1];
+      if (o[2].trim() === 'checks') {
+        if (seenBlock) throw badChecks('multiple', i + 1, 'a spec has one checks block');
+        seenBlock = true; inChecks = true;
+      }
+    }
+  }
+  if (!seenBlock) return [];
+  if (!closed) throw badChecks('unterminated', 0, 'the checks block is never closed');
+
+  /** @type {Check[]} */
+  const out = [];
+  /** @type {Record<string, any> | null} */
+  let cur = null;
+  let serves = 0;
+  const value = (/** @type {string} */ v, /** @type {number} */ line) => {
+    const t = v.trim();
+    if (!t) throw badChecks('syntax', line, 'empty value');
+    if (t.length > CHECK_VALUE_MAX) throw badChecks('limit', line, 'a value is longer than ' + CHECK_VALUE_MAX + ' characters');
+    if (/[\u0000-\u001f\u007f]/.test(t)) throw badChecks('syntax', line, 'control characters are not allowed');
+    return t;
+  };
+  const finish = () => {
+    if (!cur) return;
+    const c = cur; cur = null;
+    const n = out.length + 1;
+    if (c.kind === 'cmd') {
+      if (c.expect === undefined) throw badChecks('expect', c.line, 'cmd needs an expect line');
+      if (c.ready !== undefined || c.look !== undefined) throw badChecks('syntax', c.line, 'cmd takes only expect');
+      const m = /^exit (\d{1,3})$/.exec(c.expect), s = /^stdout contains (.+)$/.exec(c.expect);
+      if (!m && !s) throw badChecks('expect', c.line, 'cmd expects "exit <n>" or "stdout contains <text>"');
+      out[out.length] = { n, kind: 'cmd', cmd: c.value, expect: m ? { type: 'exit', code: parseInt(m[1], 10) } : { type: 'stdout', text: /** @type {RegExpExecArray} */ (s)[1] } };
+    } else if (c.kind === 'serve') {
+      if (c.expect !== undefined || c.look !== undefined) throw badChecks('syntax', c.line, 'serve takes only ready');
+      serves++;
+      if (serves > 1) throw badChecks('serve', c.line, 'at most one serve');
+      out[out.length] = { n, kind: 'serve', serve: c.value, ready: c.ready === undefined ? null : checkUrl(c.ready, c.line, allowed) };
+    } else if (c.kind === 'http') {
+      if (c.expect === undefined) throw badChecks('expect', c.line, 'http needs an expect line');
+      if (c.ready !== undefined || c.look !== undefined) throw badChecks('syntax', c.line, 'http takes only expect');
+      const m = /^status ([1-5]\d\d)$/.exec(c.expect), b = /^body contains (.+)$/.exec(c.expect);
+      if (!m && !b) throw badChecks('expect', c.line, 'http expects "status <n>" or "body contains <text>"');
+      out[out.length] = { n, kind: 'http', url: checkUrl(c.value, c.line, allowed), expect: m ? { type: 'status', code: parseInt(m[1], 10) } : { type: 'body', text: /** @type {RegExpExecArray} */ (b)[1] } };
+    } else {
+      if (c.look === undefined) throw badChecks('syntax', c.line, 'browse needs a look line');
+      if (c.expect !== undefined || c.ready !== undefined) throw badChecks('syntax', c.line, 'browse takes only look');
+      out[out.length] = { n, kind: 'browse', url: checkUrl(c.value, c.line, allowed), look: c.look };
+    }
+  };
+  for (const { line, text: raw } of lines) {
+    const l = raw.replace(/\s+$/, '');
+    if (!l.trim()) continue;
+    const s = /^- (cmd|serve|http|browse):(?:[ \t]+(.*))?$/.exec(l);
+    if (s) {
+      finish();
+      if (out.length >= CHECKS_MAX) throw badChecks('limit', line, 'more than ' + CHECKS_MAX + ' checks');
+      cur = { kind: s[1], line, value: value(s[2] || '', line) };
+      continue;
+    }
+    const k = /^[ \t]+(expect|ready|look):(?:[ \t]+(.*))?$/.exec(l);
+    if (k && cur) {
+      if (cur[k[1]] !== undefined) throw badChecks('syntax', line, 'duplicate ' + k[1]);
+      cur[k[1]] = value(k[2] || '', line);
+      continue;
+    }
+    throw badChecks('syntax', line, 'not a check item or a key of one');
+  }
+  finish();
+  return out;
 }
 
 /**
@@ -178,7 +347,7 @@ function readSpecTitle(root, task) {
 
 /**
  * Build the spec file text.
- * @param {{ task: string, builder: string, kind: string, reason: string, fixes: string | null, baseBranch?: string | null, after?: string | null, hold?: string | null, revision: number, body: string, now?: Date }} p
+ * @param {{ task: string, builder: string, kind: string, reason: string, fixes: string | null, baseBranch?: string | null, after?: string | null, hold?: string | null, checkHosts?: string[], revision: number, body: string, now?: Date }} p
  */
 function renderSpec(p) {
   // JSON strings are valid YAML scalars, so free text can never break the front matter.
@@ -192,6 +361,7 @@ function renderSpec(p) {
     'base_branch: ' + (p.baseBranch ? JSON.stringify(p.baseBranch) : 'null'),
     'after: ' + (p.after ? JSON.stringify(p.after) : 'null'),
     'hold_before_merge: ' + (p.hold ? JSON.stringify(p.hold) : 'null'),
+    ...(p.checkHosts && p.checkHosts.length ? ['check_hosts: ' + JSON.stringify(p.checkHosts)] : []),
     'spec_revision: ' + p.revision,
     'created_at: ' + JSON.stringify((p.now || new Date()).toISOString()),
     '---',
@@ -202,7 +372,7 @@ function renderSpec(p) {
 
 /**
  * Write .sereno/specs/<task>.md.
- * @param {{ root: string, fsafe: { writeFile: (rel: string, data: string) => string }, task: string, allowed?: string[], builder?: string, kind?: string, reason?: string, fixes?: string, baseBranch?: string, after?: string, hold?: string, body: string }} a
+ * @param {{ root: string, fsafe: { writeFile: (rel: string, data: string) => string }, task: string, allowed?: string[], builder?: string, kind?: string, reason?: string, fixes?: string, baseBranch?: string, after?: string, hold?: string, checkHosts?: string[], body: string }} a
  */
 function writeSpec(a) {
   const task = rec.checkTask(a.task);
@@ -234,8 +404,11 @@ function writeSpec(a) {
     if (h.length > HOLD_MAX) throw new SerenoError('invalid_arg', '--hold is longer than ' + HOLD_MAX + ' characters');
     hold = h || null;
   }
+  // check_hosts: omitted keeps the earlier spec's list; an empty list clears it. Only the user's own hosts belong here.
+  const checkHosts = a.checkHosts !== undefined ? cleanCheckHosts(a.checkHosts) : (prev ? prev.check_hosts : []);
+  parseChecks(a.body, checkHosts); // a malformed checks block is refused at write time, never at test time
   const revision = previousRevision(a.root, task) + 1;
-  const text = renderSpec({ task, builder: /** @type {string} */ (a.builder), kind: /** @type {string} */ (a.kind), reason, fixes, baseBranch, after, hold, revision, body: a.body });
+  const text = renderSpec({ task, builder: /** @type {string} */ (a.builder), kind: /** @type {string} */ (a.kind), reason, fixes, baseBranch, after, hold, checkHosts, revision, body: a.body });
   const rel = '.sereno/specs/' + task + '.md';
   a.fsafe.writeFile(rel, text);
   return { path: rel, spec_revision: revision, spec_hash: rec.sha256(Buffer.from(text, 'utf8')) };
@@ -264,4 +437,4 @@ function createTaskBranch(a) {
   return { branch, base_commit: head, from_branch: gitlib.currentBranch(a.root) };
 }
 
-module.exports = { validBranchName, previousRevision, previousBaseBranch, readSpecMeta, readSpecTitle, HOLD_MAX, renderSpec, writeSpec, createTaskBranch };
+module.exports = { parseChecks, cleanCheckHosts, CHECKS_MAX, CHECK_VALUE_MAX, validBranchName, previousRevision, previousBaseBranch, readSpecMeta, readSpecTitle, HOLD_MAX, renderSpec, writeSpec, createTaskBranch };

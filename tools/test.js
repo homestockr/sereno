@@ -15837,6 +15837,401 @@ test('missing rate_limits degrades instead of throwing', () => {
     await atest('[plugin-0.4 field3] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
 
+  /* ---- [plugin-0.5 H1] runnable checks: cmd, serve/ready, http; browse recorded as unverified ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const speclib = require('../plugin/bin/lib/spec.js');
+    const testrunLib = require('../plugin/bin/lib/testrun.js');
+    const nextLib = require('../plugin/bin/lib/next.js');
+    const net = require('node:net');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-h1-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 120000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout + r.stderr);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const FENCE = '```';
+    const blk = (...items) => '## Goal\nx\n\n## Acceptance criteria\n- y\n\n' + FENCE + 'checks\n' + items.join('\n') + '\n' + FENCE + '\n';
+    const bad = (text, cat, hosts) => {
+      let err = null;
+      try { speclib.parseChecks(text, hosts); } catch (e) { err = e; }
+      assert.ok(err && err.code === 'invalid_checks', 'expected invalid_checks for: ' + text + ' got ' + (err && err.message));
+      assert.ok(err.message.startsWith('invalid_checks ' + cat), 'expected category ' + cat + ': ' + err.message);
+    };
+    const freePort = () => new Promise((resolve) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (_e) { return false; } };
+    const goneSoon = async (pid) => { for (let i = 0; i < 40; i++) { if (!alive(pid)) return true; await new Promise((r) => setTimeout(r, 100)); } return false; };
+    const readPid = async (file) => { for (let i = 0; i < 50; i++) { try { const t = fs.readFileSync(file, 'utf8'); if (t) return parseInt(t, 10); } catch (_e) { /* not yet */ } await new Promise((r) => setTimeout(r, 100)); } return null; };
+    // A tiny server on 127.0.0.1 and the port given as argv[2]; argv[3] is a file that gets the server's own pid.
+    const SERVER_JS = [
+      "const http=require('http'),fs=require('fs');",
+      "const port=+process.argv[2];",
+      "if(process.argv[3]) fs.writeFileSync(process.argv[3],String(process.pid));",
+      "http.createServer((q,r)=>{",
+      " if(q.url==='/health'){r.end('ok');return;}",
+      " if(q.url==='/items'){r.setHeader('content-type','text/html');r.end('<h1>Items</h1>');return;}",
+      " if(q.url==='/r'){r.statusCode=302;r.setHeader('location','/items');r.end();return;}",
+      " if(q.url==='/big'){r.end('x'.repeat(300*1024)+'ENDMARK');return;}",
+      " if(q.url==='/bigstart'){r.end('STARTMARK'+'x'.repeat(300*1024));return;}",
+      " if(q.url==='/slow'){return;}",
+      " r.statusCode=404;r.end('nope');",
+      "}).listen(port,'127.0.0.1');",
+    ].join('\n');
+    const work = () => { const d = mk(); fs.writeFileSync(path.join(d, 'server.js'), SERVER_JS); return d; };
+
+    // ---- parser ----
+    test('[plugin-0.5 H1] parseChecks: a valid block parses to one entry per item, numbered from 1', () => {
+      const text = blk(
+        '- cmd: npm run lint', '  expect: exit 0',
+        '- cmd: node bin/cli.js --version', '  expect: stdout contains 1.4.0',
+        '- serve: npm run dev', '  ready: http://localhost:3000/health',
+        '- http: http://localhost:3000/api/items', '  expect: status 200',
+        '- http: http://127.0.0.1:3000/', '  expect: body contains <h1>Items</h1>',
+        '- browse: http://[::1]:3000/items', '  look: the empty state says "No items yet"');
+      assert.deepStrictEqual(speclib.parseChecks(text), [
+        { n: 1, kind: 'cmd', cmd: 'npm run lint', expect: { type: 'exit', code: 0 } },
+        { n: 2, kind: 'cmd', cmd: 'node bin/cli.js --version', expect: { type: 'stdout', text: '1.4.0' } },
+        { n: 3, kind: 'serve', serve: 'npm run dev', ready: 'http://localhost:3000/health' },
+        { n: 4, kind: 'http', url: 'http://localhost:3000/api/items', expect: { type: 'status', code: 200 } },
+        { n: 5, kind: 'http', url: 'http://127.0.0.1:3000/', expect: { type: 'body', text: '<h1>Items</h1>' } },
+        { n: 6, kind: 'browse', url: 'http://[::1]:3000/items', look: 'the empty state says "No items yet"' },
+      ]);
+    });
+    test('[plugin-0.5 H1] parseChecks: no block is [], a serve may have no ready, and a fence inside another fence is example text', () => {
+      assert.deepStrictEqual(speclib.parseChecks('## Goal\nx\n'), []);
+      assert.deepStrictEqual(speclib.parseChecks(blk('- serve: node s.js')), [{ n: 1, kind: 'serve', serve: 'node s.js', ready: null }]);
+      const nested = '## Goal\n\n````md\n' + FENCE + 'checks\n- cmd: rm -rf x\n  expect: exit 0\n' + FENCE + '\n````\n';
+      assert.deepStrictEqual(speclib.parseChecks(nested), []);
+      assert.deepStrictEqual(speclib.parseChecks('---\ntask: "a"\n---\n' + blk('- cmd: a', '  expect: exit 1')).map((c) => c.cmd), ['a']);
+      assert.deepStrictEqual(speclib.parseChecks('~~~checks\n- cmd: a\n  expect: exit 1\n~~~\n').length, 1);
+    });
+    test('[plugin-0.5 H1] parseChecks: each malformed form is refused as invalid_checks <category>', () => {
+      bad(blk('- shell: ls', '  expect: exit 0'), 'syntax');
+      bad(blk('- cmd: ls'), 'expect');
+      bad(blk('- cmd: ls', '  expect: exit'), 'expect');
+      bad(blk('- cmd: ls', '  expect: status 200'), 'expect');
+      bad(blk('- cmd:', '  expect: exit 0'), 'syntax');
+      bad(blk('- cmd: ls', '  expect: exit 0', '  expect: exit 1'), 'syntax');
+      bad(blk('- cmd: ls', '  expect: exit 0', '  look: x'), 'syntax');
+      bad(blk('- cmd: ls', '  expect: exit 0', 'stray line'), 'syntax');
+      bad(blk('  expect: exit 0'), 'syntax');
+      bad(blk('- http: http://localhost/', '  expect: exit 0'), 'expect');
+      bad(blk('- http: http://localhost/', '  expect: status 999'), 'expect');
+      bad(blk('- http: http://localhost/'), 'expect');
+      bad(blk('- http: not a url', '  expect: status 200'), 'syntax');
+      bad(blk('- serve: node s.js', '  expect: status 200'), 'syntax');
+      bad(blk('- browse: http://localhost/'), 'syntax');
+      bad(blk('- browse: http://localhost/', '  look: x', '  expect: status 200'), 'syntax');
+      bad(blk('- cmd: ls\u0007', '  expect: exit 0'), 'syntax');
+      bad('## Goal\n' + FENCE + 'checks\n- cmd: ls\n  expect: exit 0\n', 'unterminated');
+      bad(blk('- cmd: a', '  expect: exit 0') + '\n' + blk('- cmd: b', '  expect: exit 0'), 'multiple');
+    });
+    test('[plugin-0.5 H1] parseChecks: limits are 20 checks, 500 characters per value and one serve', () => {
+      const items = (n) => Array.from({ length: n }, (_v, i) => ['- cmd: c' + i, '  expect: exit 0']).flat();
+      assert.strictEqual(speclib.parseChecks(blk(...items(20))).length, 20);
+      bad(blk(...items(21)), 'limit');
+      assert.strictEqual(speclib.parseChecks(blk('- cmd: ' + 'a'.repeat(500), '  expect: exit 0')).length, 1);
+      bad(blk('- cmd: ' + 'a'.repeat(501), '  expect: exit 0'), 'limit');
+      bad(blk('- browse: http://localhost/', '  look: ' + 'a'.repeat(501)), 'limit');
+      bad(blk('- serve: a', '- serve: b'), 'serve');
+    });
+    test('[plugin-0.5 H1] parseChecks: host rule, check_hosts front matter and http/https only', () => {
+      const ext = blk('- http: http://staging.example.test/health', '  expect: status 200');
+      bad(ext, 'host');
+      assert.strictEqual(speclib.parseChecks(ext, ['staging.example.test']).length, 1);
+      assert.strictEqual(speclib.parseChecks('---\ncheck_hosts: ["Staging.Example.test"]\n---\n' + ext).length, 1, 'front matter list, case folded');
+      bad('---\ncheck_hosts: ["other.example.test"]\n---\n' + ext, 'host');
+      bad(blk('- http: http://localhost.example.test/', '  expect: status 200'), 'host');
+      bad(blk('- http: http://user:pw@localhost/', '  expect: status 200'), 'host');
+      bad(blk('- browse: http://evil.example.test/', '  look: x'), 'host');
+      bad(blk('- serve: node s.js', '  ready: http://evil.example.test/'), 'host');
+      bad(blk('- http: ftp://localhost/', '  expect: status 200'), 'scheme');
+      bad(blk('- http: file:///etc/hosts', '  expect: status 200'), 'scheme');
+      bad(blk('- browse: javascript:alert(1)', '  look: x'), 'scheme');
+      assert.strictEqual(speclib.parseChecks(blk('- http: https://localhost:8443/x', '  expect: status 200')).length, 1);
+      assert.strictEqual(speclib.parseChecks(blk('- http: http://LOCALHOST/x', '  expect: status 200')).length, 1);
+    });
+
+    // ---- writing ----
+    function repo() {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      return dir;
+    }
+    const specArgs = (task, extra) => ['spec', '--task', task, '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', 'main'].concat(extra || [], ['--stdin']);
+    test('[plugin-0.5 H1] spec: --check-hosts is written to the front matter, kept on revision, cleared by "" and validated', () => {
+      const dir = repo();
+      const body = blk('- http: http://staging.example.test/health', '  expect: status 200');
+      const r = S(dir, specArgs('c1', ['--check-hosts', 'Staging.Example.test, other.test']), body);
+      assert.strictEqual(r.out.ok, true, JSON.stringify(r.out));
+      const text = fs.readFileSync(path.join(dir, '.sereno', 'specs', 'c1.md'), 'utf8');
+      assert.match(text, /^check_hosts: \["staging\.example\.test","other\.test"\]$/m);
+      assert.deepStrictEqual(speclib.readSpecMeta(dir, 'c1').check_hosts, ['staging.example.test', 'other.test']);
+      assert.strictEqual(speclib.parseChecks(text).length, 1, 'the spec file parses with its own front matter');
+      assert.strictEqual(S(dir, specArgs('c1'), body).out.spec_revision, 2);
+      assert.deepStrictEqual(speclib.readSpecMeta(dir, 'c1').check_hosts, ['staging.example.test', 'other.test'], 'omitted keeps the list');
+      const cleared = S(dir, specArgs('c1', ['--check-hosts', '']), '## Goal\nx\n');
+      assert.strictEqual(cleared.out.ok, true);
+      assert.deepStrictEqual(speclib.readSpecMeta(dir, 'c1').check_hosts, []);
+      assert.ok(!/check_hosts/.test(fs.readFileSync(path.join(dir, '.sereno', 'specs', 'c1.md'), 'utf8')));
+      for (const badHost of ['http://x.test', 'x.test/path', 'x.test:80', 'a b']) {
+        const e = S(dir, specArgs('c2', ['--check-hosts', badHost]), '## Goal\nx\n');
+        assert.deepStrictEqual([e.out.ok, e.out.code], [false, 'invalid_arg'], badHost);
+      }
+      assert.strictEqual(S(dir, specArgs('c2', ['--check-hosts', Array.from({ length: 11 }, (_v, i) => 'h' + i + '.test').join(',')]), '## Goal\nx\n').out.code, 'invalid_arg');
+    });
+    test('[plugin-0.5 H1] spec: a malformed checks block, or a host nobody named, is refused at write time (invalid_checks, exit 25)', () => {
+      const dir = repo();
+      const e = S(dir, specArgs('c3'), blk('- cmd: ls'));
+      assert.deepStrictEqual([e.out.ok, e.out.code, e.status], [false, 'invalid_checks', 25]);
+      assert.match(e.out.error, /^invalid_checks expect/);
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno', 'specs', 'c3.md')), 'nothing was written');
+      const h = S(dir, specArgs('c3'), blk('- http: http://staging.example.test/', '  expect: status 200'));
+      assert.match(h.out.error, /^invalid_checks host/);
+      assert.strictEqual(S(dir, specArgs('c3', ['--check-hosts', 'staging.example.test']), blk('- http: http://staging.example.test/', '  expect: status 200')).out.ok, true);
+    });
+
+    // ---- running, in process (short limits) ----
+    const run = (checks, cwd, opts) => testrunLib.runChecks(speclib.parseChecks(blk(...checks)), cwd, opts);
+    await atest('[plugin-0.5 H1] runChecks cmd: exit codes and stdout contains pass or fail', async () => {
+      const d = work();
+      const r = await run([
+        '- cmd: node -e "process.exit(3)"', '  expect: exit 3',
+        '- cmd: node -e "process.exit(1)"', '  expect: exit 0',
+        '- cmd: node -e "console.log(\'hello 1.4.0\')"', '  expect: stdout contains 1.4.0',
+        '- cmd: node -e "console.log(\'hello\')"', '  expect: stdout contains 9.9.9',
+        '- cmd: node -e "console.error(\'1.4.0\')"', '  expect: stdout contains 1.4.0',
+      ], d);
+      assert.deepStrictEqual(r.results.map((x) => x.result), ['pass', 'fail', 'pass', 'fail', 'fail']);
+      assert.match(r.results[1].detail, /^exit 1, expected 0/);
+      assert.strictEqual(r.servePid, null);
+    });
+    await atest('[plugin-0.5 H1] runChecks cmd: a command that outlasts its limit is a timeout and its process tree is killed', async () => {
+      const d = work(); const pidFile = path.join(d, 'cmd.pid');
+      const t0 = Date.now();
+      const r = await run(['- cmd: node server.js ' + (await freePort()) + ' cmd.pid', '  expect: exit 0'], d, { cmdTimeoutMs: 1500 });
+      assert.strictEqual(r.results[0].result, 'timeout');
+      assert.ok(Date.now() - t0 < 20000);
+      const pid = await readPid(pidFile);
+      assert.ok(pid, 'the command did start');
+      assert.ok(await goneSoon(pid), 'the timed-out command is gone');
+    });
+    await atest('[plugin-0.5 H1] runChecks serve + ready + http: status, body contains, no redirect followed, body capped at 256 KiB', async () => {
+      const d = work(); const port = await freePort(); const base = 'http://127.0.0.1:' + port;
+      const r = await run([
+        '- serve: node server.js ' + port + ' s.pid', '  ready: ' + base + '/health',
+        '- http: ' + base + '/health', '  expect: status 200',
+        '- http: ' + base + '/items', '  expect: body contains <h1>Items</h1>',
+        '- http: ' + base + '/nope', '  expect: status 200',
+        '- http: ' + base + '/nope', '  expect: status 404',
+        '- http: ' + base + '/r', '  expect: status 302',
+        '- http: ' + base + '/r', '  expect: body contains Items',
+        '- http: ' + base + '/bigstart', '  expect: body contains STARTMARK',
+        '- http: ' + base + '/big', '  expect: body contains ENDMARK',
+        '- http: ' + base + '/slow', '  expect: status 200',
+      ], d, { httpTimeoutMs: 1500, readyPollMs: 100 });
+      assert.deepStrictEqual(r.results.map((x) => x.result), ['pass', 'pass', 'pass', 'fail', 'pass', 'pass', 'fail', 'pass', 'fail', 'timeout']);
+      assert.match(r.results[3].detail, /^status 404, expected 200/);
+      const pid = await readPid(path.join(d, 's.pid'));
+      assert.ok(pid && r.servePid, 'the server ran');
+      assert.ok(await goneSoon(pid), 'the serve process tree is gone after the run');
+      assert.ok(!alive(r.servePid), 'and so is the shell that started it');
+    });
+    await atest('[plugin-0.5 H1] runChecks: a server that never gets ready is server_not_ready for serve and every http check, and is killed (timeout path)', async () => {
+      const d = work(); const port = await freePort(); const other = await freePort();
+      const r = await run([
+        '- serve: node server.js ' + port + ' s.pid', '  ready: http://127.0.0.1:' + other + '/health',
+        '- http: http://127.0.0.1:' + port + '/health', '  expect: status 200',
+        '- cmd: node -e "process.exit(0)"', '  expect: exit 0',
+        '- browse: http://127.0.0.1:' + port + '/', '  look: it loads',
+      ], d, { readyTotalMs: 1500, readyPollMs: 100, httpTimeoutMs: 1000 });
+      assert.deepStrictEqual(r.results.map((x) => x.result), ['server_not_ready', 'server_not_ready', 'pass', 'unverified']);
+      assert.match(r.results[0].detail, /no 2xx or 3xx/);
+      const pid = await readPid(path.join(d, 's.pid'));
+      assert.ok(pid, 'the server did start');
+      assert.ok(await goneSoon(pid), 'the server is killed although it never became ready');
+    });
+    await atest('[plugin-0.5 H1] runChecks: a server that exits before it is ready fails fast as server_not_ready', async () => {
+      const d = work(); const t0 = Date.now();
+      const r = await run(['- serve: node -e "process.exit(3)"', '  ready: http://127.0.0.1:' + (await freePort()) + '/'], d, { readyTotalMs: 30000, readyPollMs: 100 });
+      assert.strictEqual(r.results[0].result, 'server_not_ready');
+      assert.match(r.results[0].detail, /exited with code 3/);
+      assert.ok(Date.now() - t0 < 15000, 'did not wait out the ready limit');
+    });
+    await atest('[plugin-0.5 H1] runChecks: an interrupted run (abortAll, as on SIGINT or the deadline) kills the serve process too', async () => {
+      const d = work(); const port = await freePort();
+      const text = blk('- serve: node server.js ' + port + ' s.pid', '  ready: http://127.0.0.1:' + (await freePort()) + '/');
+      // In a child, so the abort flag does not leak into this process.
+      const script = [
+        'const fs=require("fs");',
+        'const tr=require(' + JSON.stringify(path.join(PLUGIN, 'bin', 'lib', 'testrun.js')) + '), sp=require(' + JSON.stringify(path.join(PLUGIN, 'bin', 'lib', 'spec.js')) + ');',
+        'const p=tr.runChecks(sp.parseChecks(' + JSON.stringify(text) + '), process.cwd(), {readyTotalMs:30000,readyPollMs:100});',
+        'const iv=setInterval(()=>{ try { if(fs.readFileSync("s.pid","utf8")){ clearInterval(iv); tr.abortAll(); } } catch(e){} },100);',
+        'p.then((r)=>{ console.log(JSON.stringify(r.results.map((x)=>x.result))); process.exit(0); });',
+      ].join('\n');
+      fs.writeFileSync(path.join(d, 'abort.js'), script);
+      const c = spawnSync(process.execPath, ['abort.js'], { cwd: d, encoding: 'utf8', timeout: 60000 });
+      assert.strictEqual(c.status, 0, c.stderr);
+      assert.notStrictEqual(JSON.parse(c.stdout.trim())[0], 'pass');
+      const pid = await readPid(path.join(d, 's.pid'));
+      assert.ok(pid && await goneSoon(pid), 'the server is gone after abortAll');
+    });
+
+    // ---- through sereno.js test ----
+    function ckRepo(body, extra) {
+      const dir = repo();
+      fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ tests: { command: 'node -e "process.exit(0)"' } }));
+      const base = git(dir, 'rev-parse', 'HEAD');
+      assert.strictEqual(S(dir, ['branch', '--task', 'ck']).out.ok, true);
+      const sp = S(dir, specArgs('ck', extra), body);
+      assert.strictEqual(sp.out.ok, true, JSON.stringify(sp.out));
+      git(dir, 'switch', '-q', 'task/ck');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); fs.writeFileSync(path.join(dir, 'server.js'), SERVER_JS);
+      git(dir, 'add', 'a.txt', 'server.js'); git(dir, 'commit', '-q', '-m', 'work');
+      return { dir, base, head: git(dir, 'rev-parse', 'HEAD') };
+    }
+    const T = (r, extra) => S(r.dir, ['test', '--task', 'ck', '--base', r.base, '--head', r.head, '--json'].concat(extra || []));
+    await atest('[plugin-0.5 H1] test --task: checks run at head after the suite; the record has checks[{n,kind,target,result,detail}], a log, and the server is gone', async () => {
+      const port = await freePort(); const u = 'http://127.0.0.1:' + port;
+      const r = ckRepo(blk(
+        '- cmd: node -e "process.exit(0)"', '  expect: exit 0',
+        '- serve: node server.js ' + port + ' s.pid', '  ready: ' + u + '/health',
+        '- http: ' + u + '/items', '  expect: body contains Items',
+        '- browse: ' + u + '/items', '  look: the heading says Items'));
+      const t = T(r);
+      assert.strictEqual(t.out.ok, true, JSON.stringify(t.out));
+      assert.strictEqual(t.out.passed, true, JSON.stringify(t.out));
+      assert.deepStrictEqual(t.out.checks.map((c) => Object.keys(c).join(',')), Array(4).fill('n,kind,target,result,detail'));
+      assert.deepStrictEqual(t.out.checks.map((c) => [c.n, c.kind, c.result]), [[1, 'cmd', 'pass'], [2, 'serve', 'pass'], [3, 'http', 'pass'], [4, 'browse', 'unverified']]);
+      assert.strictEqual(t.out.checks[3].target, u + '/items');
+      assert.strictEqual(t.out.checks[3].detail, 'the heading says Items');
+      assert.deepStrictEqual(t.out.newFailures, []);
+      assert.match(t.out.checks_log, /^\.sereno\/cache\/checks-rr_\d{8}T\d{6}Z_[0-9a-f]{7}\.log$/);
+      const log = fs.readFileSync(path.join(r.dir, t.out.checks_log), 'utf8');
+      assert.match(log, /===== check 3: http \(pass\) =====/);
+      assert.ok(fs.statSync(path.join(r.dir, t.out.checks_log)).size < 1024 * 1024);
+      const pid = await readPid(path.join(r.dir, 's.pid'));
+      assert.ok(pid && await goneSoon(pid), 'the serve process is gone after the run');
+    });
+    test('[plugin-0.5 H1] test: a spec without checks, or no --task, adds an empty checks list and nothing else changes', () => {
+      const r = ckRepo('## Goal\nx\n');
+      const t = T(r);
+      assert.deepStrictEqual([t.out.passed, t.out.checks, t.out.checks_log], [true, [], null]);
+    });
+    await atest('[plugin-0.5 H1] test: failing and timed-out-style checks become new failures named "check <n>: <kind>" with diagnosis defect', async () => {
+      const port = await freePort(); const u = 'http://127.0.0.1:' + port;
+      const r = ckRepo(blk(
+        '- cmd: node -e "process.exit(1)"', '  expect: exit 0',
+        '- serve: node server.js ' + port, '  ready: ' + u + '/health',
+        '- http: ' + u + '/nope', '  expect: status 200',
+        '- http: ' + u + '/health', '  expect: status 200',
+        '- browse: ' + u + '/', '  look: x'));
+      const t = T(r);
+      assert.strictEqual(t.out.passed, false, JSON.stringify(t.out));
+      assert.strictEqual(t.out.diagnosis, 'defect');
+      assert.deepStrictEqual(t.out.newFailures, ['check 1: cmd', 'check 3: http']);
+      assert.deepStrictEqual(t.out.checks.map((c) => c.result), ['fail', 'pass', 'fail', 'pass', 'unverified']);
+      assert.strictEqual(t.out.exit_codes.head, 0, 'the suite itself passed');
+    });
+    test('[plugin-0.5 H1] test: a serve that never gets ready fails every http check as server_not_ready', () => {
+      // A serve whose command exits at once is not ready, without waiting the 60 s out.
+      const r = ckRepo(blk('- serve: node -e "process.exit(2)"', '  ready: http://127.0.0.1:9/health', '- http: http://127.0.0.1:9/health', '  expect: status 200'));
+      const t = T(r);
+      assert.deepStrictEqual(t.out.checks.map((c) => c.result), ['server_not_ready', 'server_not_ready']);
+      assert.deepStrictEqual([t.out.passed, t.out.diagnosis, t.out.newFailures], [false, 'defect', ['check 1: serve', 'check 2: http']]);
+    });
+    test('[plugin-0.5 H1] test: record caps - target 200 characters, detail 3 lines and 300 characters with control bytes stripped', () => {
+      const long = 'a'.repeat(450);
+      const noisy = "node -e \"console.log('\\x07bell'+'b'.repeat(250));console.log('l2');console.log('l3');console.log('l4');process.exit(1)\"";
+      const r = ckRepo(blk('- cmd: node -e "process.exit(0)" -- ' + long, '  expect: exit 0', '- cmd: ' + noisy, '  expect: exit 0'));
+      const t = T(r);
+      const [a, b] = t.out.checks;
+      assert.strictEqual(a.result, 'pass'); assert.strictEqual(a.target.length, 200);
+      assert.strictEqual(b.result, 'fail');
+      assert.ok(b.detail.length <= 300, String(b.detail.length));
+      assert.ok(!/[\u0000-\u001f\u007f]/.test(b.detail), 'no control bytes');
+      assert.ok(b.detail.split(' | ').length <= 3 && !b.detail.includes('l4'), b.detail);
+      assert.ok(b.target.length <= 200);
+    });
+    test('[plugin-0.5 H1] spec integrity: editing the checks block after the build pins a different hash, so test refuses with spec_changed', () => {
+      const body = blk('- cmd: node -e "process.exit(1)"', '  expect: exit 0');
+      const r = ckRepo(body);
+      const at = (args) => S(r.dir, ['attempt', '--task', 'ck'].concat(args));
+      assert.strictEqual(at(['--builder', 'sonnet', '--kind', 'feature', '--outcome', 'running', '--started-at', 'now', '--spec', '.sereno/specs/ck.md']).out.ok, true);
+      assert.strictEqual(at(['--update', '1', '--outcome', 'built', '--ended-at', 'now']).out.ok, true);
+      const before = T(r);
+      assert.strictEqual(before.out.ok, true, JSON.stringify(before.out));
+      assert.deepStrictEqual(before.out.newFailures, ['check 1: cmd'], 'the pinned check runs and fails');
+      // A Builder (or anyone) loosens the check in place: same task, same revision, different bytes.
+      const f = path.join(r.dir, '.sereno', 'specs', 'ck.md');
+      fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('expect: exit 0', 'expect: exit 1'));
+      const after = T(r);
+      assert.deepStrictEqual([after.out.ok, after.out.code], [false, 'spec_changed']);
+    });
+
+    // ---- browse: unverified, never a failure; listed in the pack and at the merge stop ----
+    test('[plugin-0.5 H1] review-pack lists browse checks under "Browse checks (not yet verifiable)" with URL and look; none, no section', () => {
+      const r = ckRepo(blk('- browse: http://localhost:3000/items', '  look: the empty state says "No items yet"', '- browse: http://localhost:3000/', '  look: it loads'));
+      const p = S(r.dir, ['review-pack', '--task', 'ck', '--base', r.base, '--head', r.head]).out;
+      assert.strictEqual(p.ok, true, JSON.stringify(p));
+      const text = fs.readFileSync(path.join(r.dir, p.path), 'utf8');
+      assert.match(text, /## Browse checks \(not yet verifiable\)\nNothing has checked these\. Do not treat them as passed\.\n- http:\/\/localhost:3000\/items\n  look: the empty state says "No items yet"\n- http:\/\/localhost:3000\/\n  look: it loads\n/);
+      assert.ok(text.indexOf('## Tests') < text.indexOf('## Browse checks') && text.indexOf('## Browse checks') < text.indexOf('## Touched source files'));
+      const none = ckRepo(blk('- cmd: node -e "process.exit(0)"', '  expect: exit 0'));
+      const q = S(none.dir, ['review-pack', '--task', 'ck', '--base', none.base, '--head', none.head]).out;
+      assert.ok(!fs.readFileSync(path.join(none.dir, q.path), 'utf8').includes('Browse checks'));
+    });
+    test('[plugin-0.5 H1] next: the merge stop carries browse_unverified and "N browse checks unverified: check them yourself", like a hold; other steps do not', () => {
+      const fake = (browse) => ({
+        listSpecs: () => ['a'], spec: (t) => ({ task: t, base_branch: 'main', after: null, hold_before_merge: 'Apply the migration', created_at: null }),
+        attemptCount: () => 1, lastOutcome: () => 'pass', recover: () => ({ next: 'merge', reason: 'gate passed' }), isMerged: () => false,
+        browseChecks: () => browse,
+      });
+      const one = nextLib.decide({ task: 'a', deps: fake([{ url: 'http://localhost:3000/items', look: 'empty state' }]) });
+      assert.deepStrictEqual([one.step, one.command, one.hold], ['merge', '/sereno:merge a', 'Apply the migration']);
+      assert.deepStrictEqual(one.browse_unverified, [{ url: 'http://localhost:3000/items', look: 'empty state' }]);
+      assert.strictEqual(one.browse_note, '1 browse check unverified: check it yourself');
+      const two = nextLib.decide({ task: 'a', deps: fake([{ url: 'http://localhost/a', look: 'x' }, { url: 'http://localhost/b', look: 'y' }]) });
+      assert.strictEqual(two.browse_note, '2 browse checks unverified: check them yourself');
+      const none = nextLib.decide({ task: 'a', deps: fake([]) });
+      assert.ok(!('browse_unverified' in none) && !('browse_note' in none));
+      const ship = nextLib.decide({ task: 'a', deps: Object.assign(fake([{ url: 'http://localhost/a', look: 'x' }]), { recover: () => ({ next: 'repair', reason: 'r' }) }) });
+      assert.ok(ship.step === 'repair' && !('browse_unverified' in ship));
+    });
+    test('[plugin-0.5 H1] next realDeps reads browse checks from the spec on disk; an unreadable checks block reads as none', () => {
+      const r = ckRepo(blk('- cmd: node -e "process.exit(0)"', '  expect: exit 0', '- browse: http://localhost:3000/items', '  look: it loads'));
+      const deps = nextLib.realDeps({ root: r.dir, fsafe: { listDir: () => [] }, config: {} });
+      assert.deepStrictEqual(deps.browseChecks('ck'), [{ url: 'http://localhost:3000/items', look: 'it loads' }]);
+      fs.appendFileSync(path.join(r.dir, '.sereno', 'specs', 'ck.md'), '\n' + FENCE + 'checks\n- nonsense\n' + FENCE + '\n');
+      assert.deepStrictEqual(deps.browseChecks('ck'), []);
+      assert.deepStrictEqual(deps.browseChecks('missing'), []);
+    });
+
+    // ---- skills and README ----
+    const skillText = (n) => fs.readFileSync(path.join(PLUGIN, 'skills', n, 'SKILL.md'), 'utf8');
+    test('[plugin-0.5 H1] skills and README: task writes checks only where runnable and names check_hosts; ship, merge and next print the new output', () => {
+      const t = skillText('task');
+      assert.ok(/Never invent a command, script, route or port the repo does not have/.test(t) && t.includes('--check-hosts') && /Never add a host the user did not name/.test(t));
+      assert.ok(/invalid_checks/.test(t) && t.includes('```checks'));
+      const s = skillText('ship');
+      assert.ok(/`checks`/.test(s) && /check <n>: <kind>/.test(s) && /`unverified`/.test(s));
+      for (const n of ['merge', 'next']) assert.ok(/browse_unverified/.test(skillText(n)) && /browse_note/.test(skillText(n)), n);
+      assert.ok(/typing `\/sereno:merge` is the same yes as for a hold/i.test(skillText('merge')));
+      const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
+      assert.ok(/### Runnable checks/.test(readme) && /check_hosts/.test(readme) && /browse checks unverified/.test(readme));
+    });
+
+    await atest('[plugin-0.5 H1] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

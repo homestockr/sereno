@@ -91,6 +91,28 @@ base branch brief. On conflicts it aborts the merge. It never touches a remote.
 Now, Next and Blocked. It uses a version check, so a brief written by the app's `/brief`
 or by this command is read the same way. Run it whenever you want the brief refreshed.
 
+### Runnable checks
+
+A spec can carry one `checks` fenced block under its acceptance criteria. `/sereno:task` writes it only for criteria that can be checked by running something, and never invents a command the repo does not have.
+
+````
+```checks
+- cmd: npm run lint
+  expect: exit 0
+- serve: npm run dev
+  ready: http://localhost:3000/health
+- http: http://localhost:3000/api/items
+  expect: status 200
+- browse: http://localhost:3000/items
+  look: the empty state says "No items yet"
+```
+````
+
+- `sereno.js test --task <task>` runs the `cmd` and `http` checks at head, after the suite, in the repo root. A `cmd` has a 120 s limit; an `http` check is a GET with no redirects, a 10 s limit and the first 256 KiB of the body. A `serve` is started in the background, polled at `ready` for up to 60 s, and always stopped afterwards.
+- A check that fails or times out is a new failure named `check <n>: <kind>`, so it leads to a repair like a failing test. Results are in the test output as `checks`; full logs go to `.sereno/cache/checks-<run>.log`.
+- `browse` checks are not run. They are listed in the review pack and printed at the merge stop with the hold, as "N browse checks unverified: check them yourself". Typing `/sereno:merge` is your yes.
+- URLs must be `http:` or `https:` on `localhost`, `127.0.0.1` or `[::1]`. Any other host must be named by you; `/sereno:task` then records it as `check_hosts` in the spec. A malformed block is refused with `invalid_checks`. The checks are pinned with the rest of the spec, so editing them after a build is a `spec_changed`.
+
 ## Roles and models
 
 | Role | Agent | Tier | Turn cap |

@@ -43,6 +43,13 @@
  *                           `after` queues the task behind another; `hold` (<= 200 chars, one line) is
  *                           a human step printed before merge. Omitted keeps the earlier spec's value;
  *                           `--after none` and `--hold ""` clear it.
+ *   spec ... [--check-hosts <a,b>]
+ *                           bare host names (no scheme, port or path) that the spec's `checks` block may
+ *                           use besides localhost, 127.0.0.1 and [::1]; at most 10. Only /sereno:task passes
+ *                           it, from hosts the user named. Omitted keeps the earlier list; "" clears it.
+ *                           A malformed `checks` block is refused: code invalid_checks (exit 25).
+ *   test ... [--task <t>]   with --task, also runs the spec's `checks` at head after the suite; the result
+ *                           gains checks: [{ n, kind, target, result, detail }] and checks_log.
  *   attempt --adopt --task <t>
  *                           records a new `built` attempt for the tip of task/<t> after the user approved a
  *                           manual commit of the Builder's work (e.g. past a failing hook). Refuses a
@@ -91,7 +98,7 @@ function agentModel(name) {
   return m ? m[1] : null;
 }
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, builder_not_allowed: 21, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, after_not_merged: 22, tip_not_moved: 23, tip_unrelated: 24, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, builder_not_allowed: 21, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, after_not_merged: 22, tip_not_moved: 23, tip_unrelated: 24, invalid_checks: 25, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -186,7 +193,7 @@ function cacheFileArg(root, arg, nameRe) {
   return { rel: '.sereno/cache/' + segs[2], m };
 }
 
-/** @param {string} root @param {string} specArg @returns {{ rel: string, hash: string }} */
+/** @param {string} root @param {string} specArg @returns {{ rel: string, hash: string, text: string }} */
 function readSpec(root, specArg) {
   const rel = rec.repoRelative(specArg);
   if (!rel) throw new SerenoError('path_refused', 'spec must be a path inside the repository');
@@ -195,7 +202,8 @@ function readSpec(root, specArg) {
   try { real = fs.realpathSync.native(abs); } catch (_e) { throw new SerenoError('invalid_arg', 'spec file not found: ' + rel); }
   const fold = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
   if (!fold(real).startsWith(fold(root + path.sep))) throw new SerenoError('path_refused', 'spec resolves outside the repository');
-  return { rel, hash: rec.sha256(readCapped(real)) };
+  const buf = readCapped(real);
+  return { rel, hash: rec.sha256(buf), text: buf.toString('utf8') };
 }
 
 /** @param {string} task */
@@ -474,10 +482,15 @@ const COMMANDS = {
       }, Number(dl) * 1000);
     }
     const { root, fsafe } = needRepo();
+    /** @type {import('./lib/spec.js').Check[]} */
+    let checks = [];
     if (str(a, 'task') !== undefined) {
       const t = rec.checkTask(str(a, 'task'));
       checkTaskBranch(root, t);
-      checkSpecPin(root, fsafe, t, str(a, 'spec') || '.sereno/specs/' + t + '.md');
+      const specArg = str(a, 'spec') || '.sereno/specs/' + t + '.md';
+      checkSpecPin(root, fsafe, t, specArg);
+      // The checks come from the spec the attempt is pinned to (checkSpecPin refused any other), parsed before any suite starts.
+      checks = speclib.parseChecks(readSpec(root, specArg).text);
     } else requireTaskIfRecorded(root, fsafe);
     testrun.sweepStale(root);
     const base = gitlib.resolveCommit(root, str(a, 'base') || '');
@@ -485,11 +498,11 @@ const COMMANDS = {
     if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
     if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
     const { config, config_hash } = loadConfig(root);
-    return await testrun.runTests({ root, fsafe, config, configHash: config_hash, base, head, runId: rec.makeRunId(head) });
+    return await testrun.runTests({ root, fsafe, config, configHash: config_hash, base, head, runId: rec.makeRunId(head), checks });
   },
 
   spec(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes', 'base-branch', 'after', 'hold', 'body-file'], bool: ['json', 'stdin'] });
+    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes', 'base-branch', 'after', 'hold', 'check-hosts', 'body-file'], bool: ['json', 'stdin'] });
     if (!!a['body-file'] === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --body-file or --stdin');
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
@@ -503,7 +516,7 @@ const COMMANDS = {
       cacheRel = cf.rel;
       body = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
     }
-    const out = speclib.writeSpec({ root, fsafe, task, allowed: loadConfig(root).config.roles.builder.allowed, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), after: str(a, 'after'), hold: str(a, 'hold'), body });
+    const out = speclib.writeSpec({ root, fsafe, task, allowed: loadConfig(root).config.roles.builder.allowed, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), after: str(a, 'after'), hold: str(a, 'hold'), checkHosts: str(a, 'check-hosts') === undefined ? undefined : /** @type {string} */ (str(a, 'check-hosts')).split(',').map((x) => x.trim()).filter(Boolean), body });
     if (cacheRel) fsafe.removeFile(cacheRel);
     return out;
   },

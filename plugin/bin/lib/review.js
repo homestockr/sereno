@@ -14,6 +14,7 @@
 const gitlib = require('./git.js');
 const rec = require('./records.js');
 const testrun = require('./testrun.js');
+const speclib = require('./spec.js');
 const { SerenoError } = require('./fsafe.js');
 
 /** Always get the full red team. A repo's roles.redTeam.light.never adds to these and cannot remove them. */
@@ -262,6 +263,19 @@ function stubMarkers(diffText, max) {
 }
 
 /**
+ * The spec's browse checks, or null when its checks block cannot be parsed.
+ * @param {string} specText @returns {{ url: string, look: string }[] | null}
+ */
+function browseChecks(specText) {
+  try {
+    /** @type {{ url: string, look: string }[]} */
+    const out = [];
+    for (const c of speclib.parseChecks(specText)) if (c.kind === 'browse') out[out.length] = { url: c.url, look: c.look };
+    return out;
+  } catch (_e) { return null; }
+}
+
+/**
  * @param {{ root: string, fsafe: any, task: string, base: string, head: string, specText: string }} a
  * @returns {{ path: string, lines: number, files: number, truncated: boolean }}
  */
@@ -303,6 +317,16 @@ function buildPack(a) {
   add(out, '## Tests');
   for (const l of testSummary(a.fsafe, a.head)) add(out, l);
   add(out, '');
+  const browse = browseChecks(a.specText);
+  if (browse === null || browse.length) {
+    add(out, '## Browse checks (not yet verifiable)');
+    if (browse === null) add(out, 'The spec\'s checks block could not be parsed; read it in .sereno/specs/' + a.task + '.md.');
+    else {
+      add(out, 'Nothing has checked these. Do not treat them as passed.');
+      for (const b of browse) { add(out, '- ' + plain(b.url)); add(out, '  look: ' + plain(b.look)); }
+    }
+    add(out, '');
+  }
   const un = untested(d.files);
   add(out, '## Touched source files with no test change in the diff (' + un.length + ')');
   if (!un.length) add(out, 'None.');

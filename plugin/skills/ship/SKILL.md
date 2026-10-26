@@ -62,7 +62,9 @@ Always pass `--task <task>` to `test` and `gate`; without it the script refuses 
 after `/sereno:build`: stop and say so.
 
 The result has `passed` (a `deadline` result has only `status`, `code`, `deadline_sec` and `passed: false`), `diagnosis` (`none`, `environment`, `defect`, `unknown_baseline`),
-`newFailures` and `note`. Failures that already fail at the base are not counted.
+`newFailures`, `note` and `checks`. Failures that already fail at the base are not counted.
+
+If the spec has a `checks` block, `test` runs it at head after the suite and `checks` lists `{ n, kind, target, result, detail }` for each item. A `cmd` or `http` check that did not pass (`fail`, `timeout`, `server_not_ready`) is in `newFailures` as `check <n>: <kind>` and counts as a defect. A `browse` check is `unverified`: it never fails the test. Do not run the checks yourself and do not edit the spec's checks block; the spec is pinned.
 
 If `passed` is false, update the attempt, then go to step 5:
 

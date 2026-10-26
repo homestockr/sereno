@@ -36,6 +36,7 @@ const recovery = require('./recovery.js');
  * @property {(task: string) => string | null} [recordedHead] the commit the newest success was recorded at
  * @property {() => string[] | null} [cleanFiles] tracked files with uncommitted changes (null: unknown)
  * @property {(task: string) => { pinned: string | null, current: string | null }} [specPin] the spec hash the newest pinned attempt carries, and the spec's hash now
+ * @property {(task: string) => { url: string, look: string }[]} [browseChecks] the spec's browse checks (nothing verifies them); [] when none or the checks block is unreadable
  * @property {(task: string) => boolean} [branchExists] does refs/heads/task/<task> resolve (when absent, assumed yes)
  */
 
@@ -154,7 +155,13 @@ function stateOf(d, m) {
     }
     case 'retry': return mk('retry', r.reason, null, null);
     case 'repair': return mk('repair', r.reason, null, null);
-    case 'merge': return mk('merge', r.reason, '/sereno:merge ' + task, m.hold_before_merge);
+    case 'merge': {
+      const st = mk('merge', r.reason, '/sereno:merge ' + task, m.hold_before_merge);
+      // Browse checks are never run by the test step. Like a hold, they are printed at the merge stop, and typing /sereno:merge is the person's yes.
+      const b = typeof d.browseChecks === 'function' ? d.browseChecks(task) : [];
+      if (!b.length) return st;
+      return Object.assign(st, { browse_unverified: b, browse_note: b.length + ' browse check' + (b.length === 1 ? '' : 's') + ' unverified: check ' + (b.length === 1 ? 'it' : 'them') + ' yourself' });
+    }
     case 'done': return mk('done', r.reason, '/sereno:next', null);
     default: {
       if (r.reason.startsWith('the latest attempt never finished')) {
@@ -260,6 +267,14 @@ function realDeps(a) {
     },
     recordedHead: (task) => recovery.recordedHead({ root, task, listAttempts: () => fsafe.listDir('.sereno/attempts') }),
     branchExists: (task) => !!gitlib.resolveCommit(root, 'refs/heads/task/' + task),
+    browseChecks: (task) => {
+      try {
+        /** @type {{ url: string, look: string }[]} */
+        const out = [];
+        for (const c of speclib.parseChecks(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'), 'utf8'))) if (c.kind === 'browse') out[out.length] = { url: c.url, look: c.look };
+        return out;
+      } catch (_e) { return []; }
+    },
   };
 }
 

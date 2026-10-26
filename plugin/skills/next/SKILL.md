@@ -54,7 +54,7 @@ Safety cap: run at most 3 `build` / `ship` / `repair` / `retry` steps in one inv
 
 Stop at the first step that is not `build`, `ship`, `repair` or `retry`. Print exactly one final line:
 
-- `merge`: "Gate passed for <task>. Before merging: <hold>. Run /sereno:merge <task>." Leave out the "Before merging" sentence when `hold` is null.
+- `merge`: "Gate passed for <task>. Before merging: <hold>. Run /sereno:merge <task>." Leave out the "Before merging" sentence when `hold` is null. When the result has `browse_unverified`, add the result's `browse_note` and one line per entry, "<url>: <look>".
 - `decide`: the `reason`, then the `command` if there is one (its options are a person's call, so list them if the reason does). When the reason says the branch is gone, tell the user the whole reason line (it names both options, one of them the `stop` command); never run `stop` yourself.
 - `done` or `idle`: the `reason`, then "Nothing queued." (skip it when the reason already says so) or, when another task is waiting, that task's name.
 - `pick`: list the tasks, each as a command to run (`/sereno:next <task>`), then end the turn. Do not guess and do not wait for an answer.
