@@ -2638,16 +2638,16 @@ function tlLanes(d) {
   const src = Array.isArray(d && d.lanes) ? d.lanes.filter((l) => l && typeof l === 'object') : [];
   const main = src.find((l) => l.kind === 'main') || { id: 'main', kind: 'main', attribution: 'explicit', started: d ? d.started : null, stopped: d ? d.ended : null, model: null, role: 'main', cost_est: 0 };
   const out = [main].concat(src.filter((l) => l !== main)).map((l) => Object.assign({}, l, { tools: [] }));
-  const byId = {};
-  out.forEach((l) => { byId[String(l.id)] = l; });
+  const byId = new Map();   // keyed by API strings: never a plain object (constructor, __proto__)
+  out.forEach((l) => { byId.set(String(l.id), l); });
   for (const t of (Array.isArray(d && d.tools) ? d.tools : [])) {
     if (!t || typeof t !== 'object') continue;
     const key = t.agent_id ? String(t.agent_id) : String(main.id);
-    if (!byId[key]) {
+    if (!byId.has(key)) {
       const l = { id: key, kind: 'agent', label: 'Agent', role: 'other', model: null, attribution: 'unattributed', started: null, stopped: null, subtitle: null, cost_est: 0, tools: [] };
-      out.push(l); byId[key] = l;
+      out.push(l); byId.set(key, l);
     }
-    byId[key].tools.push(t);
+    byId.get(key).tools.push(t);
   }
   return out;
 }
@@ -2694,7 +2694,7 @@ function tlCostPoints(series, span, x0, x1, y0, y1) {
 /** Review markers that have a time: [{ x, outcome, findings }]. */
 function tlReviews(reviews, span, x0, x1) {
   return (Array.isArray(reviews) ? reviews : []).filter((r) => r && r.at != null && Number.isFinite(Number(r.at)))
-    .map((r) => ({ x: tlX(r.at, span, x0, x1), outcome: String(r.outcome || ''), findings: Number(r.findings) > 0 ? Math.floor(Number(r.findings)) : 0 }));
+    .map((r) => ({ x: tlX(r.at, span, x0, x1), outcome: String(r.outcome || ''), findings: Number(r.findings) > 0 ? Math.floor(Number(r.findings)) : 0, matched: r.matched === 'time' ? 'time' : 'session' }));
 }
 
 function findingsLabel(n) {
@@ -2738,7 +2738,8 @@ function tlReviewMarkers(revs, W) {
     const x = g.items.reduce((s, r) => s + r.x, 0) / g.items.length;
     const n = g.items.length;
     const label = n > 1 ? n + ' reviews' : tlReviewLabel(worst);
-    const title = n > 1 ? n + ' reviews: ' + g.items.map(tlReviewLabel).join('; ') : label;
+    const tl = (r) => tlReviewLabel(r) + (r.matched === 'time' ? ' (matched by time)' : '');
+    const title = n > 1 ? n + ' reviews: ' + g.items.map(tl).join('; ') : tl(worst);
     return { x, outcome: worst.outcome, count: n, title, label, showLabel: false, anchor: 'start', lx: x + 12, items: g.items };
   });
   const width = Number(W);
@@ -3013,6 +3014,7 @@ function sessReviewsHtml(d) {
   if (!rs.length) return '<p class="empty-note">No reviews in this session.</p>';
   return '<section class="xsect" aria-label="Reviews"><h3>Reviews</h3><ul class="xrev">' + rs.map((r) => '<li>' + outcomeShape(String(r.outcome || '')) + '<span class="xrev-main"><strong>'
     + esc(OUTCOME_LABEL[r.outcome] || r.outcome || 'Review') + '</strong> · ' + esc(findingsLabel(r.findings)) + (r.at != null ? ' · ' + esc(fmtClock(r.at)) : '')
+    + (r.matched === 'time' ? ' <span class="quiet-text">matched by time</span>' : '')
     + '</span><a class="xlink" href="#pipeline/work">Pipeline task ' + esc(r.task || '') + '</a></li>').join('') + '</ul></section>';
 }
 

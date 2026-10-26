@@ -10620,6 +10620,10 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[4a-heredoc] gate and spec read a bash heredoc body', () => {
       const probe = spawnSync('bash', ['-c', 'true'], { encoding: 'utf8' });
       if (probe.error || probe.status !== 0) return; // no bash on this machine
+      if (process.platform === 'win32') {   // PATH may hold WSL's bash (Linux), which cannot run the Windows node path
+        const un = spawnSync('bash', ['-c', 'uname -s'], { encoding: 'utf8' });
+        if (un.error || !/MINGW|MSYS|CYGWIN/i.test(String(un.stdout))) return;
+      }
       const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hd-')));
       try {
         const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -10635,8 +10639,8 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.match(fs.readFileSync(path.join(dir, '.sereno', 'specs', 'hd.md'), 'utf8'), /change a/);
         const gt = sh(node + ' gate --stdin --task hd --base ' + head + ' --head ' + head + " --branch main --tests-passed true <<'SERENO_VERDICT'\n{\"outcome\":\"pass\",\"findings\":[]}\nSERENO_VERDICT");
         assert.strictEqual(gt.outcome, 'pass');
-        fs.rmSync(home, { recursive: true, force: true });
-      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+        fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* a lingering child holds it; cleanup must not fail the test */ } }
     });
   }
 
@@ -15807,19 +15811,26 @@ test('missing rate_limits degrades instead of throwing', () => {
           task: 'demo', stage: 'ready',
           gates: [
             { review_run_id: 'g1', outcome: 'block', findings: [finding, finding], reviewed_at: iso(NOWX - 150 * 60000), session_id: null, agent_id: 'ag-r', prompt: 'SECRET-PROMPT' },
-            { review_run_id: 'g2', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 140 * 60000), session_id: ids.ended },
             { review_run_id: 'g3', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 15 * Dd), session_id: null },
+          ],
+          attempts: [{ attempt: 1, agent_id: 'ag-b1', outcome: 'block' }, { attempt: 2, agent_id: 'ag-b2', outcome: 'built' }],
+        }, {
+          // once a task's gates name a session, none of its gates is guessed by time (this task's names are all explicit)
+          task: 'demo', stage: 'ready',
+          gates: [
+            { review_run_id: 'g2', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 140 * 60000), session_id: ids.ended },
             { review_run_id: 'g4', outcome: 'block', findings: [finding], reviewed_at: iso(NOWX - 150 * 60000), session_id: 'someone-else' },
             { review_run_id: 'g5', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 60 * 60000), session_id: ids.ended },
             { review_run_id: 'g6', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 200 * 60000), session_id: ids.ended },
             { review_run_id: 'g7', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 60000), session_id: ids.live },
             { review_run_id: 'g8', outcome: 'pass', findings: [], reviewed_at: iso(NOWX + 3600000), session_id: ids.live },
           ],
-          attempts: [{ attempt: 1, agent_id: 'ag-b1', outcome: 'block' }, { attempt: 2, agent_id: 'ag-b2', outcome: 'built' }],
+          attempts: [],
         }] },
       },
     });
 
+    let snapOver = null;   // a test may swap the repo snapshot
     const boot7 = async (l) => {
       const store = new Store();
       store.applyHook('SessionStart', { session_id: ids.idle, cwd: CWD });
@@ -15829,7 +15840,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       store.applyHook('PreToolUse', { session_id: ids.wait, tool_name: 'Bash', tool_use_id: 'tw', tool_input: { command: 'x' } });
       store.applyHook('Notification', { session_id: ids.wait, notification_type: 'permission_prompt' });
       const c = createCollector(store, 0, { now: () => NOWX, ledger: l, pluginStatus: () => ({ installed: false, detected: false }),
-        projects: { list: () => [{ id: 'p1', name: 'demo-proj', repoPath: CWD, hidden: false }] }, repos: { snapshot } });
+        projects: { list: () => [{ id: 'p1', name: 'demo-proj', repoPath: CWD, hidden: false }] }, repos: { snapshot: () => snapOver || snapshot() } });
       await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
       return c;
     };
@@ -15938,7 +15949,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       try {
         const d = (await get7(c.port, '/api/sessions/sess-ended')).body;
         assert.deepStrictEqual(d.reviews.map((x) => [x.task, x.outcome, x.findings]), [['demo', 'block', 2], ['demo', 'pass', 0]]);
-        assert.deepStrictEqual(Object.keys(d.reviews[0]).sort(), ['at', 'findings', 'outcome', 'task']);
+        assert.deepStrictEqual(Object.keys(d.reviews[0]).sort(), ['at', 'findings', 'matched', 'outcome', 'task']);
+        assert.deepStrictEqual(d.reviews.map((x) => x.matched), ['time', 'session'], 'alpha7 fix: the unnamed review says it was matched by time');
         assert.deepStrictEqual((await get7(c.port, '/api/sessions/sess-yday')).body.reviews, [], 'no review in its window');
       } finally { await halt7(c); l.close(); }
     });
@@ -16005,13 +16017,28 @@ test('missing rate_limits degrades instead of throwing', () => {
       } finally { await halt7(c); l.close(); }
     });
 
+    await atest('[alpha7 fix] reviews: a task whose gates name a session never matches an unnamed gate by time; matched says how', async () => {
+      const { l } = build(); const c = await boot7(l);
+      const mkT = (name, gates) => ({ task: name, stage: 'ready', gates, attempts: [] });
+      const within = iso(NOWX - 150 * 60000);
+      snapOver = { p1: { worktrees: [{ path: CWD, branch: 'main' }], pipeline: { tasks: [
+        mkT('mixed', [{ review_run_id: 'm1', outcome: 'block', findings: [], reviewed_at: within, session_id: null }, { review_run_id: 'm2', outcome: 'pass', findings: [], reviewed_at: within, session_id: 'someone-else' }]),
+        mkT('plain', [{ review_run_id: 'p1', outcome: 'pass', findings: [], reviewed_at: within, session_id: null }]),
+        mkT('named', [{ review_run_id: 'n1', outcome: 'pass', findings: [], reviewed_at: within, session_id: ids.ended }]),
+      ] } } };
+      try {
+        const d = (await get7(c.port, '/api/sessions/sess-ended')).body;
+        assert.deepStrictEqual(d.reviews.map((x) => [x.task, x.matched]).sort(), [['named', 'session'], ['plain', 'time']], 'mixed: m1 is not guessed');
+      } finally { snapOver = null; await halt7(c); l.close(); }
+    });
+
     await atest('[alpha7 S2] privacy: the JSON holds no key outside the allowlist and no id, path or finding text', async () => {
       const { l } = build(); const c = await boot7(l);
       try {
         const ALLOWED = new Set(['range', 'sessions', 'session_id', 'project', 'project_id', 'branch', 'state', 'started', 'ended', 'duration_ms', 'cost_est', 'turns',
           'reconciliation', 'ok', 'statusline', 'ledger', 'diff', 'lanes', 'id', 'kind', 'label', 'agent_type', 'role', 'model', 'attribution', 'stopped', 'subtitle',
           'tools', 'tool_name', 'agent_id', 'outcome', 'ts', 'waits', 'truncated', 'cost_series', 'reviews', 'task', 'findings', 'at',
-          'explicit', 'inferred', 'unattributed', 'held_up', 'has_events']);
+          'explicit', 'inferred', 'unattributed', 'held_up', 'has_events', 'matched']);
         const strays = []; let texts = '';
         for (const p of ['/api/sessions?range=30d', '/api/sessions/sess-ended', '/api/sessions/sess-live', '/api/sessions/sess-stale', '/api/sessions/sess-old']) {
           const r = await get7(c.port, p);
@@ -16235,6 +16262,28 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(X.tlTicks(47 * MIN).step, 5 * MIN);
       assert.strictEqual(X.tlTicks(3 * 3600000).step, 18e5);
       assert.deepStrictEqual([0, 30000, 5 * MIN, 90 * MIN, 150 * MIN, 30 * 3600000, 3 * 864e5].map(X.tlTickLabel), ['0', '30s', '5m', '1h 30m', '2h 30m', '1d 6h', '3d']);
+    });
+
+    test('[alpha7 fix] lanes: agent ids named like Object.prototype members render, one lane each, and never throw', () => {
+      const evil = ['constructor', '__proto__', 'toString', 'hasOwnProperty'];
+      const d = detail({ tools: evil.map((id, i) => ({ ts: T0 + (i + 1) * MIN, ended: T0 + (i + 1) * MIN + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: id, outcome: 'ok' })) });
+      const lanes = X.tlLanes(d);
+      assert.deepStrictEqual(lanes.slice(4).map((l) => l.id), evil);
+      assert.deepStrictEqual(lanes.slice(4).map((l) => l.tools.length), [1, 1, 1, 1]);
+      const withLane = detail({ lanes: d.lanes.concat(evil.map((id) => ({ id, kind: 'agent', label: id, agent_type: null, role: 'other', model: null, attribution: 'explicit', started: T0, stopped: T0 + MIN, cost_est: 0, subtitle: null }))), tools: d.tools });
+      assert.deepStrictEqual(X.tlLanes(withLane).slice(4).map((l) => l.tools.length), [1, 1, 1, 1]);
+      assert.ok(X.tlSvg(withLane, 900, NOW).includes('<svg'), 'the waterfall renders');
+      assert.ok(X.sessDetailHtml(withLane, { tab: 'timeline', width: 900, nowMs: NOW }).length > 100, 'the detail renders');
+    });
+
+    test('[alpha7 fix] reviews matched by time say so in the Reviews list and in the marker title; named ones do not', () => {
+      const d = detail({ reviews: [{ task: 't', outcome: 'block', findings: 1, at: T0 + 12 * MIN, matched: 'time' }, { task: 't', outcome: 'pass', findings: 0, at: T0 + 46 * MIN, matched: 'session' }] });
+      const html = X.sessReviewsHtml(d);
+      assert.strictEqual((html.match(/matched by time/g) || []).length, 1);
+      assert.match(html, /<span class="quiet-text">matched by time<\/span>/);
+      const svg = X.tlSvg(d, 900, NOW);
+      assert.strictEqual((svg.match(/\(matched by time\)/g) || []).length, 1, 'only the time-matched marker title');
+      assert.ok(!/matched by time/.test(X.sessReviewsHtml(detail())), 'no marker on rows without it');
     });
 
     test('[alpha7 S3] geometry: lanes put Main session first, agents after, and give every tool a lane', () => {
@@ -17326,6 +17375,115 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
   }
 
+
+  /* ---- [alpha7 fix] red-team fixes: last_seen, orphan rows, clear history, index ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const DAYMS = 86400000;
+    const mkL = (t) => { const clk = { t }; const l = openLedger({ file: ':memory:', retentionDays: 30, now: () => clk.t }); return { l, clk }; };
+    const row = (l, id) => l._db.prepare('SELECT * FROM sessions WHERE session_id=?').get(id);
+
+    test('[alpha7 fix] ledger: tools, waits, turns and stops after SessionStart move last_seen', () => {
+      const { l, clk } = mkL(1e12);
+      l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+      clk.t += 1000; l.recordHook('UserPromptSubmit', { session_id: 's1', prompt_id: 'p' });
+      assert.strictEqual(Number(row(l, 's1').last_seen), 1e12 + 1000);
+      clk.t += 1000; l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Read', tool_use_id: 'u1' });
+      clk.t += 1000; l.recordHook('PostToolUse', { session_id: 's1', tool_name: 'Read', tool_use_id: 'u1' });
+      clk.t += 1000; l.recordHook('Stop', { session_id: 's1' });
+      const r = row(l, 's1');
+      assert.strictEqual(Number(r.last_seen), 1e12 + 4000);
+      assert.strictEqual(Number(r.first_seen), 1e12);
+      assert.strictEqual(r.ended_at, null, 'a Stop is not an end');
+      l.close();
+    });
+
+    test('[alpha7 fix] ledger: a 10-day-old session with tools today is in the 7d list and shows its real span without a SessionEnd', () => {
+      const { l, clk } = mkL(1e12);
+      l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+      clk.t += 10 * DAYMS;
+      l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Read', tool_use_id: 'u1' });
+      const r = l.sessionRow('s1');
+      assert.strictEqual(r.lastSeen - r.firstSeen, 10 * DAYMS, 'the span is real');
+      assert.ok(l.sessionList(clk.t - 7 * DAYMS).some((x) => x.id === 's1'), 'in ?range=7d');
+      l.close();
+    });
+
+    test('[alpha7 fix] ledger: prune keeps a session that is still active, with its events', () => {
+      const { l, clk } = mkL(1e12);
+      l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+      l.recordHook('SessionStart', { session_id: 'idle', cwd: 'C:\\w\\proj' });
+      clk.t += 40 * DAYMS;
+      l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Read', tool_use_id: 'u1' });
+      l.prune(30);
+      assert.ok(row(l, 's1'), 'active session kept');
+      assert.strictEqual(row(l, 'idle'), undefined, 'the idle one is pruned');
+      assert.strictEqual(l._db.prepare("SELECT COUNT(*) AS n FROM session_events WHERE session_id='s1'").get().n, 1);
+      l.close();
+    });
+
+    test('[alpha7 fix] ledger: events with no SessionStart make a sessions row whose first_seen is the first event; a later end fills it in', () => {
+      const { l, clk } = mkL(2e12);
+      l.recordHook('PreToolUse', { session_id: 'o1', tool_name: 'Read', tool_use_id: 'u1' });
+      clk.t += 5000; l.recordHook('PostToolUse', { session_id: 'o1', tool_name: 'Read', tool_use_id: 'u1' });
+      let r = row(l, 'o1');
+      assert.ok(r, 'no orphan events');
+      assert.strictEqual(Number(r.first_seen), 2e12);
+      assert.strictEqual(Number(r.last_seen), 2e12 + 5000);
+      clk.t += 1000; l.recordHook('SessionEnd', { session_id: 'o1' });
+      r = row(l, 'o1');
+      assert.strictEqual(Number(r.first_seen), 2e12, 'the end does not move first_seen');
+      assert.strictEqual(Number(r.ended_at), 2e12 + 6000);
+      l.close();
+    });
+
+    test('[alpha7 fix] ledger: agents(agent_id) index exists, also on a V2 file opened again; lookups use prepared statements', () => {
+      const f = path.join(os.tmpdir(), 'sereno-idx-' + process.pid + '-' + Date.now() + '.db');
+      try {
+        let l = openLedger({ file: f });
+        l._db.exec('DROP INDEX agents_agent_id');   // a V2 file made before the index
+        l.close();
+        l = openLedger({ file: f });
+        assert.ok(l._db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type='index' AND name='agents_agent_id'").get(), 'created at open');
+        l.recordHook('SubagentStart', { session_id: 's1', agent_id: 'a1', agent_type: 'x' });
+        assert.strictEqual(l.sessionOfAgent('a1'), 's1');
+        assert.strictEqual(l.hasSession('s1'), true);
+        l.close();
+      } finally { for (const x of [f, f + '-wal', f + '-shm']) { try { fs.rmSync(x, { force: true }); } catch (_) {} } }
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'ledger.js'), 'utf8');
+      const fn = src.slice(src.indexOf('function hasSession('), src.indexOf('function sessionRow('));
+      assert.ok(fn.length > 50 && !/db\.prepare/.test(fn), 'no prepare per call');
+    });
+
+    test('[alpha7 fix] main.js: the ledger opens before the pending drain, drained records reach it, and clearing history refreshes the collector', () => {
+      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const drain = main.indexOf('config.drainPending()');
+      const open = main.indexOf('applyLedgerConfig();');
+      assert.ok(open > 0 && drain > open, 'applyLedgerConfig() runs before drainPending()');
+      const loop = main.slice(drain, main.indexOf('config.clearLaunchLock()'));
+      assert.match(loop, /store\.applyHook\(rec\.event, rec\.payload/);
+      assert.match(loop, /ledger\.recordHook\(rec\.event, rec\.payload, rec\.receivedAt\)/);
+      const h = main.slice(main.indexOf("ipcMain.handle('sereno:clear-history'"), main.indexOf("ipcMain.handle('sereno:wiring-status'"));
+      assert.ok(h.indexOf('ledger.clearHistory()') < h.indexOf('collector.afterHistoryCleared()'), 'the collector is refreshed after the clear');
+    });
+
+    test('[alpha7 fix] collector: afterHistoryCleared re-seeds live sessions, so later events do not orphan', () => {
+      const store = new Store();
+      store.applyHook('SessionStart', { session_id: 'live-1', cwd: 'C:\\w\\proj', model: 'claude-opus-5-5' });
+      const l = openLedger({ file: ':memory:' });
+      l.recordHook('SessionStart', { session_id: 'live-1', cwd: 'C:\\w\\proj' });
+      l.recordHook('SessionStart', { session_id: 'gone', cwd: 'C:\\w\\proj' });
+      const c = createCollector(store, 0, { ledger: l });
+      try {
+        l.clearHistory();
+        assert.strictEqual(l.sessionList(0).length, 0);
+        c.afterHistoryCleared();
+        const r = row(l, 'live-1');
+        assert.ok(r && r.cwd === 'C:\\w\\proj' && r.project === 'proj', 'live session re-seeded with cwd and project');
+        assert.strictEqual(row(l, 'gone'), undefined, 'only live sessions come back');
+      } finally { c.close(); l.close(); }
+    });
+  }
 
   /* ---- [plugin-0.4 field] fixes from two real /sereno:next runs ---- */
   {

@@ -658,6 +658,10 @@ if (CLI_UNWIRE) {
       );
     } catch (_) { /* a read-only home must not stop the widget starting */ }
 
+    // Ledger per current config (null = off); the opt-in is asked after startup.
+    // Opened before the drain so the queued SessionStart reaches it too.
+    applyLedgerConfig();
+
     // Whatever the shim captured while we were booting. Done before the collector
     // accepts anyone, so the first snapshot a client sees already has it.
     for (const rec of config.drainPending()) {
@@ -665,6 +669,7 @@ if (CLI_UNWIRE) {
         store.applyHook(rec.event, rec.payload,
           { ppid: typeof rec.ppid === 'number' ? rec.ppid : null });
       } catch (_) { /* one bad replay must not cost the rest */ }
+      try { if (ledger) ledger.recordHook(rec.event, rec.payload, rec.receivedAt); } catch (_) { /* a record, not the live view */ }
     }
     config.clearLaunchLock();
 
@@ -672,9 +677,6 @@ if (CLI_UNWIRE) {
     // defaults - on a collapsed restart the click handler would otherwise be
     // wrong about what a click should do.
     ui = loadUi();
-
-    // Ledger per current config (null = off); the opt-in is asked after startup.
-    applyLedgerConfig();
 
     // A tray is a nicety; the widget is not. An icon Windows refuses must not
     // take the rest of this callback - collector, window, everything - with it.
@@ -804,6 +806,7 @@ if (CLI_UNWIRE) {
       const { response } = await dialog.showMessageBox(ledgerLife.clearHistoryDialog());
       if (response !== 0) return { ok: true, cleared: false, reason: 'cancelled' };
       ledger.clearHistory();
+      if (collector) collector.afterHistoryCleared();   // live sessions re-seeded, spend totals recomputed
       return { ok: true, cleared: true };
     } catch (e) { return { ok: false, error: e.message }; }
   });

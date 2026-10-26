@@ -106,6 +106,9 @@ function openLedger(opts = {}) {
     ver++;
   }
 
+  // Safe on a V2 file that predates it: created at open, not in a migration.
+  db.exec('CREATE INDEX IF NOT EXISTS agents_agent_id ON agents(agent_id)');
+
   const q = {
     insReq: db.prepare(`INSERT OR IGNORE INTO requests (request_key, request_id, session_id, prompt_id, ts, model,
       query_source, source, agent_name, agent_id, attribution, input_tokens, output_tokens, cache_read_tokens,
@@ -159,6 +162,8 @@ function openLedger(opts = {}) {
       WHERE session_id=? AND kind IN ('tool','wait') AND ended IS NULL`),
     sessEnd: db.prepare(`INSERT INTO sessions (session_id, first_seen, last_seen, ended_at) VALUES (?,?,?,?)
       ON CONFLICT(session_id) DO UPDATE SET ended_at=excluded.ended_at, last_seen=MAX(last_seen, excluded.last_seen)`),
+    hasSess: db.prepare('SELECT 1 AS x FROM sessions WHERE session_id=?'),
+    sessOfAgent: db.prepare('SELECT session_id FROM agents WHERE agent_id=? ORDER BY COALESCE(stopped, started) DESC LIMIT 1'),
     setBranch: db.prepare('UPDATE sessions SET branch=? WHERE session_id=? AND branch IS NULL'),
     // Sessions API (alpha.7 S2). Reads only, and only allowlisted columns exist to be read.
     sessList: db.prepare(`SELECT ${SESS_COLS} FROM sessions s WHERE s.last_seen >= ? ORDER BY s.first_seen DESC, s.session_id LIMIT ${SESS_LIST_CAP}`),
@@ -250,6 +255,8 @@ function openLedger(opts = {}) {
     if (!sessionId) return;
     const ts = stamp(receivedAt);
     const agentId = strCap(p.agent_id, MAX_ID);
+    // Every event keeps the session row alive (last_seen = max) and can never leave an orphan (first_seen = min).
+    if (event !== 'SessionStart') q.upSessSeen.run(sessionId, ts, ts);
     if (event === 'SessionStart') {
       const cwd = str(p.cwd);
       const project = cwd ? path.basename(cwd) || null : null;
@@ -699,13 +706,13 @@ function openLedger(opts = {}) {
   /** True when the ledger has this session (a link target must exist). @param {string} sessionId */
   function hasSession(sessionId) {
     live();
-    return !!db.prepare('SELECT 1 AS x FROM sessions WHERE session_id=?').get(String(sessionId));
+    return !!q.hasSess.get(String(sessionId));
   }
 
   /** The session an agent ran in (newest if the id repeats), or null. @param {string} agentId @returns {string|null} */
   function sessionOfAgent(agentId) {
     live();
-    const r = db.prepare('SELECT session_id FROM agents WHERE agent_id=? ORDER BY COALESCE(stopped, started) DESC LIMIT 1').get(String(agentId));
+    const r = q.sessOfAgent.get(String(agentId));
     return r ? String(r.session_id) : null;
   }
 

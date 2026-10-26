@@ -883,15 +883,19 @@ function createCollector(store, port, opts) {
     const repairAgents = new Set();
     for (const t of ptasks.slice(0, 200)) {
       if (!t || typeof t !== 'object') continue;
-      for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
+      const tgates = Array.isArray(t.gates) ? t.gates : [];
+      // once any gate of a task names a session, an unnamed gate of that task is never guessed by time
+      const taskNamesSession = tgates.some((g) => g && typeof g === 'object' && typeof g.session_id === 'string' && g.session_id);
+      for (const g of tgates) {
         if (!g || typeof g !== 'object') continue;
         const at = pTime(g.reviewed_at);
         // a timed review counts only inside the session's own window (a later review that names the session id is not part of it)
         const inWindow = at !== null && at >= row.firstSeen - REVIEW_SLACK_MS && at <= endEdge;
-        const mine = typeof g.session_id === 'string' && g.session_id
+        const named = typeof g.session_id === 'string' && g.session_id;
+        const mine = named
           ? g.session_id === id && (at === null || inWindow)
-          : inWindow;
-        if (mine) reviews.push({ task: pStr(t.task, 128), outcome: pStr(g.outcome, 32), findings: Array.isArray(g.findings) ? g.findings.length : 0, at });
+          : (!taskNamesSession && inWindow);
+        if (mine) reviews.push({ task: pStr(t.task, 128), outcome: pStr(g.outcome, 32), findings: Array.isArray(g.findings) ? g.findings.length : 0, at, matched: named ? 'session' : 'time' });
       }
       const atts = Array.isArray(t.attempts) ? t.attempts : [];
       for (const a of atts) {
@@ -1219,6 +1223,19 @@ function createCollector(store, port, opts) {
     server,
     broadcast,
     setLedger(l) { ledger = l || null; refreshSpend(); },
+    /**
+     * After Sereno's own history was cleared (main.js, IPC): re-seed a sessions row for every live session
+     * so later events do not orphan, forget the branch attempts, and recompute the spend totals.
+     */
+    afterHistoryCleared() {
+      branchTried.clear();
+      if (ledger) {
+        for (const s of store.snapshot().sessions) {
+          try { ledger.recordHook('SessionStart', { session_id: s.id, cwd: s.cwd || undefined, model: s.model || undefined }, now()); } catch (_) { /* the ledger is a record */ }
+        }
+      }
+      refreshSpend();
+    },
     _tickSpend: tickSpend,
     clientCount: () => clients.size,
     listen(cb) {
