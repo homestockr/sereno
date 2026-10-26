@@ -8000,6 +8000,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       'builder-opus': { model: 'opus', maxTurns: '120' },
       'red-team': { model: 'fable' },
       'red-team-lean': { model: 'opus' },
+      'red-team-browse': { model: 'fable' },
       'scribe': { model: 'haiku' },
     };
     const IGNORED_KEYS = ['permissionMode', 'hooks', 'mcpServers'];
@@ -8010,7 +8011,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(m); return m[1].split('|');
     })();
 
-    test('[4a3] agents: exactly the six expected, with the fixed models and turn caps', () => {
+    test('[4a3] agents: exactly the seven expected, with the fixed models and turn caps', () => {
       assert.deepStrictEqual(agentFiles.map((f) => f.replace(/\.md$/, '')).sort(), Object.keys(AGENT_SPEC).sort());
       for (const f of agentFiles) {
         const name = f.replace(/\.md$/, '');
@@ -8421,7 +8422,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(fmm && /^name: ship$/m.test(fmm[1]) && /^disable-model-invocation: true$/m.test(fmm[1]) && /^argument-hint:/m.test(fmm[1]));
       const order = [];
       for (const m of SHIP.matchAll(/sereno\.js" ([a-z-]+)/g)) if (!order.includes(m[1])) order[order.length] = m[1];
-      assert.deepStrictEqual(order, ['clean', 'config', 'test', 'attempt', 'run-id', 'reviewer', 'review-pack', 'context', 'paths', 'gate', 'brief', 'recovery']);
+      assert.deepStrictEqual(order, ['clean', 'config', 'test', 'attempt', 'run-id', 'reviewer', 'review-pack', 'serve', 'context', 'paths', 'gate', 'brief', 'recovery']);
       const at = (s) => SHIP.indexOf(s);
       const seq = ['bin/sereno.js" test --task', 'bin/sereno.js" run-id --head', 'bin/sereno.js" context --head', 'bin/sereno.js" gate --file', '--review-run-id <review_run_id> --diagnosis', 'bin/sereno.js" recovery --task', '## 6. Merge prompt'];
       for (let i = 1; i < seq.length; i++) assert.ok(at(seq[i - 1]) >= 0 && at(seq[i]) > at(seq[i - 1]), seq[i] + ' after ' + seq[i - 1]);
@@ -8437,7 +8438,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('[4a4] ship skill: spawns the red team by configured agent name only', () => {
       const names = [...SHIP.matchAll(/`sereno:([^`]*)`/g)].map((m) => m[1]);
-      for (const n of names) assert.ok(['red-team-lean', 'scribe', ''].includes(n), 'only the fallback and the scribe are named: ' + n);
+      for (const n of names) assert.ok(['red-team-lean', 'red-team-browse', 'scribe', ''].includes(n), 'only the fallback, the browse reviewer and the scribe are named: ' + n);
       assert.ok(/`sereno:` plus the `agent` from the `reviewer` result/.test(SHIP1) && SHIP1.includes('`roles.redTeam.agent` if it failed'));
       assert.ok(!/sereno:red-team`/.test(SHIP) && !/sereno:builder/.test(SHIP), 'no hard-coded red team or builder');
       assert.ok(!/\bnpm\b|\bnpx\b/.test(SHIP));
@@ -10024,7 +10025,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const s = rd('skills/ship/SKILL.md');
       assert.ok(s.includes('bin/sereno.js" review-pack --task <task> --base <base> --head <head>'));
       assert.ok(s.indexOf('sereno.js" review-pack') < s.indexOf('Spawn the red team'));
-      for (const a of ['red-team', 'red-team-lean']) {
+      for (const a of ['red-team', 'red-team-lean', 'red-team-browse']) {
         const t = rd('agents/' + a + '.md');
         const lines = t.split('\n').filter((l) => /review pack/i.test(l));
         assert.strictEqual(lines.length, 1, a);
@@ -10141,7 +10142,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(r.lines <= 200);
     });
     test('[plugin-0.5 H3] both red teams are told to check each stub marker against the acceptance criteria', () => {
-      for (const a of ['red-team', 'red-team-lean']) {
+      for (const a of ['red-team', 'red-team-lean', 'red-team-browse']) {
         const lines = rd('agents/' + a + '.md').split('\n').filter((l) => /stub marker/i.test(l));
         assert.strictEqual(lines.length, 1, a);
         assert.ok(/acceptance criteria/.test(lines[0]) && /defect/.test(lines[0]) && /block/.test(lines[0]), a);
@@ -12726,7 +12727,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     test('[4b-api] agentModels: bundled agents with their models; missing dir is empty', () => {
       const m = pl.agentModels();
-      assert.deepStrictEqual(m.map((x) => x.agent).sort(), ['sereno:builder', 'sereno:builder-haiku', 'sereno:builder-opus', 'sereno:red-team', 'sereno:red-team-lean', 'sereno:scribe']);
+      assert.deepStrictEqual(m.map((x) => x.agent).sort(), ['sereno:builder', 'sereno:builder-haiku', 'sereno:builder-opus', 'sereno:red-team', 'sereno:red-team-browse', 'sereno:red-team-lean', 'sereno:scribe']);
       assert.deepStrictEqual(pl.agentModels(path.join(os.tmpdir(), 'sereno-no-such-dir')), []);
     });
   }
@@ -16227,6 +16228,167 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(/typing `\/sereno:merge` is the same yes as for a hold/i.test(skillText('merge')));
       const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
       assert.ok(/### Runnable checks/.test(readme) && /check_hosts/.test(readme) && /browse checks unverified/.test(readme));
+    });
+
+    // ---- [plugin-0.5 P2b] browse reviewer, serve --start/--stop, per-check verdicts ----
+    const pipelineApp = require('../src/pipeline.js');
+    const { createSafeFs: p2bSafeFs } = require('../plugin/bin/lib/fsafe.js');
+    const recLib2 = require('../plugin/bin/lib/records.js');
+    const frontOf = (file) => {
+      const t = fs.readFileSync(file, 'utf8').replace(/\r/g, ''); const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(t);
+      const fm = {}; for (const l of m[1].split('\n')) { const k = /^([A-Za-z]+):\s*(.*)$/.exec(l); if (k) fm[k[1]] = k[2].trim(); }
+      return { fm, body: m[2] };
+    };
+    const BROWSE_BLK = (port) => blk('- serve: node server.js ' + port + ' s.pid', '  ready: http://127.0.0.1:' + port + '/health', '- http: http://127.0.0.1:' + port + '/items', '  expect: status 200', '- browse: http://127.0.0.1:' + port + '/items', '  look: the heading says Items', '- browse: http://127.0.0.1:' + port + '/', '  look: it loads');
+    const P2B_GATE = (r, verdict, id) => S(r.dir, ['gate', '--stdin', '--task', 'ck', '--base', r.base, '--head', r.head, '--branch', 'task/ck', '--tests-passed', 'true'].concat(id ? ['--run-id', id] : []), JSON.stringify(verdict));
+    const readGate = (r, out) => JSON.parse(fs.readFileSync(path.join(r.dir, out.path), 'utf8'));
+    const LIGHT_FEATURE = JSON.stringify({ tests: { command: 'node -e "process.exit(0)"' }, roles: { redTeam: { light: { kinds: ['feature'] } } } });
+
+    test('[plugin-0.5 P2b] agent red-team-browse: no tools list, disallows Write/Edit/NotebookEdit, same tier as red-team, browse rules, read-only, pack and stub lines kept in step', () => {
+      const a = frontOf(path.join(PLUGIN, 'agents', 'red-team-browse.md')), rt = frontOf(path.join(PLUGIN, 'agents', 'red-team.md'));
+      assert.strictEqual(a.fm.name, 'red-team-browse');
+      assert.ok(!('tools' in a.fm), 'no tools list, so it inherits MCP browser tools');
+      assert.strictEqual(a.fm.disallowedTools, 'Write, Edit, NotebookEdit');
+      assert.strictEqual(a.fm.model, rt.fm.model); assert.strictEqual(a.fm.model, 'fable');
+      for (const key of ['Browse rules', 'same-origin', 'Never submit a form, sign in, enter data', 'download', '`unverified`', 'no browser tool', 'Never guess', 'You are read-only', '"outcome"', 'needs_context', 'Insufficient context is never a pass', '"checks"']) assert.ok(a.body.includes(key), 'mentions ' + key);
+      for (const re of [/review pack/i, /stub marker/i]) {
+        const mine = a.body.split('\n').filter((l) => re.test(l)), theirs = rt.body.split('\n').filter((l) => re.test(l));
+        assert.ok(theirs.length > 0 && theirs.every((l) => mine.includes(l)), 'the ' + re + ' line is copied from red-team.md');
+      }
+      assert.ok(!/push/i.test(a.body));
+    });
+    test('[plugin-0.5 P2b] app side: red-team-browse is the Red team role, and Fable still infers only to red-team', () => {
+      assert.strictEqual(pipelineApp.roleMap()['sereno:red-team-browse'], 'red-team');
+      const am = pipelineApp.agentModels().find((x) => x.agent === 'sereno:red-team-browse');
+      assert.deepStrictEqual([am.role, am.model], ['red-team', 'fable']);
+      assert.deepStrictEqual(pipelineApp.inferModels(), { fable: 'red-team' });
+      const files = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files;
+      assert.ok(files.includes('plugin/agents/*.md'), 'the agent glob is bundled');
+    });
+    test('[plugin-0.5 P2b] reviewer: a spec with a browse check gets red-team-browse (full review, overriding light); without one nothing changes', () => {
+      const r = ckRepo(BROWSE_BLK(3999));
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'pipeline.json'), LIGHT_FEATURE);
+      const q = S(r.dir, ['reviewer', '--task', 'ck', '--base', r.base, '--head', r.head]).out;
+      assert.deepStrictEqual([q.ok, q.agent, q.light], [true, 'red-team-browse', false], JSON.stringify(q));
+      assert.match(q.reason, /2 browse checks/); assert.ok(!/["`$\\']/.test(q.reason));
+      const plain = ckRepo(blk('- cmd: node -e "process.exit(0)"', '  expect: exit 0'));
+      fs.writeFileSync(path.join(plain.dir, '.sereno', 'pipeline.json'), LIGHT_FEATURE);
+      const p = S(plain.dir, ['reviewer', '--task', 'ck', '--base', plain.base, '--head', plain.head]).out;
+      assert.deepStrictEqual([p.agent, p.light], ['red-team-lean', true]);
+      const off = ckRepo(blk('- cmd: node -e "process.exit(0)"', '  expect: exit 0'));
+      assert.strictEqual(S(off.dir, ['reviewer', '--task', 'ck', '--base', off.base, '--head', off.head]).out.agent, 'red-team');
+    });
+    test('[plugin-0.5 P2b] review-pack: browse checks come with their check numbers for the verdict', () => {
+      const r = ckRepo(blk('- cmd: node -e "process.exit(0)"', '  expect: exit 0', '- browse: http://localhost:3000/a', '  look: a', '- browse: http://localhost:3000/b', '  look: b'));
+      const p = S(r.dir, ['review-pack', '--task', 'ck', '--base', r.base, '--head', r.head]).out;
+      assert.match(fs.readFileSync(path.join(r.dir, p.path), 'utf8'), /Check numbers for the verdict, in the order above: 2, 3\./);
+    });
+
+    await atest('[plugin-0.5 P2b] serve --start/--stop: detached server survives --start, pid file lifecycle, refuses a second start, --stop kills the tree and is idempotent, doctor reports a leftover', async () => {
+      const port = await freePort();
+      const r = ckRepo(BROWSE_BLK(port));
+      const file = path.join(r.dir, '.sereno', 'cache', 'serve-ck.json');
+      const st = S(r.dir, ['serve', '--task', 'ck', '--start']);
+      assert.strictEqual(st.status, 0, JSON.stringify(st.out));
+      assert.deepStrictEqual([st.out.ok, st.out.started], [true, true]);
+      assert.ok(Number.isInteger(st.out.pid) && st.out.pid > 1);
+      assert.ok(alive(st.out.pid), 'the process is alive after --start returned');
+      const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+      assert.deepStrictEqual([rec.pid, rec.ready], [st.out.pid, 'http://127.0.0.1:' + port + '/health']);
+      assert.ok(!Number.isNaN(Date.parse(rec.started_at)));
+      const serverPid = await readPid(path.join(r.dir, 's.pid'));
+      assert.ok(serverPid && alive(serverPid));
+      const again = S(r.dir, ['serve', '--task', 'ck', '--start']);
+      assert.deepStrictEqual([again.out.ok, again.out.code, again.status], [false, 'serve_running', 26]);
+      assert.strictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).pid, st.out.pid, 'the file is untouched');
+      const doc = S(r.dir, ['doctor']).out.checks.find((c) => c.name === 'browse review servers');
+      assert.match(doc.detail, /serve-ck\.json/); assert.match(doc.detail, new RegExp('pid ' + st.out.pid + ', still running'));
+      const stop = S(r.dir, ['serve', '--task', 'ck', '--stop']);
+      assert.deepStrictEqual([stop.out.ok, stop.out.stopped, stop.out.was_alive], [true, true, true], JSON.stringify(stop.out));
+      assert.ok(await goneSoon(st.out.pid), 'the shell is gone'); assert.ok(await goneSoon(serverPid), 'the server (a child) is gone');
+      assert.ok(!fs.existsSync(file));
+      const twice = S(r.dir, ['serve', '--task', 'ck', '--stop']);
+      assert.deepStrictEqual([twice.status, twice.out.ok, twice.out.stopped], [0, true, false]);
+      assert.ok(!S(r.dir, ['doctor']).out.checks.some((c) => c.name === 'browse review servers'), 'no leftover, no check line');
+    });
+    await atest('[plugin-0.5 P2b] serve --start: a stale pid file is replaced, a server that never gets ready is killed and leaves no file, --start/--stop need exactly one flag', async () => {
+      const port = await freePort();
+      const r = ckRepo(BROWSE_BLK(port));
+      const file = path.join(r.dir, '.sereno', 'cache', 'serve-ck.json');
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ pid: 2147483000, started_at: '2026-01-01T00:00:00.000Z', ready: null }));
+      assert.match(S(r.dir, ['doctor']).out.checks.find((c) => c.name === 'browse review servers').detail, /not running/);
+      const st = S(r.dir, ['serve', '--task', 'ck', '--start']);
+      assert.strictEqual(st.out.started, true, JSON.stringify(st.out));
+      assert.notStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).pid, 2147483000);
+      assert.strictEqual(S(r.dir, ['serve', '--task', 'ck', '--stop']).out.stopped, true);
+      const failing = ckRepo(blk('- serve: node -e "process.exit(3)"', '  ready: http://127.0.0.1:' + (await freePort()) + '/', '- browse: http://127.0.0.1:3000/', '  look: x'));
+      const f = S(failing.dir, ['serve', '--task', 'ck', '--start']);
+      assert.deepStrictEqual([f.out.ok, f.out.code, f.status], [false, 'server_not_ready', 27]);
+      assert.ok(!fs.existsSync(path.join(failing.dir, '.sereno', 'cache', 'serve-ck.json')));
+      assert.strictEqual(S(r.dir, ['serve', '--task', 'ck']).out.code, 'usage');
+      assert.strictEqual(S(r.dir, ['serve', '--task', 'ck', '--start', '--stop']).out.code, 'usage');
+    });
+    test('[plugin-0.5 P2b] serve --start: a browse spec with no serve, or a spec with a serve but no browse check, is a no-op ok result and writes no file', () => {
+      const a = ckRepo(blk('- browse: http://127.0.0.1:3000/', '  look: x'));
+      const s = S(a.dir, ['serve', '--task', 'ck', '--start']);
+      assert.deepStrictEqual([s.status, s.out.ok, s.out.started], [0, true, false]);
+      const b = ckRepo(blk('- serve: node server.js 1'));
+      const t = S(b.dir, ['serve', '--task', 'ck', '--start']);
+      assert.deepStrictEqual([t.status, t.out.ok, t.out.started], [0, true, false]);
+      for (const d of [a.dir, b.dir]) assert.ok(!fs.existsSync(path.join(d, '.sereno', 'cache', 'serve-ck.json')));
+    });
+    test('[plugin-0.5 P2b] verdict checks: sanitized (unknown numbers dropped, unknown results unverified, notes cleaned and capped, duplicates take the worst) and stored in the gate', () => {
+      const r = ckRepo(BROWSE_BLK(3998)); // checks: 1 serve, 2 http, 3 browse, 4 browse
+      const note = 'x'.repeat(400) + '\u0007\nline';
+      const g = P2B_GATE(r, { outcome: 'pass', findings: [], checks: [{ n: 3, result: 'pass', note }, { n: 4, result: 'maybe', note: 'a\tb' }, { n: 2, result: 'pass', note: 'http is not browse' }, { n: 99, result: 'pass' }, { n: 'x', result: 'pass' }, null, { n: 3, result: 'unverified', note: 'dup' }] });
+      assert.deepStrictEqual([g.out.ok, g.out.outcome, g.out.checks], [true, 'pass', 2], JSON.stringify(g.out));
+      const gate = readGate(r, g.out);
+      assert.deepStrictEqual(gate.checks.map((c) => [c.n, c.result]), [[3, 'unverified'], [4, 'unverified']]);
+      assert.strictEqual(gate.checks[1].note, 'a b');
+      const capped = recLib2.sanitizeChecks([{ n: 3, result: 'pass', note }]);
+      assert.ok(capped[0].note.length <= 300 && !/[\u0007\n]/.test(capped[0].note));
+      const none = P2B_GATE(r, { outcome: 'pass', findings: [] }, 'rr_20260101T000000Z_' + r.head.slice(0, 7));
+      assert.ok(!('checks' in readGate(r, none.out)));
+    });
+    test('[plugin-0.5 P2b] gate: a failed browse check makes the outcome block even when the verdict says pass, with a finding; unverified does not', () => {
+      const r = ckRepo(BROWSE_BLK(3997));
+      const g = P2B_GATE(r, { outcome: 'pass', findings: [], checks: [{ n: 3, result: 'pass', note: 'saw it' }, { n: 4, result: 'fail', note: 'the page is blank' }] });
+      assert.deepStrictEqual([g.out.outcome, g.out.findings], ['block', 1], JSON.stringify(g.out));
+      const gate = readGate(r, g.out);
+      assert.strictEqual(gate.outcome, 'block');
+      assert.deepStrictEqual(gate.checks.map((c) => [c.n, c.result]), [[3, 'pass'], [4, 'fail']]);
+      assert.deepStrictEqual([gate.findings[0].severity, gate.findings[0].kind], ['high', 'spec']);
+      assert.match(gate.findings[0].summary, /browse check 4 failed: the page is blank/);
+      const r2 = ckRepo(BROWSE_BLK(3996));
+      const u = P2B_GATE(r2, { outcome: 'pass', findings: [], checks: [{ n: 3, result: 'unverified', note: 'no browser tool' }, { n: 4, result: 'unverified', note: 'no browser tool' }] });
+      assert.deepStrictEqual([u.out.outcome, u.out.findings], ['pass', 0]);
+      const dup = P2B_GATE(r2, { outcome: 'pass', findings: [], checks: [{ n: 3, result: 'fail', note: 'a' }, { n: 3, result: 'pass', note: 'b' }] }, 'rr_20260102T000000Z_' + r2.head.slice(0, 7));
+      assert.strictEqual(dup.out.outcome, 'block');
+    });
+    test('[plugin-0.5 P2b] hold list: a browse check that is pass in the latest gate leaves the unverified list; no gate result keeps it', () => {
+      const r = ckRepo(BROWSE_BLK(3995));
+      const deps = () => nextLib.realDeps({ root: r.dir, fsafe: p2bSafeFs(r.dir), config: {} });
+      const A = { url: 'http://127.0.0.1:3995/items', look: 'the heading says Items' }, B = { url: 'http://127.0.0.1:3995/', look: 'it loads' };
+      assert.deepStrictEqual(deps().browseChecks('ck'), [A, B], 'no gate at all');
+      P2B_GATE(r, { outcome: 'pass', findings: [], checks: [{ n: 3, result: 'pass', note: 'ok' }] }, 'rr_20260101T000000Z_' + r.head.slice(0, 7));
+      assert.deepStrictEqual(deps().browseChecks('ck'), [B], 'check 3 passed, check 4 has no result');
+      P2B_GATE(r, { outcome: 'pass', findings: [], checks: [{ n: 3, result: 'pass', note: 'ok' }, { n: 4, result: 'pass', note: 'ok' }] }, 'rr_20260102T000000Z_' + r.head.slice(0, 7));
+      assert.deepStrictEqual(deps().browseChecks('ck'), [], 'the latest gate passes both');
+      P2B_GATE(r, { outcome: 'pass', findings: [], checks: [{ n: 4, result: 'unverified', note: 'no browser tool' }] }, 'rr_20260103T000000Z_' + r.head.slice(0, 7));
+      assert.deepStrictEqual(deps().browseChecks('ck'), [A, B], 'only the latest gate counts');
+      const d = nextLib.decide({ task: 'ck', deps: Object.assign({}, deps(), { recover: () => ({ next: 'merge', reason: 'gate passed' }), isMerged: () => false, lastOutcome: () => 'pass', attemptCount: () => 1 }) });
+      assert.strictEqual(d.step, 'merge'); assert.strictEqual(d.browse_unverified.length, 2);
+    });
+    test('[plugin-0.5 P2b] ship skill: serve --start before the browse reviewer, --stop after it on every path; no npm or push; README documents browse checks and a browser tool', () => {
+      const s = skillText('ship');
+      assert.ok(s.includes('sereno.js" serve --task <task> --start') && s.includes('sereno.js" serve --task <task> --stop'));
+      assert.ok(s.indexOf('serve --task <task> --start') < s.indexOf('serve --task <task> --stop'));
+      assert.ok(/on every path/.test(s) && /Agent tool/.test(s) && /Never end the turn[^.]*server still running/.test(s));
+      assert.ok(/red-team-browse/.test(s) && !/run_in_background: true.*serve/.test(s));
+      assert.ok(!/\bnpm\b/i.test(s) && !/push/i.test(s));
+      const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
+      assert.ok(/red-team-browse/.test(readme) && /Claude in Chrome/.test(readme) && /Playwright/.test(readme) && /reports every browse check `unverified`/.test(readme) && !/push/i.test(readme));
     });
 
     await atest('[plugin-0.5 H1] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });

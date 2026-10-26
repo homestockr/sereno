@@ -17,6 +17,9 @@ const testrun = require('./testrun.js');
 const speclib = require('./spec.js');
 const { SerenoError } = require('./fsafe.js');
 
+/** The red team that can open a page: chosen whenever the spec has a browse check. */
+const BROWSE_AGENT = 'red-team-browse';
+
 /** Always get the full red team. A repo's roles.redTeam.light.never adds to these and cannot remove them. */
 const DEFAULT_NEVER = ['**/migrations/**', 'supabase/**'];
 /** A touched path whose lowercased form contains any of these always gets the full red team. */
@@ -84,7 +87,9 @@ function diffInfo(root, base, head) {
 }
 
 /**
- * @param {{ root: string, config: any, kind: string | null, base: string, head: string }} a
+ * A spec with browse checks gets the browse red team (a full review, never light), whatever the
+ * config says about light review; `a.browse` is the number of browse checks.
+ * @param {{ root: string, config: any, kind: string | null, base: string, head: string, browse?: number }} a
  * @returns {{ agent: string, light: boolean, reason: string }}
  */
 function chooseReviewer(a) {
@@ -94,6 +99,7 @@ function chooseReviewer(a) {
   const safe = (/** @type {string} */ t) => rec.cleanText(t, 200).replace(/["`$\\']/g, '');
   const normal = (/** @type {string} */ reason) => ({ agent: red.agent, light: false, reason: safe(reason) });
   const kind = a.kind || 'unknown';
+  if (a.browse && a.browse > 0) return { agent: BROWSE_AGENT, light: false, reason: safe('the spec has ' + a.browse + ' browse check' + (a.browse === 1 ? '' : 's') + '; full review with a browser') };
   if (!light.kinds.length) return normal('light review is off (roles.redTeam.light.kinds is empty)');
   if (!light.kinds.includes(kind)) return normal('kind ' + kind + ' is not one of: ' + light.kinds.join(', '));
   const d = diffInfo(a.root, a.base, a.head);
@@ -264,13 +270,13 @@ function stubMarkers(diffText, max) {
 
 /**
  * The spec's browse checks, or null when its checks block cannot be parsed.
- * @param {string} specText @returns {{ url: string, look: string }[] | null}
+ * @param {string} specText @returns {{ n: number, url: string, look: string }[] | null}
  */
 function browseChecks(specText) {
   try {
-    /** @type {{ url: string, look: string }[]} */
+    /** @type {{ n: number, url: string, look: string }[]} */
     const out = [];
-    for (const c of speclib.parseChecks(specText)) if (c.kind === 'browse') out[out.length] = { url: c.url, look: c.look };
+    for (const c of speclib.parseChecks(specText)) if (c.kind === 'browse') out[out.length] = { n: c.n, url: c.url, look: c.look };
     return out;
   } catch (_e) { return null; }
 }
@@ -324,6 +330,7 @@ function buildPack(a) {
     else {
       add(out, 'Nothing has checked these. Do not treat them as passed.');
       for (const b of browse) { add(out, '- ' + plain(b.url)); add(out, '  look: ' + plain(b.look)); }
+      add(out, 'Check numbers for the verdict, in the order above: ' + browse.map((b) => b.n).join(', ') + '.');
     }
     add(out, '');
   }
@@ -339,4 +346,4 @@ function buildPack(a) {
   return { path: rel, lines: out.length, files: d.files.length, truncated };
 }
 
-module.exports = { chooseReviewer, buildPack, stubMarkers, diffInfo, neverRule, globToRegExp, acceptanceLines, untested, DEFAULT_NEVER, NEVER_WORDS, PACK_MAX_LINES };
+module.exports = { chooseReviewer, browseChecks, BROWSE_AGENT, buildPack, stubMarkers, diffInfo, neverRule, globToRegExp, acceptanceLines, untested, DEFAULT_NEVER, NEVER_WORDS, PACK_MAX_LINES };

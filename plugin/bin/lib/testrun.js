@@ -26,14 +26,26 @@ const liveChildren = new Set();
 /** @type {Set<() => void>} */
 const cleanups = new Set();
 
-/** @param {import('node:child_process').ChildProcess} child */
-function killTree(child) {
-  const pid = child.pid;
+/**
+ * Kill a process and its children by pid: taskkill /T /F on win32, the process group (children
+ * spawned detached lead their own) or the process itself elsewhere. Best effort.
+ * @param {number | undefined} pid @param {import('node:child_process').ChildProcess} [child]
+ */
+function killPid(pid, child) {
   if (!pid) return;
   try {
     if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10000 });
-    else { try { process.kill(-pid, 'SIGKILL'); } catch (_e) { child.kill('SIGKILL'); } }
+    else { try { process.kill(-pid, 'SIGKILL'); } catch (_e) { if (child) child.kill('SIGKILL'); else process.kill(pid, 'SIGKILL'); } }
   } catch (_e) { /* best effort */ }
+}
+
+/** @param {import('node:child_process').ChildProcess} child */
+function killTree(child) { killPid(child.pid, child); }
+
+/** Is a process with this pid running? EPERM means it exists. @param {number} pid */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return /** @type {any} */ (e).code === 'EPERM'; }
 }
 
 let aborted = false;
@@ -451,6 +463,53 @@ function httpGet(url, timeoutMs) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Poll a ready URL until it answers 2xx or 3xx. Shared by runChecks and `serve --start`.
+ * @param {string} url @param {{ exited: () => boolean, aborted?: () => boolean, readyMs: number, pollMs: number, httpMs: number }} o
+ * @returns {Promise<boolean>}
+ */
+async function pollReady(url, o) {
+  const until = Date.now() + o.readyMs;
+  while (!(o.aborted && o.aborted()) && !o.exited() && Date.now() < until) {
+    const r = await httpGet(url, Math.min(2000, o.httpMs));
+    if (r.status !== null && r.status >= 200 && r.status < 400) return true;
+    await sleep(o.pollMs);
+  }
+  return false;
+}
+
+/**
+ * Start a `serve` command detached so it outlives this process, wait for its ready URL, and return
+ * its pid. On failure (not ready in time, or it exited) the tree is killed and ok is false. Never
+ * rejects. On win32 `detached` gives the child its own console-less process group; elsewhere its
+ * own session. The tree is found later by pid (taskkill /T on win32, the process group elsewhere).
+ * @param {string} command @param {string | null} ready @param {string} cwd
+ * @param {{ httpTimeoutMs?: number, readyTotalMs?: number, readyPollMs?: number }} [opts]
+ * @returns {Promise<{ ok: boolean, pid: number | null, why: string }>}
+ */
+async function startDetached(command, ready, cwd, opts) {
+  const o = opts || {};
+  let child;
+  try {
+    child = spawn(command, { shell: true, cwd, windowsHide: true, stdio: 'ignore', detached: true });
+  } catch (_e) { return { ok: false, pid: null, why: 'could not start' }; }
+  let exited = false, code = /** @type {number | null} */ (null);
+  child.on('error', () => { exited = true; });
+  child.on('exit', (c) => { exited = true; code = c; });
+  const pid = child.pid || null;
+  if (!pid) return { ok: false, pid: null, why: 'could not start' };
+  const readyMs = o.readyTotalMs || CHECK_READY_TOTAL_MS;
+  if (ready) {
+    const ok = await pollReady(ready, { exited: () => exited, readyMs, pollMs: o.readyPollMs || CHECK_READY_POLL_MS, httpMs: o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS });
+    if (!ok) {
+      killPid(pid, child);
+      return { ok: false, pid, why: exited ? 'the server exited' + (code === null ? '' : ' with code ' + code) + ' before it was ready' : 'no 2xx or 3xx from ' + ready + ' within ' + Math.round(readyMs / 1000) + ' s' };
+    }
+  }
+  child.unref();
+  return { ok: true, pid, why: '' };
+}
+
+/**
  * @typedef {{ n: number, kind: string, target: string, result: 'pass' | 'fail' | 'timeout' | 'server_not_ready' | 'refused' | 'unverified', detail: string }} CheckResult
  */
 
@@ -502,13 +561,7 @@ async function runChecks(checks, cwd, opts) {
         child.on('error', () => { serveExited = true; });
         child.on('close', (code) => { serveExited = true; serveCode = code; });
         if (!c.ready) { record(c, 'serve', c.serve, 'pass', 'started (no ready URL)', ''); continue; }
-        const until = Date.now() + readyMs;
-        let ok = false;
-        while (!aborted && !serveExited && Date.now() < until) {
-          const r = await httpGet(c.ready, Math.min(2000, httpMs));
-          if (r.status !== null && r.status >= 200 && r.status < 400) { ok = true; break; }
-          await sleep(pollMs);
-        }
+        const ok = await pollReady(c.ready, { exited: () => serveExited, aborted: () => aborted, readyMs, pollMs, httpMs });
         if (ok) record(c, 'serve', c.serve, 'pass', 'ready at ' + c.ready, '');
         else {
           serverReady = false;
@@ -708,4 +761,4 @@ async function runTests(o) {
   };
 }
 
-module.exports = { runChecks, httpGet, sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };
+module.exports = { killPid, pidAlive, startDetached, pollReady, runChecks, httpGet, sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };

@@ -271,11 +271,39 @@ function realDeps(a) {
       try {
         /** @type {{ url: string, look: string }[]} */
         const out = [];
-        for (const c of speclib.parseChecks(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'), 'utf8'))) if (c.kind === 'browse') out[out.length] = { url: c.url, look: c.look };
+        const passed = latestGatePasses(root, fsafe, task);
+        for (const c of speclib.parseChecks(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'), 'utf8'))) if (c.kind === 'browse' && !passed.has(c.n)) out[out.length] = { url: c.url, look: c.look };
         return out;
       } catch (_e) { return []; }
     },
   };
+}
+
+/**
+ * The check numbers the task's newest gate record (by reviewed_at) records as `pass`. A browse check
+ * with no result there is still unverified. Unreadable or oversized records count as nothing.
+ * @param {string} root @param {{ listDir: (rel: string) => string[] }} fsafe @param {string} task @returns {Set<number>}
+ */
+function latestGatePasses(root, fsafe, task) {
+  /** @type {Set<number>} */
+  const out = new Set();
+  let best = '';
+  /** @type {any} */ let latest = null;
+  let names = [];
+  try { names = fsafe.listDir('.sereno/gates'); } catch (_e) { return out; }
+  for (const f of names) {
+    if (!/^rr_[A-Za-z0-9_]+.json$/.test(f)) continue;
+    try {
+      const file = path.join(root, '.sereno', 'gates', f);
+      const st = fs.lstatSync(file);
+      if (!st.isFile() || st.size > 1024 * 1024) continue;
+      const g = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!g || g.task_id !== task || typeof g.reviewed_at !== 'string') continue;
+      if (g.reviewed_at >= best) { best = g.reviewed_at; latest = g; }
+    } catch (_e) { /* skip */ }
+  }
+  if (latest && Array.isArray(latest.checks)) for (const c of latest.checks) if (c && c.result === 'pass' && Number.isInteger(c.n)) out.add(c.n);
+  return out;
 }
 
 /**
@@ -336,4 +364,4 @@ function refreshQueuedBranch(a) {
 // The cap is counted by the model (it passes --steps-done), so it is a backstop, not a hard limit.
 const STEP_CAP = 3;
 
-module.exports = { STEP_CAP, decide, realDeps, refreshQueuedBranch, branchMerged, headMergedFor, afterState, baseFor, commandForDecide, stateOf, mergedInto };
+module.exports = { STEP_CAP, latestGatePasses, decide, realDeps, refreshQueuedBranch, branchMerged, headMergedFor, afterState, baseFor, commandForDecide, stateOf, mergedInto };

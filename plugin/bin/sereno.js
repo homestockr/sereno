@@ -13,7 +13,14 @@
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
  * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, clean, context, recovery, brief, doctor,
- * next, after-check, preflight, reviewer, review-pack.
+ * next, after-check, preflight, reviewer, review-pack, serve.
+ *
+ *   serve --task <t> --start | --stop
+ *                           --start launches the spec's `serve` detached (it outlives the command), waits for its
+ *                           `ready` URL and writes .sereno/cache/serve-<t>.json {pid, started_at, ready}; refuses
+ *                           while a live one exists; a no-op ok when the spec has no browse checks or no serve.
+ *                           --stop kills the process tree and removes the file; safe to repeat. The ship skill
+ *                           brackets the browse reviewer with these. doctor lists a leftover file.
  *
  *   reviewer --task <t> --base <sha> --head <sha>
  *                           read-only: { agent, light, reason }. Light only when the spec's kind is in
@@ -83,6 +90,7 @@ const briefLib = require('./lib/brief.js');
 const doctorLib = require('./lib/doctor.js');
 const nextLib = require('./lib/next.js');
 const reviewLib = require('./lib/review.js');
+const serveLib = require('./lib/serve.js');
 const preflightLib = require('./lib/preflight.js');
 const { projectId } = require('./lib/projectid.js');
 
@@ -98,7 +106,7 @@ function agentModel(name) {
   return m ? m[1] : null;
 }
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, builder_not_allowed: 21, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, after_not_merged: 22, tip_not_moved: 23, tip_unrelated: 24, invalid_checks: 25, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, builder_not_allowed: 21, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, after_not_merged: 22, tip_not_moved: 23, tip_unrelated: 24, invalid_checks: 25, serve_running: 26, server_not_ready: 27, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -337,6 +345,17 @@ const COMMANDS = {
       text = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
     }
     const v = rec.sanitizeVerdict(parseVerdict(text));
+    // Per-check results are for the spec's browse checks only; any other number is dropped. A failed one forces block.
+    /** @type {number[]} */
+    let browseNs = [];
+    try { browseNs = speclib.parseChecks(spec.text).filter((c) => c.kind === 'browse').map((c) => c.n); } catch (_e) { browseNs = []; }
+    const checks = rec.sanitizeChecks(v.checks, browseNs);
+    if (checks.some((c) => c.result === 'fail')) {
+      v.outcome = 'block';
+      for (const c of checks) {
+        if (c.result === 'fail' && v.findings.length < rec.MAX_FINDINGS) v.findings[v.findings.length] = { severity: 'high', kind: 'spec', file: null, line: null, summary: rec.cleanText('browse check ' + c.n + ' failed' + (c.note ? ': ' + c.note : ''), 300) };
+      }
+    }
     const { config_hash } = loadConfig(root);
     const reviewerReason = rec.cleanText(str(a, 'reviewer-reason'), 200);
 
@@ -359,10 +378,11 @@ const COMMANDS = {
       config_hash,
     };
     if (reviewerReason) /** @type {any} */ (gate).reviewer_reason = reviewerReason;
+    if (checks.length) /** @type {any} */ (gate).checks = checks;
     const rel = '.sereno/gates/' + runId + '.json';
     fsafe.writeJson(rel, gate);
     if (cacheRel) fsafe.removeFile(cacheRel);
-    return { path: rel, review_run_id: runId, outcome: gate.outcome, findings: gate.findings.length, tests_passed: gate.tests_passed };
+    return { path: rel, review_run_id: runId, outcome: gate.outcome, findings: gate.findings.length, tests_passed: gate.tests_passed, checks: checks.length };
   },
 
   stop(/** @type {string[]} */ argv) {
@@ -615,7 +635,18 @@ const COMMANDS = {
     const meta = speclib.readSpecMeta(root, task);
     if (!meta) throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first');
     const { config } = loadConfig(root);
-    return reviewLib.chooseReviewer({ root, config, kind: meta.kind, base, head });
+    // A spec with browse checks gets the browse red team (its checks block must parse; if it does not, the normal choice stands).
+    let browse = 0;
+    try { const b = reviewLib.browseChecks(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'), 'utf8')); browse = b ? b.length : 0; } catch (_e) { browse = 0; }
+    return reviewLib.chooseReviewer({ root, config, kind: meta.kind, base, head, browse });
+  },
+
+  async serve(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task'], bool: ['json', 'start', 'stop'] });
+    if (!!a.start === !!a.stop) throw new SerenoError('usage', 'give exactly one of --start or --stop');
+    const task = rec.checkTask(str(a, 'task'));
+    const { root, fsafe } = needRepo();
+    return a.start ? serveLib.start({ root, fsafe, task }) : serveLib.stop({ fsafe, task });
   },
 
   'review-pack'(/** @type {string[]} */ argv) {

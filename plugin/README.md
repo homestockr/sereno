@@ -110,7 +110,8 @@ A spec can carry one `checks` fenced block under its acceptance criteria. `/sere
 
 - `sereno.js test --task <task>` runs the `cmd` and `http` checks at head, after the suite, in the repo root. A `cmd` has a 120 s limit; an `http` check is a GET with no redirects, a 10 s limit and the first 256 KiB of the body. A `serve` is started in the background, polled at `ready` for up to 60 s, and always stopped afterwards.
 - A check that fails or times out is a new failure named `check <n>: <kind>`, so it leads to a repair like a failing test. Results are in the test output as `checks`; full logs go to `.sereno/cache/checks-<run>.log`.
-- `browse` checks are not run. They are listed in the review pack and printed at the merge stop with the hold, as "N browse checks unverified: check them yourself". Typing `/sereno:merge` is your yes.
+- `browse` checks are not run by `test`. They are checked by the red team in a browser (below). A browse check that is not `pass` in the latest gate is printed at the merge stop with the hold, as "N browse checks unverified: check them yourself". Typing `/sereno:merge` is your yes.
+- **Browse checks need a browser tool.** `sereno.js reviewer` picks `sereno:red-team-browse` whenever the spec has a `browse` check (a full review, never the light one). It inherits whichever browser MCP you have installed (Claude in Chrome or Playwright) and cannot write or edit files. It opens only the check's URL or same-origin pages reached from it, and never submits a form or signs in. If there is no browser tool it reports every browse check `unverified`, and they stay on the list for you to check before `/sereno:merge`. A `fail` makes the gate record `block`. `/sereno:ship` runs `sereno.js serve --task <task> --start` before that reviewer (the spec's `serve`, detached, polled at `ready`) and `--stop` after it on every path; `sereno.js doctor` reports a leftover server.
 - URLs must be `http:` or `https:` on `localhost`, `127.0.0.1` or `[::1]`. Any other host must be named by you; `/sereno:task` then records it as `check_hosts` in the spec. A malformed block is refused with `invalid_checks`. The checks are pinned with the rest of the spec, so editing them after a build is a `spec_changed`.
 
 ## Roles and models
@@ -124,6 +125,7 @@ A spec can carry one `checks` fenced block under its acceptance criteria. `/sere
 | Builder, substantial | `sereno:builder-opus` | opus | 120 |
 | Red team, `default` preset | `sereno:red-team` | fable | 60 |
 | Red team, `lean` preset (and fallback) | `sereno:red-team-lean` | opus | 60 |
+| Red team, spec with `browse` checks | `sereno:red-team-browse` | fable | 60 |
 | Scribe (briefs, commit text) | `sereno:scribe` | haiku | 20 |
 
 Models are tier aliases (`haiku`, `sonnet`, `opus`, `fable`) set in each agent file and, for orchestration, in each skill's front matter (`model: sonnet`, which applies to that turn only; your session model resumes on the next prompt). An alias tracks the current model of that tier on your provider. To repoint a tier, set `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL` or `ANTHROPIC_DEFAULT_FABLE_MODEL` in your Claude Code settings. `roles.builder.allowed` restricts which Builder tiers a spec may choose, and the preset chooses the red team. The turn cap is fixed in each agent file. The
