@@ -114,6 +114,10 @@ A spec can carry one `checks` fenced block under its acceptance criteria. `/sere
 - **Browse checks need a browser tool.** `sereno.js reviewer` picks `sereno:red-team-browse` whenever the spec has a `browse` check (a full review, never the light one). It inherits whichever browser MCP you have installed (Claude in Chrome or Playwright) and cannot write or edit files. It opens only the check's URL or same-origin pages reached from it, and never submits a form or signs in. If there is no browser tool it reports every browse check `unverified`, and they stay on the list for you to check before `/sereno:merge`. A `fail` makes the gate record `block`. `/sereno:ship` runs `sereno.js serve --task <task> --start` before that reviewer (the spec's `serve`, detached, polled at `ready`) and `--stop` after it on every path; `sereno.js doctor` reports a leftover server.
 - URLs must be `http:` or `https:` on `localhost`, `127.0.0.1` or `[::1]`. Any other host must be named by you; `/sereno:task` then records it as `check_hosts` in the spec. A malformed block is refused with `invalid_checks`. The checks are pinned with the rest of the spec, so editing them after a build is a `spec_changed`.
 
+### Spec review
+
+Before the first build, `/sereno:next` has the red team read the spec (not a diff, there is none yet) and answer `agree`, `revise` or `split`: is each criterion testable, are runnable `checks` present where they could be, is the scope one reviewable change. On `revise` or `split` it stops with the first point and `/sereno:task <task>`; a new spec revision is reviewed again. `/sereno:build <task>` never requires the review, so running it directly builds without one. The review is skipped when the spec's kind is in `roles.redTeam.light.kinds` or the red team is off. To turn it off, set `"roles": { "redTeam": { "specReview": false } }` in `pipeline.json`; the `lean` preset has it off. `sereno.js spec-review-needed --task <task>` shows the decision.
+
 ## Roles and models
 
 | Role | Agent | Tier | Turn cap |
@@ -190,6 +194,7 @@ invalid file stops the pipeline and lists the errors.
 | `roles.redTeam.onFallback` | `"ask"` | `"ask"` (stop and print the `use-fallback` command), `"auto"` or `"never"`. |
 | `roles.redTeam.maxBlockedRuns` | `2` | Blocks in a row before the run asks you for a decision. |
 | `roles.redTeam.enabled` | `true` | `false` switches the review off. The gate is then `skipped`. |
+| `roles.redTeam.specReview` | `true` in `default`, `false` in `lean` | The red team reviews the spec before the first build (see Spec review). `false` switches it off. |
 | `roles.redTeam.light` | off in `default`; `kinds: ["mechanical"]` in `lean` | A lighter reviewer for small plain tasks: `{ kinds, maxDiffLines: 80, agent: "red-team-lean", never: [] }`. `sereno.js reviewer` picks it only when the spec kind is listed, the diff is at most `maxDiffLines` lines and no touched path matches a `never` glob. `**/migrations/**`, `supabase/**` and any path containing auth, permission, payment, delete or secret always get the full red team; `never` can only add globs. The gate still has to pass. |
 | `recovery.repairs` | `1` | Repairs allowed for a defect. |
 | `recovery.infraRetries` | `2` | Retries allowed for an environment failure. |
@@ -231,10 +236,11 @@ Everything the plugin writes goes under `.sereno/` in your repo:
 - `gates/<review_run_id>.json`: the red team's verdict, validated. Findings are short
   summaries with a file and line.
 - `attempts/<task>-<n>.json`: one record per Builder run.
+- `spec-reviews/<task>-<spec_revision>.json`: the red team's spec review: outcome, up to 8 short points, agent, time.
 - `briefs/<branch>.md`: the branch brief.
 - `cache/`: the base test result for each base commit, and the test logs. The logs hold
   whatever your test output prints, so keep `.sereno/cache/` out of git. It also holds two
-  transient hand-off files, `verdict-<review_run_id>.json` and `spec-<task>.md`, which
+  transient hand-off files, `verdict-<review_run_id>.json` (and `verdict-spec-<task>.json` for a spec review) and `spec-<task>.md`, which
   `/sereno:ship` and `/sereno:task` write and the plugin deletes as soon as it has used them.
 
 It also runs the base suite in a temporary git worktree in the system temp directory,

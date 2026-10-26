@@ -9253,6 +9253,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[plugin-0.4 A1] spec: a spec written before 0.4 (no after/hold) still reads and still works with next', () => {
       const dir = repo();
       fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { redTeam: { specReview: false } } })); // plugin 0.5: the spec review is a step of its own; this test is about build
       fs.writeFileSync(path.join(dir, '.sereno', 'specs', 'old.md'), '---\ntask: "old"\nbuilder: sonnet\nkind: feature\nreason: "r"\nfixes: null\nbase_branch: "main"\nspec_revision: 3\ncreated_at: "2026-01-01T00:00:00.000Z"\n---\n\n## Goal\nx\n');
       const m = speclib.readSpecMeta(dir, 'old');
       assert.deepStrictEqual([m.after, m.hold_before_merge, m.spec_revision, m.base_branch, m.created_at], [null, null, 3, 'main', '2026-01-01T00:00:00.000Z']);
@@ -9272,6 +9273,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     // ---- next, end to end, on real repos ----
     test('[plugin-0.4 A1] sereno.js next: build, queue order, after-check, and done once the dependency is merged', () => {
       const dir = repo();
+      fs.mkdirSync(path.join(dir, '.sereno'), { recursive: true }); fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { redTeam: { specReview: false } } })); // plugin 0.5: spec review off here
       assert.deepStrictEqual([S(dir, ['next']).out.step, S(dir, ['next']).out.reason], ['idle', 'Nothing queued.']);
       assert.strictEqual(S(dir, ['next', '--task', 'nope']).out.code, 'not_found');
       for (const t of ['a', 'b']) assert.strictEqual(S(dir, ['branch', '--task', t]).out.ok, true);
@@ -9890,11 +9892,14 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(blocked.split('; ').length, 3, blocked);
       assert.ok(blocked.includes('b3') && !blocked.includes('b4'), blocked);
       assert.match(text, /^Next: 4 tasks are in progress/m);
-      const d2 = repo();
+      const d2 = repo({ roles: { redTeam: { specReview: false } } });
       S(d2, ['branch', '--task', 'fresh']);
       S(d2, ['spec', '--task', 'fresh', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--base-branch', 'main', '--stdin'], '## Goal\nx\n');
       S(d2, ['brief', '--auto', '--branch', 'main']);
       assert.match(briefOf(d2), /^Next: fresh \(build\), run \/sereno:next$/m);
+      fs.rmSync(path.join(d2, '.sereno', 'pipeline.json'));
+      S(d2, ['brief', '--auto', '--branch', 'main']);
+      assert.match(briefOf(d2), /^Next: fresh \(spec_review\), run \/sereno:next$/m, '[plugin-0.5 P3] a fresh task waits for its spec review');
     });
     test('[plugin-0.4 A3] brief --auto: guards stay (branch must be checked out), and it takes no hand-written parts', () => {
       const dir = mergedRepo();
@@ -10676,7 +10681,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!/Merged/.test(text), 'never "merged into itself"');
     });
     test('[plugin-0.4 rt] brief --auto on a task branch: built and not reviewed; no attempt; and a decide reason is Blocked', () => {
-      const dir = repo();
+      const dir = repo({ roles: { redTeam: { specReview: false } } });
       work(dir, 'n');
       assert.match(taskBrief(dir, 'n'), /^Now: n: Title of n, no attempt yet$/m);
       git(dir, 'switch', '-q', 'main');
@@ -16389,6 +16394,196 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!/\bnpm\b/i.test(s) && !/push/i.test(s));
       const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
       assert.ok(/red-team-browse/.test(readme) && /Claude in Chrome/.test(readme) && /Playwright/.test(readme) && /reports every browse check `unverified`/.test(readme) && !/push/i.test(readme));
+    });
+
+    // ---- [plugin-0.5 P3] spec review before the first build (H2) ----
+    const cfgLib = require('../plugin/bin/lib/config.js');
+    const srLib = require('../plugin/bin/lib/specreview.js');
+    const P3_BODY = blk('- cmd: node -e "process.exit(0)"', '  expect: exit 0');
+    const P3_VERDICT = (r, obj, name) => {
+      fs.mkdirSync(path.join(r.dir, '.sereno', 'cache'), { recursive: true });
+      const f = path.join(r.dir, '.sereno', 'cache', name || 'verdict-spec-ck.json');
+      fs.writeFileSync(f, typeof obj === 'string' ? obj : JSON.stringify(obj));
+      return f;
+    };
+    const P3_REVIEW = (r, obj, extra) => S(r.dir, ['spec-review', '--file', P3_VERDICT(r, obj), '--task', 'ck'].concat(extra || []));
+    const P3_SPEC = (r, body) => S(r.dir, specArgs('ck'), body || P3_BODY);
+    const P3_NEXT = (r) => S(r.dir, ['next', '--task', 'ck']).out;
+    const P3_CFG = (r, o) => fs.writeFileSync(path.join(r.dir, '.sereno', 'pipeline.json'), JSON.stringify(Object.assign({ tests: { command: 'node -e "process.exit(0)"' } }, o)));
+    const P3_FENCE = '```';
+    const readJ = (dir, rel) => JSON.parse(fs.readFileSync(path.join(dir, rel), 'utf8'));
+
+    test('[plugin-0.5 P3] config: specReview is true in default, false in lean, validated as a boolean, overridable per repo', () => {
+      assert.strictEqual(cfgLib.PRESETS.default().roles.redTeam.specReview, true);
+      assert.strictEqual(cfgLib.PRESETS.lean().roles.redTeam.specReview, false);
+      assert.deepStrictEqual(cfgLib.validate(cfgLib.PRESETS.default()), []);
+      assert.deepStrictEqual(cfgLib.validate(cfgLib.PRESETS.lean()), []);
+      for (const v of ['yes', 1, null]) { const c = cfgLib.PRESETS.default(); c.roles.redTeam.specReview = v; assert.ok(cfgLib.validate(c).some((e) => /roles\.redTeam\.specReview: must be true or false/.test(e)), String(v)); }
+      const c2 = cfgLib.PRESETS.default(); delete c2.roles.redTeam.specReview;
+      assert.ok(cfgLib.validate(c2).some((e) => /specReview/.test(e)));
+      const dir = repo();
+      assert.strictEqual(S(dir, ['config']).out.config.roles.redTeam.specReview, true);
+      fs.mkdirSync(path.join(dir, '.sereno'));
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ preset: 'lean' }));
+      assert.strictEqual(S(dir, ['config']).out.config.roles.redTeam.specReview, false);
+      fs.writeFileSync(path.join(dir, '.sereno', 'pipeline.json'), JSON.stringify({ roles: { redTeam: { specReview: 'no' } } }));
+      const bad2 = S(dir, ['config']);
+      assert.strictEqual(bad2.out.ok, false); assert.match(JSON.stringify(bad2.out), /specReview/);
+    });
+    test('[plugin-0.5 P3] spec-review-needed: needed in default; not needed for a light kind, with specReview off, with the red team off; read-only; unknown task refused', () => {
+      const r = ckRepo(P3_BODY);
+      const before = fs.readdirSync(path.join(r.dir, '.sereno')).sort();
+      const n = S(r.dir, ['spec-review-needed', '--task', 'ck']);
+      assert.deepStrictEqual([n.status, n.out.ok, n.out.needed], [0, true, true], JSON.stringify(n.out));
+      assert.deepStrictEqual(fs.readdirSync(path.join(r.dir, '.sereno')).sort(), before, 'writes nothing');
+      P3_CFG(r, { roles: { redTeam: { light: { kinds: ['feature'] } } } });
+      let x = S(r.dir, ['spec-review-needed', '--task', 'ck']).out;
+      assert.deepStrictEqual([x.needed, /light review/.test(x.reason)], [false, true], JSON.stringify(x));
+      P3_CFG(r, { roles: { redTeam: { light: { kinds: ['fix'] } } } });
+      assert.strictEqual(S(r.dir, ['spec-review-needed', '--task', 'ck']).out.needed, true, 'a kind not listed still gets the review');
+      P3_CFG(r, { roles: { redTeam: { specReview: false } } });
+      x = S(r.dir, ['spec-review-needed', '--task', 'ck']).out;
+      assert.deepStrictEqual([x.needed, /specReview/.test(x.reason)], [false, true]);
+      P3_CFG(r, { roles: { redTeam: { enabled: false } } });
+      assert.strictEqual(S(r.dir, ['spec-review-needed', '--task', 'ck']).out.needed, false);
+      P3_CFG(r, { preset: 'lean' });
+      assert.strictEqual(S(r.dir, ['spec-review-needed', '--task', 'ck']).out.needed, false, 'lean is off');
+      const miss = S(r.dir, ['spec-review-needed', '--task', 'nope']);
+      assert.deepStrictEqual([miss.status, miss.out.code], [13, 'not_found']);
+      assert.strictEqual(S(r.dir, ['spec-review-needed']).out.ok, false);
+      assert.strictEqual(srLib.needed({ config: cfgLib.PRESETS.default(), kind: 'mechanical' }).needed, true);
+      assert.strictEqual(srLib.needed({ config: cfgLib.PRESETS.lean(), kind: 'mechanical' }).needed, false);
+    });
+    test('[plugin-0.5 P3] spec-review: writes the record with the spec revision, cleaned and capped points, ids and session; removes the cache file', () => {
+      const r = ckRepo(P3_BODY);
+      const points = ['  one\n\tgood  point\u0007 ', '', 7, null, 'x'.repeat(500)].concat(Array.from({ length: 12 }, (_v, i) => 'point ' + i));
+      const f = P3_VERDICT(r, P3_FENCE + 'json\n' + JSON.stringify({ outcome: ' Revise ', points, extra: 'ignored' }) + '\n' + P3_FENCE + '\n');
+      const o = S(r.dir, ['spec-review', '--file', f, '--task', 'ck', '--agent-name', 'red-team', '--agent', 'agent-abc123', '--session', 'sess-12345678']);
+      assert.deepStrictEqual([o.status, o.out.ok, o.out.outcome, o.out.points, o.out.spec_revision], [0, true, 'revise', 8, 1], JSON.stringify(o.out));
+      assert.strictEqual(o.out.path, '.sereno/spec-reviews/ck-1.json');
+      const j = readJ(r.dir, o.out.path);
+      assert.deepStrictEqual(Object.keys(j).sort(), ['agent_id', 'agent_name', 'outcome', 'points', 'reviewed_at', 'session', 'spec_revision', 'task']);
+      assert.deepStrictEqual([j.task, j.spec_revision, j.outcome, j.agent_name, j.agent_id, j.session], ['ck', 1, 'revise', 'red-team', 'agent-abc123', 'sess-12345678']);
+      assert.strictEqual(j.points.length, 8); assert.strictEqual(j.points[0], 'one good point'); assert.strictEqual(j.points[1].length, 200);
+      assert.ok(j.points.every((p) => typeof p === 'string' && p && !/[\u0000-\u001f]/.test(p)));
+      assert.ok(!Number.isNaN(Date.parse(j.reviewed_at)));
+      assert.ok(!fs.existsSync(f), 'the cache file is removed');
+      // a new spec revision is a new file with the new revision
+      P3_SPEC(r, blk('- cmd: node -e "process.exit(0)"', '  expect: exit 0', '- cmd: node -e "1"', '  expect: exit 0'));
+      const o2 = P3_REVIEW(r, { outcome: 'agree', points: [] });
+      assert.deepStrictEqual([o2.out.spec_revision, o2.out.path], [2, '.sereno/spec-reviews/ck-2.json']);
+      assert.strictEqual(readJ(r.dir, '.sereno/spec-reviews/ck-1.json').outcome, 'revise');
+      const bare = P3_REVIEW(r, { outcome: 'split' });
+      const jb = readJ(r.dir, bare.out.path);
+      assert.deepStrictEqual([jb.points, jb.agent_name, jb.session], [[], null, null]);
+    });
+    test('[plugin-0.5 P3] spec-review: refuses other outcomes, bad json, a file outside the cache or for another task, and a bad id; writes nothing', () => {
+      const r = ckRepo(P3_BODY);
+      const dir = () => path.join(r.dir, '.sereno', 'spec-reviews');
+      const none = () => !fs.existsSync(dir()) || fs.readdirSync(dir()).length === 0;
+      for (const v of [{ outcome: 'pass' }, { outcome: 'block' }, { outcome: 'skipped' }, { outcome: 'error' }, { outcome: 'needs_context' }, { outcome: 'unknown' }, { outcome: '' }, { points: ['x'] }, { outcome: ['agree'] }, [], 'not json', '"agree"']) {
+        const x = P3_REVIEW(r, v);
+        assert.deepStrictEqual([x.out.ok, x.status], [false, 4], JSON.stringify(v) + ' ' + JSON.stringify(x.out));
+      }
+      assert.ok(none());
+      const other = P3_VERDICT(r, { outcome: 'agree' }, 'verdict-spec-other.json');
+      const x1 = S(r.dir, ['spec-review', '--file', other, '--task', 'ck']);
+      assert.deepStrictEqual([x1.out.ok, x1.out.code], [false, 'path_refused']);
+      const gateName = P3_VERDICT(r, { outcome: 'agree' }, 'verdict-rr_20260101T000000Z_abcdef0.json');
+      assert.strictEqual(S(r.dir, ['spec-review', '--file', gateName, '--task', 'ck']).out.code, 'path_refused');
+      assert.strictEqual(S(r.dir, ['spec-review', '--file', path.join(r.dir, 'a.txt'), '--task', 'ck']).out.code, 'path_refused');
+      assert.strictEqual(P3_REVIEW(r, { outcome: 'agree' }, ['--agent', 'bad id!']).out.code, 'invalid_arg');
+      assert.strictEqual(P3_REVIEW(r, { outcome: 'agree' }, ['--agent-name', 'a b']).out.code, 'invalid_arg');
+      assert.strictEqual(S(r.dir, ['spec-review', '--task', 'ck']).out.ok, false);
+      assert.strictEqual(S(r.dir, ['spec-review', '--file', other, '--task', 'nope']).out.ok, false);
+      assert.ok(none(), 'nothing was recorded');
+    });
+    test('[plugin-0.5 P3] next: no attempts and a review wanted -> spec_review; agree -> build; revise and split -> decide with /sereno:task; a new revision -> spec_review again; not needed -> build', () => {
+      const r = ckRepo(P3_BODY);
+      let n = P3_NEXT(r);
+      assert.deepStrictEqual([n.step, n.command, n.hold], ['spec_review', null, null], JSON.stringify(n));
+      P3_REVIEW(r, { outcome: 'revise', points: ['criterion 2 cannot be tested', 'second'] });
+      n = P3_NEXT(r);
+      assert.strictEqual(n.step, 'decide'); assert.strictEqual(n.command, '/sereno:task ck');
+      assert.match(n.reason, /^spec review: revise — criterion 2 cannot be tested/);
+      assert.match(n.reason, /\/sereno:build ck builds without the review/);
+      P3_REVIEW(r, { outcome: 'split', points: [] });
+      n = P3_NEXT(r);
+      assert.deepStrictEqual([n.step, n.command], ['decide', '/sereno:task ck']); assert.match(n.reason, /^spec review: split — no detail/);
+      P3_SPEC(r, blk('- cmd: node -e "process.exit(0)"', '  expect: exit 0', '- cmd: node -e "1"', '  expect: exit 0'));
+      assert.strictEqual(P3_NEXT(r).step, 'spec_review', 'revision 2 has no review yet');
+      P3_REVIEW(r, { outcome: 'agree', points: ['fine'] });
+      n = P3_NEXT(r);
+      assert.deepStrictEqual([n.step, n.command], ['build', null], JSON.stringify(n));
+      P3_SPEC(r, P3_BODY);
+      assert.strictEqual(P3_NEXT(r).step, 'spec_review', 'an agree for an old revision does not carry over');
+      P3_CFG(r, { roles: { redTeam: { specReview: false } } });
+      assert.strictEqual(P3_NEXT(r).step, 'build', 'config off: straight to build');
+      P3_CFG(r, { roles: { redTeam: { light: { kinds: ['feature'] } } } });
+      assert.strictEqual(P3_NEXT(r).step, 'build', 'light kind: straight to build');
+      P3_CFG(r, {});
+      const pick = S(r.dir, ['next']).out;
+      assert.deepStrictEqual([pick.task, pick.step], ['ck', 'spec_review'], 'with no task named, the fresh task is picked');
+    });
+    test('[plugin-0.5 P3] next table: a started task is never sent back to the review; a queued task waits first; old fakes without the dep still build', () => {
+      const m = { task: 'a', base_branch: 'main', after: null, hold_before_merge: null, created_at: null };
+      const deps = (o) => Object.assign({ listSpecs: () => ['a'], spec: () => m, attemptCount: () => 0, lastOutcome: () => null, recover: () => ({ next: 'review', reason: 'r' }), isMerged: () => false }, o);
+      const sr = (needed, outcome, point) => () => ({ needed, outcome, point });
+      assert.strictEqual(nextLib.decide({ task: 'a', deps: deps() }).step, 'build', 'no specReview dep: unchanged');
+      assert.strictEqual(nextLib.decide({ task: 'a', deps: deps({ specReview: sr(false, null, null) }) }).step, 'build');
+      assert.strictEqual(nextLib.decide({ task: 'a', deps: deps({ specReview: sr(true, null, null) }) }).step, 'spec_review');
+      assert.strictEqual(nextLib.decide({ task: 'a', deps: deps({ specReview: sr(true, 'agree', null) }) }).step, 'build');
+      const rv = nextLib.decide({ task: 'a', deps: deps({ specReview: sr(true, 'revise', 'too big') }) });
+      assert.deepStrictEqual([rv.step, rv.command], ['decide', '/sereno:task a']);
+      const started = nextLib.decide({ task: 'a', deps: deps({ attemptCount: () => 1, specReview: sr(true, null, null), cleanFiles: () => [] }) });
+      assert.strictEqual(started.step, 'ship');
+      const queued = nextLib.decide({ task: 'a', deps: deps({ spec: () => Object.assign({}, m, { after: 'b' }), specReview: sr(true, null, null) }) });
+      assert.strictEqual(queued.step, 'idle');
+    });
+    test('[plugin-0.5 P3] agent files: red-team, red-team-lean and red-team-browse carry the same Spec review section and the exact verdict shape', () => {
+      const secs = [];
+      for (const n of ['red-team', 'red-team-lean', 'red-team-browse']) {
+        const a = frontOf(path.join(PLUGIN, 'agents', n + '.md'));
+        assert.ok(a.body.includes('## Spec review'), n);
+        const sec = a.body.slice(a.body.indexOf('## Spec review'));
+        for (const key of ['spec review', 'testable', 'runnable `checks`', 'one reviewable change', '400 lines', '"outcome": "agree"', '"points"', '`agree`', '`revise`', '`split`', 'at most 8', 'read-only']) assert.ok(sec.includes(key), n + ' mentions ' + key);
+        assert.ok(!/push/i.test(sec));
+        secs.push(sec);
+      }
+      assert.ok(secs[0] === secs[1] && secs[1] === secs[2], 'the three sections are identical');
+      const m = new RegExp(P3_FENCE + 'json\\n([\\s\\S]*?)\\n' + P3_FENCE).exec(secs[0]);
+      const v = JSON.parse(m[1]);
+      assert.deepStrictEqual(Object.keys(v), ['outcome', 'points']); assert.ok(srLib.OUTCOMES.includes(v.outcome)); assert.ok(Array.isArray(v.points));
+      assert.strictEqual(srLib.sanitize(v).outcome, 'agree');
+    });
+    test('[plugin-0.5 P3] next skill: runs spec_review (paths, agent in the foreground, verdict-spec file, spec-review command), no cap count, stops on failure; Bash only, no remote, no npm; build skill and README', () => {
+      const s = skillText('next');
+      assert.ok(s.includes('- `spec_review`:'));
+      for (const key of ['sereno.js" paths', 'cacheDir', 'roles.redTeam.agent', 'verdict-spec-<task>.json', 'sereno.js" spec-review --file', '--agent-name', '--agent <agent id', '--session "${CLAUDE_SESSION_ID}"', 'does not count toward the cap', 'do not retry', 'build without the spec review']) assert.ok(s.includes(key), 'mentions ' + key);
+      assert.ok(s.indexOf('- `spec_review`') < s.indexOf('- `build`'), 'before build');
+      assert.ok(s.includes('Stop at the first step that is not `spec_review`, `build`'));
+      assert.ok(/Run every shell command in this skill with the Bash tool/.test(s) && /Never use `run_in_background`/.test(s) && /never run anything against a remote/.test(s));
+      assert.ok(!/run_in_background: true/.test(s));
+      assert.ok(!/\bnpm\b/i.test(s) && !/push/i.test(s));
+      assert.ok(s.includes('Write(.sereno/cache/verdict-*.json)'), 'the Write grant covers verdict-spec-*.json');
+      assert.ok(!/spec.review/i.test(skillText('build')), 'build is unchanged and does not require the review');
+      const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
+      assert.ok(/### Spec review/.test(readme) && /specReview/.test(readme) && readme.includes('/sereno:build <task>` never requires the review') && readme.includes('spec-reviews/') && !/push/i.test(readme));
+    });
+    await atest('[plugin-0.5 P3] app side: a spec_review record in .sereno/spec-reviews/ is ignored by the Pipeline reader, which returns the same data', async () => {
+      const r = ckRepo(P3_BODY);
+      const before = await pipelineApp.readRepo(r.dir);
+      assert.ok(before && before.tasks.some((t) => t.task === 'ck'), 'the reader sees the task');
+      P3_REVIEW(r, { outcome: 'revise', points: ['p'] });
+      fs.writeFileSync(path.join(r.dir, '.sereno', 'spec-reviews', 'junk.json'), '{not json');
+      assert.ok(fs.existsSync(path.join(r.dir, '.sereno', 'spec-reviews', 'ck-1.json')));
+      const after = await pipelineApp.readRepo(r.dir);
+      assert.deepStrictEqual(JSON.parse(JSON.stringify(after)), JSON.parse(JSON.stringify(before)));
+      const t = after.tasks.find((x) => x.task === 'ck');
+      assert.deepStrictEqual([t.attempts.length, t.gates.length], [0, 0], 'a review is neither an attempt nor a gate');
+      assert.ok(!/spec_review|reviewed_at/.test(JSON.stringify(after)));
+      const view = await pipelineApp.taskView(r.dir, t, after.config, async () => { throw Object.assign(new Error('no git'), { code: 1 }); }, Date.now());
+      assert.ok(view && view.task === 'ck' && typeof view.stage === 'string', JSON.stringify(view));
     });
 
     await atest('[plugin-0.5 H1] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });

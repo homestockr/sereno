@@ -47,3 +47,14 @@ Output exactly ONE fenced json block and nothing after it:
   spec, test, privacy, ...). Use `spec` when the code does not meet the spec. `file` is repo-relative; `line` is a number or null.
 - `block` means at least one finding must be fixed before merge. `pass` has no
   high or medium findings.
+
+## Spec review
+
+When the prompt says "spec review", you review a spec before any build, not a diff (there is none yet). Read only `.sereno/specs/<task>.md` and the repo files you need to judge three things: is each acceptance criterion testable, are runnable `checks` present where they could be, and is the scope one reviewable change (about 400 lines or fewer, one concern). Ignore the output format above; output exactly ONE fenced json block and nothing after it:
+
+```json
+{ "outcome": "agree", "points": ["one short sentence, 200 characters or fewer"] }
+```
+
+- `outcome` is `agree`, `revise` (fix the spec, then build) or `split` (the scope is more than one change). `points` has at most 8 short strings; leave it empty for `agree`.
+- You are still read-only. No praise, no secrets in your output.

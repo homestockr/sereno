@@ -4,8 +4,9 @@
  * sereno.js next: what /sereno:next does, as code. Read-only; it writes nothing.
  *
  * Answers { task, step, reason, hold, command }:
- *   step     build | ship | repair | retry | merge | decide | done | pick | idle
- *            (repair: recovery says one repair is due; ship is entered at its repair bullet)
+ *   step     spec_review | build | ship | repair | retry | merge | decide | done | pick | idle
+ *            (repair: recovery says one repair is due; ship is entered at its repair bullet;
+ *            spec_review: the red team reads the spec before the first build, see specreview.js)
  *   command  the exact slash command the user types next, or null when `next` itself
  *            carries on (build, ship, repair, retry) or there is nothing to type (pick, idle)
  *   hold     the spec's hold_before_merge text, only on a `merge` stop
@@ -23,6 +24,7 @@ const gitlib = require('./git.js');
 const rec = require('./records.js');
 const speclib = require('./spec.js');
 const recovery = require('./recovery.js');
+const specreview = require('./specreview.js');
 
 /**
  * @typedef {{ task: string, base_branch: string | null, after: string | null, hold_before_merge: string | null, created_at: string | null }} Meta
@@ -37,6 +39,7 @@ const recovery = require('./recovery.js');
  * @property {() => string[] | null} [cleanFiles] tracked files with uncommitted changes (null: unknown)
  * @property {(task: string) => { pinned: string | null, current: string | null }} [specPin] the spec hash the newest pinned attempt carries, and the spec's hash now
  * @property {(task: string) => { url: string, look: string }[]} [browseChecks] the spec's browse checks (nothing verifies them); [] when none or the checks block is unreadable
+ * @property {(task: string) => { needed: boolean, outcome: string | null, point: string | null }} [specReview] is a spec review wanted, and what is recorded for the spec's current revision (outcome and first point); when absent, none is wanted
  * @property {(task: string) => boolean} [branchExists] does refs/heads/task/<task> resolve (when absent, assumed yes)
  */
 
@@ -136,6 +139,14 @@ function stateOf(d, m) {
   if (d.attemptCount(task) === 0) {
     const a = afterState(d, m);
     if (!a.ok) return mk('idle', a.after && d.lastOutcome(a.after) === 'stopped' ? a.after + ' was stopped; run /sereno:task ' + task + ' --after none to unblock' : 'after_not_merged: ' + task + ' waits for ' + a.after + ' to be merged' + (a.base ? ' into ' + a.base : ''), null, null);
+    const sr = typeof d.specReview === 'function' ? d.specReview(task) : null;
+    if (sr && sr.needed) {
+      if (!sr.outcome) return mk('spec_review', 'the spec has not been reviewed yet', null, null);
+      if (sr.outcome !== 'agree') {
+        // A new spec revision (/sereno:task) is reviewed again. Build does not require the review, so building directly is the way past it.
+        return mk('decide', 'spec review: ' + sr.outcome + ' — ' + (sr.point || 'no detail') + ' (/sereno:build ' + task + ' builds without the review)', '/sereno:task ' + task, null);
+      }
+    }
     return mk('build', 'the spec exists and nothing has been built yet', null, null);
   }
   if (mergedInto(d, task, m.base_branch)) {
@@ -267,6 +278,13 @@ function realDeps(a) {
     },
     recordedHead: (task) => recovery.recordedHead({ root, task, listAttempts: () => fsafe.listDir('.sereno/attempts') }),
     branchExists: (task) => !!gitlib.resolveCommit(root, 'refs/heads/task/' + task),
+    specReview: (task) => {
+      const m = speclib.readSpecMeta(root, task);
+      if (!m) return { needed: false, outcome: null, point: null };
+      if (!specreview.needed({ config, kind: m.kind }).needed) return { needed: false, outcome: null, point: null };
+      const r = specreview.latest(root, task, m.spec_revision);
+      return { needed: true, outcome: r ? r.outcome : null, point: r && r.points.length ? r.points[0] : null };
+    },
     browseChecks: (task) => {
       try {
         /** @type {{ url: string, look: string }[]} */

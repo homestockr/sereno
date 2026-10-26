@@ -13,7 +13,16 @@
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
  * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, clean, context, recovery, brief, doctor,
- * next, after-check, preflight, reviewer, review-pack, serve.
+ * next, after-check, preflight, reviewer, review-pack, serve, spec-review-needed, spec-review.
+ *
+ *   spec-review-needed --task <t>
+ *                           read-only: { needed, reason }. The red team reads a spec before the first build unless
+ *                           roles.redTeam.specReview is false, the red team is off, or the spec's kind is in
+ *                           roles.redTeam.light.kinds. Decided in code, no model.
+ *   spec-review --file <verdict.json> --task <t> [--agent-name <n>] [--agent <id>] [--session <id>]
+ *                           records the red team's spec verdict {outcome: agree|revise|split, points: [<= 8]} as
+ *                           .sereno/spec-reviews/<t>-<spec_revision>.json. The file is .sereno/cache/verdict-spec-<t>.json,
+ *                           removed once recorded. Any other outcome is refused.
  *
  *   serve --task <t> --start | --stop
  *                           --start launches the spec's `serve` detached (it outlives the command), waits for its
@@ -91,6 +100,7 @@ const doctorLib = require('./lib/doctor.js');
 const nextLib = require('./lib/next.js');
 const reviewLib = require('./lib/review.js');
 const serveLib = require('./lib/serve.js');
+const specReviewLib = require('./lib/specreview.js');
 const preflightLib = require('./lib/preflight.js');
 const { projectId } = require('./lib/projectid.js');
 
@@ -641,6 +651,47 @@ const COMMANDS = {
     return reviewLib.chooseReviewer({ root, config, kind: meta.kind, base, head, browse });
   },
 
+  'spec-review-needed'(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root } = needRepo();
+    const meta = speclib.readSpecMeta(root, task);
+    if (!meta) throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first');
+    const { config } = loadConfig(root);
+    return specReviewLib.needed({ config, kind: meta.kind });
+  },
+
+  'spec-review'(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['file', 'task', 'agent-name', 'agent', 'session'], bool: ['json'] });
+    if (str(a, 'file') === undefined) throw new SerenoError('usage', 'give --file <verdict.json>');
+    const task = rec.checkTask(str(a, 'task'));
+    const { root, fsafe } = needRepo();
+    const meta = speclib.readSpecMeta(root, task);
+    if (!meta) throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first');
+    const id = /^[A-Za-z0-9._:-]{1,128}$/;
+    const agent = str(a, 'agent');
+    const agentName = str(a, 'agent-name');
+    const sessRaw = str(a, 'session');
+    const session = sessRaw !== undefined && !sessRaw.includes('${') && /^[A-Za-z0-9-]{8,64}$/.test(sessRaw) ? sessRaw : undefined;
+    const cf = cacheFileArg(root, /** @type {string} */ (a.file), /^verdict-spec-(.+).json$/);
+    if (cf.m[1] !== task) throw new SerenoError('path_refused', 'verdict file does not match --task');
+    const v = specReviewLib.sanitize(parseVerdict(fsafe.readFile(cf.rel, CACHE_FILE_MAX).toString('utf8')));
+    const record = {
+      task,
+      spec_revision: meta.spec_revision,
+      outcome: v.outcome,
+      points: v.points,
+      agent_name: agentName === undefined ? null : matchId(agentName, '--agent-name', id),
+      agent_id: agent === undefined ? null : matchId(agent, '--agent', id),
+      session: session === undefined ? null : session,
+      reviewed_at: new Date().toISOString(),
+    };
+    const rel = '.sereno/spec-reviews/' + task + '-' + meta.spec_revision + '.json';
+    fsafe.writeJson(rel, record);
+    fsafe.removeFile(cf.rel);
+    return { path: rel, spec_revision: meta.spec_revision, outcome: record.outcome, points: record.points.length };
+  },
+
   async serve(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, { value: ['task'], bool: ['json', 'start', 'stop'] });
     if (!!a.start === !!a.stop) throw new SerenoError('usage', 'give exactly one of --start or --stop');
@@ -709,6 +760,7 @@ const COMMANDS = {
         specs: '.sereno/specs/<task>.md',
         gates: '.sereno/gates/<review_run_id>.json',
         attempts: '.sereno/attempts/<task>-<n>.json',
+        spec_reviews: '.sereno/spec-reviews/<task>-<spec_revision>.json',
         briefs: '.sereno/briefs/<branch>.md',
       },
       user_config: path.join(home, 'pipeline.json'),

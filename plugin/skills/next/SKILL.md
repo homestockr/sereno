@@ -37,6 +37,13 @@ The build skill runs the repo's commit-hook check itself, after it has switched 
 
 ## 3. Do the step
 
+- `spec_review`: the red team reads the spec before the first build. It is not a build, ship, repair or retry step, so it does not count toward the cap below. Run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` for `cacheDir`, and `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" config` for `roles.redTeam.agent`. Spawn that red team with the Agent tool in the foreground (`subagent_type` `sereno:` plus the agent name, no `model`), with the prompt "spec review of .sereno/specs/<task>.md; answer with the spec review verdict JSON". Take the one fenced json block from its answer (`outcome` and `points`) and write it, with Write, to `<cacheDir>/verdict-spec-<task>.json`. Then run:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec-review --file <cacheDir>/verdict-spec-<task>.json --task <task> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever reviewed> --agent <agent id from the Agent tool result>
+```
+
+  Then go back to step 1: an `agree` leads to `build`; `revise` or `split` leads to a `decide` stop. If the agent fails, gives no verdict block, or `spec-review` refuses it, do not retry and do not ask again (that would loop): print the error and "Run /sereno:build <task> to build without the spec review." as the final line, and stop.
 - `build`: read `${CLAUDE_PLUGIN_ROOT}/skills/build/SKILL.md` and follow it for the task (with `approve-no-verify` if the user gave it), then go back to step 1.
 - `ship`, `repair` or `retry`: read `${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md` and follow it for the task (with `use-fallback` if the user gave it; it includes its one repair), then go back to step 1. If ship ends at "Review needs a decision" or at its merge prompt, do not repeat that message: go back to step 1 and let the next result be the single stop line.
 
@@ -52,7 +59,7 @@ Safety cap: run at most 3 `build` / `ship` / `repair` / `retry` steps in one inv
 
 ## 4. Stop
 
-Stop at the first step that is not `build`, `ship`, `repair` or `retry`. Print exactly one final line:
+Stop at the first step that is not `spec_review`, `build`, `ship`, `repair` or `retry`. Print exactly one final line:
 
 - `merge`: "Gate passed for <task>. Before merging: <hold>. Run /sereno:merge <task>." Leave out the "Before merging" sentence when `hold` is null. When the result has `browse_unverified`, add the result's `browse_note` and one line per entry, "<url>: <look>".
 - `decide`: the `reason`, then the `command` if there is one (its options are a person's call, so list them if the reason does). When the reason says the branch is gone, tell the user the whole reason line (it names both options, one of them the `stop` command); never run `stop` yourself.
