@@ -15617,6 +15617,114 @@ test('missing rate_limits degrades instead of throwing', () => {
     await atest('[plugin-0.4 field2] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
 
+  /* ---- [plugin-0.4 field3] red-team lows and the hook_failed wording ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const speclib = require('../plugin/bin/lib/spec.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-fld3-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const skill = (n) => fs.readFileSync(path.join(PLUGIN, 'skills', n, 'SKILL.md'), 'utf8');
+    const readRec = (dir, p) => JSON.parse(fs.readFileSync(path.join(dir, p), 'utf8'));
+    function repo() {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      git(dir, 'switch', '-q', '-c', 'task/t1');
+      return dir;
+    }
+    const RUN = ['attempt', '--task', 't1', '--builder', 'sonnet', '--kind', 'feature', '--diagnosis', 'none', '--outcome', 'running'];
+
+    test('[plugin-0.4 field3] the hook_failed wording: staged work, build refuses until clean, fix-and-commit or rebuild; build and adopt still refuse a dirty tree', () => {
+      const dir = repo();
+      S(dir, RUN);
+      S(dir, ['attempt', '--task', 't1', '--update', '1', '--outcome', 'error', '--diagnosis', 'hook_failed', '--ended-at', 'now']);
+      const r = S(dir, ['recovery', '--task', 't1']).out;
+      assert.match(r.reason, /^hook_failed: the hook refused the Builder's commit; its work is staged on task\/t1, so \/sereno:build will refuse until the tree is clean\./);
+      for (const k of ['fix the hook and commit the staged work by hand', '`git commit --no-verify` it yourself', '`sereno.js attempt --adopt --task t1`', '`git stash --include-untracked`', '`/sereno:build t1 approve-no-verify`']) assert.ok(r.reason.includes(k), k);
+      const b = skill('build');
+      for (const k of ['its work is staged on `task/<task>`', 'git commit --no-verify', 'attempt --adopt --task <task>', 'git stash --include-untracked', '/sereno:build <task> approve-no-verify', 'Sereno never commits for the user']) assert.ok(b.includes(k), k);
+      fs.writeFileSync(path.join(dir, 'staged.txt'), 'x\n');
+      git(dir, 'add', 'staged.txt');
+      const ad = S(dir, ['attempt', '--adopt', '--task', 't1']).out;
+      assert.deepStrictEqual([ad.ok, ad.code], [false, 'dirty_tree']);
+      assert.strictEqual(S(dir, ['clean']).out.clean, false);
+    });
+    test('[plugin-0.4 field3] build step 2 prints the next forms when run from next, the build forms otherwise', () => {
+      const b = skill('build');
+      assert.ok(b.includes('started by `/sereno:next`, print the `/sereno:next <task>` and `/sereno:next <task> approve-no-verify` forms; otherwise print the `/sereno:build <task>` and `/sereno:build <task> approve-no-verify` forms'));
+    });
+    test('[plugin-0.4 field3] next passes approve-no-verify to build and use-fallback to ship, and nothing else', () => {
+      const n = skill('next');
+      assert.ok(n.includes('Pass `approve-no-verify` to the build skill and `use-fallback` to the ship skill, and nothing else.'));
+      assert.ok(!n.includes('Pass each flag on to the build and ship skills'));
+    });
+    test('[plugin-0.4 field3] attempt --adopt copies no_verify_approved from the last attempt when it is true, and not otherwise', () => {
+      for (const approved of [true, false]) {
+        const dir = repo();
+        const r = S(dir, approved ? RUN.concat(['--no-verify-approved', '--start-commit', 'HEAD']) : RUN.concat(['--start-commit', 'HEAD'])).out;
+        assert.strictEqual(r.ok, true, JSON.stringify(r));
+        S(dir, ['attempt', '--task', 't1', '--update', '1', '--outcome', 'error', '--diagnosis', 'hook_failed', '--ended-at', 'now']);
+        fs.writeFileSync(path.join(dir, 'b.txt'), 'x\n');
+        git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'by hand');
+        const ad = S(dir, ['attempt', '--adopt', '--task', 't1']).out;
+        assert.strictEqual(ad.ok, true, JSON.stringify(ad));
+        assert.strictEqual(readRec(dir, ad.path).no_verify_approved, approved ? true : undefined);
+      }
+    });
+    test('[plugin-0.4 field3] attempt: an unreadable newest record refuses a new running record with invalid_arg', () => {
+      const dir = repo();
+      S(dir, RUN);
+      S(dir, ['attempt', '--task', 't1', '--update', '1', '--outcome', 'error', '--ended-at', 'now']);
+      fs.writeFileSync(path.join(dir, '.sereno', 'attempts', 't1-1.json'), '{ not json');
+      const r = S(dir, RUN);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'invalid_arg']);
+      assert.match(r.out.error, /unreadable/);
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno', 'attempts', 't1-2.json')));
+    });
+    test('[plugin-0.4 field3] spec title: a fence closes only on a matching fence string, and indented code is ignored', () => {
+      const dir = mk();
+      const put = (task, text) => { fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true }); fs.writeFileSync(path.join(dir, '.sereno', 'specs', task + '.md'), text); };
+      const T = (task) => speclib.readSpecTitle(dir, task);
+      // ~~~ inside a ``` block does not close it; a shorter fence does not close a longer one
+      put('mix', '---\ntask: "mix"\n---\n\n## Goal\n```\n~~~\n# Not a title\n```\nReal goal line\n');
+      put('long', '---\ntask: "long"\n---\n\n## Goal\n````\n```\ninner\n```\n````\nAfter long fence\n');
+      put('tilde', '---\ntask: "tilde"\n---\n\n## Goal\n~~~~\n~~~\ncode\n~~~~\nAfter tilde fence\n');
+      put('indent', '---\ntask: "indent"\n---\n\n    # Indented heading in a code block\n\n## Goal\n    code line\nThe real goal\n');
+      put('indh1', '---\ntask: "indh1"\n---\n\n\t# Tabbed code\n# Real H1\n');
+      put('unclosed', '---\ntask: "unclosed"\n---\n\n## Goal\n```\nnever closed\n');
+      assert.strictEqual(T('mix'), 'Real goal line');
+      assert.strictEqual(T('long'), 'After long fence');
+      assert.strictEqual(T('tilde'), 'After tilde fence');
+      assert.strictEqual(T('indent'), 'The real goal');
+      assert.strictEqual(T('indh1'), 'Real H1');
+      assert.strictEqual(T('unclosed'), 'unclosed');
+    });
+    test('[plugin-0.4 field3] build steps 5 and 6: a --no-verify commit without the approval is recorded as error / hook_failed; the schema gains no new diagnosis', () => {
+      const b = skill('build');
+      assert.ok(/if it says it used `--no-verify` and the attempt record has no `no_verify_approved: true`/.test(b));
+      assert.ok(b.includes('Record `--outcome error --diagnosis hook_failed`') && /skipped the hook without approval/.test(b) && /do not hand the commit to ship/.test(b));
+      assert.ok(b.indexOf('Before you choose the outcome') < b.indexOf('Use `--outcome built`'));
+      assert.ok(!require('../plugin/bin/lib/records.js').DIAGNOSES.includes('unapproved_no_verify'));
+      // the existing diagnosis it uses is accepted by attempt --update
+      const dir = repo();
+      S(dir, RUN);
+      const u = S(dir, ['attempt', '--task', 't1', '--update', '1', '--outcome', 'error', '--diagnosis', 'hook_failed', '--ended-at', 'now']).out;
+      assert.deepStrictEqual([u.ok, u.outcome, u.diagnosis], [true, 'error', 'hook_failed']);
+    });
+
+    await atest('[plugin-0.4 field3] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
 })();

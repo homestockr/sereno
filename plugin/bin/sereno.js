@@ -696,7 +696,8 @@ function allocateAttempt(fsafe, task, record) {
   // when a background agent's result arrives after the loop moved on).
   if (record.outcome === 'running' && n > 1) {
     const prev = newestAttemptRecord(fsafe, task, n - 1);
-    if (prev && prev.outcome === 'running') throw new SerenoError('attempt_running', 'attempt ' + (n - 1) + ' of ' + task + ' is still running; finish it with --update before starting another');
+    if (!prev) throw new SerenoError('invalid_arg', 'the newest attempt record of ' + task + ' (attempt ' + (n - 1) + ') is unreadable; repair or remove it first');
+    if (prev.outcome === 'running') throw new SerenoError('attempt_running', 'attempt ' + (n - 1) + ' of ' + task + ' is still running; finish it with --update before starting another');
   }
   for (let tries = 0; tries < 20; tries++, n++) {
     record.attempt = n;
@@ -786,6 +787,7 @@ function adoptAttempt(root, fsafe, task, a) {
     ended_at: now,
   };
   if (pinned) record.spec_hash = pinned;
+  if (last.no_verify_approved === true) record.no_verify_approved = true;
   record.head_commit = tip;
   return allocateAttempt(fsafe, task, record);
 }

@@ -47,7 +47,7 @@ Now, on the task branch and before any attempt record or Builder, check that the
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" preflight --task <task>
 ```
 
-`preflight` never switches branches; if `on_task_branch` is false, mention `branch_note` in one clause. If `passed` is false, show the `hook`, the `output_tail` lines (the real failure is at the end; `output_head` is only the start) and any `branch_note`. Without `approve-no-verify`, stop here: write no attempt record, start no Builder, and end the turn printing the options as commands: fix the hook on its own branch and run `/sereno:build <task>` again, or `/sereno:build <task> approve-no-verify` to approve `--no-verify` for this task's Builder commit. With `approve-no-verify`, carry on. If `dirty_after` is true, the hook changed files: stop, list them, and tell the user to review or discard them and run the build again. Never skip a hook yourself.
+`preflight` never switches branches; if `on_task_branch` is false, mention `branch_note` in one clause. If `passed` is false, show the `hook`, the `output_tail` lines (the real failure is at the end; `output_head` is only the start) and any `branch_note`. Without `approve-no-verify`, stop here: write no attempt record, start no Builder, and end the turn printing the options as commands: fix the hook on its own branch and run the command again, or run it with `approve-no-verify` to approve `--no-verify` for this task's Builder commit. When this build was started by `/sereno:next`, print the `/sereno:next <task>` and `/sereno:next <task> approve-no-verify` forms; otherwise print the `/sereno:build <task>` and `/sereno:build <task> approve-no-verify` forms. With `approve-no-verify`, carry on. If `dirty_after` is true, the hook changed files: stop, list them, and tell the user to review or discard them and run the build again. Never skip a hook yourself.
 
 ## 3. Record the attempt before the Builder starts
 
@@ -96,15 +96,15 @@ outcome is `error`.
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --update <attempt> --outcome <built|error> --diagnosis <none|environment> --agent-id <Builder agent id from the Agent tool result> --ended-at now
 ```
 
-Omit `--agent-id` if the Agent tool result gave none. Use `--outcome built` when the Builder committed (it now waits for review; `/sereno:ship`
+Omit `--agent-id` if the Agent tool result gave none. Before you choose the outcome, check what the Builder reported: if it says it used `--no-verify` and the attempt record has no `no_verify_approved: true`, the commit skipped a hook without approval. Record `--outcome error --diagnosis hook_failed` (the existing diagnosis; no new value is added to the records schema), say plainly that the Builder skipped the hook without approval, and do not hand the commit to ship. If the record does have `no_verify_approved: true`, a `--no-verify` commit is fine; note it in your closing lines.
+
+Use `--outcome built` when the Builder committed (it now waits for review; `/sereno:ship`
 records the final outcome). Use `--outcome error` when it did not commit or the run
 failed. For `error`, use `--diagnosis environment` if the cause was the environment (a
 StopFailure, an API or rate-limit error, a missing tool or key), and `--diagnosis none`
 otherwise, including a turn or budget stop. If the Builder reports that `git commit` was refused by
 a repo hook (it will have left its work staged and quoted the first lines of the hook output), record
-`--outcome error --diagnosis hook_failed`, show those lines, and tell the user: fix the hook on its own
-branch and run `/sereno:build <task>` again, or approve `--no-verify` for the Builder's commit with `/sereno:build <task> approve-no-verify` (or commit by hand and run
-`node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --adopt --task <task>`). Print those as commands and end the turn. Never skip a hook yourself. The result is `{ ok, path, attempt }`; if
+`--outcome error --diagnosis hook_failed`, show those lines, and tell the user: the hook refused the Builder's commit and its work is staged on `task/<task>`, so `/sereno:build` will refuse until the tree is clean. Either fix the hook and commit the staged work by hand, or `git commit --no-verify` it yourself, then run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --adopt --task <task>`. To rebuild instead, `git stash --include-untracked` (or discard the work) and run `/sereno:build <task> approve-no-verify`. Print those as commands and end the turn. Never commit or skip a hook yourself: build and adopt both refuse a dirty tree, and Sereno never commits for the user. The result is `{ ok, path, attempt }`; if
 `ok` is false, show the error.
 
 ## 7. Stop

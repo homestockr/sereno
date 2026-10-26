@@ -154,7 +154,7 @@ function decide(a) {
     return out('decide', 'attempt says pass but the gate record is missing or does not confirm it');
   }
   if (o === 'error') {
-    if (last.rec.diagnosis === 'hook_failed') return out('decide', "hook_failed: the repo's commit hook refused the Builder's commit; fix the hook on its own branch, or run /sereno:build " + a.task + " approve-no-verify to approve --no-verify for the Builder's commit, or commit by hand and record it with sereno.js attempt --adopt");
+    if (last.rec.diagnosis === 'hook_failed') return out('decide', "hook_failed: the hook refused the Builder's commit; its work is staged on task/" + a.task + ", so /sereno:build will refuse until the tree is clean. Either fix the hook and commit the staged work by hand, or `git commit --no-verify` it yourself, then run `sereno.js attempt --adopt --task " + a.task + "`. To rebuild instead, `git stash --include-untracked` (or discard the work) and run `/sereno:build " + a.task + " approve-no-verify`");
     if (last.rec.diagnosis !== 'environment') return out('decide', 'the attempt failed for a reason that is not the environment');
     return infraRetriesUsed < rc.infraRetries
       ? out('retry', 'environment failure; the repair is not used')

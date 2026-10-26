@@ -103,6 +103,21 @@ function readSpecMeta(root, task) {
   };
 }
 
+/**
+ * Tracks fenced code (a fence closes only on the same character with at least the opening length) and
+ * skips indented code (4+ spaces or a tab). @param {string} line @param {{ open: string | null }} st @returns {boolean} true to skip the line
+ */
+function skipCode(line, st) {
+  if (st.open) {
+    const c = new RegExp('^ {0,3}' + (st.open[0] === '`' ? '`' : '~') + '{' + st.open.length + ',}[ \\t]*$');
+    if (c.test(line)) st.open = null;
+    return true;
+  }
+  const o = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  if (o) { st.open = o[1]; return true; }
+  return /^(?: {4,}|\t)/.test(line);
+}
+
 const GENERIC_HEADINGS = ['goal', 'background', 'acceptance criteria', 'tests', 'out of scope', 'notes'];
 /** @param {string} h */
 const normHeading = (h) => h.replace(/[:\s#]+$/, '').trim().toLowerCase();
@@ -139,18 +154,16 @@ function readSpecTitle(root, task) {
       if (m && m[1]) { try { const v = JSON.parse(m[1]); raw = typeof v === 'string' ? v : null; } catch (_e) { raw = m[1]; } }
       if (!raw || !raw.trim()) {
         raw = null;
-        let fence = false, inGoal = false;
+        let st = { open: null }, inGoal = false;
         for (const line of body.split(/\r?\n/)) {
-          if (/^\s*(```|~~~)/.test(line)) { fence = !fence; continue; }
-          if (fence) continue;
+          if (skipCode(line, st)) continue;
           const h1 = /^#[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(line);
           if (h1 && !isGeneric(h1[1])) { raw = h1[1]; break; }
         }
         if (!raw) {
-          fence = false;
+          st = { open: null };
           for (const line of body.split(/\r?\n/)) {
-            if (/^\s*(```|~~~)/.test(line)) { fence = !fence; continue; }
-            if (fence) continue;
+            if (skipCode(line, st)) continue;
             const h = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(line);
             if (h) { if (inGoal) break; inGoal = h[1] === '##' && normHeading(h[2]) === 'goal'; continue; }
             if (inGoal && line.trim()) { raw = line.trim().replace(/^(?:[-*+>]|\d+[.)])[ \t]+/, ''); break; }
