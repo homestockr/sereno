@@ -10037,6 +10037,118 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!/child_process|writeFileSync|fetch\(/.test(code));
     });
 
+    // ---- [plugin-0.5 H3] stub markers ----
+    const H3_DIFF = [
+      'diff --git a/src/a.js b/src/a.js',
+      'index 111..222 100644',
+      '--- a/src/a.js',
+      '+++ b/src/a.js',
+      '@@ -1,3 +1,6 @@',
+      ' context line with TODO that is not added',
+      '-removed FIXME line',
+      '+// TODO: wire this up',
+      '+function load() {}',
+      '+throw new Error("TODO later");',
+      ' more context',
+      '+const q = items.map((x) => {});',
+      '@@ -20,2 +30,4 @@',
+      '+  if (!ready) throw new Error("not implemented");',
+      '+describe.skip("slow", () => {});',
+      ' tail context',
+      'diff --git a/lib/b.py b/lib/b.py',
+      '--- a/lib/b.py',
+      '+++ b/lib/b.py',
+      '@@ -0,0 +1,8 @@',
+      '+def run(x):',
+      '+    pass',
+      '+def go():',
+      '+    raise NotImplementedError',
+      '+@pytest.mark.skip(reason="r")',
+      '+def test_a(): ...',
+      '+def later():',
+      '+    ...',
+      'diff --git a/src/c.rs b/src/c.rs',
+      '--- a/src/c.rs',
+      '+++ b/src/c.rs',
+      '@@ -5 +5,5 @@',
+      '+    todo!();',
+      '+    unimplemented!()',
+      '+#[ignore]',
+      '+func f() { panic("TODO") }',
+      '+    t.Skip("later")',
+      'diff --git a/img.png b/img.png',
+      'Binary files a/img.png and b/img.png differ',
+      'diff --git a/src/d.js b/src/d.js',
+      '--- a/src/d.js',
+      '+++ b/src/d.js',
+      '@@ -1,0 +1,5 @@',
+      '+function real() {',
+      '+  return 1;',
+      '+}',
+      '+xit("x", () => { check(); });',
+      '+if (a) {}',
+      '',
+    ].join('\n');
+    const kindsAt = (r, file) => r.entries.filter((e) => e.file === file).map((e) => e.line + ':' + e.kind);
+    test('[plugin-0.5 H3] stubMarkers: each kind is found with the new-file line number', () => {
+      const r = reviewLib.stubMarkers(H3_DIFF);
+      assert.deepStrictEqual(kindsAt(r, 'src/a.js'), ['2:todo', '3:empty_body', '4:todo', '4:not_implemented', '6:empty_body', '30:not_implemented', '31:empty_body', '31:skipped_test']);
+      assert.deepStrictEqual(kindsAt(r, 'lib/b.py'), ['2:empty_body', '4:not_implemented', '5:skipped_test', '6:empty_body', '8:empty_body']);
+      assert.deepStrictEqual(kindsAt(r, 'src/c.rs'), ['5:not_implemented', '6:not_implemented', '7:skipped_test', '8:todo', '8:not_implemented', '9:skipped_test']);
+      assert.deepStrictEqual(kindsAt(r, 'src/d.js'), ['4:skipped_test']);
+      assert.strictEqual(r.total, r.entries.length);
+    });
+    test('[plugin-0.5 H3] stubMarkers: removed and context lines are ignored; binary and deleted files are skipped', () => {
+      const r = reviewLib.stubMarkers(H3_DIFF);
+      assert.ok(!r.entries.some((e) => e.file === 'src/a.js' && (e.line === 1 || (e.line === 3 && e.kind === 'todo'))), 'context and removed lines');
+      assert.ok(!r.entries.some((e) => e.file === 'img.png'));
+      const del = 'diff --git a/x.js b/x.js\n--- a/x.js\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-// TODO gone\n-xit("a")\n';
+      assert.deepStrictEqual(reviewLib.stubMarkers(del), { entries: [], total: 0 });
+      assert.deepStrictEqual(reviewLib.stubMarkers(''), { entries: [], total: 0 });
+      assert.deepStrictEqual(reviewLib.stubMarkers('diff --git a/x b/x\nBinary files a/x and b/x differ\n'), { entries: [], total: 0 });
+    });
+    test('[plugin-0.5 H3] stubMarkers: multiple files and hunks, CRLF diffs, the entry cap and the total', () => {
+      const r = reviewLib.stubMarkers(H3_DIFF.replace(/\n/g, '\r\n'));
+      assert.deepStrictEqual([...new Set(r.entries.map((e) => e.file))], ['src/a.js', 'lib/b.py', 'src/c.rs', 'src/d.js']);
+      const many = 'diff --git a/m.js b/m.js\n--- a/m.js\n+++ b/m.js\n@@ -0,0 +1,120 @@\n' + Array.from({ length: 120 }, () => '+// TODO x').join('\n') + '\n';
+      const c = reviewLib.stubMarkers(many);
+      assert.strictEqual(c.entries.length, 50);
+      assert.strictEqual(c.total, 120);
+      assert.deepStrictEqual(c.entries[49], { file: 'm.js', line: 50, kind: 'todo' });
+      assert.strictEqual(reviewLib.stubMarkers(many, 3).entries.length, 3);
+      assert.ok(c.entries.every((e) => Object.keys(e).sort().join() === 'file,kind,line'), 'no line text in entries');
+    });
+    test('[plugin-0.5 H3] review-pack: lists stub markers as path:line kind, never the line text; None found. when clean', () => {
+      const dir = repo();
+      const t = mkTask(dir, 'st', 'feature', { 'src/s.js': 'const a = 1;\n// TODO SECRET_LINE_TEXT_QQ\nfunction f() {}\n', 'src/s.test.js': 'it.skip("SECRET_TEST_NAME_ZZ", () => {});\n' }, SPEC_BODY);
+      const text = fs.readFileSync(path.join(dir, pack(dir, 'st', t).path), 'utf8');
+      const sec = text.split('## Stub markers added in this diff')[1].split('## Tests')[0];
+      assert.ok(sec.startsWith(' (4)\n'), sec);
+      for (const e of ['- src/s.js:2 todo', '- src/s.js:3 empty_body', '- src/s.test.js:1 skipped_test']) assert.ok(sec.includes(e), e + '\n' + sec);
+      assert.ok(sec.includes('- src/s.test.js:1 skipped_test') && !sec.includes('None found.'));
+      assert.ok(!text.includes('SECRET_LINE_TEXT_QQ') && !text.includes('SECRET_TEST_NAME_ZZ'), 'no file contents');
+      const t2 = mkTask(dir, 'cl', 'feature', { 'src/clean.js': 'const ok = 1;\n' }, SPEC_BODY);
+      const text2 = fs.readFileSync(path.join(dir, pack(dir, 'cl', t2).path), 'utf8');
+      assert.ok(/## Stub markers added in this diff \(0\)\nNone found\.\n/.test(text2), text2);
+    });
+    test('[plugin-0.5 H3] review-pack: more than 50 markers shows the cap and the rest; the pack stays within its line cap', () => {
+      const dir = repo();
+      const t = mkTask(dir, 'sc', 'feature', { 'src/many.js': Array.from({ length: 70 }, () => '// FIXME').join('\n') + '\n' }, SPEC_BODY);
+      const r = pack(dir, 'sc', t);
+      const text = fs.readFileSync(path.join(dir, r.path), 'utf8');
+      assert.ok(text.includes('## Stub markers added in this diff (70)') && text.includes('- src/many.js:50 todo') && !text.includes('- src/many.js:51 todo'));
+      assert.ok(text.includes('- ... and 20 more'));
+      assert.ok(r.lines <= 200);
+    });
+    test('[plugin-0.5 H3] both red teams are told to check each stub marker against the acceptance criteria', () => {
+      for (const a of ['red-team', 'red-team-lean']) {
+        const lines = rd('agents/' + a + '.md').split('\n').filter((l) => /stub marker/i.test(l));
+        assert.strictEqual(lines.length, 1, a);
+        assert.ok(/acceptance criteria/.test(lines[0]) && /defect/.test(lines[0]) && /block/.test(lines[0]), a);
+        assert.ok(/the pack is a map, not evidence/.test(rd('agents/' + a + '.md')), a);
+      }
+    });
+
     for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_e) { /* best effort */ } }
   }
 

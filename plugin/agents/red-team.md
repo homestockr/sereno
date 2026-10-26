@@ -17,6 +17,7 @@ and the repo's CLAUDE.md or README invariants. Look hardest at security, privacy
 data loss, error paths, idempotency, and tests that do not test what they claim.
 
 If you are given a review pack path, read it first, then verify independently: the pack is a map, not evidence.
+Check each listed stub marker against the spec's acceptance criteria: a criterion met only by a stub (TODO, not-implemented, empty body, skipped test) is a defect, and the outcome is `block`.
 
 Rules:
 - You are read-only. Use Bash only for read-only git (`git diff`, `git show`,

@@ -193,6 +193,74 @@ function untested(files) {
   });
 }
 
+/* ---- stub markers (plugin 0.5 H3) ---- */
+
+const STUB_MAX = 50;
+const RE_TODO = /\b(?:TODO|FIXME|XXX)\b/;
+const RE_NOT_IMPL = /not implemented|NotImplementedError|NotImplementedException|UnsupportedOperationException|\btodo!\s*\(|\bunimplemented!\s*\(|panic\(\s*["'`]TODO/i;
+const RE_SKIP = /\.skip\s*\(|\bxit\s*\(|\bxdescribe\s*\(|\b(?:it|test)\.todo\s*\(|@pytest\.mark\.skip|@unittest\.skip|#\[ignore\b|\bt\.Skip(?:f|Now)?\s*\(/;
+// A function opener and its closing body on one line: `function x() {}`, `=> {}`, `name(args) { }`, `def f(): pass`.
+const RE_EMPTY_ONE = /^\s*def\s.*:\s*(?:pass|\.\.\.)\s*$|\bfunction\b[^{;]*\([^)]*\)\s*\{\s*\}|=>\s*\{\s*\}|(?:^|[\s.])(?!(?:if|for|while|switch|catch|with)\b)[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{\s*\}\s*;?\s*$/;
+// An opener that ends a line, for the two-line form (`function x() {` then `}`), and a Python def.
+const RE_OPEN = /(?:\bfunction\b[^{;]*\([^)]*\)|=>|(?:^|[\s.])(?!(?:if|for|while|switch|catch|with|else|try|do)\b)[A-Za-z_$][\w$]*\s*\([^)]*\))\s*\{\s*$/;
+const RE_PY_DEF = /^\s*(?:async\s+)?def\s+\w+\s*\(.*\)\s*(?:->\s*[^:]+)?:\s*$/;
+
+/**
+ * Stub markers on the ADDED lines of a unified diff (`git diff base head`, any context). Returns
+ * only path, new-file line number and kind, never the line text (the pack holds no file contents).
+ * Kinds: todo, not_implemented, empty_body, skipped_test. Binary hunks carry no `@@` lines and are
+ * skipped. Deliberately heuristic: expect some false positives (a `.skip(` on a stream, `XXX` in a
+ * placeholder string, a legitimately empty no-op callback) and some misses (multi-line signatures,
+ * bodies of only comments). The red team judges each entry against the acceptance criteria; this
+ * list is a map, not a verdict.
+ * @param {string} diffText @param {number} [max] cap on entries returned
+ * @returns {{ entries: { file: string, line: number, kind: string }[], total: number }}
+ */
+function stubMarkers(diffText, max) {
+  const cap = max === undefined ? STUB_MAX : max;
+  /** @type {{ file: string, line: number, kind: string }[]} */
+  const entries = [];
+  let total = 0;
+  let file = '', inHunk = false, line = 0;
+  let prevText = '', prevLine = -1;
+  /** @param {string} kind */
+  const hit = (kind) => { total++; if (entries.length < cap) add(entries, { file, line, kind }); };
+  for (const raw of diffText.split('\n')) {
+    const l = raw.replace(/\r$/, '');
+    if (l.startsWith('diff --git ')) { inHunk = false; file = ''; prevLine = -1; continue; }
+    if (!inHunk) {
+      if (l.startsWith('+++ ')) {
+        const p = l.slice(4).replace(/\t.*$/, '');
+        file = p === '/dev/null' ? '' : p.replace(/^b\//, '');
+        continue;
+      }
+      const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+      if (h) { inHunk = true; line = parseInt(h[1], 10); prevLine = -1; }
+      continue;
+    }
+    const h2 = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+    if (h2) { line = parseInt(h2[1], 10); prevLine = -1; continue; }
+    if (l.startsWith('+')) {
+      const t = l.slice(1);
+      if (file) {
+        if (RE_TODO.test(t)) hit('todo');
+        if (RE_NOT_IMPL.test(t) || /throw\s+new\s+\w*Error\(\s*["'`]TODO/.test(t)) hit('not_implemented');
+        const trimmed = t.trim();
+        const consecutive = prevLine === line - 1;
+        if (RE_EMPTY_ONE.test(t) || (consecutive && trimmed === '}' && RE_OPEN.test(prevText))
+          || (consecutive && RE_PY_DEF.test(prevText) && (trimmed === 'pass' || trimmed === '...'))) hit('empty_body');
+        if (RE_SKIP.test(t)) hit('skipped_test');
+      }
+      prevText = t; prevLine = line; line++;
+    } else if (l.startsWith('-') || l.startsWith('\\')) {
+      // removed lines and "\ No newline at end of file" do not advance the new-file counter
+    } else if (l.startsWith(' ')) {
+      line++; prevLine = -1;
+    }
+  }
+  return { entries, total };
+}
+
 /**
  * @param {{ root: string, fsafe: any, task: string, base: string, head: string, specText: string }} a
  * @returns {{ path: string, lines: number, files: number, truncated: boolean }}
@@ -221,6 +289,17 @@ function buildPack(a) {
   for (const f of d.files.slice(0, FILES_MAX)) add(out, '- ' + plain(f));
   if (d.files.length > FILES_MAX) add(out, '- ... and ' + (d.files.length - FILES_MAX) + ' more');
   add(out, '');
+  const diffText = gitlib.git(a.root, ['-c', 'core.quotePath=false', 'diff', '--unified=0', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--end-of-options', a.base + '...' + a.head]);
+  const stubs = diffText === null ? null : stubMarkers(diffText);
+  add(out, '## Stub markers added in this diff' + (stubs ? ' (' + stubs.total + ')' : ''));
+  if (!stubs) add(out, 'The diff could not be scanned (too large or unreadable).');
+  else if (!stubs.total) add(out, 'None found.');
+  else {
+    add(out, 'Path, new-file line and kind only. Check each against the acceptance criteria.');
+    for (const s of stubs.entries) add(out, '- ' + plain(s.file) + ':' + s.line + ' ' + s.kind);
+    if (stubs.total > stubs.entries.length) add(out, '- ... and ' + (stubs.total - stubs.entries.length) + ' more');
+  }
+  add(out, '');
   add(out, '## Tests');
   for (const l of testSummary(a.fsafe, a.head)) add(out, l);
   add(out, '');
@@ -236,4 +315,4 @@ function buildPack(a) {
   return { path: rel, lines: out.length, files: d.files.length, truncated };
 }
 
-module.exports = { chooseReviewer, buildPack, diffInfo, neverRule, globToRegExp, acceptanceLines, untested, DEFAULT_NEVER, NEVER_WORDS, PACK_MAX_LINES };
+module.exports = { chooseReviewer, buildPack, stubMarkers, diffInfo, neverRule, globToRegExp, acceptanceLines, untested, DEFAULT_NEVER, NEVER_WORDS, PACK_MAX_LINES };
