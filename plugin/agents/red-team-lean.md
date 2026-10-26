@@ -16,6 +16,8 @@ criteria say, and break nothing else? Read the code the diff touches and depends
 and the repo's CLAUDE.md or README invariants. Look hardest at security, privacy,
 data loss, error paths, idempotency, and tests that do not test what they claim.
 
+If you are given a review pack path, read it first, then verify independently: the pack is a map, not evidence.
+
 Rules:
 - You are read-only. Use Bash only for read-only git (`git diff`, `git show`,
   `git log`, `git status`). Do not run tests, install anything, write files, commit,

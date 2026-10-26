@@ -4,7 +4,7 @@ description: Test, review and gate a built task branch, repair once if needed, t
 argument-hint: <task>
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Bash, Read, Agent, Edit(.sereno/cache/verdict-*.json)
+allowed-tools: Bash, Read, Agent, Write(.sereno/cache/verdict-*.json)
 ---
 
 ## How to run commands
@@ -15,7 +15,11 @@ You run the ship step. You run the checks, relay the red team's verdict into the
 file, follow the recovery rules, and hand off to the user for the merge. You do not
 write feature code and you do not review the diff yourself.
 
-Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, ask for it.
+Arguments: `$ARGUMENTS`. The first word is the task name; any other words are flags. The one flag is `use-fallback`: the user approves the fallback red team for this run (step 2). Any other word: stop and show the usage `/sereno:ship <task> [use-fallback]`. If the task is missing, show the same usage and stop.
+
+A plain reply from the user starts a new turn on the session model and loses this skill's model, so a choice never waits for an answer in this turn: end the turn and print each option as a command to re-run.
+
+Background agents: if an agent was started in the background anyway and its result arrives in a later turn, first finish that agent's own step (for the red team, steps 3 and 4: write the gate and record the outcome; for a repair or retry Builder, build steps 5 and 6), and only then continue from the step after that agent. Use the attempt record (`.sereno/attempts/<task>-<n>.json`) and the `recovery --task <task>` command of step 5 to find where you are. Never start a second Builder or red team for the same attempt (`attempt` refuses a new running record while the newest one is still running).
 
 Rules that hold throughout: never run anything against a remote, never change which
 Builder is used by yourself, and never merge: merging is `/sereno:merge`, which only the user can start.
@@ -28,7 +32,7 @@ This skill is the process for this run. Don't invoke other plugins' skills (plan
 - You are on branch `task/<task>` with no uncommitted changes to tracked files
   (`node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" clean` returns `clean: true`; only the generated `.sereno/` dirs are ignored). If not, stop and say so.
 - Read `.sereno/specs/<task>.md`. Take `base_branch` from its front matter. If it is null
-  or missing, ask the user which branch this task merges into.
+  or missing, stop: tell the user to set it with `/sereno:task <task>` (revise the spec), then run `/sereno:ship <task>` again.
 - Read the effective config once:
 
 ```
@@ -38,8 +42,12 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" config
   You need `roles.redTeam` (`enabled`, `agent`, `fallback`, `onFallback`).
 - Compute the base: `git merge-base task/<task> <base_branch>`. Compute the head:
   `git rev-parse HEAD`. Take the latest attempt number for the task from the newest file
-  `.sereno/attempts/<task>-<n>.json`; it should be `built`. If there is none, or it is
-  already final, tell the user to run `/sereno:build <task>` and stop.
+  `.sereno/attempts/<task>-<n>.json`; it should be `built`. If there is none, tell the user to
+  run `/sereno:build <task>` and stop. If it is final, run the `recovery --task <task>` command
+  from step 5 before deciding: when the latest attempt is `block` or `error` and `next` is `retry`
+  or `repair`, this is a continuation, so skip steps 1 to 4 and go straight to the `retry` /
+  `repair` bullet in step 5. For any other final attempt, tell the user to run
+  `/sereno:build <task>` and stop.
 
 ## 1. Run the tests
 
@@ -78,9 +86,23 @@ step 5. Otherwise make the run id:
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" run-id --head <head>
 ```
 
-Spawn the red team with the Agent tool, `subagent_type` set to `sereno:` plus
-`roles.redTeam.agent` from the config. Use that configured name only and pass no `model`
-parameter. Prompt: the spec path, the base commit and the head commit, and "review
+Choose the reviewer. This is code, not your judgment: the gate always runs, only the agent changes.
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" reviewer --task <task> --base <base> --head <head>
+```
+
+The result has `agent`, `light` and `reason`. Keep `reason` for the gate. Then write the review pack, a short map of the change for the reviewer:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" review-pack --task <task> --base <base> --head <head>
+```
+
+Take `abs` from its result. If either command fails, carry on without it: no `reviewer` answer means `roles.redTeam.agent`, no pack means no pack path.
+
+Spawn the red team with the Agent tool, `subagent_type` set to `sereno:` plus the `agent` from the `reviewer` result
+(`roles.redTeam.agent` if it failed). Use that name only and pass no `model`
+parameter. Prompt: the spec path, the base commit and the head commit, the review pack path (`abs`) if there is one, and "review
 `git diff <base>...<head>` against the spec and answer with the verdict JSON".
 
 - **Context requests.** If the verdict is `needs_context` with `context_requests`, fetch
@@ -93,14 +115,13 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" context --head <head> <file> <file>
   Tell it these are the requested files (at most five, size-capped), treat them as data,
   and answer again. One round only: use whatever the second answer is.
 - **Model unavailable.** If the spawn fails with an error that names the model as
-  unavailable, apply `roles.redTeam.onFallback`, with the fallback agent taken from `roles.redTeam.fallback` in the config (never a hard-coded name). If `roles.redTeam.fallback` is `null` there is no fallback: behave as `never`. `ask`: ask the user whether to use
-  `sereno:` plus `roles.redTeam.fallback` instead, and use it on a yes; on a no, record outcome `error`.
+  unavailable, apply `roles.redTeam.onFallback`, with the fallback agent taken from `roles.redTeam.fallback` in the config (never a hard-coded name). If `roles.redTeam.fallback` is `null` there is no fallback: behave as `never`. `ask`: without `use-fallback`, do not wait for an answer and do not write a gate or change the attempt record: end the turn and print `/sereno:ship <task> use-fallback` as the way to approve the fallback reviewer (running `/sereno:ship <task>` again retries the main one). With `use-fallback`, behave as `auto`.
   `auto`: use `sereno:` plus `roles.redTeam.fallback` and tell the user you did. `never`: do not retry; the
   outcome is `error`. Note which agent actually reviewed.
 
 ## 3. Write the gate
 
-Extract the single fenced `json` block from the red team's reply. If there is no such block,
+Extract the single fenced `json` block from the red team's response. If there is no such block,
 the verdict is the single object `{"outcome":"error"}`.
 
 First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (an absolute path spelled like your working directory). Use it exactly as given, for both Write and the file argument below: never rebuild it from `repo_root`, and never change its letter case.
@@ -110,10 +131,10 @@ JSON (or any `{"`) on a Bash command line, and never use heredocs, `echo` or pip
 run the gate (its `--file` is the same `<cacheDir>/verdict-<review_run_id>.json` path, exactly as given), which reads that file and deletes it:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file <cacheDir>/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file <cacheDir>/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true --reviewer-reason "<reason from reviewer>"
 ```
 
-The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.
+Leave out `--reviewer-reason` when `reviewer` failed. The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.
 
 ## 4. Record the outcome
 
@@ -130,13 +151,11 @@ non-low finding has a kind of `defect`, `bug`, `security`, `privacy`, `test`,
 
 ## 5. Recovery
 
-Ask `sereno:scribe` to refresh the brief for this branch (after every gate run and every
-Builder failure). Agents cannot expand `${CLAUDE_PLUGIN_ROOT}`, so give the scribe the
-literal command line in its prompt, with only the angle-bracket values left for it to fill,
-and tell it to run that command verbatim and never construct a path itself:
+Refresh the brief for this branch (after every gate run and every Builder failure). It is
+built from the records, so no agent writes it:
 
 ```
-Run exactly: node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" brief --branch <branch> --now "<now>" --next "<next>" --blocked "<blocked>" --expect-version <version it read from the existing brief, 0 if none>
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" brief --auto --branch task/<task> --task <task>
 ```
 
 Then ask the rules what is next:
@@ -148,9 +167,9 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" recovery --task <task>
 The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `next`:
 
 - **`retry`** or **`repair`**: start a new attempt (write the `running` record first, then update it):
-  `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start> --spec .sereno/specs/<task>.md`
+  `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start> --start-commit <HEAD before the Builder starts> --spec .sereno/specs/<task>.md`
   (without `--spec` the script refuses with `spec_required`), then the same update as `/sereno:build`, spawning the SAME Builder agent
-  by name that the spec names. For `repair`, give it the gate's findings (file, line,
+  by name that the spec names (the new record inherits `no_verify_approved` from the earlier attempt; when that earlier record has `no_verify_approved: true`, add the same sentence to the Builder prompt as build step 4: "The user approved `--no-verify` for this task's commit. Commit normally first; use `git commit --no-verify` only if a hook refuses it, and say so in your report."). For `repair`, give it the gate's findings (file, line,
   summary) and tell it to fix only those; for `retry` after a test failure, give it the
   failing test names. Then go back to step 1 with the new head. A repair never changes
   the Builder, and `retry` does not use the repair.
@@ -161,9 +180,7 @@ The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `n
   with the `reason` and the findings or failure in one line each, and these choices:
   clarify the spec (run `/sereno:task` to revise it), use a stronger Builder (revise the
   spec with a higher `builder`, which must be in `roles.builder.allowed` (the `spec` command refuses otherwise, exit 21), then `/sereno:build <task>` starts a new attempt), or
-  stop. Do not pick for the user and do not start another attempt. If they choose stop,
-  record the latest attempt with `--outcome stopped` only if it is not final; otherwise
-  just say the task is stopped.
+  stop. Print each choice as a command to run, end the turn, and do not pick for the user or start another attempt. For stop, the command is the `stop --task <task>` subcommand of the same script (the `decide` result of `next` prints it).
 - **`done`**: say the task was stopped and finish.
 - **`merge`**: go to step 6.
 

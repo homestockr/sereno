@@ -153,15 +153,16 @@ the agent id.
     boolean and never store or log the text. The tests enforce that the check reads only a
     fixed-length prefix.
   - **(b)** Never look at the text, and label the count "turns" instead of "prompts".
-  - Recommendation: (b) for alpha.7, because it is the simpler privacy story. Revisit if
-    "turns" proves misleading.
+  - **Decided (Robe, 2026-10-25): (b).** The text is never read, and the count is labelled
+    "turns". Revisit only if "turns" proves misleading.
 
 ## Steps
 
-- **S0, measure volume (before S1 is finalised).** Count PreToolUse events per session-hour
-  in one real working session, using a counter in the collector behind a debug flag that
-  stores counts only. Check that one row per call is fine at that rate, with an index on
-  `(session_id, ts)`. Record the numbers here.
+- **S0, measure volume (after S1, before release).** S1's `session_events` table is the
+  counter. After a day of real use, record here the tool rows per session-hour and the database
+  growth. If the rate is far above about 1,000 rows per hour, revisit coalescing before
+  release. It was moved after S1 because measuring first would need a throwaway collector
+  counter.
 - **S1, ledger V2.** The migration adds:
   - `session_events` with the allowlisted columns above, and indexes `(session_id, ts)` and
     `(session_id, tool_use_id)`;

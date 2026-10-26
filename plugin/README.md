@@ -7,7 +7,7 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.3.1. Windows is the first
+can observe the files it writes. Version 0.4.0. Windows is the first
 platform; other systems are not yet tested.
 
 ## Install
@@ -36,9 +36,32 @@ object with a check per item (Node, git, the repo, `pipeline.json`, the test com
 `.sereno/` layout, and the red-team agents) and exits non-zero if any check fails.
 The skills do not run it for you.
 
-## The flow
+## Typical flow
 
-Run the commands in this order for each task.
+Write the specs, then let `/sereno:next` carry them. It runs every step that needs no human in one turn and stops at the first step that does, with one line saying what you do next.
+
+```
+/sereno:task add-export "Export the report as CSV"
+/sereno:task export-ui "Add the export button" --after add-export
+/sereno:next     builds and ships add-export, then stops:
+                 "Gate passed for add-export. Before merging: <hold>. Run /sereno:merge add-export."
+(do the human step, if there is one)
+/sereno:merge add-export
+/sereno:next     export-ui is no longer waiting: builds, ships, stops at its merge line
+/sereno:merge export-ui
+```
+
+- **`--after <task>`** queues a task behind another. `/sereno:build` refuses it (`after_not_merged`) until that task is merged into the base. With no argument, `/sereno:next` takes the one task in progress, else the oldest spec that is ready; with two in progress it asks which.
+- **`--hold "<one line>"`** on `/sereno:task` names a human step outside the pipeline, such as applying a migration to staging. `next` and `merge` print it before the merge. Typing `/sereno:merge` confirms it is done; the plugin never runs it.
+- **Preflight.** `/sereno:build` runs the repo's pre-commit hook (`sereno.js preflight --task <name>`) after it has switched to `task/<name>` and before it starts the Builder; `preflight` itself never switches branches (it reports `on_task_branch` and `branch_note`). If the hook fails, the build stops before any Builder tokens are spent and shows the last lines of the output (`output_tail`). To go on past a hook failure, run `/sereno:next <name> approve-no-verify` (or `/sereno:build <name> approve-no-verify`): that approves `--no-verify` for that task's Builder commits and stores `no_verify_approved: true` in the attempt record; later attempts of the same task inherit it, and it ends when the task is merged or stopped. Without it the Builder never uses `--no-verify`.
+- **No choice waits for a plain reply.** A plain reply starts a new turn on your session model and loses the skill's `sonnet`, so every skill that needs your decision ends its turn and prints the options as commands to run.
+- **Squash merges done outside `/sereno:merge` are not detected.** Use `/sereno:merge`; if the branch was squash-merged and deleted by hand, run `sereno.js stop --task <name>` to retire the task.
+- **A hook that refuses the Builder's commit** is recorded as `hook_failed`, and the work stays staged. Fix the hook on its own branch, or approve a commit that skips it, then run `sereno.js attempt --adopt --task <name>` to record that commit so ship can go on. Nothing skips a hook without your yes.
+- `next` runs at most 3 build or ship steps per invocation, never merges and never touches a remote.
+
+## The steps
+
+The commands `/sereno:next` runs for you, and that you can also run one at a time.
 
 **`/sereno:task <name> [goal]`** writes the task spec at `.sereno/specs/<name>.md`. The
 spec holds the acceptance criteria, what is out of scope, the tests required, and the
@@ -73,7 +96,7 @@ or by this command is read the same way. Run it whenever you want the brief refr
 | Role | Agent | Tier | Turn cap |
 |------|-------|------|----------|
 | Architect, your session | main session (no agent) | your session's model | n/a |
-| Orchestration (`task`, `build`, `ship`, `merge`, `brief`) | skills | sonnet | n/a |
+| Orchestration (`task`, `next`, `build`, `ship`, `merge`, `brief`) | skills | sonnet | n/a |
 | Builder, default | `sereno:builder` | sonnet | 80 |
 | Builder, mechanical | `sereno:builder-haiku` | haiku | 40 |
 | Builder, substantial | `sereno:builder-opus` | opus | 120 |
@@ -86,12 +109,36 @@ spec chooses the Builder per task, and that choice is never changed automaticall
 
 **Cheapest setup:** start the session on Sonnet (`claude --model sonnet`) when you run the pipeline. A result that arrives in a later turn, such as a background agent or the ship test retry, runs on the session model, so on an Opus session it can cost an extra cold-cache Opus turn. In our small-task benchmark, Opus leaked this way in 2 of 3 `default` ships, adding about $0.44 each (an estimate).
 
+## Cost: run agents in the foreground
+
+`/sereno:next` is built to run its whole loop in one turn. When Claude Code runs subagents in the background, each agent result arrives as a new turn on your session model, with a cold cache, plus agent progress summaries. In a field test, switching this off cut a run from $5.45 to $2.92 (est.). Set `CLAUDE_CODE_FORK_SUBAGENT=0` (`sereno.js doctor` reports `background_subagents` as `on`, `off` or `unknown` from this variable and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`). The plugin never writes your settings.
+
+PowerShell, for the current session:
+
+```
+$env:CLAUDE_CODE_FORK_SUBAGENT = "0"
+```
+
+bash:
+
+```
+export CLAUDE_CODE_FORK_SUBAGENT=0
+```
+
+Or in `settings.json`, which applies to every Claude Code session:
+
+```json
+{ "env": { "CLAUDE_CODE_FORK_SUBAGENT": "0" } }
+```
+
+If an agent still runs in the background, the skills carry on from the step after it and never start a second Builder or red team for the same attempt.
+
 ## Presets and pipeline.json
 
 Two presets:
 
 - `default`: the red team is `red-team` on Fable. If Fable is unavailable,
-  `onFallback: "ask"` offers `red-team-lean` instead.
+  `onFallback: "ask"` stops and prints `/sereno:ship <task> use-fallback` (or `/sereno:next <task> use-fallback`) so you approve `red-team-lean` by re-running.
 - `lean`: the red team is `red-team-lean` on Opus, with no fallback.
 
 Both presets use the same Builders.
@@ -116,9 +163,10 @@ invalid file stops the pipeline and lists the errors.
 | `roles.scribe.agent` | `"scribe"` | Agent that writes briefs and commit text. |
 | `roles.redTeam.agent` | `"red-team"` | Red team agent for `/sereno:ship`. |
 | `roles.redTeam.fallback` | `"red-team-lean"` | Used when the red team's model is unavailable. `null` for none. |
-| `roles.redTeam.onFallback` | `"ask"` | `"ask"`, `"auto"` or `"never"`. |
+| `roles.redTeam.onFallback` | `"ask"` | `"ask"` (stop and print the `use-fallback` command), `"auto"` or `"never"`. |
 | `roles.redTeam.maxBlockedRuns` | `2` | Blocks in a row before the run asks you for a decision. |
 | `roles.redTeam.enabled` | `true` | `false` switches the review off. The gate is then `skipped`. |
+| `roles.redTeam.light` | off in `default`; `kinds: ["mechanical"]` in `lean` | A lighter reviewer for small plain tasks: `{ kinds, maxDiffLines: 80, agent: "red-team-lean", never: [] }`. `sereno.js reviewer` picks it only when the spec kind is listed, the diff is at most `maxDiffLines` lines and no touched path matches a `never` glob. `**/migrations/**`, `supabase/**` and any path containing auth, permission, payment, delete or secret always get the full red team; `never` can only add globs. The gate still has to pass. |
 | `recovery.repairs` | `1` | Repairs allowed for a defect. |
 | `recovery.infraRetries` | `2` | Retries allowed for an environment failure. |
 | `recovery.taskBudgetUsd` | `null` | Validated (null or a positive number). No plugin script enforces it yet. Listed under `inert` when set. |

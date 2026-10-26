@@ -4,7 +4,7 @@ description: Merge a shipped task branch into its base branch locally. Use after
 argument-hint: <task>
 disable-model-invocation: true
 model: sonnet
-allowed-tools: Bash, Read, Agent(sereno:scribe)
+allowed-tools: Bash, Read
 ---
 
 ## How to run commands
@@ -15,7 +15,7 @@ Typing `/sereno:merge` is the user's explicit yes. You merge one task branch int
 branch with a local `--no-ff` merge, and nothing else. You do not write feature code and you
 do not review anything.
 
-Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, ask for it.
+Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, stop and show the usage `/sereno:merge <task>`. A plain reply from the user starts a new turn on the session model and loses this skill's model, so a choice never waits for an answer in this turn: end the turn and print each option as a command to re-run.
 
 Rules that hold throughout: never run anything against a remote. Every script result is one
 JSON object; if `ok` is false, show the `error` and stop.
@@ -25,7 +25,7 @@ This skill is the process for this run. Don't invoke other plugins' skills (plan
 ## 1. Check the rules
 
 - Read `.sereno/specs/<task>.md`. Take `base_branch` from its front matter. If it is null
-  or missing, ask the user which branch this task merges into.
+  or missing, stop: tell the user to set it with `/sereno:task <task>` (revise the spec), then run `/sereno:merge <task>` again.
 - Ask the rules what is next:
 
 ```
@@ -37,8 +37,16 @@ passed (or was skipped because the gate is off), the reviewed commit is still th
 `task/<task>`, the gate belongs to this task and branch, and the spec is the one that was
 reviewed. Take `head_commit` from the result: that is the commit you merge. For any other `next`,
 show the `reason` in one line and stop. Tell the user what to run: if the reason starts with
-`head_moved`, `/sereno:build <task>`; if it starts with `spec_changed`, `/sereno:task <task>`;
-for anything else, `/sereno:ship <task>`.
+`head_moved`, `/sereno:build <task>`; if it starts with `spec_changed`, `/sereno:build <task>` (a new build pins the new spec);
+for anything else, `/sereno:build <task>`.
+
+Then read the spec's hold, if any:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" next --task <task>
+```
+
+If the result's `hold` is not null, print one line: "Before merging: <hold>." Typing `/sereno:merge` is the confirmation that the hold is done, so do not ask again and do not run the hold yourself. Then carry on. Keep the result's `title`: it is the spec's title, already safe to put inside double quotes.
 
 ## 2. Clean tree
 
@@ -53,7 +61,7 @@ not the branch name:
 
 ```
 git switch <base_branch>
-git merge --no-ff -m "Merge branch 'task/<task>'" <head_commit>
+git merge --no-ff -m "Merge task/<task>: <title>" <head_commit>
 ```
 
 If the merge reports conflicts, run `git merge --abort`, tell the user, and stop. Never add
@@ -61,13 +69,12 @@ a remote step.
 
 ## 4. Brief
 
-After the merge, ask `sereno:scribe` to refresh the brief for `<base_branch>`. Agents cannot
-expand `${CLAUDE_PLUGIN_ROOT}`, so give the scribe the literal command line in its prompt,
-with only the angle-bracket values left for it to fill, and tell it to run that command
-verbatim and never construct a path itself:
+After the merge, refresh the brief for `<base_branch>`. It is built from the records, so no agent writes it:
 
 ```
-Run exactly: node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" brief --branch <base_branch> --now "<now>" --next "<next>" --blocked "<blocked>" --expect-version <version it read from the existing brief, 0 if none>
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" brief --auto --branch <base_branch>
 ```
+
+If it fails, show the `error` in one line; the merge itself is done.
 
 Report the merge commit in one line.

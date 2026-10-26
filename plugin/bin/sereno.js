@@ -12,7 +12,53 @@
  * Nothing else is written to stdout. Node built-ins only. The only files it
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
- * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, clean, context, recovery, brief, doctor.
+ * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, clean, context, recovery, brief, doctor,
+ * next, after-check, preflight, reviewer, review-pack.
+ *
+ *   reviewer --task <t> --base <sha> --head <sha>
+ *                           read-only: { agent, light, reason }. Light only when the spec's kind is in
+ *                           roles.redTeam.light.kinds, the diff is at most maxDiffLines, and no touched
+ *                           path trips a `never` rule (the built-in ones always apply). Ship stores the
+ *                           reason in the gate as reviewer_reason (gate --reviewer-reason).
+ *   review-pack --task <t> --base <sha> --head <sha>
+ *                           writes .sereno/cache/review-<t>.md (<= 200 lines): the spec's acceptance
+ *                           criteria, diffstat, touched files, test counts and failing names, and source
+ *                           files without test changes. No file contents.
+ *   brief --auto --branch <b>
+ *                           writes Now / Next / Blocked from the records instead of taking them as flags.
+ *
+ *   next [--task <t>] [--steps-done <n>]
+ *                           with --steps-done, also cap_reached: true once n >= 3 (the step cap of /sereno:next).
+ *   next [--task <t>]       what /sereno:next does: { task, step, reason, hold, command }. Read-only.
+ *   after-check --task <t>  ok when the spec's `after` task is merged into the base (or there is none); then, if
+ *                           task/<t> has no attempts and no commits of its own and the tree is clean, it
+ *                           fast-forwards task/<t> to the base tip (else a `warning`, branch untouched);
+ *                           otherwise error code after_not_merged. /sereno:build calls it first.
+ *   preflight [--task <t>] [--timeout-sec <n>]
+ *                           runs the repo's pre-commit hook against the current tree, without committing:
+ *                           { hook, passed, timed_out, dirty_after, output_head, output_tail, on_task_branch, branch_note }.
+ *                           With --task it reports on_task_branch / branch_note; it never switches branches. Hooks can modify files
+ *                           (lint --fix): it reports dirty_after when the tree changed and never undoes it.
+ *   spec ... [--after <task|none>] [--hold <text>]
+ *                           `after` queues the task behind another; `hold` (<= 200 chars, one line) is
+ *                           a human step printed before merge. Omitted keeps the earlier spec's value;
+ *                           `--after none` and `--hold ""` clear it.
+ *   attempt --adopt --task <t>
+ *                           records a new `built` attempt for the tip of task/<t> after the user approved a
+ *                           manual commit of the Builder's work (e.g. past a failing hook). Refuses a
+ *                           dirty tree. With the last attempt's start_commit (see attempt --start-commit) the
+ *                           tip must differ from it and descend from it (tip_not_moved, tip_unrelated);
+ *                           without one, the tip must be newer than the attempt's end by commit time.
+ *   stop --task <t>         retires a task: records a new attempt with outcome `stopped` (recovery maps it to done,
+ *                           so the task leaves the in-progress list). Refused while the newest attempt is running
+ *                           or when there is none. Writes one record; never touches git.
+ *   attempt ... --no-verify-approved
+ *                           on a new running record: stores no_verify_approved: true (the user approved
+ *                           --no-verify for this task's Builder commit). A new running record inherits it from
+ *                           the newest earlier attempt of the same task (not after stop). Without it the Builder must not use it.
+ *                           A new running record is refused (attempt_running) while the newest attempt is still running.
+ *   attempt --start-commit <sha>
+ *                           records the commit the Builder started from, on the running record.
  */
 
 const fs = require('node:fs');
@@ -28,6 +74,9 @@ const contextlib = require('./lib/context.js');
 const recovery = require('./lib/recovery.js');
 const briefLib = require('./lib/brief.js');
 const doctorLib = require('./lib/doctor.js');
+const nextLib = require('./lib/next.js');
+const reviewLib = require('./lib/review.js');
+const preflightLib = require('./lib/preflight.js');
 const { projectId } = require('./lib/projectid.js');
 
 const AGENTS_DIR = path.join(__dirname, '..', 'agents');
@@ -42,7 +91,7 @@ function agentModel(name) {
   return m ? m[1] : null;
 }
 
-const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, builder_not_allowed: 21, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, interrupted: 130 };
+const EXIT = { usage: 2, config_invalid: 3, invalid_arg: 4, not_a_repo: 5, path_refused: 6, exists: 7, head_mismatch: 8, no_test_command: 9, deadline: 20, builder_not_allowed: 21, worktree_failed: 10, dirty_tree: 11, spec_changed: 17, spec_required: 18, task_required: 19, record_final: 12, not_found: 13, version_conflict: 14, detached_head: 15, branch_mismatch: 16, after_not_merged: 22, tip_not_moved: 23, tip_unrelated: 24, interrupted: 130 };
 const MAX_INPUT = 1024 * 1024;
 
 /**
@@ -234,7 +283,7 @@ const COMMANDS = {
 
   gate(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['file', 'task', 'spec', 'base', 'head', 'branch', 'session', 'agent', 'agent-name', 'model', 'tests-passed', 'run-id'],
+      value: ['file', 'task', 'spec', 'base', 'head', 'branch', 'session', 'agent', 'agent-name', 'model', 'tests-passed', 'run-id', 'reviewer-reason'],
       bool: ['json', 'stdin'],
     });
     if (!!a.file === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --file or --stdin');
@@ -281,6 +330,7 @@ const COMMANDS = {
     }
     const v = rec.sanitizeVerdict(parseVerdict(text));
     const { config_hash } = loadConfig(root);
+    const reviewerReason = rec.cleanText(str(a, 'reviewer-reason'), 200);
 
     const gate = {
       review_run_id: runId,
@@ -300,20 +350,63 @@ const COMMANDS = {
       reviewed_at: new Date().toISOString(),
       config_hash,
     };
+    if (reviewerReason) /** @type {any} */ (gate).reviewer_reason = reviewerReason;
     const rel = '.sereno/gates/' + runId + '.json';
     fsafe.writeJson(rel, gate);
     if (cacheRel) fsafe.removeFile(cacheRel);
     return { path: rel, review_run_id: runId, outcome: gate.outcome, findings: gate.findings.length, tests_passed: gate.tests_passed };
   },
 
+  stop(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root, fsafe } = needRepo();
+    const re = attemptRe(task);
+    const nums = [];
+    for (const f of fsafe.listDir('.sereno/attempts')) { const m = re.exec(f); if (m) nums[nums.length] = parseInt(m[1], 10); }
+    nums.sort((x, y) => x - y);
+    if (!nums.length) throw new SerenoError('not_found', 'no attempts recorded for task ' + task + '; nothing to stop');
+    /** @type {any} */
+    let last = null;
+    try {
+      const file = path.join(root, '.sereno', 'attempts', task + '-' + nums[nums.length - 1] + '.json');
+      const st = fs.lstatSync(file);
+      if (st.isFile() && st.size <= MAX_INPUT) last = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (_e) { last = null; }
+    if (!last || typeof last !== 'object') throw new SerenoError('not_found', 'the latest attempt record is unreadable');
+    if (last.outcome === 'running') throw new SerenoError('invalid_arg', 'attempt ' + nums[nums.length - 1] + ' is still running; finish it with --update first');
+    if (last.outcome === 'stopped') throw new SerenoError('invalid_arg', 'task ' + task + ' is already stopped');
+    const { config, config_hash } = loadConfig(root);
+    const sm = speclib.readSpecMeta(root, task);
+    if (sm && nextLib.mergedInto(nextLib.realDeps({ root, fsafe, config }), task, sm.base_branch)) throw new SerenoError('already_merged', 'task ' + task + ' is already merged into ' + sm.base_branch + '; there is nothing to retire');
+    const now = new Date().toISOString();
+    return allocateAttempt(fsafe, task, {
+      project_id: typeof last.project_id === 'string' && last.project_id ? last.project_id : projectId(root),
+      task_id: task,
+      spec_revision: Number.isInteger(last.spec_revision) && last.spec_revision > 0 ? last.spec_revision : 1,
+      attempt: 0,
+      builder_requested: rec.enumOr(last.builder_requested, rec.BUILDERS),
+      agent_id: null,
+      config_hash,
+      kind: rec.enumOr(last.kind, rec.KINDS),
+      fixes: null,
+      diagnosis: 'none',
+      outcome: 'stopped',
+      review_run_id: null,
+      started_at: now,
+      ended_at: now,
+    });
+  },
+
   attempt(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash', 'head'],
-      bool: ['json'],
+      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash', 'head', 'start-commit'],
+      bool: ['json', 'adopt', 'no-verify-approved'],
     });
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
     checkTaskBranch(root, task);
+    if (a.adopt) return adoptAttempt(root, fsafe, task, a);
     if (a.update !== undefined) return updateAttempt(root, fsafe, task, a);
     if (a.head !== undefined) throw new SerenoError('usage', '--head is only for --update with --outcome skipped');
     const { config_hash } = loadConfig(root);
@@ -325,18 +418,14 @@ const COMMANDS = {
     const shArg = str(a, 'spec-hash');
     if (shArg !== undefined && !/^sha256:[0-9a-f]{64}$/.test(shArg)) throw new SerenoError('invalid_arg', '--spec-hash must be sha256:<64 hex>');
     if (shArg !== undefined && str(a, 'spec') !== undefined) throw new SerenoError('usage', 'give --spec or --spec-hash, not both');
+    const scArg = str(a, 'start-commit');
+    const startCommit = scArg === undefined ? null : gitlib.resolveCommit(root, scArg);
+    if (scArg !== undefined && !startCommit) throw new SerenoError('invalid_arg', '--start-commit must name an existing commit');
     const specHash = shArg !== undefined ? shArg : (str(a, 'spec') !== undefined ? readSpec(root, /** @type {string} */ (str(a, 'spec'))).hash : null);
     if (specHash === null && newestPin(root, fsafe, task)) throw new SerenoError('spec_required', 'an earlier attempt of this task pinned a spec; pass --spec .sereno/specs/' + task + '.md');
     const agent = str(a, 'agent') !== undefined ? str(a, 'agent') : str(a, 'agent-id');
     if (agent !== undefined) matchId(agent, '--agent', /^[A-Za-z0-9._:-]{1,128}$/);
 
-    const re = attemptRe(task);
-    const existing = fsafe.listDir('.sereno/attempts');
-    let n = 1;
-    for (const f of existing) {
-      const m = re.exec(f);
-      if (m) n = Math.max(n, parseInt(m[1], 10) + 1);
-    }
     const record = {
       // Same id the app derives for this repo (sha1 of the normalised root, 12 hex); --project overrides.
       project_id: flagText(str(a, 'project'), 128) || projectId(root),
@@ -354,19 +443,21 @@ const COMMANDS = {
       started_at: isoOrNull(str(a, 'started-at'), '--started-at'),
       ended_at: isoOrNull(str(a, 'ended-at'), '--ended-at'),
     };
-    // Exclusive create: if two writers race for the same number, the loser takes the next one.
     if (specHash !== null) /** @type {any} */ (record).spec_hash = specHash;
-    for (let tries = 0; tries < 20; tries++, n++) {
-      record.attempt = n;
-      const rel = '.sereno/attempts/' + task + '-' + n + '.json';
-      try {
-        fsafe.writeJson(rel, record, { exclusive: true });
-        return { path: rel, attempt: n, task_id: task };
-      } catch (e) {
-        if (!(e instanceof SerenoError) || e.code !== 'exists') throw e;
-      }
+    if (startCommit) /** @type {any} */ (record).start_commit = startCommit;
+    // The user's per-task approval to use --no-verify on the Builder's commit; recorded so it is auditable.
+    // The approval lasts for the task: a new running record inherits it from the newest earlier attempt of the
+    // same task (a stopped task starts fresh). It never carries to another task.
+    let inherit = false;
+    {
+      const re = attemptRe(task);
+      let top = 0;
+      for (const f of fsafe.listDir('.sereno/attempts')) { const m = re.exec(f); if (m) top = Math.max(top, parseInt(m[1], 10)); }
+      const prev = top ? newestAttemptRecord(fsafe, task, top) : null;
+      inherit = !!(prev && prev.no_verify_approved === true && prev.outcome !== 'stopped');
     }
-    throw new SerenoError('exists', 'could not allocate an attempt number');
+    if (a['no-verify-approved'] || (inherit && record.outcome === 'running')) /** @type {any} */ (record).no_verify_approved = true;
+    return allocateAttempt(fsafe, task, record);
   },
 
   async test(/** @type {string[]} */ argv) {
@@ -398,7 +489,7 @@ const COMMANDS = {
   },
 
   spec(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes', 'base-branch', 'body-file'], bool: ['json', 'stdin'] });
+    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes', 'base-branch', 'after', 'hold', 'body-file'], bool: ['json', 'stdin'] });
     if (!!a['body-file'] === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --body-file or --stdin');
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
@@ -412,7 +503,7 @@ const COMMANDS = {
       cacheRel = cf.rel;
       body = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
     }
-    const out = speclib.writeSpec({ root, fsafe, task, allowed: loadConfig(root).config.roles.builder.allowed, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), body });
+    const out = speclib.writeSpec({ root, fsafe, task, allowed: loadConfig(root).config.roles.builder.allowed, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), after: str(a, 'after'), hold: str(a, 'hold'), body });
     if (cacheRel) fsafe.removeFile(cacheRel);
     return out;
   },
@@ -459,12 +550,19 @@ const COMMANDS = {
       listAttempts: () => fsafe.listDir('.sereno/attempts'),
       currentHead: () => gitlib.resolveCommit(root, 'refs/heads/task/' + task),
       currentSpecHash: () => { try { return readSpec(root, '.sereno/specs/' + task + '.md').hash; } catch (_e) { return null; } },
+      headMerged: nextLib.headMergedFor(root, fsafe, task),
     });
   },
 
   brief(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['branch', 'now', 'next', 'blocked', 'task', 'expect-version'], bool: ['json'] });
+    const a = parseArgs(argv, { value: ['branch', 'now', 'next', 'blocked', 'task', 'expect-version'], bool: ['json', 'auto'] });
     const branch = str(a, 'branch'), now = str(a, 'now'), next = str(a, 'next');
+    if (a.auto) {
+      if (branch === undefined) throw new SerenoError('usage', 'brief --auto needs --branch');
+      if (now !== undefined || next !== undefined || a.blocked !== undefined || a['expect-version'] !== undefined) throw new SerenoError('usage', '--auto writes Now, Next and Blocked itself; do not pass --now, --next, --blocked or --expect-version');
+      const r = needRepo();
+      return briefLib.writeAutoBrief({ root: r.root, fsafe: r.fsafe, config: loadConfig(r.root).config, branch, task: str(a, 'task') });
+    }
     if (branch === undefined || now === undefined || next === undefined) throw new SerenoError('usage', 'brief needs --branch, --now, --next and --blocked');
     const ev = str(a, 'expect-version');
     if (ev !== undefined && !/^\d{1,9}$/.test(ev)) throw new SerenoError('invalid_arg', '--expect-version must be a non-negative integer');
@@ -475,6 +573,77 @@ const COMMANDS = {
   doctor(/** @type {string[]} */ argv) {
     parseArgs(argv, { value: [], bool: ['json'] });
     return doctorLib.runDoctor(process.cwd());
+  },
+
+  next(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task', 'steps-done'], bool: ['json'] });
+    const t = str(a, 'task');
+    const sd = str(a, 'steps-done');
+    if (sd !== undefined && !/^\d{1,3}$/.test(sd)) throw new SerenoError('invalid_arg', '--steps-done must be a non-negative integer');
+    const { root, fsafe } = needRepo();
+    const { config } = loadConfig(root);
+    const r = nextLib.decide({ task: t === undefined ? null : rec.checkTask(t), deps: nextLib.realDeps({ root, fsafe, config }) });
+    // The merge skill puts the title in the merge commit message; it is shell-safe (see readSpecTitle).
+    /** @type {Record<string, any>} */
+    const out = r.task ? Object.assign({}, r, { title: speclib.readSpecTitle(root, r.task) }) : Object.assign({}, r);
+    // /sereno:next runs at most STEP_CAP build/ship/retry steps per invocation; it passes the count it has done.
+    if (sd !== undefined) out.cap_reached = Number(sd) >= nextLib.STEP_CAP;
+    return out;
+  },
+
+  reviewer(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task', 'base', 'head'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root } = needRepo();
+    const base = gitlib.resolveCommit(root, str(a, 'base') || '');
+    const head = gitlib.resolveCommit(root, str(a, 'head') || '');
+    if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
+    if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
+    const meta = speclib.readSpecMeta(root, task);
+    if (!meta) throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first');
+    const { config } = loadConfig(root);
+    return reviewLib.chooseReviewer({ root, config, kind: meta.kind, base, head });
+  },
+
+  'review-pack'(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task', 'base', 'head'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root, fsafe } = needRepo();
+    const base = gitlib.resolveCommit(root, str(a, 'base') || '');
+    const head = gitlib.resolveCommit(root, str(a, 'head') || '');
+    if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
+    if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
+    let specText;
+    try { specText = fsafe.readFile('.sereno/specs/' + task + '.md', MAX_INPUT).toString('utf8'); } catch (_e) { throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first'); }
+    const r = reviewLib.buildPack({ root, fsafe, task, base, head, specText });
+    return Object.assign({}, r, { abs: path.join(root, r.path).split(path.sep).join('/') });
+  },
+
+  'after-check'(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['task'], bool: ['json'] });
+    const task = rec.checkTask(str(a, 'task'));
+    const { root, fsafe } = needRepo();
+    const { config } = loadConfig(root);
+    const deps = nextLib.realDeps({ root, fsafe, config });
+    const m = deps.spec(task);
+    if (!m) throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first');
+    const st = nextLib.afterState(deps, m);
+    if (!st.ok) {
+      throw new SerenoError('after_not_merged', 'task ' + task + ' comes after ' + st.after + ', which is not merged into ' + (st.base || 'its base branch') + ' yet' + (st.base ? '' : ' (no base branch is known)') + '; merge ' + st.after + ' first', { task, after: st.after, base: st.base });
+    }
+    /** @type {Record<string, any>} */
+    const out = { task, after: st.after, merged: true, base: st.base };
+    if (st.after && st.base) Object.assign(out, nextLib.refreshQueuedBranch({ root, task, base: st.base, attempts: deps.attemptCount(task) }));
+    return out;
+  },
+
+  preflight(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['timeout-sec', 'task'], bool: ['json'] });
+    const ts = str(a, 'timeout-sec');
+    const ptask = str(a, 'task') === undefined ? undefined : rec.checkTask(str(a, 'task'));
+    if (ts !== undefined && !/^[1-9]\d{0,3}$/.test(ts)) throw new SerenoError('invalid_arg', '--timeout-sec must be a positive integer');
+    const { root } = needRepo();
+    return preflightLib.preflight({ root, task: ptask, timeoutMs: ts === undefined ? undefined : Number(ts) * 1000 });
   },
 
   paths(/** @type {string[]} */ argv) {
@@ -504,12 +673,132 @@ const COMMANDS = {
 };
 
 /**
+ * Write the record under the next free attempt number. Exclusive create: if two writers
+ * race for the same number, the loser takes the next one.
+ * @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, any>} record
+ */
+function newestAttemptRecord(fsafe, task, n) {
+  try {
+    const r = JSON.parse(fsafe.readFile('.sereno/attempts/' + task + '-' + n + '.json', MAX_INPUT).toString('utf8'));
+    return r && typeof r === 'object' && !Array.isArray(r) ? r : null;
+  } catch (_e) { return null; }
+}
+
+/** @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, any>} record */
+function allocateAttempt(fsafe, task, record) {
+  const re = attemptRe(task);
+  let n = 1;
+  for (const f of fsafe.listDir('.sereno/attempts')) {
+    const m = re.exec(f);
+    if (m) n = Math.max(n, parseInt(m[1], 10) + 1);
+  }
+  // A second running record would mean a second Builder for an attempt that is still going (for example
+  // when a background agent's result arrives after the loop moved on).
+  if (record.outcome === 'running' && n > 1) {
+    const prev = newestAttemptRecord(fsafe, task, n - 1);
+    if (!prev) throw new SerenoError('invalid_arg', 'the newest attempt record of ' + task + ' (attempt ' + (n - 1) + ') is unreadable; repair or remove it first');
+    if (prev.outcome === 'running') throw new SerenoError('attempt_running', 'attempt ' + (n - 1) + ' of ' + task + ' is still running; finish it with --update before starting another');
+  }
+  for (let tries = 0; tries < 20; tries++, n++) {
+    record.attempt = n;
+    const rel = '.sereno/attempts/' + task + '-' + n + '.json';
+    try {
+      fsafe.writeJson(rel, record, { exclusive: true });
+      return { path: rel, attempt: n, task_id: task };
+    } catch (e) {
+      if (!(e instanceof SerenoError) || e.code !== 'exists') throw e;
+    }
+  }
+  throw new SerenoError('exists', 'could not allocate an attempt number');
+}
+
+/**
+ * attempt --adopt: the user approved a manual commit of the Builder's work (for example past
+ * a failing hook). It accepts any newest attempt that ended as `error`; the typical case is
+ * hook_failed. A record without `start_commit` falls back to the commit-time rule. Record a new `built` attempt for the tip of task/<task> so ship can go on.
+ * Refuses a dirty tree, another branch, and a tip that is not a new commit since the last
+ * attempt (the tip was already adopted, or is not newer than the last attempt's end).
+ * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, string | boolean>} a
+ */
+function adoptAttempt(root, fsafe, task, a) {
+  for (const k of ['update', 'spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'agent-id', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'head', 'start-commit', 'no-verify-approved']) {
+    if (a[k] !== undefined) throw new SerenoError('usage', '--' + k + ' cannot be combined with --adopt');
+  }
+  if (gitlib.currentBranch(root) !== 'task/' + task) throw new SerenoError('branch_mismatch', 'check out task/' + task + ' first; --adopt records the tip of the branch you are on');
+  const dirty = gitlib.cleanFiles(root);
+  if (dirty === null) throw new SerenoError('invalid_arg', 'could not read the working tree status');
+  if (dirty.length) throw new SerenoError('dirty_tree', 'working tree has uncommitted changes; commit or stash them first', { files: dirty.slice(0, 20) });
+  const tip = gitlib.resolveCommit(root, 'refs/heads/task/' + task);
+  if (!tip) throw new SerenoError('invalid_arg', 'task/' + task + ' has no commit');
+  const re = attemptRe(task);
+  const nums = [];
+  for (const f of fsafe.listDir('.sereno/attempts')) { const m = re.exec(f); if (m) nums[nums.length] = parseInt(m[1], 10); }
+  nums.sort((x, y) => x - y);
+  if (!nums.length) throw new SerenoError('not_found', 'no attempts recorded for task ' + task + '; nothing to adopt after');
+  /** @param {number} n @returns {any} */
+  const read = (n) => {
+    try {
+      const file = path.join(root, '.sereno', 'attempts', task + '-' + n + '.json');
+      const st = fs.lstatSync(file);
+      if (!st.isFile() || st.size > MAX_INPUT) return null;
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (_e) { return null; }
+  };
+  const all = nums.map(read);
+  const last = all[all.length - 1];
+  if (!last || typeof last !== 'object') throw new SerenoError('not_found', 'the latest attempt record is unreadable');
+  if (last.outcome === 'running') throw new SerenoError('invalid_arg', 'attempt ' + nums[nums.length - 1] + ' is still running; finish it with --update first');
+  if (all.some((r) => r && r.head_commit === tip)) throw new SerenoError('tip_not_moved', 'the tip of task/' + task + ' is already recorded by an earlier attempt');
+  if (last.outcome !== 'error') throw new SerenoError('invalid_arg', 'attempt ' + nums[nums.length - 1] + ' ended as ' + String(last.outcome) + ', not error; --adopt is only for work that failed to commit (for example a hook refusal)');
+  const lastN = nums[nums.length - 1];
+  if (typeof last.start_commit === 'string' && gitlib.isSha(last.start_commit)) {
+    // The commit the Builder started from is the reference: a clock or an amend cannot fool it.
+    if (tip === last.start_commit.toLowerCase()) throw new SerenoError('tip_not_moved', 'the tip of task/' + task + ' is still the commit attempt ' + lastN + ' started from');
+    if (gitlib.isAncestor(root, last.start_commit, tip) !== true) throw new SerenoError('tip_unrelated', 'the tip of task/' + task + ' does not build on the commit attempt ' + lastN + ' started from');
+  } else {
+    // An older record with no start_commit: fall back to commit time against the attempt's end.
+    const ref = typeof last.ended_at === 'string' ? last.ended_at : (typeof last.started_at === 'string' ? last.started_at : null);
+    const refMs = ref ? new Date(ref).getTime() : NaN;
+    if (!isNaN(refMs)) {
+      const ct = gitlib.git(root, ['show', '-s', '--format=%ct', '--end-of-options', tip]);
+      const tipSec = ct && /^\d{1,12}$/.test(ct) ? parseInt(ct, 10) : NaN;
+      if (isNaN(tipSec)) throw new SerenoError('invalid_arg', 'could not read the commit time of the tip');
+      if (tipSec <= Math.floor(refMs / 1000)) throw new SerenoError('tip_not_moved', 'the tip of task/' + task + ' is not a new commit since attempt ' + lastN + ' ended');
+    }
+  }
+  const pinned = checkSpecPin(root, fsafe, task, '.sereno/specs/' + task + '.md');
+  const { config_hash } = loadConfig(root);
+  const now = new Date().toISOString();
+  /** @type {Record<string, any>} */
+  const record = {
+    project_id: typeof last.project_id === 'string' && last.project_id ? last.project_id : projectId(root),
+    task_id: task,
+    spec_revision: Number.isInteger(last.spec_revision) && last.spec_revision > 0 ? last.spec_revision : 1,
+    attempt: 0,
+    builder_requested: rec.enumOr(last.builder_requested, rec.BUILDERS),
+    agent_id: null,
+    config_hash,
+    kind: rec.enumOr(last.kind, rec.KINDS),
+    fixes: typeof last.fixes === 'string' ? last.fixes : null,
+    diagnosis: 'none',
+    outcome: 'built',
+    review_run_id: null,
+    started_at: now,
+    ended_at: now,
+  };
+  if (pinned) record.spec_hash = pinned;
+  if (last.no_verify_approved === true) record.no_verify_approved = true;
+  record.head_commit = tip;
+  return allocateAttempt(fsafe, task, record);
+}
+
+/**
  * attempt --update <n>: merge outcome, diagnosis, review run id and end time into
  * an existing record. A record whose outcome is final is never changed.
  * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, string | boolean>} a
  */
 function updateAttempt(root, fsafe, task, a) {
-  for (const k of ['spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'started-at']) {
+  for (const k of ['spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'started-at', 'start-commit']) {
     if (a[k] !== undefined) throw new SerenoError('usage', '--' + k + ' cannot be combined with --update');
   }
   const nArg = str(a, 'update');
