@@ -9493,7 +9493,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(t.includes('--after <task>') && t.includes('--hold "<one line>"'));
       for (const n of ['builder', 'builder-haiku', 'builder-opus']) {
         const a = rd('agents/' + n + '.md');
-        assert.ok(a.includes('do not use `--no-verify`') && a.includes('hook_failed'), n);
+        assert.ok(a.includes('do not use `--no-verify` unless the prompt says the user approved it for this task') && a.includes('hook_failed'), n);
       }
     });
     test('[plugin-0.4 A1] next.js is not in the app bundle list yet (A4)', () => {
@@ -9538,7 +9538,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(n.includes("This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process."));
       assert.ok(/## How to run commands/.test(n) && /with the Bash tool, never PowerShell or cmd/.test(n) && n.includes('Never use `run_in_background`'));
       assert.ok(n.includes('bin/sereno.js" next [--task <task>]'));
-      assert.ok(n.includes('bin/sereno.js" preflight') && /passed. is false/.test(n) && n.includes('--no-verify') && /Never skip a hook yourself/.test(n));
+      { const bd = rd('skills/build/SKILL.md'); assert.ok(bd.includes('bin/sereno.js" preflight') && /passed. is false/.test(bd) && bd.includes('--no-verify') && /Never skip a hook yourself/.test(bd), 'preflight lives in build'); assert.ok(n.includes('`preflight`') && n.includes('--no-verify'), 'next points at it'); }
       assert.ok(n.includes('${CLAUDE_PLUGIN_ROOT}/skills/build/SKILL.md') && n.includes('${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md'));
       assert.ok(/at most 3 `build` \/ `ship` \/ `repair` \/ `retry` steps/.test(n));
       assert.ok(/never merge/.test(n) && /never run anything against a remote/.test(n) && /Do not merge/.test(n));
@@ -15309,38 +15309,6 @@ test('missing rate_limits degrades instead of throwing', () => {
     }
 
     // ---- 1 preflight on the task branch ----
-    test('[plugin-0.4 field] preflight --task: the hook runs on task/<t>, shows its real failure in output_tail, and the branch is restored', () => {
-      const dir = repoOnDev();
-      let r = S(dir, ['preflight']).out;
-      assert.deepStrictEqual([r.passed, r.branch_note], [true, null], 'on dev the hook sees no marker');
-      assert.strictEqual(r.output_head[0], "WARNING: Committing straight to 'dev'");
-      r = S(dir, ['preflight', '--task', 't1']).out;
-      assert.deepStrictEqual([r.ok, r.passed, r.branch_note], [true, false, null]);
-      assert.ok(!r.output_head.some((l) => /WARNING/.test(l)), 'no dev warning: it ran on the task branch');
-      assert.strictEqual(r.output_tail.length, 8);
-      assert.ok(r.output_tail.some((l) => /Expo drift/.test(l)), JSON.stringify(r.output_tail));
-      assert.strictEqual(git(dir, 'branch', '--show-current'), 'dev', 'switched back');
-      assert.strictEqual(git(dir, 'status', '--porcelain', '--untracked-files=all'), '');
-    });
-    test('[plugin-0.4 field] preflight --task: a dirty tree is not switched; the hook runs in place and branch_note says where', () => {
-      const dir = repoOnDev();
-      fs.writeFileSync(path.join(dir, 'a.txt'), 'changed\n');
-      const r = S(dir, ['preflight', '--task', 't1']).out;
-      assert.deepStrictEqual([r.passed, r.branch_note], [true, 'ran on dev']);
-      assert.strictEqual(git(dir, 'branch', '--show-current'), 'dev');
-      assert.strictEqual(S(dir, ['preflight', '--task', 'nope']).out.branch_note, 'ran on dev (task/nope does not exist)');
-      assert.strictEqual(S(dir, ['preflight', '--task', '../x']).out.ok, false);
-    });
-    test('[plugin-0.4 field] preflight --task: already on the task branch stays there; a throw while the hook runs still restores the branch', () => {
-      const dir = repoOnDev();
-      git(dir, 'switch', '-q', 'task/t1');
-      assert.deepStrictEqual([S(dir, ['preflight', '--task', 't1']).out.passed, git(dir, 'branch', '--show-current')], [false, 'task/t1']);
-      git(dir, 'switch', '-q', 'dev');
-      const real = spawnSync;
-      const spawn = (f, a, o) => { if (a[0] === 'hook') throw new Error('boom'); return real(f, a, o); };
-      assert.throws(() => preflightLib.preflight({ root: dir, task: 't1', spawn }), /boom/);
-      assert.strictEqual(git(dir, 'branch', '--show-current'), 'dev', 'finally switched back');
-    });
     test('[plugin-0.4 field] preflight: output_tail is the last 8 lines, each cut to 200 characters', () => {
       const t = preflightLib.tail(Array.from({ length: 20 }, (_, i) => 'L' + (i + 1)).join('\n') + '\n' + 'z'.repeat(500));
       assert.strictEqual(t.length, 8);
@@ -15348,12 +15316,6 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(t[7].length, 200);
       assert.deepStrictEqual(preflightLib.tail(''), []);
     });
-    test('[plugin-0.4 field] next skill passes --task to preflight and shows output_tail', () => {
-      const n = skill('next');
-      assert.ok(n.includes('bin/sereno.js" preflight --task <task>'));
-      assert.ok(/output_tail/.test(n) && /branch_note/.test(n));
-    });
-
     // ---- 2 never continue on a plain reply ----
     test('[plugin-0.4 field] no skill tells the user to reply or "tell me which", or waits on an answer', () => {
       const sentence = /A plain reply from the user starts a new turn[^.]*\./g;
@@ -15368,17 +15330,17 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[plugin-0.4 field] approve-no-verify is documented in next and build, and the argument words are parsed', () => {
       for (const k of ['next', 'build']) {
         const t = skill(k);
-        assert.match(t, /approve-no-verify`: the user approves/);
-        assert.match(t, /first word(, if there is one,)? is the task name; any other words are flags/);
-        assert.match(t, /this task's Builder commit only/);
+        assert.match(t, /`approve-no-verify`( approves|: the user approves) `--no-verify` for this task's Builder commit/);
+        assert.match(t, /first word is the task name/);
+        assert.match(t, /any other words are flags|a flag word/);
       }
       assert.match(skill('next'), /\/sereno:next <task> approve-no-verify/);
       assert.match(skill('build'), /\/sereno:build <task> approve-no-verify/);
       assert.match(skill('build'), /--no-verify-approved/);
-      assert.match(skill('build'), /Without `approve-no-verify`, the Builder must not use `--no-verify`/);
-      assert.match(skill('next'), /no_verify_approved: true/);
+      assert.match(skill('build'), /the Builder must not use `--no-verify`/);
+      assert.match(skill('next'), /\/sereno:next <task> approve-no-verify/);
     });
-    test('[plugin-0.4 field] attempt --no-verify-approved stores no_verify_approved: true on the running record; absent otherwise', () => {
+    test('[plugin-0.4 field] attempt --no-verify-approved stores no_verify_approved: true on the running record; a later attempt of the task inherits it', () => {
       const dir = repoOnDev();
       git(dir, 'switch', '-q', 'task/t1');
       const base = ['attempt', '--task', 't1', '--builder', 'sonnet', '--kind', 'feature', '--diagnosis', 'none', '--outcome', 'running'];
@@ -15388,7 +15350,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const u = S(dir, ['attempt', '--task', 't1', '--update', String(r.attempt), '--outcome', 'built']).out;
       assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, u.path), 'utf8')).no_verify_approved, true, 'kept on update');
       r = S(dir, base).out;
-      assert.strictEqual(Object.prototype.hasOwnProperty.call(JSON.parse(fs.readFileSync(path.join(dir, r.path), 'utf8')), 'no_verify_approved'), false);
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, r.path), 'utf8')).no_verify_approved, true, 'a later attempt of the same task inherits it (see field2); a first attempt has none');
       assert.strictEqual(S(dir, ['attempt', '--adopt', '--task', 't1', '--no-verify-approved']).out.code, 'usage');
     });
 
@@ -15456,6 +15418,203 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('[plugin-0.4 field] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
+  /* ---- [plugin-0.4 field2] red-team fixes for the field-test round ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const speclib = require('../plugin/bin/lib/spec.js');
+    const doctorLib = require('../plugin/bin/lib/doctor.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-fld2-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const skill = (n) => fs.readFileSync(path.join(PLUGIN, 'skills', n, 'SKILL.md'), 'utf8');
+    const readRec = (dir, p) => JSON.parse(fs.readFileSync(path.join(dir, p), 'utf8'));
+    function repoOnDev() {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'dev');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      for (const t of ['t1', 't2']) git(dir, 'branch', 'task/' + t);
+      git(dir, 'switch', '-q', 'task/t1');
+      fs.writeFileSync(path.join(dir, 'drift.marker'), 'x\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'marker');
+      git(dir, 'switch', '-q', 'dev');
+      fs.writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'), [
+        '#!/bin/sh',
+        'b=$(git symbolic-ref --short HEAD)',
+        'case "$b" in task/*) ;; *) echo "WARNING: Committing straight to \'$b\'";; esac',
+        'for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "check $i"; done',
+        'if [ -f drift.marker ]; then echo "Expo drift: run npx expo install" >&2; exit 1; fi',
+        'exit 0', ''].join('\n'), { mode: 0o755 });
+      return dir;
+    }
+
+    // ---- 1 preflight never switches ----
+    test('[plugin-0.4 field2] preflight --task never changes the current branch; it reports on_task_branch and branch_note', () => {
+      const dir = repoOnDev();
+      let r = S(dir, ['preflight', '--task', 't1']).out;
+      assert.deepStrictEqual([r.ok, r.passed, r.on_task_branch, r.branch_note], [true, true, false, 'ran on dev'], 'it ran on dev, where the marker is absent');
+      assert.strictEqual(r.output_head[0], "WARNING: Committing straight to 'dev'");
+      assert.strictEqual(git(dir, 'branch', '--show-current'), 'dev');
+      assert.strictEqual(S(dir, ['preflight', '--task', 'nope']).out.branch_note, 'ran on dev');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'changed\n');
+      assert.strictEqual(S(dir, ['preflight', '--task', 't1']).out.on_task_branch, false);
+      assert.strictEqual(git(dir, 'branch', '--show-current'), 'dev', 'a dirty tree changes nothing either');
+      git(dir, 'checkout', '-q', '--', 'a.txt');
+      git(dir, 'switch', '-q', 'task/t1');
+      r = S(dir, ['preflight', '--task', 't1']).out;
+      assert.deepStrictEqual([r.passed, r.on_task_branch, r.branch_note], [false, true, null]);
+      assert.ok(r.output_tail.some((l) => /Expo drift/.test(l)) && r.output_tail.length === 8, JSON.stringify(r.output_tail));
+      assert.ok(!r.output_head.some((l) => /WARNING/.test(l)));
+      assert.strictEqual(git(dir, 'branch', '--show-current'), 'task/t1');
+      assert.strictEqual(S(dir, ['preflight', '--task', '../x']).out.ok, false);
+      assert.strictEqual(S(dir, ['preflight']).out.on_task_branch, null);
+      assert.ok(!/\bswitch\b|checkout/.test(fs.readFileSync(path.join(PLUGIN, 'bin', 'lib', 'preflight.js'), 'utf8').replace(/^\s*(\/\/|\*|\/\*).*$/gm, '')), 'the code has no switch or checkout');
+    });
+    test('[plugin-0.4 field2] build runs preflight --task after switching to the task branch and before any record or Builder; next does not run it', () => {
+      const b = skill('build');
+      const sw = b.indexOf('git switch task/<task>'), pf = b.indexOf('sereno.js" preflight --task <task>'), rec = b.indexOf('## 3. Record the attempt');
+      assert.ok(sw > 0 && pf > sw && rec > pf, 'switch, then preflight, then the attempt record');
+      assert.ok(/output_tail/.test(b) && /branch_note/.test(b) && /never switches branches/.test(b));
+      assert.ok(/write no attempt record, start no Builder/.test(b));
+      const n = skill('next');
+      assert.ok(!n.includes('sereno.js" preflight'), 'next relies on build');
+      assert.ok(/Do not run `preflight` here/.test(n));
+      const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
+      assert.ok(!/switches to it and back/.test(readme) && /never switches branches/.test(readme));
+    });
+
+    // ---- 2 builder agents ----
+    test('[plugin-0.4 field2] builder agents: no --no-verify unless the prompt says the user approved it, and say so in the report', () => {
+      for (const n of ['builder', 'builder-haiku', 'builder-opus']) {
+        const a = fs.readFileSync(path.join(PLUGIN, 'agents', n + '.md'), 'utf8');
+        assert.ok(a.includes('do not use `--no-verify` unless the prompt says the user approved it for this task; if you use it, say so in your report'), n);
+        assert.ok(a.includes('hook_failed'), n);
+      }
+    });
+
+    // ---- 3 approval lasts for the task ----
+    test('[plugin-0.4 field2] a new running attempt inherits no_verify_approved from the same task only, and not after stop', () => {
+      const dir = repoOnDev();
+      git(dir, 'switch', '-q', 'task/t1');
+      const run = (t) => S(dir, ['attempt', '--task', t, '--builder', 'sonnet', '--kind', 'feature', '--diagnosis', 'none', '--outcome', 'running']).out;
+      const fin = (t, n, o) => S(dir, ['attempt', '--task', t, '--update', String(n), '--outcome', o]).out;
+      let a1 = S(dir, ['attempt', '--task', 't1', '--builder', 'sonnet', '--kind', 'feature', '--diagnosis', 'none', '--outcome', 'running', '--no-verify-approved']).out;
+      assert.strictEqual(readRec(dir, a1.path).no_verify_approved, true);
+      fin('t1', 1, 'error');
+      const a2 = run('t1');
+      assert.strictEqual(readRec(dir, a2.path).no_verify_approved, true, 'inherited');
+      fin('t1', 2, 'error');
+      const a3 = run('t1');
+      assert.strictEqual(readRec(dir, a3.path).no_verify_approved, true, 'still inherited');
+      fin('t1', 3, 'error');
+      git(dir, 'switch', '-q', 'task/t2');
+      const b1 = run('t2');
+      assert.ok(!('no_verify_approved' in readRec(dir, b1.path)), 'another task starts fresh');
+      fin('t2', 1, 'error');
+      git(dir, 'switch', '-q', 'task/t1');
+      assert.strictEqual(S(dir, ['stop', '--task', 't1']).out.ok, true);
+      const a5 = run('t1');
+      assert.ok(!('no_verify_approved' in readRec(dir, a5.path)), 'a stopped task starts fresh');
+    });
+    test('[plugin-0.4 field2] ship adds the approval sentence to a repair or retry Builder prompt when the record has it', () => {
+      const s = skill('ship');
+      assert.ok(/inherits `no_verify_approved`/.test(s) && /no_verify_approved: true/.test(s) && /use `git commit --no-verify` only if a hook refuses it/.test(s));
+      assert.ok(/lasts for the task/.test(skill('build')));
+    });
+
+    // ---- 4 onFallback ask ----
+    test('[plugin-0.4 field2] onFallback ask: ship records nothing and prints the use-fallback command; the flag is parsed in ship and next', () => {
+      const s = skill('ship'), n = skill('next');
+      assert.ok(/do not write a gate or change the attempt record/.test(s) && s.includes('/sereno:ship <task> use-fallback'));
+      assert.ok(/With `use-fallback`, behave as `auto`/.test(s));
+      assert.ok(/The one flag is `use-fallback`/.test(s) && s.includes('/sereno:ship <task> [use-fallback]'));
+      assert.ok(n.includes('`use-fallback`') && /with `use-fallback` if the user gave it/.test(n) && n.includes('/sereno:next [task] [approve-no-verify] [use-fallback]'));
+      assert.ok(!/set\s+`roles\.redTeam\.onFallback` to `auto`/.test(s), 'no more telling the user to edit the config');
+      const readme = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
+      assert.ok(/onFallback: "ask"` stops and prints `\/sereno:ship <task> use-fallback`/.test(readme));
+      assert.ok(/\| `roles\.redTeam\.onFallback` \| `"ask"` \| `"ask"` \(stop and print the `use-fallback` command\)/.test(readme));
+      assert.strictEqual(S(repoOnDev(), ['config']).out.config.roles.redTeam.onFallback, 'ask', 'ask stays the default');
+    });
+
+    // ---- 5 resume after a background agent ----
+    test('[plugin-0.4 field2] background paragraphs: finish the agent\'s own step first; a second running record is refused', () => {
+      for (const k of ['next', 'build', 'ship']) {
+        const t = skill(k);
+        assert.match(t, /first finish that agent's own step/, k);
+        assert.match(t, /and only then continue from the step after that agent/, k);
+        assert.match(t, /Never start a second Builder or red team for the same attempt/, k);
+      }
+      const dir = repoOnDev();
+      git(dir, 'switch', '-q', 'task/t1');
+      const args = ['attempt', '--task', 't1', '--builder', 'sonnet', '--kind', 'feature', '--diagnosis', 'none', '--outcome', 'running'];
+      assert.strictEqual(S(dir, args).out.ok, true);
+      const r = S(dir, args);
+      assert.deepStrictEqual([r.out.ok, r.out.code], [false, 'attempt_running']);
+      assert.ok(!fs.existsSync(path.join(dir, '.sereno', 'attempts', 't1-2.json')));
+      S(dir, ['attempt', '--task', 't1', '--update', '1', '--outcome', 'built']);
+      assert.strictEqual(S(dir, args).out.ok, true, 'allowed once the newest is finished');
+    });
+
+    // ---- 6 flag words ----
+    test('[plugin-0.4 field2] next: a flag word is never a task name', () => {
+      const n = skill('next');
+      assert.ok(/a flag word \(`approve-no-verify`, `use-fallback`\) is never a task name/.test(n));
+      assert.ok(/`\/sereno:next approve-no-verify` means no task plus that flag/.test(n));
+    });
+
+    // ---- 7 recovery reason ----
+    test('[plugin-0.4 field2] recovery: the hook_failed reason also offers /sereno:build <task> approve-no-verify', () => {
+      const dir = repoOnDev();
+      git(dir, 'switch', '-q', 'task/t1');
+      S(dir, ['attempt', '--task', 't1', '--builder', 'sonnet', '--kind', 'feature', '--diagnosis', 'none', '--outcome', 'running']);
+      S(dir, ['attempt', '--task', 't1', '--update', '1', '--outcome', 'error', '--diagnosis', 'hook_failed', '--ended-at', 'now']);
+      const r = S(dir, ['recovery', '--task', 't1']).out;
+      assert.strictEqual(r.next, 'decide');
+      assert.match(r.reason, /^hook_failed:/);
+      assert.ok(r.reason.includes('/sereno:build t1 approve-no-verify') && r.reason.includes('attempt --adopt'), r.reason);
+    });
+
+    // ---- 8 title: fences in Goal, "Goal:" ----
+    test('[plugin-0.4 field2] spec title: fenced blocks inside ## Goal are skipped (both fence kinds), and "## Goal:" counts as Goal', () => {
+      const dir = mk();
+      const put = (task, text) => { fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true }); fs.writeFileSync(path.join(dir, '.sereno', 'specs', task + '.md'), text); };
+      const T = (task) => speclib.readSpecTitle(dir, task);
+      put('bt', '---\ntask: "bt"\n---\n\n## Goal\n```sh\nnpm run build\n```\nShip the CSV export\n');
+      put('tl', '---\ntask: "tl"\n---\n\n## Goal\n~~~\nsome code\n~~~\nShip the PDF export\n');
+      put('colon', '---\ntask: "colon"\n---\n\n## Goal:\nWith a colon\n');
+      put('hash', '---\ntask: "hash"\n---\n\n## Goal ##\nWith closing hashes\n');
+      put('onlyfence', '---\ntask: "onlyfence"\n---\n\n## Goal\n```\ncode only\n```\n\n## Tests\nx\n');
+      put('colonh1', '---\ntask: "colonh1"\n---\n\n# Goal:\n\n## Goal\nFrom the section\n');
+      assert.strictEqual(T('bt'), 'Ship the CSV export');
+      assert.strictEqual(T('tl'), 'Ship the PDF export');
+      assert.strictEqual(T('colon'), 'With a colon');
+      assert.strictEqual(T('hash'), 'With closing hashes');
+      assert.strictEqual(T('onlyfence'), 'onlyfence');
+      assert.strictEqual(T('colonh1'), 'From the section');
+    });
+
+    // ---- 9 doctor values ----
+    test('[plugin-0.4 field2] doctor: CLAUDE_CODE_FORK_SUBAGENT 0 or false is off, 1 or true is on, an unrecognised value is unknown', () => {
+      const f = (v, d) => doctorLib.backgroundSubagents({ CLAUDE_CODE_FORK_SUBAGENT: v, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: d });
+      assert.deepStrictEqual(['0', 'false', 'FALSE', ' 0 '].map((v) => f(v)), ['off', 'off', 'off', 'off']);
+      assert.deepStrictEqual(['1', 'true', 'True', 'yes'].map((v) => f(v)), ['on', 'on', 'on', 'on']);
+      assert.deepStrictEqual(['maybe', '2', '', undefined].map((v) => f(v)), ['unknown', 'unknown', 'unknown', 'unknown']);
+      assert.strictEqual(f('1', '1'), 'off');
+      assert.strictEqual(f('1', 'true'), 'off');
+      assert.strictEqual(f('1', '0'), 'on');
+    });
+
+    await atest('[plugin-0.4 field2] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

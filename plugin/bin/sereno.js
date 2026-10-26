@@ -36,8 +36,8 @@
  *                           otherwise error code after_not_merged. /sereno:build calls it first.
  *   preflight [--task <t>] [--timeout-sec <n>]
  *                           runs the repo's pre-commit hook against the current tree, without committing:
- *                           { hook, passed, timed_out, dirty_after, output_head, output_tail, branch_note }.
- *                           With --task the hook runs on task/<t> (switched to and back when the tree is clean). Hooks can modify files
+ *                           { hook, passed, timed_out, dirty_after, output_head, output_tail, on_task_branch, branch_note }.
+ *                           With --task it reports on_task_branch / branch_note; it never switches branches. Hooks can modify files
  *                           (lint --fix): it reports dirty_after when the tree changed and never undoes it.
  *   spec ... [--after <task|none>] [--hold <text>]
  *                           `after` queues the task behind another; `hold` (<= 200 chars, one line) is
@@ -54,7 +54,9 @@
  *                           or when there is none. Writes one record; never touches git.
  *   attempt ... --no-verify-approved
  *                           on a new running record: stores no_verify_approved: true (the user approved
- *                           --no-verify for this task's Builder commit). Without it the Builder must not use it.
+ *                           --no-verify for this task's Builder commit). A new running record inherits it from
+ *                           the newest earlier attempt of the same task (not after stop). Without it the Builder must not use it.
+ *                           A new running record is refused (attempt_running) while the newest attempt is still running.
  *   attempt --start-commit <sha>
  *                           records the commit the Builder started from, on the running record.
  */
@@ -444,7 +446,17 @@ const COMMANDS = {
     if (specHash !== null) /** @type {any} */ (record).spec_hash = specHash;
     if (startCommit) /** @type {any} */ (record).start_commit = startCommit;
     // The user's per-task approval to use --no-verify on the Builder's commit; recorded so it is auditable.
-    if (a['no-verify-approved']) /** @type {any} */ (record).no_verify_approved = true;
+    // The approval lasts for the task: a new running record inherits it from the newest earlier attempt of the
+    // same task (a stopped task starts fresh). It never carries to another task.
+    let inherit = false;
+    {
+      const re = attemptRe(task);
+      let top = 0;
+      for (const f of fsafe.listDir('.sereno/attempts')) { const m = re.exec(f); if (m) top = Math.max(top, parseInt(m[1], 10)); }
+      const prev = top ? newestAttemptRecord(fsafe, task, top) : null;
+      inherit = !!(prev && prev.no_verify_approved === true && prev.outcome !== 'stopped');
+    }
+    if (a['no-verify-approved'] || (inherit && record.outcome === 'running')) /** @type {any} */ (record).no_verify_approved = true;
     return allocateAttempt(fsafe, task, record);
   },
 
@@ -665,12 +677,26 @@ const COMMANDS = {
  * race for the same number, the loser takes the next one.
  * @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, any>} record
  */
+function newestAttemptRecord(fsafe, task, n) {
+  try {
+    const r = JSON.parse(fsafe.readFile('.sereno/attempts/' + task + '-' + n + '.json', MAX_INPUT).toString('utf8'));
+    return r && typeof r === 'object' && !Array.isArray(r) ? r : null;
+  } catch (_e) { return null; }
+}
+
+/** @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, any>} record */
 function allocateAttempt(fsafe, task, record) {
   const re = attemptRe(task);
   let n = 1;
   for (const f of fsafe.listDir('.sereno/attempts')) {
     const m = re.exec(f);
     if (m) n = Math.max(n, parseInt(m[1], 10) + 1);
+  }
+  // A second running record would mean a second Builder for an attempt that is still going (for example
+  // when a background agent's result arrives after the loop moved on).
+  if (record.outcome === 'running' && n > 1) {
+    const prev = newestAttemptRecord(fsafe, task, n - 1);
+    if (prev && prev.outcome === 'running') throw new SerenoError('attempt_running', 'attempt ' + (n - 1) + ' of ' + task + ' is still running; finish it with --update before starting another');
   }
   for (let tries = 0; tries < 20; tries++, n++) {
     record.attempt = n;

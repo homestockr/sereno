@@ -13,8 +13,10 @@ const AGENTS_DIR = path.join(__dirname, '..', '..', 'agents');
 
 /** @param {Record<string, string | undefined>} env @returns {'on' | 'off' | 'unknown'} */
 function backgroundSubagents(env) {
-  if (env.CLAUDE_CODE_FORK_SUBAGENT === '0' || env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === '1') return 'off';
-  if (env.CLAUDE_CODE_FORK_SUBAGENT !== undefined && env.CLAUDE_CODE_FORK_SUBAGENT !== '') return 'on';
+  const fork = String(env.CLAUDE_CODE_FORK_SUBAGENT === undefined ? '' : env.CLAUDE_CODE_FORK_SUBAGENT).trim().toLowerCase();
+  const dis = String(env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === undefined ? '' : env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).trim().toLowerCase();
+  if (/^(0|false|no|off)$/.test(fork) || /^(1|true|yes|on)$/.test(dis)) return 'off';
+  if (/^(1|true|yes|on)$/.test(fork)) return 'on';
   return 'unknown';
 }
 

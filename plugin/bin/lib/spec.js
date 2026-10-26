@@ -105,7 +105,8 @@ function readSpecMeta(root, task) {
 
 const GENERIC_HEADINGS = ['goal', 'background', 'acceptance criteria', 'tests', 'out of scope', 'notes'];
 /** @param {string} h */
-const isGeneric = (h) => GENERIC_HEADINGS.includes(h.replace(/[:\s#]+$/, '').trim().toLowerCase());
+const normHeading = (h) => h.replace(/[:\s#]+$/, '').trim().toLowerCase();
+const isGeneric = (h) => GENERIC_HEADINGS.includes(normHeading(h));
 
 /** Cut at 72 characters on a word boundary (a single long word is cut hard). @param {string} s */
 function wordCut(s) {
@@ -148,9 +149,10 @@ function readSpecTitle(root, task) {
         if (!raw) {
           fence = false;
           for (const line of body.split(/\r?\n/)) {
-            if (/^\s*(```|~~~)/.test(line)) { fence = !fence; if (!inGoal) continue; }
-            const h = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(fence ? '' : line);
-            if (h) { if (inGoal) break; inGoal = h[1] === '##' && h[2].trim().toLowerCase() === 'goal'; continue; }
+            if (/^\s*(```|~~~)/.test(line)) { fence = !fence; continue; }
+            if (fence) continue;
+            const h = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(line);
+            if (h) { if (inGoal) break; inGoal = h[1] === '##' && normHeading(h[2]) === 'goal'; continue; }
             if (inGoal && line.trim()) { raw = line.trim().replace(/^(?:[-*+>]|\d+[.)])[ \t]+/, ''); break; }
           }
         }

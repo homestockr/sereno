@@ -24,7 +24,7 @@ While building:
   or `git add .`, and never stage anything under `.sereno/`.
 - Never change configuration, hooks, settings or other branches. Never send commits to a remote. Never
   touch anything outside this repo.
-- If `git commit` is refused by a hook, do not use `--no-verify` and do not unstage anything. Stop, leave
+- If `git commit` is refused by a hook, do not use `--no-verify` unless the prompt says the user approved it for this task; if you use it, say so in your report. Do not unstage anything. Stop, leave
   the work staged, and report the first lines of the hook output, so the attempt is recorded as `hook_failed`.
 - Never read or copy secrets, credentials or real user data into the repo.
 

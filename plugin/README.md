@@ -53,7 +53,7 @@ Write the specs, then let `/sereno:next` carry them. It runs every step that nee
 
 - **`--after <task>`** queues a task behind another. `/sereno:build` refuses it (`after_not_merged`) until that task is merged into the base. With no argument, `/sereno:next` takes the one task in progress, else the oldest spec that is ready; with two in progress it asks which.
 - **`--hold "<one line>"`** on `/sereno:task` names a human step outside the pipeline, such as applying a migration to staging. `next` and `merge` print it before the merge. Typing `/sereno:merge` confirms it is done; the plugin never runs it.
-- **Preflight.** Before the first build, `next` runs the repo's pre-commit hook (`sereno.js preflight --task <name>`) with `task/<name>` checked out (it switches to it and back when the tree is clean; with a dirty tree it runs in place and says so in `branch_note`). If the hook fails, `next` stops before any Builder tokens are spent and shows the last lines of the output (`output_tail`). To go on past a hook failure, run `/sereno:next <name> approve-no-verify` (or `/sereno:build <name> approve-no-verify`): that approves `--no-verify` for that task's Builder commit only and stores `no_verify_approved: true` in the attempt record. Without it the Builder never uses `--no-verify`.
+- **Preflight.** `/sereno:build` runs the repo's pre-commit hook (`sereno.js preflight --task <name>`) after it has switched to `task/<name>` and before it starts the Builder; `preflight` itself never switches branches (it reports `on_task_branch` and `branch_note`). If the hook fails, the build stops before any Builder tokens are spent and shows the last lines of the output (`output_tail`). To go on past a hook failure, run `/sereno:next <name> approve-no-verify` (or `/sereno:build <name> approve-no-verify`): that approves `--no-verify` for that task's Builder commits and stores `no_verify_approved: true` in the attempt record; later attempts of the same task inherit it, and it ends when the task is merged or stopped. Without it the Builder never uses `--no-verify`.
 - **No choice waits for a plain reply.** A plain reply starts a new turn on your session model and loses the skill's `sonnet`, so every skill that needs your decision ends its turn and prints the options as commands to run.
 - **Squash merges done outside `/sereno:merge` are not detected.** Use `/sereno:merge`; if the branch was squash-merged and deleted by hand, run `sereno.js stop --task <name>` to retire the task.
 - **A hook that refuses the Builder's commit** is recorded as `hook_failed`, and the work stays staged. Fix the hook on its own branch, or approve a commit that skips it, then run `sereno.js attempt --adopt --task <name>` to record that commit so ship can go on. Nothing skips a hook without your yes.
@@ -138,7 +138,7 @@ If an agent still runs in the background, the skills carry on from the step afte
 Two presets:
 
 - `default`: the red team is `red-team` on Fable. If Fable is unavailable,
-  `onFallback: "ask"` offers `red-team-lean` instead.
+  `onFallback: "ask"` stops and prints `/sereno:ship <task> use-fallback` (or `/sereno:next <task> use-fallback`) so you approve `red-team-lean` by re-running.
 - `lean`: the red team is `red-team-lean` on Opus, with no fallback.
 
 Both presets use the same Builders.
@@ -163,7 +163,7 @@ invalid file stops the pipeline and lists the errors.
 | `roles.scribe.agent` | `"scribe"` | Agent that writes briefs and commit text. |
 | `roles.redTeam.agent` | `"red-team"` | Red team agent for `/sereno:ship`. |
 | `roles.redTeam.fallback` | `"red-team-lean"` | Used when the red team's model is unavailable. `null` for none. |
-| `roles.redTeam.onFallback` | `"ask"` | `"ask"`, `"auto"` or `"never"`. |
+| `roles.redTeam.onFallback` | `"ask"` | `"ask"` (stop and print the `use-fallback` command), `"auto"` or `"never"`. |
 | `roles.redTeam.maxBlockedRuns` | `2` | Blocks in a row before the run asks you for a decision. |
 | `roles.redTeam.enabled` | `true` | `false` switches the review off. The gate is then `skipped`. |
 | `roles.redTeam.light` | off in `default`; `kinds: ["mechanical"]` in `lean` | A lighter reviewer for small plain tasks: `{ kinds, maxDiffLines: 80, agent: "red-team-lean", never: [] }`. `sereno.js reviewer` picks it only when the spec kind is listed, the diff is at most `maxDiffLines` lines and no touched path matches a `never` glob. `**/migrations/**`, `supabase/**` and any path containing auth, permission, payment, delete or secret always get the full red team; `never` can only add globs. The gate still has to pass. |

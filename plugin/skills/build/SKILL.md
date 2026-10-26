@@ -14,11 +14,11 @@ Run every shell command in this skill with the Bash tool, never PowerShell or cm
 You are the architect. You run the Builder the spec names and record what happened.
 You do not write the feature code yourself.
 
-Arguments: `$ARGUMENTS`. The first word is the task name; any other words are flags. If the task is missing, stop and show the usage `/sereno:build <task> [approve-no-verify]`. The one flag is `approve-no-verify`: the user approves `--no-verify` for this task's Builder commit only, and only when a hook failure (preflight or `hook_failed`) is the reason. Any other word: stop and show the usage.
+Arguments: `$ARGUMENTS`. The first word is the task name; any other words are flags. If the task is missing, stop and show the usage `/sereno:build <task> [approve-no-verify]`. The one flag is `approve-no-verify`: the user approves `--no-verify` for this task's Builder commit only, and only when a hook failure (preflight or `hook_failed`) is the reason. Any other word: stop and show the usage. The approval lasts for the task: a later attempt of the same task inherits it (see step 3), until the task is merged or stopped.
 
 A plain reply from the user starts a new turn on the session model and loses this skill's model, so a choice never waits for an answer in this turn: end the turn and print each option as a command to re-run.
 
-Background agents: if an agent was started in the background anyway and its result arrives in a later turn, continue from the step after that agent. Use the attempt record (`.sereno/attempts/<task>-<n>.json`) and `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" next --task <task>` to find where you are. Never start a second Builder or red team for the same attempt.
+Background agents: if an agent was started in the background anyway and its result arrives in a later turn, first finish that agent's own step (for the Builder, steps 5 and 6 below: check the result and update the attempt record from it), and only then continue from the step after that agent. Use the attempt record (`.sereno/attempts/<task>-<n>.json`) and `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" next --task <task>` to find where you are. Never start a second Builder or red team for the same attempt (`attempt` refuses a new running record while the newest one is still running).
 
 This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process.
 
@@ -41,6 +41,14 @@ Then run `git switch task/<task>`. If the branch does not exist, stop and point 
 `/sereno:task`. Note the starting commit: `git rev-parse HEAD`, and the time (UTC,
 ISO 8601).
 
+Now, on the task branch and before any attempt record or Builder, check that the repo's commit hook would accept a commit:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" preflight --task <task>
+```
+
+`preflight` never switches branches; if `on_task_branch` is false, mention `branch_note` in one clause. If `passed` is false, show the `hook`, the `output_tail` lines (the real failure is at the end; `output_head` is only the start) and any `branch_note`. Without `approve-no-verify`, stop here: write no attempt record, start no Builder, and end the turn printing the options as commands: fix the hook on its own branch and run `/sereno:build <task>` again, or `/sereno:build <task> approve-no-verify` to approve `--no-verify` for this task's Builder commit. With `approve-no-verify`, carry on. If `dirty_after` is true, the hook changed files: stop, list them, and tell the user to review or discard them and run the build again. Never skip a hook yourself.
+
 ## 3. Record the attempt before the Builder starts
 
 One Builder run is one attempt record. Write it now, as `running`, so an interrupted run
@@ -50,7 +58,7 @@ still leaves a trace:
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --spec-revision <spec_revision> --builder <builder> --kind <kind> [--fixes <fixes>] --diagnosis none --outcome running --started-at <start> --start-commit <starting commit> --spec .sereno/specs/<task>.md [--no-verify-approved]
 ```
 
-Add `--no-verify-approved` only when the user gave `approve-no-verify`: it stores `no_verify_approved: true` in the record so the approval is auditable.
+Add `--no-verify-approved` when the user gave `approve-no-verify`: it stores `no_verify_approved: true` in the record so the approval is auditable. A new record also inherits it from the task's newest earlier attempt, so a later attempt of the same task keeps the approval without the flag (a stopped task starts fresh).
 
 `--start-commit` records the commit the Builder starts from; `--adopt` later uses it to tell a new commit from an old one. `--spec` pins the spec: it records the sha256 of the spec file as `spec_hash`, and the later test and gate steps refuse with `spec_changed` if the spec is edited afterwards. Add `--fixes` only when the spec has one. The result is `{ ok, path, attempt }`; keep the
 `attempt` number. If `ok` is false, show the error and stop.
@@ -71,7 +79,7 @@ Prompt: "Implement the task spec at `.sereno/specs/<task>.md` on the current bra
 If `fixes` is set, or this is a repair run with review findings, include those findings
 in the prompt and tell the Builder to fix only them.
 
-Without `approve-no-verify`, the Builder must not use `--no-verify`. With it, add to the prompt: "The user approved `--no-verify` for this task's commit. Commit normally first; use `git commit --no-verify` only if a hook refuses it, and say so in your report."
+Without the approval (the flag, or `no_verify_approved: true` in the record you just wrote), the Builder must not use `--no-verify`. With it, add to the prompt: "The user approved `--no-verify` for this task's commit. Commit normally first; use `git commit --no-verify` only if a hook refuses it, and say so in your report."
 
 ## 5. Check the result
 

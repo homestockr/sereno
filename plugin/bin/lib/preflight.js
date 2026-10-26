@@ -19,12 +19,11 @@
  * Windows). Only that path is used: a `.husky/pre-commit` that core.hooksPath does not point at
  * is not a hook git would run, so it is ignored. No hook means passed.
  *
- * With `task`, the hook runs with task/<task> checked out: if another branch is current and the tree is
- * clean the branch is switched first and restored in a finally; with a dirty tree (or a missing branch)
- * nothing is switched and `branch_note` says where it ran. A hook then sees the branch the Builder will
- * commit on (not the user's `dev`, where a "committing straight to dev" warning hid the real failure).
+ * It never switches branches. With `task` it only reports on_task_branch (is task/<task> the current
+ * branch?) and, when it is not, branch_note ("ran on <branch>"). The caller (/sereno:build) switches to the
+ * task branch first, so the hook sees the branch the Builder will commit on.
  *
- * Result: { hook: path | null, passed, timed_out, may_still_run, dirty_after, output_head, output_tail, branch_note }.
+ * Result: { hook: path | null, passed, timed_out, may_still_run, dirty_after, output_head, output_tail, on_task_branch, branch_note }.
  * On a timeout spawnSync has already killed the direct child, and nothing else is killed: its pid is
  * dead by then and may be reused, so a kill by pid could hit an unrelated process. The hook's own
  * children may survive, so may_still_run is true and dirty_after is the tree as of now.
@@ -79,27 +78,16 @@ function hasHookRun(v) {
  */
 function preflight(a) {
   const spawn = a.spawn || childProcess.spawnSync;
-  const root = a.root;
-  if (!a.task) return runHook(a, spawn, null);
-  const target = 'task/' + a.task;
-  const cur = gitlib.currentBranch(root);
-  if (cur === target) return runHook(a, spawn, null);
-  const curLabel = cur || 'a detached HEAD';
-  const exists = plainGit(root, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + target], spawn) !== null;
-  if (!exists) return runHook(a, spawn, 'ran on ' + curLabel + ' (' + target + ' does not exist)');
-  const files = gitlib.cleanFiles(root);
-  if (files === null || files.length) return runHook(a, spawn, 'ran on ' + curLabel);
-  const back = cur ? ['switch', '--quiet', cur] : ['switch', '--quiet', '--detach', String(plainGit(root, ['rev-parse', 'HEAD'], spawn) || '').trim()];
-  if (plainGit(root, ['switch', '--quiet', target], spawn) === null) return runHook(a, spawn, 'ran on ' + curLabel);
-  try {
-    return runHook(a, spawn, null);
-  } finally {
-    plainGit(root, back, spawn);
-  }
+  // Never switches branches (a restore can fail silently when a hook rewrites tracked files, and a
+  // checkout runs post-checkout hooks). It only reports whether the current branch is the task branch.
+  if (!a.task) return runHook(a, spawn, null, null);
+  const cur = gitlib.currentBranch(a.root);
+  const on = cur === 'task/' + a.task;
+  return runHook(a, spawn, on, on ? null : 'ran on ' + (cur || 'a detached HEAD'));
 }
 
-/** @param {{ root: string, timeoutMs?: number }} a @param {(f: string, a: string[], o: any) => any} spawn @param {string | null} branchNote */
-function runHook(a, spawn, branchNote) {
+/** @param {{ root: string, timeoutMs?: number }} a @param {(f: string, a: string[], o: any) => any} spawn @param {boolean | null} onTask @param {string | null} branchNote */
+function runHook(a, spawn, onTask, branchNote) {
   const root = a.root;
   const timeout = Math.min(Math.max(a.timeoutMs || DEFAULT_TIMEOUT_MS, 1000), MAX_TIMEOUT_MS);
 
@@ -112,7 +100,7 @@ function runHook(a, spawn, branchNote) {
   }
   // Only the path git itself would run (core.hooksPath is honoured by --git-path). A bare
   // .husky/pre-commit that git is not configured to use is not a hook git would run.
-  if (!hookAbs) return { hook: null, passed: true, timed_out: false, may_still_run: false, dirty_after: false, output_head: [], output_tail: [], branch_note: branchNote };
+  if (!hookAbs) return { hook: null, passed: true, timed_out: false, may_still_run: false, dirty_after: false, output_head: [], output_tail: [], on_task_branch: onTask, branch_note: branchNote };
 
   const rel = path.relative(root, hookAbs).split(path.sep).join('/');
   const hookLabel = rel && !rel.startsWith('..') ? rel : hookAbs;
@@ -138,6 +126,7 @@ function runHook(a, spawn, branchNote) {
     may_still_run: timedOut,
     dirty_after: before !== after,
     output_tail: tail(out),
+    on_task_branch: onTask,
     branch_note: branchNote,
     output_head: head(timedOut ? 'the hook did not finish within ' + Math.round(timeout / 1000) + ' s; it may still be running, and dirty_after is as of now\n' + out : out),
   };
