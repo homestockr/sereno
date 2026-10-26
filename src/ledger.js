@@ -55,7 +55,8 @@ const SESS_LIST_CAP = 500;
 const SESS_COLS = `s.session_id AS id, s.cwd AS cwd, s.project AS project, s.branch AS branch, s.model AS model,
   s.first_seen AS first_seen, s.last_seen AS last_seen, s.ended_at AS ended_at,
   (SELECT COALESCE(SUM(r.cost_micros),0) FROM requests r WHERE r.session_id = s.session_id) AS cost_micros,
-  (SELECT COUNT(*) FROM session_events e WHERE e.session_id = s.session_id AND e.kind = 'turn') AS turns`;
+  (SELECT COUNT(*) FROM session_events e WHERE e.session_id = s.session_id AND e.kind = 'turn') AS turns,
+  EXISTS (SELECT 1 FROM session_events e2 WHERE e2.session_id = s.session_id) AS has_events`;
 
 /** @returns {{ roles: Record<string, { costUsd: number, explicit: number, inferred: number, unattributed: number }> }} */
 function emptyRoleSpend() {
@@ -686,7 +687,7 @@ function openLedger(opts = {}) {
     id: String(r.id), cwd: r.cwd == null ? null : String(r.cwd), project: r.project == null ? null : String(r.project),
     branch: r.branch == null ? null : String(r.branch), model: r.model == null ? null : String(r.model),
     firstSeen: Number(r.first_seen), lastSeen: Number(r.last_seen), endedAt: r.ended_at == null ? null : Number(r.ended_at),
-    costMicros: Number(r.cost_micros), turns: Number(r.turns),
+    costMicros: Number(r.cost_micros), turns: Number(r.turns), hasEvents: Number(r.has_events) === 1,
   });
 
   /** Sessions seen at or after `sinceMs`, newest start first (at most 500). @param {number} sinceMs */

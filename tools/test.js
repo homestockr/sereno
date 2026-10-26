@@ -3974,7 +3974,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(html, /src="\/console\/console\.js"/);
       assert.match(html, /LOCAL WORKSPACE/);
       assert.match(html, /Local only/);
-      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 3);
+      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 4);   // [alpha7 S3] Sessions joined
       assert.ok(html.indexOf('data-route="projects"') < html.indexOf('data-route="spend"'));
       assert.ok(html.indexOf('data-route="spend"') < html.indexOf('data-route="pipeline"'));
       for (const v of ['--src-main', '--src-subagent', '--src-auxiliary', '--src-unattributed', '--src-hatch']) {
@@ -11384,8 +11384,8 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     test('[4b-tab] nav order is Projects, Spend, Pipeline and the tab is registered', () => {
       const order = [...html.matchAll(/data-route="(\w+)"/g)].map((m) => m[1]);
-      assert.deepStrictEqual(order, ['projects', 'spend', 'pipeline']);
-      assert.match(cj, /const TABS = \{ projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline' \}/);
+      assert.deepStrictEqual(order, ['projects', 'spend', 'pipeline', 'sessions']);   // [alpha7 S3] Sessions joined, after Pipeline
+      assert.match(cj, /const TABS = \{ projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline', sessions: 'Sessions' \}/);
       assert.match(cj, /getJson\('\/api\/pipeline'\)/);
     });
 
@@ -13737,7 +13737,9 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[alpha6 exit 6] amber appears only in needs-you and decision contexts, across console and widget', () => {
       const rulesOf = (css) => [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] }));
       const users = (css) => rulesOf(css).filter((r) => /--amber/.test(r.body) && r.sel !== ':root').map((r) => r.sel);
-      assert.deepStrictEqual(users(ccss).sort(), ['.attn-amber .attn-head', '.btn-review', '.mk-dec', '.pill-amber', '.pshape-need', '.prow.decision', '.prow.sel.decision'].sort());
+      assert.deepStrictEqual(users(ccss).sort(), ['.attn-amber .attn-head', '.btn-review', '.mk-dec', '.pill-amber', '.pshape-need', '.prow.decision', '.prow.sel.decision',
+        // [alpha7 S3] Sessions: the waiting pill, the held-up wait line and the wait band, its top rule, its label and its legend swatch
+        '.xpill-waiting', '.xheld-wait', '.tl-wait-band', '.tl-wait-top', '.tl-wait-label', '.tl-sw-wait'].sort());
       assert.deepStrictEqual(users(wcss).sort(), ['.alert #banner', '.blocked .state-symbol', '.timer'].sort());
       assert.ok(!/amber/i.test(fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8').replace(/\/\/.*$/gm, '')), 'the widget script never names amber');
       // the console renders those classes only for a blocked session or a pending decision
@@ -14165,6 +14167,10 @@ test('missing rate_limits degrades instead of throwing', () => {
             { review_run_id: 'g2', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 140 * 60000), session_id: ids.ended },
             { review_run_id: 'g3', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 15 * Dd), session_id: null },
             { review_run_id: 'g4', outcome: 'block', findings: [finding], reviewed_at: iso(NOWX - 150 * 60000), session_id: 'someone-else' },
+            { review_run_id: 'g5', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 60 * 60000), session_id: ids.ended },
+            { review_run_id: 'g6', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 200 * 60000), session_id: ids.ended },
+            { review_run_id: 'g7', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 60000), session_id: ids.live },
+            { review_run_id: 'g8', outcome: 'pass', findings: [], reviewed_at: iso(NOWX + 3600000), session_id: ids.live },
           ],
           attempts: [{ attempt: 1, agent_id: 'ag-b1', outcome: 'block' }, { attempt: 2, agent_id: 'ag-b2', outcome: 'built' }],
         }] },
@@ -14203,11 +14209,28 @@ test('missing rate_limits degrades instead of throwing', () => {
         const r = (await get7(c.port, '/api/sessions?range=30d')).body;
         assert.strictEqual(r.range, '30d');
         const by = Object.fromEntries(r.sessions.map((s) => [s.session_id, s]));
-        assert.deepStrictEqual(Object.keys(by['sess-ended']).sort(), ['branch', 'cost_est', 'duration_ms', 'ended', 'project', 'project_id', 'session_id', 'started', 'state', 'turns']);
+        assert.deepStrictEqual(Object.keys(by['sess-ended']).sort(), ['branch', 'cost_est', 'duration_ms', 'ended', 'has_events', 'project', 'project_id', 'session_id', 'started', 'state', 'turns']);
         assert.deepStrictEqual([by['sess-ended'].project, by['sess-ended'].project_id, by['sess-ended'].branch], ['demo-proj', 'p1', 'feat/x']);
         assert.deepStrictEqual([by['sess-old'].project, by['sess-old'].project_id, by['sess-old'].branch], ['x', null, null], 'a project the registry does not know');
         assert.strictEqual(by['sess-live'].branch, 'main', 'a null branch is backfilled from the poller snapshot, read-only');
         assert.strictEqual((await get7(c.port, '/api/sessions?range=year')).status, 400);
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] branch: only a live session borrows the poller branch; an ended one with none stored shows null; has_events tells old sessions apart', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const by = Object.fromEntries((await get7(c.port, '/api/sessions?range=30d')).body.sessions.map((s) => [s.session_id, s]));
+        assert.strictEqual(by['sess-live'].branch, 'main');
+        assert.strictEqual(by['sess-wait'].branch, 'main');
+        assert.strictEqual(by['sess-stale'].branch, null, 'ended and nothing stored: no guess from the worktree as it is today');
+        assert.strictEqual(by['sess-yday'].branch, null);
+        assert.strictEqual(by['sess-ended'].branch, 'feat/x', 'a stored branch always stands');
+        assert.strictEqual((await get7(c.port, '/api/sessions/sess-yday')).body.branch, null);
+        assert.strictEqual((await get7(c.port, '/api/sessions/sess-live')).body.branch, 'main');
+        assert.strictEqual(by['sess-ended'].has_events, true);
+        assert.strictEqual(by['sess-yday'].has_events, false, 'recorded before Sessions: no session_events rows');
+        assert.strictEqual((await get7(c.port, '/api/sessions/sess-yday')).body.has_events, false);
       } finally { await halt7(c); l.close(); }
     });
 
@@ -14277,6 +14300,17 @@ test('missing rate_limits degrades instead of throwing', () => {
       } finally { await halt7(c); l.close(); }
     });
 
+    await atest('[alpha7 S3] detail: reviews outside the session window are dropped, even when they name its id; a running session runs to now', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const d = (await get7(c.port, '/api/sessions/sess-ended')).body;
+        assert.strictEqual(d.reviews.length, 2, 'g5 (after the end) and g6 (before the start) are not this session');
+        assert.ok(d.reviews.every((x) => x.at >= d.started - 60000 && x.at <= d.ended + 60000));
+        const live = (await get7(c.port, '/api/sessions/sess-live')).body;
+        assert.deepStrictEqual(live.reviews.map((x) => x.at), [NOWX - 60000], 'a running session stops at now: the future review is out');
+      } finally { await halt7(c); l.close(); }
+    });
+
     await atest('[alpha7 S2] detail: the cost series is cumulative and downsampled to at most 200 points; tools cap at 2000 with a flag', async () => {
       const { l } = build();
       const S = ids.yday;
@@ -14334,7 +14368,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const ALLOWED = new Set(['range', 'sessions', 'session_id', 'project', 'project_id', 'branch', 'state', 'started', 'ended', 'duration_ms', 'cost_est', 'turns',
           'reconciliation', 'ok', 'statusline', 'ledger', 'diff', 'lanes', 'id', 'kind', 'label', 'agent_type', 'role', 'model', 'attribution', 'stopped', 'subtitle',
           'tools', 'tool_name', 'agent_id', 'outcome', 'ts', 'waits', 'truncated', 'cost_series', 'reviews', 'task', 'findings', 'at',
-          'explicit', 'inferred', 'unattributed', 'held_up']);
+          'explicit', 'inferred', 'unattributed', 'held_up', 'has_events']);
         const strays = []; let texts = '';
         for (const p of ['/api/sessions?range=30d', '/api/sessions/sess-ended', '/api/sessions/sess-live', '/api/sessions/sess-stale', '/api/sessions/sess-old']) {
           const r = await get7(c.port, p);
@@ -14350,6 +14384,1081 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.ok(!/SECRET|tool_use_id|TUSECRET|C:\\\\w|elsewhere|cwd|prompt/.test(texts), 'no tool_use_id, path, cwd or free text');
         assert.ok(/mcp__srv__lookup/.test(texts), 'tool names are the one thing that is kept');
       } finally { await halt7(c); l.close(); }
+    });
+  }
+
+  /* ---- alpha7 S3: the Sessions tab (pure helpers, timeline geometry, markup, source rules) ---- */
+  {
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cj = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+    const names = ['fmtDay', 'tlActivity', 'tlAxis', 'laneRole', 'esc', 'projectLabel', 'modelName', 'outcomeShape', 'visibleProjects', 'navSort', 'navResolveSel', 'navMove', 'parseRoute', 'initialRoute',
+      'parseSessionSel', 'fmtDur', 'costEst', 'fmtClock', 'sessTimeRange', 'turnsLabel', 'sessState', 'sessIsLive', 'sessPillHtml', 'sessFilter', 'sessCounts', 'sessSearch',
+      'sessDayKey', 'sessDayLabel', 'sessGroups', 'sessVisible', 'sessResolveSel', 'sessVisibleIds', 'sessRowHtml', 'sessListHtml', 'sessControlsHtml', 'sessTitleHtml',
+      'sessReconHtml', 'tlSpan', 'tlX', 'tlTicks', 'tlTickLabel', 'tlLanes', 'tlLaneText', 'tlAttribution', 'tlWaitBands', 'tlCostPoints', 'tlReviews', 'tlWindowReviews', 'findingsLabel',
+      'tlHasEvents', 'tlShape', 'tlSvg', 'tlSvgParts', 'tlWrapHtml', 'tlReviewLabel', 'tlReviewMarkers', 'tlAxisTexts', 'tlBreakLabels', 'tlBreakShort', 'tlHasBreaks', 'tlUseClock', 'tlClockLabel', 'tlLegendHtml', 'sessHeldUp', 'sessFacts', 'sessHeldUpHtml', 'sessFactsHtml', 'sessTimelineHtml', 'sessRequestsHtml',
+      'sessReviewsHtml', 'sessDetailHtml', 'sessPage'];
+    const consts = cj.match(/^const (SESS_\w+|TL|TL_STEPS|TL_OUTCOME_RANK|OUTCOME_LABEL|ROLE_LABEL) = .*;$/gm);
+    assert.strictEqual(consts.length, 10, 'the single-line constants the helpers need');
+    const lifted = names.map((n) => {
+      const m = cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'));
+      assert.ok(m, 'console.js has ' + n);
+      return m[0];
+    });
+    const X = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+    const TLC = { mergePx: 30, laneH: 36 };   // TL.mergePx and TL.laneH, as console.js sets it
+
+    const MIN = 60000;
+    const NOW = new Date(2026, 9, 25, 15, 0, 0).getTime();   // local time, so day grouping holds in any zone
+    const at = (daysAgo, h, m) => new Date(2026, 9, 25 - daysAgo, h, m, 0).getTime();
+    const row = (id, over) => Object.assign({ session_id: id, project: 'alpha', project_id: 'p-alpha', branch: 'feat/x', state: 'ended', started: at(0, 9, 0), ended: at(0, 9, 47),
+      duration_ms: 47 * MIN, cost_est: 6.82, turns: 5 }, over || {});
+    const LIST = [
+      row('a-old', { project: 'beta', branch: 'main', started: at(3, 10, 0), ended: at(3, 10, 30), duration_ms: 30 * MIN, cost_est: 1.1 }),
+      row('a-yday', { project: 'alpha', branch: 'fix/y', started: at(1, 16, 0), ended: at(1, 16, 20), duration_ms: 20 * MIN }),
+      row('a-early', { started: at(0, 8, 0), ended: at(0, 8, 30) }),
+      row('a-live', { state: 'running', started: at(0, 14, 0), ended: null, duration_ms: 60 * MIN }),
+      row('a-wait', { state: 'waiting', project: 'gamma', branch: 'wip', started: at(0, 13, 0), ended: null, duration_ms: 120 * MIN }),
+    ];
+
+    test('[alpha7 S3] route: Sessions is a tab with #sessions and #sessions/<id>; hostile hashes fall back', () => {
+      assert.strictEqual(X.parseRoute('#sessions'), 'sessions');
+      assert.strictEqual(X.parseRoute('#/Sessions'), 'sessions');
+      assert.strictEqual(X.parseRoute('#sessions/abc-123_x.y:z'), 'sessions');
+      for (const bad of ['#sessions/', '#sessions/a b', '#sessions/<script>', '#sessions/a/b', '#sessions/' + 'x'.repeat(129), '#sessionsx']) assert.notStrictEqual(X.parseRoute(bad), 'sessions', bad);
+      assert.strictEqual(X.parseSessionSel('#sessions/AbC-1'), 'AbC-1', 'the id keeps its case');
+      for (const bad of ['#sessions', '#sessions/', '#sessions/a b', '#sessions/<b>', '#projects/x', null, undefined, '#sessions/' + 'x'.repeat(129)]) assert.strictEqual(X.parseSessionSel(bad), null, String(bad));
+      assert.strictEqual(X.initialRoute('', 'sessions'), 'sessions');
+      assert.strictEqual(X.initialRoute('#spend', 'sessions'), 'spend');
+      assert.strictEqual(X.initialRoute('', 'bogus'), 'projects');
+      assert.match(cj, /const TABS = \{ projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline', sessions: 'Sessions' \}/);
+      const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
+      assert.ok(html.indexOf('data-route="pipeline"') < html.indexOf('data-route="sessions"'));
+      assert.match(html, /href="#sessions"/);
+    });
+
+    test('[alpha7 S3] formatting: durations, turns, time range, every dollar figure says est.', () => {
+      assert.deepStrictEqual([0, 340, 5000, 72000, 245000, 3600000 + 5 * 60000].map(X.fmtDur), ['0s', '<1s', '5s', '1m 12s', '4m 05s', '1h 05m']);
+      for (const bad of [null, undefined, -1, NaN, 'x']) assert.strictEqual(X.fmtDur(bad), '', String(bad));
+      assert.strictEqual(X.costEst(6.824), '$6.82 est.');
+      for (const bad of [null, undefined, -3, NaN, 'x']) assert.strictEqual(X.costEst(bad), '$0.00 est.', String(bad));
+      assert.strictEqual(X.turnsLabel(5), '5 turns');
+      assert.strictEqual(X.turnsLabel(1), '1 turn');
+      assert.strictEqual(X.turnsLabel(0), '0 turns');
+      assert.strictEqual(X.turnsLabel(null), '0 turns');
+      assert.strictEqual(X.sessTimeRange({ started: at(0, 9, 0), ended: at(0, 9, 47) }), '09:00–09:47');
+      assert.strictEqual(X.sessTimeRange({ started: at(0, 9, 0), ended: null }), '09:00–now');
+      assert.strictEqual(X.sessTimeRange({}), '');
+    });
+
+    test('[alpha7 S3] list: grouped by day, newest first, labelled Today / Yesterday / a date', () => {
+      const g = X.sessGroups(LIST, NOW);
+      assert.deepStrictEqual(g.map((x) => x.label), ['Today', 'Yesterday', 'Thu Oct 22']);
+      assert.deepStrictEqual(g[0].rows.map((r) => r.session_id), ['a-live', 'a-wait', 'a-early']);
+      // within a day: newest first (live 14:00, waiting 13:00, then the 09:00 row, then the 08:00 row)
+      const ids = X.sessGroups(LIST.concat([row('a-nine')]), NOW)[0].rows.map((r) => r.session_id);
+      assert.deepStrictEqual(ids, ['a-live', 'a-wait', 'a-nine', 'a-early']);
+      assert.deepStrictEqual(X.sessGroups([], NOW), []);
+      assert.deepStrictEqual(X.sessGroups(null, NOW), []);
+      assert.deepStrictEqual(X.sessVisibleIds(LIST, { filter: 'all', q: '', nowMs: NOW }), ['a-live', 'a-wait', 'a-early', 'a-yday', 'a-old']);
+    });
+
+    test('[alpha7 S3] list: filters All / Running / Ended and search over project and branch', () => {
+      assert.deepStrictEqual(X.sessCounts(LIST), { all: 5, running: 2, ended: 3 });
+      assert.deepStrictEqual(X.sessFilter(LIST, 'running').map((r) => r.session_id), ['a-live', 'a-wait']);
+      assert.deepStrictEqual(X.sessFilter(LIST, 'ended').map((r) => r.session_id), ['a-old', 'a-yday', 'a-early']);
+      assert.strictEqual(X.sessFilter(LIST, 'bogus').length, 5);
+      assert.strictEqual(X.sessFilter(null, 'all').length, 0);
+      assert.deepStrictEqual(X.sessSearch(LIST, 'GAMMA').map((r) => r.session_id), ['a-wait']);
+      assert.deepStrictEqual(X.sessSearch(LIST, 'fix/').map((r) => r.session_id), ['a-yday']);
+      assert.deepStrictEqual(X.sessSearch(LIST, '  ').length, 5);
+      assert.strictEqual(X.sessSearch(LIST, 'zzz').length, 0);
+      assert.deepStrictEqual(X.sessSearch([{ session_id: 'n', project: null, branch: null }], 'x'), []);
+      assert.deepStrictEqual(X.sessVisible(LIST, { filter: 'running', q: 'wip' }).map((r) => r.session_id), ['a-wait']);
+    });
+
+    test('[alpha7 S3] state pill: the four states, unknown reads as ended, only waiting is amber', () => {
+      for (const [st, text] of [['running', 'Running'], ['waiting', 'Waiting'], ['idle', 'Idle'], ['ended', 'Ended']]) {
+        assert.match(X.sessPillHtml({ state: st }), new RegExp('class="xpill xpill-' + st + '">' + text + '</span>'));
+      }
+      for (const bad of ['blocked', '', null, undefined, '<img>', 'RUNNING']) {
+        assert.match(X.sessPillHtml({ state: bad }), /xpill-ended">Ended</, String(bad));
+        assert.strictEqual(X.sessIsLive({ state: bad }), false);
+      }
+      assert.deepStrictEqual(['running', 'waiting', 'idle', 'ended'].map((s) => X.sessIsLive({ state: s })), [true, true, true, false]);
+    });
+
+    test('[alpha7 S3] selection: the route id if on screen, else the newest running session, else the newest; keys move through the shown ids', () => {
+      assert.strictEqual(X.sessResolveSel(LIST, 'a-yday'), 'a-yday');
+      assert.strictEqual(X.sessResolveSel(LIST, 'gone'), 'a-live');
+      assert.strictEqual(X.sessResolveSel(LIST, null), 'a-live');
+      assert.strictEqual(X.sessResolveSel(LIST.filter((r) => r.state === 'ended'), 'gone'), 'a-early');
+      assert.strictEqual(X.sessResolveSel([], 'x'), null);
+      const ids = X.sessVisibleIds(LIST, { filter: 'all', q: '', nowMs: NOW });
+      assert.strictEqual(X.navMove(ids, 'a-live', 'ArrowDown'), 'a-wait');
+      assert.strictEqual(X.navMove(ids, 'a-live', 'ArrowUp'), 'a-live');
+      assert.strictEqual(X.navMove(ids, 'a-wait', 'End'), 'a-old');
+      assert.strictEqual(X.navMove(ids, 'a-old', 'Home'), 'a-live');
+      assert.strictEqual(X.navMove([], 'x', 'ArrowDown'), null);
+    });
+
+    test('[alpha7 S3] list markup: project, pill, branch, range, duration, cost est.; hostile strings are escaped', () => {
+      const evil = '<img src=x onerror=alert(1)>"\'&';
+      const h = X.sessListHtml([row('s1', { project: evil, branch: evil })], { filter: 'all', q: '', sel: 's1', nowMs: NOW });
+      assert.ok(!h.includes('<img'), 'no raw tag');
+      assert.ok(!/onerror=alert\(1\)>/.test(h.replace(/&lt;img src=x onerror=alert\(1\)&gt;/g, '')), 'only the escaped form');
+      assert.match(h, /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
+      assert.match(h, /09:00–09:47 · 47m 00s/);
+      assert.match(h, /\$6\.82 est\./);
+      assert.match(h, /class="xrow sel" role="row" tabindex="0" data-xsel="s1" aria-selected="true"/);
+      assert.match(h, />Today <span>1<\/span><\/h3>/);
+      const odd = X.sessListHtml([row('"><b>', { branch: null, project: null })], { filter: 'all', q: '', sel: null, nowMs: NOW });
+      assert.ok(!odd.includes('<b>') && /data-xsel="&quot;&gt;&lt;b&gt;"/.test(odd));
+      assert.ok(!/nstatus mono/.test(odd), 'no branch, no branch line');
+      assert.match(odd, /Unknown project/);
+      assert.match(X.sessListHtml([], { filter: 'all', q: '', sel: null, nowMs: NOW }), /No sessions in this range\./);
+      assert.match(X.sessListHtml(LIST, { filter: 'all', q: 'zzz', sel: null, nowMs: NOW }), /No sessions match\./);
+      const c = X.sessControlsHtml(X.sessCounts(LIST), { filter: 'running', q: '"x' });
+      assert.match(c, /data-xfilter="running" aria-pressed="true">Running <span class="num">2<\/span>/);
+      assert.match(c, /value="&quot;x"/);
+      const t = X.sessTitleHtml('7d');
+      assert.match(t, /data-xrange="today" class="" aria-pressed="false">Today/);
+      assert.match(t, /data-xrange="7d" class="on" aria-pressed="true">7d/);
+      assert.match(t, /data-xrange="30d"[^>]*>30d/);
+    });
+
+    // A detail with two lanes, three tools, two waits, two reviews. All values synthetic.
+    const T0 = at(0, 9, 0);
+    const detail = (over) => Object.assign({
+      session_id: 'sess-1', project: 'alpha', project_id: 'p-alpha', branch: 'feat/barcode', state: 'ended', started: T0, ended: T0 + 47 * MIN, duration_ms: 47 * MIN, cost_est: 6.82, turns: 5,
+      reconciliation: { ok: true, statusline: 6.82, ledger: 6.82, diff: 0 },
+      lanes: [
+        { id: 'main', kind: 'main', label: 'Main session', agent_type: null, role: 'main', model: 'claude-opus-4-5', attribution: 'explicit', started: T0, stopped: T0 + 47 * MIN, cost_est: 2.5, subtitle: null },
+        { id: 'ag-1', kind: 'agent', label: 'builder', agent_type: 'builder', role: 'builder', model: 'claude-sonnet-4-5', attribution: 'explicit', started: T0 + 2 * MIN, stopped: T0 + 10 * MIN, cost_est: 3, subtitle: null },
+        { id: 'ag-2', kind: 'agent', label: 'builder', agent_type: 'builder', role: 'builder', model: 'claude-sonnet-4-5', attribution: 'inferred', started: T0 + 12 * MIN, stopped: T0 + 24 * MIN, cost_est: 1.32, subtitle: 'Repair' },
+        { id: 'ag-3', kind: 'agent', label: 'red-team', agent_type: 'red-team', role: 'red-team', model: 'claude-fable-1', attribution: 'unattributed', started: T0 + 44 * MIN, stopped: T0 + 46 * MIN, cost_est: 0, subtitle: null },
+      ],
+      tools: [
+        { ts: T0 + 1 * MIN, ended: T0 + 1 * MIN + 2000, duration_ms: 2000, tool_name: 'Read', agent_id: null, outcome: 'done' },
+        { ts: T0 + 5 * MIN, ended: T0 + 6 * MIN, duration_ms: MIN, tool_name: 'Bash', agent_id: 'ag-1', outcome: 'done' },
+        { ts: T0 + 13 * MIN, ended: null, duration_ms: null, tool_name: 'mcp__srv__lookup', agent_id: 'ag-2', outcome: 'unfinished' },
+      ],
+      waits: [{ ts: T0 + 10 * MIN, ended: T0 + 10 * MIN + 72000, duration_ms: 72000, outcome: 'allowed', agent_id: null }, { ts: T0 + 24 * MIN, ended: T0 + 28 * MIN + 5000, duration_ms: 245000, outcome: null, agent_id: null }],
+      truncated: false,
+      cost_series: [{ ts: T0 + 1 * MIN, cost_est: 0.5 }, { ts: T0 + 20 * MIN, cost_est: 3 }, { ts: T0 + 46 * MIN, cost_est: 6.82 }],
+      reviews: [{ task: 'barcode', outcome: 'block', findings: 2, at: T0 + 12 * MIN }, { task: 'barcode', outcome: 'pass', findings: 0, at: T0 + 46 * MIN }],
+      attribution: { explicit: 40, inferred: 3, unattributed: 2 },
+      held_up: [{ ts: T0 + 24 * MIN, duration_ms: 245000, outcome: null, agent_id: null }, { ts: T0 + 10 * MIN, duration_ms: 72000, outcome: 'allowed', agent_id: null }],
+    }, over || {});
+
+    test('[alpha7 S3] geometry: the shared axis maps time to x, clamped; a running session ends at now', () => {
+      const d = detail();
+      const span = X.tlSpan(d, NOW);
+      assert.deepStrictEqual([span.t0, span.t1], [T0, T0 + 47 * MIN]);
+      assert.strictEqual(X.tlX(T0, span, 100, 1100), 100);
+      assert.strictEqual(X.tlX(T0 + 47 * MIN, span, 100, 1100), 1100);
+      assert.strictEqual(Math.round(X.tlX(T0 + 23.5 * MIN, span, 100, 1100)), 600);
+      assert.strictEqual(X.tlX(T0 - 5 * MIN, span, 100, 1100), 100, 'before the start clamps');
+      assert.strictEqual(X.tlX(T0 + 99 * MIN, span, 100, 1100), 1100, 'after the end clamps');
+      assert.strictEqual(X.tlX(NaN, span, 100, 1100), 100);
+      const live = X.tlSpan(detail({ state: 'running', ended: null }), T0 + 60 * MIN);
+      assert.strictEqual(live.t1, T0 + 60 * MIN);
+      const none = X.tlSpan({ started: T0, ended: T0, lanes: [], tools: [], waits: [], cost_series: [] }, NOW);
+      assert.strictEqual(none.t1 - none.t0, 1000, 'never a zero-width axis');
+      const wide = X.tlSpan(detail({ ended: T0 + 10 * MIN, tools: [{ ts: T0 + 30 * MIN, duration_ms: 1000, tool_name: 'x', agent_id: null }] }), NOW);
+      assert.ok(wide.t1 >= T0 + 30 * MIN, 'an event past the recorded end stretches the axis');
+    });
+
+    test('[alpha7 S3] geometry: a review outside an ended session window neither extends nor marks the axis', () => {
+      const far = [{ task: 'x', outcome: 'pass', findings: 0, at: T0 + 24 * 60 * MIN }, { task: 'x', outcome: 'pass', findings: 0, at: T0 - 60 * MIN }];
+      const d = detail({ reviews: far.concat(detail().reviews) });
+      const span = X.tlSpan(d, NOW);
+      assert.deepStrictEqual([span.t0, span.t1], [T0, T0 + 47 * MIN]);
+      assert.strictEqual(X.tlWindowReviews(d).length, 2, 'only the two inside the window');
+      assert.deepStrictEqual(X.tlActivity(d, span), X.tlActivity(detail(), span), 'no extra activity from the stray reviews');
+      assert.strictEqual(X.tlAxis(d, span, 100, 1100).segs.filter((s) => s.kind === 'gap').length, X.tlAxis(detail(), span, 100, 1100).segs.filter((s) => s.kind === 'gap').length);
+      assert.strictEqual(X.tlWindowReviews(detail({ ended: null, reviews: far })).length, 2, 'a running session keeps what the API sent');
+      assert.strictEqual(X.tlWindowReviews(detail({ reviews: [{ task: 'u', outcome: 'pass', findings: 0, at: null }] })).length, 1, 'untimed stay');
+    });
+
+    test('[alpha7 S3] geometry: ticks scale to the span (never more than 10 intervals) and read as round durations', () => {
+      for (const spanMs of [1000, 45000, 47 * MIN, 3 * 3600000, 26 * 3600000, 3 * 864e5, 40 * 864e5, 400 * 864e5]) {
+        const tk = X.tlTicks(spanMs);
+        assert.ok(tk.ticks.length >= 1 && tk.ticks.length <= 11, spanMs + ' -> ' + tk.ticks.length);
+        assert.strictEqual(tk.ticks[0], 0);
+        assert.ok(tk.ticks[tk.ticks.length - 1] <= spanMs);
+        assert.ok(tk.ticks.every((t, i) => i === 0 || t - tk.ticks[i - 1] === tk.step));
+      }
+      assert.strictEqual(X.tlTicks(47 * MIN).step, 5 * MIN);
+      assert.strictEqual(X.tlTicks(3 * 3600000).step, 18e5);
+      assert.deepStrictEqual([0, 30000, 5 * MIN, 90 * MIN, 150 * MIN, 30 * 3600000, 3 * 864e5].map(X.tlTickLabel), ['0', '30s', '5m', '1h 30m', '2h 30m', '1d 6h', '3d']);
+    });
+
+    test('[alpha7 S3] geometry: lanes put Main session first, agents after, and give every tool a lane', () => {
+      const lanes = X.tlLanes(detail());
+      assert.deepStrictEqual(lanes.map((l) => l.id), ['main', 'ag-1', 'ag-2', 'ag-3']);
+      assert.deepStrictEqual(lanes.map((l) => l.tools.length), [1, 1, 1, 0]);
+      assert.strictEqual(X.tlLaneText(lanes[0]).label, 'Main session');
+      assert.deepStrictEqual(X.tlLaneText(lanes[1]), { label: 'Builder', sub: 'Sonnet' });
+      assert.deepStrictEqual(X.tlLaneText(lanes[2]), { label: 'Builder', sub: 'Sonnet · Repair' });
+      assert.deepStrictEqual(X.tlLaneText(lanes[3]), { label: 'Red team', sub: 'Fable' });
+      const orphan = X.tlLanes(detail({ tools: [{ ts: T0, duration_ms: 1, tool_name: 'Read', agent_id: 'ag-missing' }] }));
+      assert.strictEqual(orphan.length, 5);
+      assert.strictEqual(orphan[4].id, 'ag-missing');
+      assert.strictEqual(X.tlAttribution(orphan[4]), 'unattributed');
+      const noMain = X.tlLanes({ started: T0, ended: T0 + MIN, lanes: [], tools: [{ ts: T0, duration_ms: 1, tool_name: 'Read', agent_id: null }] });
+      assert.deepStrictEqual(noMain.map((l) => [l.kind, l.tools.length]), [['main', 1]]);
+      // attribution: the main session is always explicit; only a subagent lane can be inferred
+      assert.strictEqual(X.tlAttribution({ kind: 'main', attribution: 'inferred' }), 'explicit');
+      assert.deepStrictEqual(lanes.map(X.tlAttribution), ['explicit', 'explicit', 'inferred', 'unattributed']);
+      assert.strictEqual(X.tlAttribution({ kind: 'agent', attribution: 'weird' }), 'explicit');
+    });
+
+    test('[alpha7 S3] geometry: wait bands sit at the wait, labelled with its duration; an open wait runs to the end', () => {
+      const d = detail();
+      const span = X.tlSpan(d, NOW);
+      const b = X.tlWaitBands(d.waits, span, 100, 1100);
+      assert.deepStrictEqual(b.map((x) => x.label), ['Wait 1m 12s', 'Wait 4m 05s']);
+      assert.strictEqual(Math.round(b[0].x), Math.round(100 + (10 / 47) * 1000));
+      assert.strictEqual(Math.round(b[0].w), Math.round((72 / (47 * 60)) * 1000));
+      const open = X.tlWaitBands([{ ts: T0 + 40 * MIN, ended: null, duration_ms: null }], span, 100, 1100)[0];
+      assert.strictEqual(Math.round(open.x + open.w), 1100);
+      assert.strictEqual(open.label, 'Wait 7m 00s');
+      assert.ok(X.tlWaitBands([{ ts: T0, ended: T0, duration_ms: 0 }], span, 100, 1100)[0].w >= 2, 'a zero wait is still visible');
+      assert.deepStrictEqual(X.tlWaitBands([null, { ts: 'x' }], span, 100, 1100), []);
+      assert.deepStrictEqual(X.tlWaitBands(null, span, 100, 1100), []);
+    });
+
+    test('[alpha7 S3] geometry: the cost line starts at zero, rises left to right, ends at the top; none without a series', () => {
+      const d = detail();
+      const span = X.tlSpan(d, NOW);
+      const c = X.tlCostPoints(d.cost_series, span, 100, 1100, 20, 60);
+      assert.strictEqual(c.max, 6.82);
+      assert.deepStrictEqual(c.pts[0], [100, 60]);
+      assert.strictEqual(c.pts.length, 4);
+      assert.strictEqual(c.pts[3][1], 20, 'the last point is the top');
+      for (let i = 1; i < c.pts.length; i++) { assert.ok(c.pts[i][0] >= c.pts[i - 1][0]); assert.ok(c.pts[i][1] <= c.pts[i - 1][1]); }
+      assert.deepStrictEqual(X.tlCostPoints([], span, 100, 1100, 20, 60), { pts: [], max: 0 });
+      assert.deepStrictEqual(X.tlCostPoints(null, span, 100, 1100, 20, 60), { pts: [], max: 0 });
+      const flat = X.tlCostPoints([{ ts: T0, cost_est: 0 }], span, 100, 1100, 20, 60);
+      assert.ok(flat.pts.every((p) => Number.isFinite(p[0]) && Number.isFinite(p[1])), 'a zero series never gives NaN');
+      const rv = X.tlReviews(d.reviews.concat([{ task: 't', outcome: 'pass', findings: 0, at: null }]), span, 100, 1100);
+      assert.deepStrictEqual(rv.map((r) => [r.outcome, r.findings]), [['block', 2], ['pass', 0]], 'a review with no time has no marker');
+    });
+
+    test('[alpha7 S3] waterfall markup: Main session first, tool names in <title>, amber bands with durations, review shapes with counts', () => {
+      const svg = X.tlSvg(detail(), 1000, NOW);
+      assert.match(svg, /^<svg class="tl-svg" width="1000"/);
+      assert.ok(svg.indexOf('>Main session<') >= 0);
+      assert.ok(svg.indexOf('>Main session<') < svg.indexOf('>Builder<'), 'Main session leads');
+      assert.match(svg, /<title>Read · 2s<\/title>/);
+      assert.match(svg, /<title>Bash · 1m 00s<\/title>/);
+      assert.match(svg, /<title>mcp__srv__lookup<\/title>/);
+      assert.match(svg, /class="tl-wait-label"[^>]*>Wait 1m 12s</);
+      assert.match(svg, /class="tl-wait-label"[^>]*>Wait 4m 05s</);
+      assert.strictEqual((svg.match(/class="tl-wait-band"/g) || []).length, 2);
+      assert.match(svg, />Block · 2 findings</);
+      assert.match(svg, />Pass</);
+      assert.match(svg, /class="oshape oshape-block"/);
+      assert.match(svg, /class="oshape oshape-pass"/);
+      assert.match(svg, />Cumulative cost \(est\.\)</);
+      assert.match(svg, /\$6\.82 est\./);
+      assert.match(svg, />Sonnet · Repair</);
+      assert.ok(!/style=/.test(svg), 'no inline style attributes');
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(svg), 'no hard-coded colours');
+    });
+
+    test('[alpha7 S3] waterfall markup: lane colour follows that lane\'s attribution; hatching and orange only for inferred', () => {
+      const svg = X.tlSvg(detail(), 1000, NOW);
+      const tracks = [...svg.matchAll(/<rect class="tl-track(?: tl-track-solo)? tl-attr-(\w+)"([^>]*)>/g)];
+      assert.deepStrictEqual(tracks.map((t) => t[1]), ['explicit', 'explicit', 'inferred', 'unattributed'], 'main, builder (agents join), repair builder (inferred), red team (unattributed)');
+      assert.ok(!/fill=/.test(tracks[0][2]) && !/fill=/.test(tracks[1][2]), 'explicit lanes are solid, including the agent lane');
+      assert.match(tracks[2][2], /fill="url\(#tl-inferred\)"/);
+      assert.ok(!/fill=/.test(tracks[3][2]), 'unattributed is solid grey, not hatched');
+      assert.ok(!/tl-bar/.test(svg), 'no outlined lane boxes');
+      // tool bars carry their lane's attribution
+      const tools = [...svg.matchAll(/<rect class="tl-tool tl-attr-(\w+)"([^>]*)>/g)];
+      assert.deepStrictEqual(tools.map((t) => t[1]), ['explicit', 'explicit', 'inferred']);
+      assert.match(tools[2][2], /fill="url\(#tl-inferred\)"/);
+      // a main lane the API calls inferred is still explicit
+      const d = detail();
+      d.lanes[0].attribution = 'inferred';
+      assert.match(X.tlSvg(d, 1000, NOW), /<rect class="tl-track tl-attr-explicit"/);
+      // CSS: explicit is the explicit colour, unattributed is grey, and orange (--src-subagent) is only the inferred hatch
+      assert.match(css, /\.tl-attr-explicit \{ fill: var\(--src-main\); \}/);
+      assert.match(css, /\.tl-attr-unattributed \{ fill: var\(--src-unattributed\); \}/);
+      const sec = css.slice(css.indexOf('Sessions tab (alpha.7 S3)'), css.indexOf('Pipeline tab: one-screen layout'));
+      const orange = [...sec.matchAll(/([^{}]+)\{([^}]*--src-subagent[^}]*)\}/g)].map((m) => m[1].trim());
+      assert.deepStrictEqual(orange, ['.tl-hat-base', '.tl-sw-inferred']);
+      const lg = X.tlLegendHtml();
+      assert.match(lg, />Explicit</);
+      assert.match(lg, />Inferred</);
+      assert.match(lg, />Unattributed</);
+    });
+
+    test('[alpha7 S3] tool bars: a faint track per lane, solid bars with a 1 px gap, 2 px minimum, name in <title>', () => {
+      const svg = X.tlSvg(detail(), 1000, NOW);
+      assert.strictEqual((svg.match(/<rect class="tl-track /g) || []).length, 4, 'one track per lane');
+      assert.strictEqual((svg.match(/<rect class="tl-tool /g) || []).length, 3, 'one bar per tool call');
+      assert.ok(!/<rect class="tl-(tool|track)[^>]*(stroke|fill="none")/.test(svg), 'no outline-only boxes');
+      assert.match(css, /\.tl-track \{ fill-opacity: \.\d+; \}/);
+      assert.ok(!/\.tl-(tool|track)[^{]*\{[^}]*stroke/.test(css));
+      for (const m of svg.matchAll(/<rect class="tl-tool [^>]*width="([\d.]+)"/g)) assert.ok(Number(m[1]) >= 2, 'min width ' + m[1]);
+      // adjacent calls on the main lane stay separate bars with exactly 1 px between them
+      const MINUTE = 60000;
+      const d = detail({ tools: [0, 1, 2].map((i) => ({ ts: T0 + i * MINUTE, ended: T0 + (i + 1) * MINUTE, duration_ms: MINUTE, tool_name: 'Call' + i, agent_id: null, outcome: 'done' })),
+        waits: [], reviews: [], lanes: [], cost_series: [], held_up: [], started: T0, ended: T0 + 3 * MINUTE });
+      const bars = [...X.tlSvg(d, 1000, NOW).matchAll(/<rect class="tl-tool [^>]*x="([\d.]+)" y="[\d.]+" width="([\d.]+)" height="\d+"><title>(Call\d)/g)].map((m) => [Number(m[1]), Number(m[2]), m[3]]);
+      assert.deepStrictEqual(bars.map((b) => b[2]), ['Call0', 'Call1', 'Call2']);
+      for (let i = 1; i < bars.length; i++) assert.ok(Math.abs(bars[i][0] - (bars[i - 1][0] + bars[i - 1][1]) - 1) < 0.25, 'gap between ' + i + ': ' + (bars[i][0] - bars[i - 1][0] - bars[i - 1][1]));
+    });
+
+    test('[alpha7 S3] axis: idle stretches over 10 minutes become fixed 24 px breaks; active spans stay linear', () => {
+      const D = 864e5;
+      const call = (ts) => ({ ts, ended: ts + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: null });
+      const d = { started: T0, ended: T0 + 6 * D, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + 5 * MIN), call(T0 + 3 * D), call(T0 + 3 * D + 5 * MIN), call(T0 + 6 * D - 1000)] };
+      const span = X.tlSpan(d, NOW);
+      const ax = X.tlAxis(d, span, 100, 1100);
+      const gaps = ax.segs.filter((s) => s.kind === 'gap');
+      const runs = ax.segs.filter((s) => s.kind === 'run');
+      assert.strictEqual(gaps.length, 2);
+      assert.deepStrictEqual(gaps.map((g) => Math.round(g.x1 - g.x0)), [24, 24]);
+      assert.strictEqual(ax.segs[0].x0, 100);
+      assert.strictEqual(ax.segs[ax.segs.length - 1].x1, 1100);
+      for (let i = 1; i < ax.segs.length; i++) assert.ok(Math.abs(ax.segs[i].x0 - ax.segs[i - 1].x1) < 1e-6, 'segments touch');
+      assert.ok(runs.every((s) => s.x1 - s.x0 >= TLC.mergePx - 1e-6), 'every active run keeps its minimum width');
+      // the 5-minute calls sit apart on the axis, not in a one-pixel sliver
+      assert.ok(X.tlX(T0 + 5 * MIN, ax, 100, 1100) - X.tlX(T0, ax, 100, 1100) > 5, 'five active minutes are visible');
+      let prev = -1;
+      for (let k = 0; k <= 60; k++) { const x = X.tlX(T0 + (k / 60) * 6 * D, ax, 100, 1100); assert.ok(x >= prev - 1e-9 && x >= 100 && x <= 1100); prev = x; }
+      // inside a break, time moves across the 24 px
+      const g0 = gaps[0];
+      assert.ok(X.tlX((g0.t0 + g0.t1) / 2, ax, 100, 1100) > g0.x0 && X.tlX((g0.t0 + g0.t1) / 2, ax, 100, 1100) < g0.x1);
+      // no gaps: the plain linear scale
+      const calm = { started: T0, ended: T0 + 8 * MIN, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + 4 * MIN), call(T0 + 8 * MIN - 1000)] };
+      const cs = X.tlSpan(calm, NOW);
+      const cax = X.tlAxis(calm, cs, 100, 1100);
+      assert.strictEqual(cax.segs.length, 1);
+      assert.strictEqual(X.tlX(T0 + 4 * MIN, cax, 100, 1100), X.tlX(T0 + 4 * MIN, cs, 100, 1100));
+      // 10 minutes is the line: a 9m59s hole stays linear, an 11 minute one is a break
+      const edge = (hole) => { const e = { started: T0, ended: T0 + hole + 2000, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + hole)] }; return X.tlAxis(e, X.tlSpan(e, NOW), 100, 1100).segs.filter((s) => s.kind === 'gap').length; };
+      assert.strictEqual(edge(10 * MIN), 0);
+      assert.strictEqual(edge(11 * MIN), 1);
+      // a long permission wait is activity, not idle
+      const w = { started: T0, ended: T0 + 3 * 3600000, lanes: [], tools: [call(T0)], cost_series: [], reviews: [], waits: [{ ts: T0 + 1000, ended: T0 + 3 * 3600000, duration_ms: 3 * 3600000 - 1000 }] };
+      assert.strictEqual(X.tlAxis(w, X.tlSpan(w, NOW), 100, 1100).segs.filter((s) => s.kind === 'gap').length, 0);
+      // a running session that has gone quiet gets a trailing break
+      const quiet = { started: T0, ended: null, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + MIN)] };
+      const qa = X.tlAxis(quiet, X.tlSpan(quiet, T0 + 2 * 3600000), 100, 1100);
+      assert.strictEqual(qa.segs[qa.segs.length - 1].kind, 'gap');
+      // many idle stretches never take more than 40% of the width
+      const many = { started: T0, ended: T0 + 40 * 3600000, lanes: [], waits: [], cost_series: [], reviews: [], tools: Array.from({ length: 41 }, (_, i) => call(T0 + i * 3600000)) };
+      const ma = X.tlAxis(many, X.tlSpan(many, NOW), 100, 1100);
+      const mg = ma.segs.filter((s) => s.kind === 'gap');
+      assert.strictEqual(mg.length, 40, 'no gap is dropped');
+      assert.ok(mg.every((g) => Math.abs(g.x1 - g.x0 - 10) < 1e-6), 'breaks shrink to fit 40% of the width, not below 8 px');
+      assert.ok(mg.reduce((a, g) => a + g.x1 - g.x0, 0) <= 0.4 * 1000 + 1e-6);
+      assert.strictEqual(ma.segs[ma.segs.length - 1].x1, 1100);
+      assert.ok(ma.segs.every((s) => Number.isFinite(s.x0) && Number.isFinite(s.x1) && s.x1 >= s.x0));
+      // an empty session has one segment and no NaN
+      const e = X.tlAxis({ started: T0, ended: T0 }, X.tlSpan({ started: T0, ended: T0 }, NOW), 100, 1100);
+      assert.ok(e.segs.length >= 1 && e.segs.every((s) => Number.isFinite(s.x1)));
+    });
+
+    test('[alpha7 S3] axis: a session open for days shows break markers and ticks per active stretch', () => {
+      const D = 864e5;
+      const call = (ts, agent) => ({ ts, ended: ts + 5000, duration_ms: 5000, tool_name: 'Edit', agent_id: agent || null, outcome: 'done' });
+      const d = detail({ started: T0, ended: T0 + 6 * D, duration_ms: 6 * D, waits: [], reviews: [], held_up: [], lanes: [],
+        cost_series: [{ ts: T0 + MIN, cost_est: 1 }, { ts: T0 + 3 * D, cost_est: 4 }, { ts: T0 + 6 * D - 1000, cost_est: 9 }],
+        tools: [call(T0), call(T0 + 2 * MIN), call(T0 + 3 * D), call(T0 + 3 * D + 8 * MIN), call(T0 + 6 * D - 10000)] });
+      const svg = X.tlSvg(d, 1000, NOW);
+      assert.strictEqual((svg.match(/<g class="tl-break">/g) || []).length, 2);
+      assert.ok(!/⋯/.test(svg));
+      assert.match(svg, /<title>7\dh \d\dm idle, compressed<\/title>/);
+      const ticks = (svg.match(/<text class="tl-text" x="[\d.]+" y="96" text-anchor="[a-z]+">/g) || []).length;
+      assert.ok(ticks >= 3 && ticks <= 30, 'ticks: ' + ticks);
+      // the two active edges of the session are not the same sliver any more: the 8-minute stretch is wider than a few pixels
+      const ax = X.tlAxis(d, X.tlSpan(d, NOW), 176, 984);
+      assert.ok(X.tlX(T0 + 3 * D + 8 * MIN, ax, 176, 984) - X.tlX(T0 + 3 * D, ax, 176, 984) > 8);
+      assert.ok(!/NaN|undefined|Infinity/.test(svg));
+      assert.match(css, /\.tl-break-band \{ fill: var\(--panel2\); \}/);
+    });
+
+    test('[alpha7 S3] roles: builder, builder-haiku, builder-opus, red-team, red-team-lean and scribe are recognised with or without the sereno: prefix', () => {
+      const want = { builder: 'builder', 'builder-haiku': 'builder', 'builder-opus': 'builder', 'red-team': 'red-team', 'red-team-lean': 'red-team', scribe: 'scribe' };
+      for (const [name, role] of Object.entries(want)) {
+        for (const t of [name, 'sereno:' + name]) assert.strictEqual(X.laneRole({ kind: 'agent', agent_type: t, role: 'other' }), role, t);
+      }
+      for (const t of ['general-purpose', 'builder-evil', 'xbuilder', 'sereno:', '', null]) assert.strictEqual(X.laneRole({ kind: 'agent', agent_type: t, role: 'other' }), 'other', String(t));
+      assert.strictEqual(X.laneRole({ kind: 'agent', agent_type: 'weird', role: 'builder' }), 'builder', 'the API role wins when it has one');
+      assert.strictEqual(X.laneRole(null), 'other');
+      // the facts and the labels use it: an agent the API left as "other" still counts as a Builder run
+      const lane = (id, type, started, stopped) => ({ id, kind: 'agent', label: type, agent_type: type, role: 'other', model: 'claude-sonnet-4-5', attribution: 'explicit', started, stopped, cost_est: 0, subtitle: null });
+      const d = detail({ lanes: [detail().lanes[0], lane('b1', 'builder', T0, T0 + 5 * MIN), lane('b2', 'sereno:builder-opus', T0 + 6 * MIN, T0 + 9 * MIN), lane('r1', 'red-team-lean', T0 + 10 * MIN, T0 + 11 * MIN)], tools: [] });
+      const f = X.sessFacts(d, NOW);
+      assert.strictEqual(f.builderRuns, 2);
+      assert.strictEqual(f.builderMs, 8 * MIN);
+      assert.match(X.sessFactsHtml(d, NOW), /Builder active time<\/dt><dd>8m 00s over 2 runs</);
+      assert.deepStrictEqual(X.tlLanes(d).map((l) => X.tlLaneText(l).label), ['Main session', 'Builder', 'Builder', 'Red team']);
+    });
+
+    test('[alpha7 S3] time ranges: dates when a session spans days, in the list row and the header; under a second reads <1s', () => {
+      const multi = { started: at(5, 13, 20), ended: at(0, 15, 18) };
+      assert.strictEqual(X.sessTimeRange(multi, NOW), 'Oct 20 13:20 – Oct 25 15:18');
+      assert.strictEqual(X.sessTimeRange({ started: at(1, 22, 0), ended: null }, NOW), 'Oct 24 22:00 – now');
+      assert.strictEqual(X.sessTimeRange({ started: at(0, 9, 0), ended: null }, NOW), '09:00–now');
+      assert.strictEqual(X.sessTimeRange({ started: at(0, 9, 0), ended: at(0, 9, 47) }, NOW), '09:00–09:47');
+      assert.strictEqual(X.sessTimeRange({ started: at(1, 23, 30), ended: at(0, 0, 20) }, NOW), 'Oct 24 23:30 – Oct 25 00:20', 'across midnight');
+      assert.match(X.sessListHtml([row('m1', multi)], { filter: 'all', q: '', sel: 'm1', nowMs: NOW }), /Oct 20 13:20 – Oct 25 15:18/);
+      assert.match(X.sessDetailHtml(detail(multi), { tab: 'timeline', width: 900, nowMs: NOW }), /Oct 20 13:20 – Oct 25 15:18/);
+      assert.deepStrictEqual([1, 400, 999].map(X.fmtDur), ['<1s', '<1s', '<1s']);
+      assert.strictEqual(X.fmtDur(0), '0s');
+      assert.ok(!/ ms/.test(X.tlSvg(detail({ tools: [{ ts: T0 + MIN, ended: T0 + MIN + 300, duration_ms: 300, tool_name: 'Fast', agent_id: null }] }), 900, NOW)));
+    });
+
+    test('[alpha7 S3] sessions recorded before V2: turns read "—", the timeline says why and keeps the cost line', () => {
+      const old = detail({ has_events: false, tools: [], waits: [], reviews: [], held_up: [], turns: 0 });
+      const h = X.sessDetailHtml(old, { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.ok(!/turns?\b/.test(h.slice(0, h.indexOf('role="tablist"'))), 'no turns figure in the header (neither a dash nor 0)');
+      assert.ok(!/0 turns/.test(h));
+      assert.match(h, /No tool calls or waits: this session was recorded before Sessions existed\. Runs and cost come from the ledger\./);
+      assert.ok(!/No timeline:/.test(h));
+      assert.match(h, /<svg class="tl-svg"/, 'requests exist, so the cost line stays');
+      assert.match(h, /Cumulative cost \(est\.\)/);
+      const noReq = X.sessDetailHtml(detail({ has_events: false, tools: [], waits: [], reviews: [], held_up: [], cost_series: [] }), { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(noReq, /No tool calls or waits: this session was recorded before Sessions existed\./);
+      assert.ok(!/come from the ledger/.test(noReq), 'no chart, so no claim that one is drawn');
+      assert.ok(!/<svg class="tl-svg"/.test(noReq));
+      // a current session with events, or an API without the flag, is unchanged
+      for (const flag of [true, undefined]) {
+        const cur = X.sessDetailHtml(detail({ has_events: flag }), { tab: 'timeline', width: 900, nowMs: NOW });
+        assert.match(cur, /5 turns/);
+        assert.ok(!/recorded before Sessions existed/.test(cur));
+      }
+      // a recorded session with no tool calls yet still says "0 turns", not a dash
+      assert.match(X.sessDetailHtml(detail({ has_events: true, turns: 0, tools: [], waits: [], cost_series: [] }), { tab: 'timeline', width: 900, nowMs: NOW }), /0 turns/);
+    });
+
+    test('[alpha7 S3] waterfall: API strings are escaped, and no Task description can reach a lane label', () => {
+      const evil = '<script>alert(1)</script>';
+      const d = detail();
+      d.lanes[1] = Object.assign({}, d.lanes[1], { role: 'other', label: evil, agent_type: evil, description: 'SECRET-TASK-DESCRIPTION', prompt: 'SECRET-PROMPT' });
+      d.tools.push({ ts: T0 + 3 * MIN, ended: T0 + 4 * MIN, duration_ms: MIN, tool_name: evil, agent_id: 'ag-1', outcome: 'done' });
+      d.reviews.push({ task: evil, outcome: evil, findings: 1, at: T0 + 30 * MIN });
+      const svg = X.tlSvg(d, 1000, NOW);
+      assert.ok(!svg.includes('<script>'));
+      assert.ok(svg.includes('&lt;script&gt;'));
+      assert.ok(!/SECRET/.test(svg + X.sessDetailHtml(d, { tab: 'timeline', width: 1000, nowMs: NOW }) + X.sessDetailHtml(d, { tab: 'requests', width: 1000, nowMs: NOW }) + X.sessDetailHtml(d, { tab: 'reviews', width: 1000, nowMs: NOW })), 'no description or prompt text');
+      assert.ok(!/<script>/.test(X.sessDetailHtml(d, { tab: 'reviews', width: 1000, nowMs: NOW })));
+    });
+
+    test('[alpha7 S3] waterfall: an empty session shows an empty state; many lanes grow the SVG inside a scroll box; a very long session keeps few ticks', () => {
+      const empty = detail({ tools: [], waits: [], cost_series: [], reviews: [], held_up: [] });
+      const h = X.sessDetailHtml(empty, { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(h, /No events were recorded for this session/);
+      assert.ok(!/<svg class="tl-svg"/.test(h));
+      const many = detail();
+      for (let i = 0; i < 40; i++) many.lanes.push({ id: 'x' + i, kind: 'agent', label: 'agent', role: 'other', model: null, attribution: 'explicit', started: T0, stopped: T0 + MIN, cost_est: 0, subtitle: null });
+      const hMany = X.sessDetailHtml(many, { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(hMany, /<div class="tl-wrap" id="tl-host"><div class="tl-head"><svg class="tl-svg" [^>]*>.*?<\/svg><\/div><svg class="tl-svg tl-svg-body"/);
+      const hOf = (svg) => Number(/ height="(\d+)"/.exec(svg)[1]);
+      const bodyH = (dd) => hOf(X.tlSvgParts(dd, 900, NOW).body);
+      assert.ok(bodyH(many) > bodyH(detail()) + 40 * 30, 'many lanes grow the body, in the page flow');
+      assert.ok(!/tl-scroll/.test(css + cj), 'no inner scroll box');
+      const long = detail({ ended: T0 + 40 * 864e5, duration_ms: 40 * 864e5, tools: [{ ts: T0 + 39 * 864e5, duration_ms: 5000, tool_name: 'Read', agent_id: null }], waits: [], cost_series: [], reviews: [] });
+      const ticks = (X.tlSvg(long, 900, NOW).match(/<text class="tl-text" x="[\d.]+" y="96" text-anchor="[a-z]+">/g) || []).length;
+      assert.ok(ticks >= 2 && ticks <= 11, 'ticks: ' + ticks);
+      assert.ok(Number.isFinite(bodyH(empty)));
+      assert.ok(!/NaN|undefined|Infinity/.test(X.tlSvg(empty, 900, NOW)));
+      assert.ok(!/NaN|undefined|Infinity/.test(X.tlSvg(detail({ tools: [{ ts: 'x', duration_ms: 'y', tool_name: null, agent_id: null }], waits: [{ ts: null }], cost_series: [{ ts: 1, cost_est: 'z' }], reviews: [{ at: 'q' }] }), 900, NOW)));
+    });
+
+    test('[alpha7 S3] detail header: project, state, branch, duration, cost est., turns, time range, reconciliation chip, View project', () => {
+      const h = X.sessDetailHtml(detail(), { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(h, /<h2>alpha<\/h2>/);
+      assert.match(h, /xpill-ended">Ended</);
+      assert.match(h, /feat\/barcode/);
+      assert.match(h, /47m 00s/);
+      assert.match(h, /\$6\.82 est\./);
+      assert.match(h, /5 turns/);
+      assert.match(h, /09:00–09:47/);
+      assert.match(h, /Ledger matches statusline/);
+      assert.match(h, /<a class="xlink" href="#projects\/p-alpha">View project<\/a>/);
+      assert.match(h, /data-xtab="timeline"[^>]*>Timeline</);
+      assert.match(h, /data-xtab="requests"[^>]*>Requests</);
+      assert.match(h, /data-xtab="reviews"[^>]*>Reviews \(2\)</);
+      assert.ok(!/prompts?\b/i.test(h.replace(/prompt-?(?:free)?/gi, '')) || !/\d+ prompts/.test(h), 'the count is turns, not prompts');
+      // the chip: a difference as a percentage, or nothing
+      assert.match(X.sessReconHtml({ ok: false, diff: -3.46 }), /Ledger differs from statusline by 3\.5%/);
+      assert.match(X.sessReconHtml({ ok: false, diff: 12 }), /by 12%/);
+      assert.match(X.sessReconHtml({ ok: false, diff: null }), /Ledger differs from statusline</);
+      assert.strictEqual(X.sessReconHtml(null), '');
+      assert.strictEqual(X.sessReconHtml(undefined), '');
+      assert.ok(!/chip/.test(X.sessDetailHtml(detail({ reconciliation: null }), { tab: 'timeline', width: 900, nowMs: NOW })));
+      // no project id, no link; a hostile id is encoded
+      assert.ok(!/View project/.test(X.sessDetailHtml(detail({ project_id: null }), { tab: 'timeline', width: 900, nowMs: NOW })));
+      assert.match(X.sessDetailHtml(detail({ project_id: '"><x' }), { tab: 'timeline', width: 900, nowMs: NOW }), /href="#projects\/%22%3E%3Cx"/);
+      assert.match(X.sessDetailHtml(null, { missing: true }), /no longer in the ledger/);
+      assert.match(X.sessDetailHtml(null, { loading: true }), /Loading session/);
+      assert.match(X.sessDetailHtml(null, {}), /Select a session\./);
+      // an unknown tab reads as Timeline
+      assert.match(X.sessDetailHtml(detail(), { tab: '<x>', width: 900, nowMs: NOW }), /ntab on" data-xtab="timeline"/);
+    });
+
+    test('[alpha7 S3] below the timeline: what held it up (elapsed + event) and session facts', () => {
+      const d = detail();
+      const held = X.sessHeldUp(d);
+      assert.deepStrictEqual(held.map((x) => [x.at / MIN, x.what]), [
+        [10, 'Permission wait · 1m 12s'], [12, 'Review blocked · 2 findings'], [24, 'Permission wait · 4m 05s'], [46, 'Review passed'],
+      ]);
+      const hh = X.sessHeldUpHtml(d);
+      assert.match(hh, /<span class="num quiet-text">\+10m 00s<\/span><span class="xheld-wait">Permission wait · 1m 12s<\/span>/);
+      assert.match(hh, /<span class="">Review blocked · 2 findings<\/span>/);
+      assert.match(X.sessHeldUpHtml(detail({ held_up: [], reviews: [] })), /Nothing held this session up\./);
+      assert.ok(!/xheld-wait/.test(X.sessHeldUpHtml(detail({ held_up: [] }))), 'no amber without a wait');
+      const f = X.sessFacts(d, NOW);
+      assert.strictEqual(f.waitCount, 2);
+      assert.strictEqual(f.waitMs, 72000 + 245000);
+      assert.strictEqual(f.builderRuns, 2);
+      assert.strictEqual(f.builderMs, 8 * MIN + 12 * MIN);
+      assert.deepStrictEqual(f.path, ['Block', 'Repair', 'Pass']);
+      assert.deepStrictEqual(f.attribution, { explicit: 40, inferred: 3, unattributed: 2 });
+      const fh = X.sessFactsHtml(d, NOW);
+      assert.match(fh, /Permission waits<\/dt><dd>2 waits · 5m 17s</);
+      assert.match(fh, /Builder active time<\/dt><dd>20m 00s over 2 runs</);
+      assert.match(fh, /Review path<\/dt><dd>Block → Repair → Pass</);
+      assert.match(fh, /40 explicit · 3 inferred · 2 unattributed requests/);
+      const bare = X.sessFactsHtml(detail({ waits: [], lanes: [], reviews: [], attribution: {} }), NOW);
+      assert.match(bare, /Permission waits<\/dt><dd>None</);
+      assert.match(bare, /No Builder runs/);
+      assert.match(bare, /No reviews/);
+    });
+
+    test('[alpha7 S3] Requests and Reviews sub-tabs use only fields the API gives', () => {
+      const r = X.sessDetailHtml(detail(), { tab: 'requests', width: 900, nowMs: NOW });
+      assert.match(r, /<th scope="row">Main session<\/th><td>Opus<\/td><td>Explicit<\/td><td class="num">\$2\.50 est\.<\/td>/);
+      assert.match(r, /<th scope="row">Builder <span class="quiet-text">Repair<\/span><\/th><td>Sonnet<\/td><td>Inferred<\/td><td class="num">\$1\.32 est\.<\/td>/);
+      assert.match(r, /Cost \(est\.\)/);
+      assert.match(r, /40 explicit · 3 inferred · 2 unattributed/);
+      assert.ok(!/<svg class="tl-svg"/.test(r));
+      const v = X.sessDetailHtml(detail(), { tab: 'reviews', width: 900, nowMs: NOW });
+      assert.strictEqual((v.match(/<a class="xlink" href="#pipeline\/work">/g) || []).length, 2);
+      assert.match(v, /<strong>Block<\/strong> · 2 findings · 09:12/);
+      assert.match(v, /<strong>Pass<\/strong> · 0 findings/);
+      assert.match(v, /Pipeline task barcode</);
+      assert.match(X.sessDetailHtml(detail({ reviews: [] }), { tab: 'reviews', width: 900, nowMs: NOW }), /No reviews in this session\./);
+    });
+
+    test('[alpha7 S3] every dollar figure in the Sessions markup carries est.; the count says turns, never prompts', () => {
+      const d = detail();
+      const all = [X.sessListHtml(LIST, { filter: 'all', q: '', sel: 'a-live', nowMs: NOW })]
+        .concat(['timeline', 'requests', 'reviews'].map((tab) => X.sessDetailHtml(d, { tab, width: 900, nowMs: NOW })))
+        .concat([X.tlSvg(d, 900, NOW)]).join('\n');
+      const dollars = all.match(/\$\d[\d,.]*/g) || [];
+      assert.ok(dollars.length >= 8, 'figures were found: ' + dollars.length);
+      for (const m of all.matchAll(/\$\d[\d,.]*/g)) assert.ok(all.slice(m.index + m[0].length, m.index + m[0].length + 5) === ' est.', 'missing est. after ' + m[0]);
+      assert.match(all, /5 turns/);
+      assert.ok(!/\bprompts?\b/i.test(all), 'the word prompt never appears');
+    });
+
+    test('[alpha7 S3] page: the Projects grid, list and detail panes, no pagination, no menu', () => {
+      const ctx = { list: LIST, ui: { filter: 'all', q: '', tab: 'timeline' }, sel: 'a-live', detail: detail({ session_id: 'a-live' }), detailFor: 'a-live', missing: false, width: 900, nowMs: NOW };
+      const h = X.sessPage(ctx);
+      assert.match(h, /<div class="pnav">/);
+      assert.match(h, /<div class="nlist" id="xlist">/);
+      assert.match(h, /<section class="ndetail" id="xdetail"/);
+      assert.match(h, /5 sessions · 2 running/);
+      assert.match(h, /class="xrow sel"[^>]*data-xsel="a-live"/);
+      const hit = /page \d|next page|\bolder\b|load more|⋯|&hellip;|\.\.\./i.exec(h.slice(0, h.indexOf('id="xdetail"')));   // the list side; idle breaks are not a menu
+      assert.ok(!hit, 'no pagination or menu: ' + (hit && h.slice(Math.max(0, hit.index - 40), hit.index + 40)));
+      // the detail of another session is not shown under this selection
+      assert.match(X.sessPage(Object.assign({}, ctx, { detailFor: 'someone-else' })), /Loading session/);
+      assert.match(X.sessPage(Object.assign({}, ctx, { list: [], sel: null, detail: null, detailFor: null })), /No sessions in this range\./);
+      assert.match(X.sessTitleHtml('7d'), /<h1>Sessions<\/h1>/);
+    });
+
+    test('[alpha7 S3] amber only on a permission wait: calm markup has none, a waiting session and a wait band do', () => {
+      const calmRows = LIST.filter((r) => r.state === 'ended' || r.state === 'running');
+      const calm = X.sessPage({ list: calmRows, ui: { filter: 'all', q: '', tab: 'timeline' }, sel: 'a-live', detail: detail({ session_id: 'a-live', waits: [], held_up: [], state: 'running', ended: null }), detailFor: 'a-live', width: 900, nowMs: NOW });
+      assert.ok(!/amber|waiting|tl-wait|xheld-wait/i.test(calm), 'no amber hook in a calm session');
+      assert.match(X.sessListHtml(LIST, { filter: 'all', q: '', sel: null, nowMs: NOW }), /xpill-waiting">Waiting</);
+      assert.match(X.tlSvg(detail(), 900, NOW), /tl-wait-band/);
+      const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] }));
+      const users = rules.filter((r) => /--amber/.test(r.body) && r.sel !== ':root' && /^\.(xpill|xheld|tl-)/.test(r.sel)).map((r) => r.sel).sort();
+      assert.deepStrictEqual(users, ['.tl-sw-wait', '.tl-wait-band', '.tl-wait-label', '.tl-wait-top', '.xheld-wait', '.xpill-waiting']);
+      // every JS line that names a wait class is a wait context
+      for (const m of cj.matchAll(/^.*(?:xpill-waiting|xheld-wait|tl-wait).*$/gm)) assert.ok(/wait/i.test(m[0]), m[0].slice(0, 100));
+    });
+
+    test('[alpha7 S3] breaks: labels never overlap; one that does not fit shrinks to the marker with the full text in <title>', () => {
+      const H = 3600000;
+      const call = (ts) => ({ ts, ended: ts + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: null });
+      const dense = (a, b) => { const o = []; for (let t = a; t <= b; t += 5 * MIN) o.push(call(t)); return o; };
+      const burst = (ts) => dense(ts, ts + 10 * MIN);   // a 10 minute active stretch
+      const t = [T0, T0 + 24 * H, T0 + 26 * H, T0 + 31 * H, T0 + 34 * H];
+      const tools = t.slice(0, 4).flatMap(burst).concat(dense(t[4], t[4] + 120 * MIN));
+      const d = { started: T0, ended: t[4] + 120 * MIN + 1000, lanes: [], waits: [], cost_series: [], reviews: [], tools };
+      const ax = X.tlAxis(d, X.tlSpan(d, NOW), 176, 984);
+      const gaps = ax.segs.filter((s) => s.kind === 'gap');
+      assert.strictEqual(gaps.length, 4, 'four breaks, each more than 30 px apart');
+      const svg = X.tlSvgParts(d, 1000, NOW);
+      assert.strictEqual((svg.head.match(/<g class="tl-break">/g) || []).length, 4);
+      assert.ok(!/⋯|idle<\/text>/.test(svg.head + svg.body), 'no break text on the axis');
+      const lb = X.tlBreakLabels(ax, 400);
+      assert.strictEqual(lb.length, 4);
+      for (const l of lb) {
+        assert.match(l.label, /^(\d+h( \d+m)?|\d+m|\d+s) idle$/);
+        assert.match(l.full, /^(\d+h \d\dm|\d+m \d\ds) idle, compressed$/);
+        assert.strictEqual(l.show, l.seg.x1 - l.seg.x0 >= 14);
+        assert.ok(svg.body.includes('<title>' + l.full + '</title>'), 'full text in the body band title: ' + l.full);
+        assert.ok(svg.head.includes('<title>' + l.full + '</title>'), 'and in the head band title');
+      }
+      assert.deepStrictEqual(X.tlBreakLabels(null, 400), []);
+    });
+
+    /* ---- alpha7 S3 follow-up: week-long sessions (axis compression, label collisions, review clusters, two-SVG waterfall) ---- */
+
+    // 15 bursts over about 7 days, separated by gaps from 20 minutes to 40 hours; one burst is a single zero-length call
+    const weekSession = () => {
+      const H = 3600000;
+      const call = (ts, dur) => ({ ts, ended: ts + dur, duration_ms: dur, tool_name: 'Edit', agent_id: null, outcome: 'done' });
+      const gapsH = [1 / 3, 1, 40, 3, 5 / 12, 12, 8, 0.5, 38, 2, 15, 6, 22, 24];
+      const tools = [];
+      let t = at(7, 13, 0);
+      const T = t;
+      for (let i = 0; i < 15; i++) {
+        if (i === 6) tools.push(call(t, 0));   // a point: no length at all
+        else { tools.push(call(t, 4 * MIN)); tools.push(call(t + 4 * MIN, 3 * MIN)); }
+        t += (i === 6 ? 0 : 7 * MIN);
+        if (i < 14) t += gapsH[i] * H;
+      }
+      return { started: T, ended: t + MIN, lanes: [], waits: [], cost_series: [{ ts: T + MIN, cost_est: 1 }, { ts: t, cost_est: 9 }], reviews: [], tools };
+    };
+
+    test('[alpha7 S3] week axis: every gap over 10 minutes is a break, none merged, no activity inside a break, every run keeps its minimum width', () => {
+      const d = weekSession();
+      const span = X.tlSpan(d, NOW);
+      assert.ok(span.t1 - span.t0 > 160 * 3600000, 'about a week: ' + (span.t1 - span.t0) / 3600000 + ' h');
+      const ax = X.tlAxis(d, span, 176, 984);
+      const gaps = ax.segs.filter((s) => s.kind === 'gap');
+      const runs = ax.segs.filter((s) => s.kind === 'run');
+      const act = X.tlActivity(d, span);
+      assert.strictEqual(act.length, 16, 'fifteen bursts and the span end, a minute after the last');
+      assert.strictEqual(gaps.length, 14, 'one break per gap: none dropped, none merged');
+      assert.strictEqual(runs.length, 15);
+      for (const g of gaps) assert.strictEqual(g.idleMs, g.t1 - g.t0, 'idle time is the break itself');
+      assert.ok(gaps.reduce((a, g) => a + g.idleMs, 0) <= span.t1 - span.t0, 'idle never exceeds the session');
+      assert.ok(Math.max.apply(null, gaps.map((g) => g.idleMs)) < span.t1 - span.t0);
+      for (const [a, b] of act) {
+        const inRun = runs.some((r) => a >= r.t0 && b <= r.t1);
+        assert.ok(inRun, 'activity ' + a + '..' + b + ' sits inside one run');
+        assert.ok(!gaps.some((g) => a < g.t1 && b > g.t0), 'and overlaps no break');
+        for (const t of [a, b]) {
+          const x = X.tlX(t, ax, 176, 984);
+          assert.ok(runs.some((r) => x >= r.x0 - 1e-6 && x <= r.x1 + 1e-6), 'x of an activity edge is on a run');
+        }
+      }
+      for (const r of runs) assert.ok(r.x1 - r.x0 >= TLC.mergePx - 1e-6, 'run width ' + (r.x1 - r.x0));
+      assert.ok(runs.some((r) => r.t1 === r.t0), 'the point run exists');
+      assert.strictEqual(ax.segs[0].x0, 176);
+      assert.strictEqual(ax.segs[ax.segs.length - 1].x1, 984);
+      for (let i = 1; i < ax.segs.length; i++) assert.ok(Math.abs(ax.segs[i].x0 - ax.segs[i - 1].x1) < 1e-6, 'segments touch');
+      assert.ok(gaps.reduce((a, g) => a + g.x1 - g.x0, 0) <= 0.4 * 808 + 1e-6, 'breaks take at most 40% of the width');
+      assert.ok(gaps.every((g) => g.x1 - g.x0 >= 8 - 1e-6), 'never narrower than 8 px');
+      // the longest idle label can never be longer than the session
+      const lb = X.tlBreakLabels(ax, 400);
+      assert.strictEqual(lb.length, 14);
+      const svg = X.tlSvgParts(d, 1000, NOW);
+      const re = /<title>((?:\d+h \d\dm|\d+m \d\ds)) idle, compressed<\/title>/g;
+      assert.strictEqual([...svg.head.matchAll(re)].length, 14);
+      assert.strictEqual([...svg.body.matchAll(re)].length, 14);
+    });
+
+    test('[alpha7 S3] axis: past 40 breaks at 8 px the longest stay compressed and the rest stay linear; nothing merges', () => {
+      const H = 3600000;
+      const call = (ts) => ({ ts, ended: ts + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: null });
+      const tools = []; let t = T0; const lens = [];
+      for (let i = 0; i < 100; i++) { tools.push(call(t)); const gap = (20 + (i * 37) % 200) * MIN; lens.push(gap); t += gap; }
+      const d = { started: T0, ended: t + 1000, lanes: [], waits: [], cost_series: [], reviews: [], tools };
+      const ax = X.tlAxis(d, X.tlSpan(d, NOW), 176, 984);
+      const gaps = ax.segs.filter((s) => s.kind === 'gap');
+      const runs = ax.segs.filter((s) => s.kind === 'run');
+      assert.strictEqual(gaps.length, 40, 'floor(40% of 808 / 8)');
+      assert.ok(gaps.every((g) => Math.abs(g.x1 - g.x0 - 8) < 1e-6));
+      const shortestKept = Math.min.apply(null, gaps.map((g) => g.idleMs));
+      const sorted = lens.slice().sort((a, b) => b - a);
+      assert.ok(shortestKept >= sorted[40] - 1500, 'the kept breaks are the longest ones');
+      for (const g of gaps) assert.strictEqual(g.idleMs, g.t1 - g.t0);
+      assert.strictEqual(ax.segs[ax.segs.length - 1].x1, 984);
+      for (const r of runs) assert.ok(r.x1 - r.x0 >= 808 * 0.6 / runs.length - 1e-6 && Number.isFinite(r.x1), 'runs share what is left');
+      for (let i = 1; i < ax.segs.length; i++) assert.ok(Math.abs(ax.segs[i].x0 - ax.segs[i - 1].x1) < 1e-6);
+    });
+
+    test('[alpha7 S3] axis labels: no two overlap (6 px apart), all inside the drawing, the right edge turns to end anchor, the left to start', () => {
+      const d = weekSession();
+      const span = X.tlSpan(d, NOW);
+      const W = 1000;
+      const ax = X.tlAxis(d, span, 176, W - 16);
+      const at1 = X.tlAxisTexts(ax, span, W, true);
+      assert.ok(at1.texts.length >= 8, 'labels: ' + at1.texts.length);
+      assert.ok(at1.grids.length >= at1.texts.length, 'gridlines stay for skipped labels');
+      for (let i = 0; i < at1.texts.length; i++) {
+        const t = at1.texts[i];
+        assert.ok(t.l >= 0 && t.r <= W, 'inside [0, W]: ' + t.label);
+        if (i) assert.ok(t.l >= at1.texts[i - 1].r + 6 - 1e-6, 'clear of the previous label: ' + at1.texts[i - 1].label + ' | ' + t.label);
+      }
+      assert.ok(/^[A-Z][a-z]{2} \d{1,2} \d\d:\d\d$/.test(at1.texts[0].label), 'the first label is dated');
+      // a run that ends at the very edge of a narrow drawing never clips: the label turns to end anchor
+      const edgeAxis = { t0: T0, t1: T0 + 60 * MIN, x0: 10, x1: 300, segs: [{ kind: 'run', t0: T0, t1: T0 + 60 * MIN, x0: 10, x1: 300 }] };
+      const edge = X.tlAxisTexts(edgeAxis, { t0: T0, t1: T0 + 60 * MIN }, 300, true);
+      const last = edge.texts[edge.texts.length - 1];
+      assert.strictEqual(last.anchor, 'end');
+      assert.ok(last.r <= 300 && last.l >= 0);
+      assert.strictEqual(edge.texts[0].anchor, 'start', 'the first label at x = 10 would clip on the left');
+      assert.ok(edge.texts[0].l >= 0);
+      // relative labels go through the same pass
+      const rel = X.tlAxisTexts({ t0: T0, t1: T0 + 8 * MIN, x0: 100, x1: 900, segs: [{ kind: 'run', t0: T0, t1: T0 + 8 * MIN, x0: 100, x1: 900 }] }, { t0: T0, t1: T0 + 8 * MIN }, 1000, false);
+      assert.ok(rel.texts.length >= 2 && rel.texts.every((t) => !t.label.includes(':')));
+      // an empty axis is fine
+      assert.deepStrictEqual(X.tlAxisTexts(null, { t0: 0, t1: 1 }, 100, true), { grids: [], texts: [] });
+    });
+
+    test('[alpha7 S3] axis labels: a label that would touch the previous one is skipped and the next shown label carries the date', () => {
+      const dayA = at(1, 23, 30), dayB = at(0, 0, 0);
+      const ax = { t0: dayA, t1: dayB + 60 * MIN, x0: 100, x1: 400, segs: [
+        { kind: 'run', t0: dayA, t1: dayA + 20 * MIN, x0: 100, x1: 160 },
+        { kind: 'run', t0: dayB, t1: dayB + 60 * MIN, x0: 160, x1: 400 }] };
+      const r = X.tlAxisTexts(ax, { t0: dayA, t1: dayB + 60 * MIN }, 500, true);
+      assert.deepStrictEqual(r.texts.map((t) => t.label), ['Oct 24 23:30', 'Oct 25 00:30', '01:00'], 'the 00:00 label (the day change) collides, so 00:30 takes the date');
+      assert.strictEqual(r.grids.length, 4, 'its gridline stays');
+    });
+
+    test('[alpha7 S3] axis labels in the SVG: a week-long session has no overlapping or clipped axis text', () => {
+      const d = weekSession();
+      for (const W of [700, 1000, 1400]) {
+        const { head } = X.tlSvgParts(d, W, NOW);
+        const ticks = [...head.matchAll(/<text class="tl-text" x="([\d.]+)" y="96" text-anchor="(\w+)">([^<]*)</g)].map((m) => {
+          const w = m[3].length * 6.4, x = Number(m[1]);
+          return m[2] === 'end' ? [x - w, x, m[3]] : m[2] === 'start' ? [x, x + w, m[3]] : [x - w / 2, x + w / 2, m[3]];
+        });
+        assert.ok(ticks.length >= 4, W + ': labels ' + ticks.length);
+        ticks.forEach((t, i) => {
+          assert.ok(t[0] >= 0 && t[1] <= W, W + ': inside ' + t[2]);
+          if (i) assert.ok(t[0] >= ticks[i - 1][1] + 6 - 0.5, W + ': ' + ticks[i - 1][2] + ' | ' + t[2]);
+        });
+      }
+    });
+
+    /* ---- alpha7 S3 follow-up: the axis says time, the bands say idle ---- */
+
+    // a short session with no idle break: relative labels
+    const contSession = () => {
+      const call = (ts) => ({ ts, ended: ts + 2000, duration_ms: 2000, tool_name: 'Read', agent_id: null, outcome: 'done' });
+      return { started: T0, ended: T0 + 8 * MIN, lanes: [], waits: [], cost_series: [], reviews: [], held_up: [], tools: [call(T0 + MIN), call(T0 + 4 * MIN), call(T0 + 7 * MIN)] };
+    };
+
+    test('[alpha7 S3] axis row is time only: no break text in the head; a caption names the scale', () => {
+      const head = X.tlSvgParts(weekSession(), 1000, NOW).head;
+      assert.ok(!/⋯|idle/.test(head.replace(/<title>[^<]*<\/title>/g, '')), 'no break text in the head');
+      assert.match(head, /<text class="tl-text" x="0" y="96">Local time<\/text>/);
+      const rel = X.tlSvgParts(contSession(), 1000, NOW).head;
+      assert.match(rel, /<text class="tl-text" x="0" y="96">Elapsed<\/text>/);
+      assert.ok(!/Local time/.test(rel));
+      assert.ok(!/Elapsed/.test(head));
+    });
+
+    test('[alpha7 S3] axis: each active run starts with its own clock label, left-aligned to the run start, none overlapping', () => {
+      const H3 = 3 * 3600000;
+      const ax = { t0: T0, t1: T0 + H3, x0: 100, x1: 900, segs: [
+        { kind: 'run', t0: T0, t1: T0 + 40 * MIN, x0: 100, x1: 400 },
+        { kind: 'gap', t0: T0 + 40 * MIN, t1: T0 + 2 * 3600000, x0: 400, x1: 424, idleMs: 80 * MIN },
+        { kind: 'run', t0: T0 + 2 * 3600000, t1: T0 + H3, x0: 424, x1: 900 }] };
+      const r = X.tlAxisTexts(ax, { t0: T0, t1: T0 + H3 }, 1000, true);
+      for (const run of ax.segs.filter((s) => s.kind === 'run')) {
+        const t = r.texts.find((q) => Math.abs(q.x - run.x0) < 1e-6);
+        assert.ok(t, 'a label at the run start x=' + run.x0);
+        assert.strictEqual(t.anchor, 'start');
+        assert.ok(Math.abs(t.l - run.x0) < 1e-6);
+      }
+      assert.ok(r.texts.length > 2, 'the wide run has inner ticks too');
+      r.texts.forEach((t, i) => { assert.ok(t.l >= 0 && t.r <= 1000); if (i) assert.ok(t.l >= r.texts[i - 1].r + 6 - 1e-6, t.label); });
+      // an inner tick never covers the next run's start label
+      const tight = { t0: T0, t1: T0 + H3, x0: 100, x1: 900, segs: [
+        { kind: 'run', t0: T0, t1: T0 + 60 * MIN, x0: 100, x1: 330 },
+        { kind: 'gap', t0: T0 + 60 * MIN, t1: T0 + 2 * 3600000, x0: 330, x1: 354, idleMs: 60 * MIN },
+        { kind: 'run', t0: T0 + 2 * 3600000, t1: T0 + H3, x0: 354, x1: 900 }] };
+      const tr = X.tlAxisTexts(tight, { t0: T0, t1: T0 + H3 }, 1000, true);
+      assert.ok(tr.texts.some((t) => Math.abs(t.x - 354) < 1e-6 && t.anchor === 'start'), 'the second run keeps its start label');
+      // a run start near the right edge turns to end anchor, and nothing leaves [0, W]
+      const edge = X.tlAxisTexts({ t0: T0, t1: T0 + 3600000 + MIN, x0: 10, x1: 296, segs: [
+        { kind: 'run', t0: T0, t1: T0 + 10 * MIN, x0: 10, x1: 100 }, { kind: 'gap', t0: T0 + 10 * MIN, t1: T0 + 3600000, x0: 100, x1: 124, idleMs: 50 * MIN },
+        { kind: 'run', t0: T0 + 3600000, t1: T0 + 3600000 + MIN, x0: 124, x1: 296 }] }, { t0: T0, t1: T0 + 3600000 + MIN }, 300, true);
+      assert.ok(edge.texts.every((t) => t.l >= 0 && t.r <= 300));
+      const lone = X.tlAxisTexts({ t0: T0, t1: T0 + MIN, x0: 10, x1: 296, segs: [{ kind: 'run', t0: T0, t1: T0 + MIN, x0: 290, x1: 296 }] }, { t0: T0, t1: T0 + MIN }, 300, true);
+      assert.strictEqual(lone.texts[0].anchor, 'end');
+    });
+
+    test('[alpha7 S3] break bands: wide ones carry a rotated "28m idle" label, narrow ones none, every band keeps its <title>', () => {
+      const d = Object.assign(weekSession(), { lanes: detail().lanes });   // four lanes: the body is tall enough for the text
+      const body = X.tlSvgParts(d, 1000, NOW).body;
+      const bands = [...body.matchAll(/<rect class="tl-break-band" x="([\d.]+)" y="0" width="([\d.]+)"[^>]*><title>([^<]*)<\/title>/g)];
+      assert.strictEqual(bands.length, X.tlAxis(d, X.tlSpan(d, NOW), 176, 984).segs.filter((q) => q.kind === 'gap').length, 'a title on every band');
+      assert.ok(bands.every((m) => / idle, compressed$/.test(m[3])));
+      const texts = [...body.matchAll(/<text class="tl-break-text" x="([\d.]+)" y="([\d.]+)" text-anchor="end" transform="rotate\(-90 ([\d.]+) ([\d.]+)\)">([^<]*)</g)];
+      const wide = bands.filter((m) => Number(m[2]) >= 14);
+      assert.ok(wide.length > 0 && texts.length > 0 && texts.length <= wide.length);
+      for (const t of texts) {
+        assert.strictEqual(t[1], t[3]);
+        assert.strictEqual(Number(t[2]), TLC.laneH + 6, 'starts below the main session lane');
+        assert.strictEqual(Number(t[4]), TLC.laneH + 6, 'rotation centre on the same y');
+        assert.match(t[5], /^(\d+h( \d+m)?|\d+m|\d+s) idle$/);
+        assert.ok(bands.some((m) => Number(t[1]) > Number(m[1]) && Number(t[1]) < Number(m[1]) + Number(m[2]) + 4), 'the label sits in a band');
+      }
+      assert.ok(!/style=/.test(body));
+      const mk = (w) => ({ kind: 'gap', t0: 0, t1: 28 * MIN + 5000, x0: 0, x1: w, idleMs: 28 * MIN + 5000 });
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(13.9)] }, 400)[0].show, false);
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(14)] }, 400)[0].show, true);
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 400)[0].label, '28m idle');
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 400)[0].full, '28m 05s idle, compressed');
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 40)[0].show, false, 'does not fit the body height');
+      // the fit check counts only the space below lane 0: 8 chars * 6.4 + 12 = 63.2
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 110, TLC.laneH + 6)[0].show, true);
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 110, TLC.laneH + 6 + 30)[0].show, false, 'fits the body but not below lane 0');
+      // one lane: no label, the band keeps its title
+      const one = X.tlSvgParts(Object.assign(weekSession(), { lanes: [] }), 1000, NOW).body;
+      assert.ok(!/tl-break-text/.test(one) && /idle, compressed<\/title>/.test(one));
+      assert.deepStrictEqual([45e3, 28 * MIN, 3 * 3600000, 3.5 * 3600000].map(X.tlBreakShort), ['45s', '28m', '3h', '3h 30m']);
+      // 40 breaks squeezed to 8 px: no text, the titles stay
+      const call = (ts) => ({ ts, ended: ts + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: null });
+      const tools = []; let t = T0;
+      for (let i = 0; i < 100; i++) { tools.push(call(t)); t += (20 + (i * 37) % 200) * MIN; }
+      const nb = X.tlSvgParts({ started: T0, ended: t + 1000, lanes: [], waits: [], cost_series: [], reviews: [], tools }, 1000, NOW).body;
+      assert.ok(!/tl-break-text/.test(nb));
+      assert.strictEqual((nb.match(/idle, compressed<\/title>/g) || []).length, 40);
+    });
+
+    test('[alpha7 S3] legend: the compressed idle swatch shows only when the waterfall has a break', () => {
+      assert.ok(!/Idle time/.test(X.tlLegendHtml()));
+      assert.ok(!/Idle time/.test(X.tlLegendHtml(false)));
+      const lg = X.tlLegendHtml(true);
+      assert.match(lg, /<span class="item"><i class="swatch tl-sw-break"><\/i>Idle time \(compressed\)<\/span><\/div>$/);
+      assert.ok(lg.indexOf('Permission wait') < lg.indexOf('Idle time'), 'after the permission wait item');
+      assert.match(css, /\.tl-sw-break \{[^}]*background: var\(--panel2\);[^}]*border: 1px solid var\(--line\)/);
+      assert.match(css, /\.tl-break-text \{[^}]*font-size: 11px/);
+      assert.match(X.sessTimelineHtml(weekSession(), { width: 1000, nowMs: NOW }), /Idle time \(compressed\)/);
+      assert.ok(!/Idle time/.test(X.sessTimelineHtml(contSession(), { width: 1000, nowMs: NOW })));
+    });
+
+    test('[alpha7 S3] review markers: those within 18 px merge (worst outcome, "N reviews", list in the title); a label shows only when it fits', () => {
+      const R = (x, outcome, findings) => ({ x, outcome, findings: findings || 0 });
+      const seven = [R(960, 'pass'), R(964, 'block', 2), R(968, 'pass'), R(972, 'needs_context', 1), R(975, 'error'), R(980, 'pass'), R(984, 'pass')];
+      const m = X.tlReviewMarkers(seven, 1000);
+      assert.strictEqual(m.length, 1, 'seven close markers become one');
+      assert.strictEqual(m[0].outcome, 'block');
+      assert.strictEqual(m[0].count, 7);
+      assert.strictEqual(m[0].label, '7 reviews');
+      assert.match(m[0].title, /^7 reviews: /);
+      assert.match(m[0].title, /Block · 2 findings; Pass; /);
+      assert.match(m[0].title, /Needs context · 1 finding;/);
+      assert.strictEqual(m[0].showLabel, true);
+      assert.ok(m[0].anchor === 'end' && m[0].lx <= 1000, 'near the right edge the label ends at the marker');
+      // worst outcome order: block > needs_context > error > pass
+      const worst = (...o) => X.tlReviewMarkers(o.map((x, i) => R(100 + i * 3, x)), 1000)[0].outcome;
+      assert.strictEqual(worst('pass', 'error'), 'error');
+      assert.strictEqual(worst('error', 'needs_context', 'pass'), 'needs_context');
+      assert.strictEqual(worst('pass', 'needs_context', 'block', 'error'), 'block');
+      assert.strictEqual(worst('pass', 'pass'), 'pass');
+      assert.strictEqual(worst('mystery', 'pass'), 'pass');
+      // 19 px apart is two markers; 18 px apart is one
+      assert.strictEqual(X.tlReviewMarkers([R(100, 'pass'), R(119, 'pass')], 1000).length, 2);
+      assert.strictEqual(X.tlReviewMarkers([R(100, 'pass'), R(118, 'pass')], 1000).length, 1);
+      // a single marker keeps its own label
+      const one = X.tlReviewMarkers([R(300, 'block', 2)], 1000)[0];
+      assert.deepStrictEqual([one.label, one.title, one.showLabel, one.anchor], ['Block · 2 findings', 'Block · 2 findings', true, 'start']);
+      // markers 40 px apart with long labels: shown labels never overlap each other or another marker; the title always has the text
+      const near = X.tlReviewMarkers([R(300, 'block', 2), R(340, 'needs_context', 3), R(380, 'block', 12)], 1000);
+      assert.strictEqual(near.length, 3);
+      assert.ok(near.some((x) => !x.showLabel), 'not every label fits');
+      const ext = (x) => { const w = x.label.length * 6.4; return x.anchor === 'start' ? [x.lx, x.lx + w] : [x.lx - w, x.lx]; };
+      const shown = near.filter((x) => x.showLabel).map(ext);
+      shown.forEach((e, i) => { if (i) assert.ok(e[0] >= shown[i - 1][1] + 6 - 1e-6); });
+      for (const x of near) assert.ok(x.title.length > 0);
+      for (const x of near) for (const other of near) if (other !== x && x.showLabel) { const e = ext(x); assert.ok(!(e[0] < other.x + 10 && e[1] > other.x - 10), 'a label never covers another marker'); }
+      assert.deepStrictEqual(X.tlReviewMarkers(null, 1000), []);
+      assert.deepStrictEqual(X.tlReviewMarkers([{ x: NaN, outcome: 'pass' }], 1000), []);
+    });
+
+    test('[alpha7 S3] review markers in the SVG: a pile of reviews at the right edge is one marker and one readable label', () => {
+      const d = weekSession();
+      const e = d.ended;
+      d.reviews = [0, 1, 2, 3, 4, 5, 6].map((i) => ({ task: 't' + i, outcome: i === 2 ? 'block' : 'pass', findings: i === 2 ? 2 : 0, at: e - (6 - i) * 20000 }));
+      const { body } = X.tlSvgParts(d, 1000, NOW);
+      assert.strictEqual((body.match(/<g class="tl-review">/g) || []).length, 1);
+      assert.match(body, />7 reviews</);
+      assert.match(body, /<title>7 reviews: [^<]*Block · 2 findings[^<]*<\/title>/);
+      assert.strictEqual((body.match(/class="oshape oshape-block"/g) || []).length, 1, 'the shape of the worst outcome');
+      assert.ok(!/oshape-pass/.test(body.slice(body.indexOf('tl-review'))), 'no stack of pass shapes');
+    });
+
+    test('[alpha7 S3] waterfall in two SVGs: a head (cost, axis, break labels) and a body (lanes, bands, waits, reviews) with the same width and x geometry', () => {
+      const d = detail();
+      const p = X.tlSvgParts(d, 1000, NOW);
+      assert.strictEqual(X.tlSvg(d, 1000, NOW), p.head + p.body);
+      const dim = (s) => /<svg [^>]*width="(\d+)" height="(\d+)" viewBox="0 0 (\d+) (\d+)"/.exec(s).slice(1).map(Number);
+      const [hw, hh, hvw, hvh] = dim(p.head), [bw, bh, bvw, bvh] = dim(p.body);
+      assert.deepStrictEqual([hw, hvw, bw, bvw], [1000, 1000, 1000, 1000], 'same width');
+      assert.deepStrictEqual([hh, hvh], [100, 100]);
+      assert.strictEqual(bh, bvh);
+      assert.ok(bh > 0);
+      assert.match(p.head, />Cumulative cost \(est\.\)</);
+      assert.match(p.head, /class="tl-cost"/);
+      assert.ok(!/class="tl-(track|tool|wait-band|review)/.test(p.head), 'no lanes in the head');
+      assert.ok(!/Cumulative cost|class="tl-cost"/.test(p.body), 'no cost line in the body');
+      assert.ok(/class="tl-track/.test(p.body) && /class="tl-wait-band"/.test(p.body) && /class="oshape/.test(p.body));
+      assert.match(p.body, /^<svg class="tl-svg tl-svg-body"/);
+      // lanes start at the top of the body, so they sit right under the head
+      assert.match(p.body, /<text class="tl-text tl-strong" x="0" y="15">Main session</);
+      // idle breaks run through both: a band in the head and one in the body, at the same x
+      const wk = weekSession();
+      const w = X.tlSvgParts(wk, 1000, NOW);
+      const bands = (s) => [...s.matchAll(/<rect class="tl-break-band" x="([\d.]+)" y="(\d+|0)" width="([\d.]+)"/g)].map((m) => m[1] + '/' + m[3]);
+      assert.strictEqual(bands(w.head).length, 14);
+      assert.deepStrictEqual(bands(w.body), bands(w.head));
+      const grid = (s) => [...s.matchAll(/<line class="tl-grid" x1="([\d.]+)" x2="\1"/g)].map((m) => m[1]);
+      const hg = grid(w.head), bg = grid(w.body);
+      assert.ok(hg.length >= 10 && hg.every((x) => bg.includes(x)), 'every gridline of the axis continues down the body');
+      assert.ok(!/NaN|undefined|Infinity/.test(w.head + w.body));
+      assert.ok(!/style=/.test(p.head + p.body));
+      // the waterfall wrapper: head in a sticky box, then the body
+      const html = X.tlWrapHtml(d, { width: 1000, nowMs: NOW });
+      assert.match(html, /^<div class="tl-wrap" id="tl-host"><div class="tl-head"><svg class="tl-svg" /);
+      assert.ok(html.indexOf('</svg></div><svg class="tl-svg tl-svg-body"') > 0);
+    });
+
+    test('[alpha7 S3] the detail panel is the one vertical scroller; the head sticks inside it', () => {
+      const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] }));
+      const rule = (sel) => { const r = rules.find((x) => x.sel === sel); assert.ok(r, 'css has ' + sel); return r.body; };
+      assert.match(rule('.ndetail'), /overflow-y: auto/);
+      const head = rule('.tl-head');
+      assert.match(head, /position: sticky/);
+      assert.match(head, /top: 0/);
+      assert.match(head, /background: var\(--bg\)/, 'lanes pass under an opaque head');
+      assert.match(head, /z-index: \d/);
+      // sticky needs no scroll container between the head and .ndetail
+      for (const sel of ['.tl-wrap', '.tl-head', '.xsect', '.ntabpanel']) assert.ok(!/overflow/.test(rule(sel)), sel + ' must not scroll or clip');
+      assert.ok(!/max-height/.test(rule('.tl-wrap')));
+      assert.ok(!/tl-scroll/.test(css));
+      // the panel keeps its scroll position across a re-render (it is the host, not a child)
+      assert.match(cj, /const keep = host\.scrollTop \|\| 0;/);
+      assert.match(cj, /if \(keep\) host\.scrollTop = keep;/);
+    });
+
+    test('[alpha7 S3] sessions recorded before V2 that have a cost line: the note no longer says there is no timeline', () => {
+      const old = X.sessDetailHtml(detail({ has_events: false, tools: [], waits: [], reviews: [], held_up: [] }), { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(old, /<p class="empty-note">No tool calls or waits: this session was recorded before Sessions existed. Runs and cost come from the ledger.<\/p>/);
+      assert.ok(old.indexOf('empty-note') < old.indexOf('class="legend"'), 'the note sits above the legend');
+      assert.match(old, /class="tl-wrap"/);
+      assert.ok(!/No timeline/.test(old));
+    });
+
+    test('[alpha7 S3] ticks: clock times for sessions over 24 h or with a break, dated at each new day; short ones stay relative', () => {
+      const lab = X.tlClockLabel(at(0, 13, 20), '');
+      assert.deepStrictEqual([lab.lab, lab.day], ['Oct 25 13:20', X.sessDayKey(at(0, 13, 20))]);
+      assert.strictEqual(X.tlClockLabel(at(0, 13, 25), lab.day).lab, '13:25');
+      assert.strictEqual(X.tlClockLabel(at(-1, 0, 5), lab.day).lab, 'Oct 26 00:05');
+      const plain = (ms) => ({ t0: 0, t1: ms });
+      assert.strictEqual(X.tlUseClock(plain(25 * 3600000), null), true);
+      assert.strictEqual(X.tlUseClock(plain(2 * 3600000), { segs: [{ kind: 'run' }] }), false);
+      assert.strictEqual(X.tlUseClock(plain(3600000), { segs: [{ kind: 'run' }, { kind: 'gap' }, { kind: 'run' }] }), true);
+      const tickTexts = (svg) => [...svg.matchAll(/<text class="tl-text" x="[\d.]+" y="96" text-anchor="[a-z]+">([^<]*)</g)].map((m) => m[1]).filter((x) => !x.startsWith('\u22ef'));
+      // a six day session: every label is a clock time, the first of each day carries the date
+      const D = 864e5;
+      const call = (ts) => ({ ts, ended: ts + 60000, duration_ms: 60000, tool_name: 'Edit', agent_id: null });
+      const start = at(6, 22, 30);
+      const tools = []; for (let i = 0; i < 6; i++) for (let t = start + i * D; t <= start + i * D + 90 * MIN; t += 5 * MIN) tools.push(call(t));
+      const six = { started: start, ended: start + 5 * D + 100 * MIN, lanes: [], waits: [], cost_series: [], reviews: [], tools };
+      const texts = tickTexts(X.tlSvg(six, 1200, NOW));
+      assert.ok(texts.length >= 6, 'ticks: ' + texts.length);
+      for (const x of texts) assert.match(x, /^(?:[A-Z][a-z]{2} \d{1,2} )?\d\d:\d\d$/, x);
+      const dated = texts.filter((x) => /^[A-Z][a-z]{2} /.test(x));
+      assert.ok(dated.length >= 2, 'a date at each new day: ' + dated.join(', '));
+      assert.ok(/^[A-Z][a-z]{2} /.test(texts[0]), 'the first tick is dated');
+      // an 8 minute continuous session keeps relative labels
+      const calm = { started: T0, ended: T0 + 8 * MIN, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + 4 * MIN), call(T0 + 7 * MIN)] };
+      const rel = tickTexts(X.tlSvg(calm, 900, NOW));
+      assert.ok(rel.length >= 2);
+      for (const x of rel) assert.ok(!x.includes(':') && /^(0|\d+s|\d+m( \d+s)?)$/.test(x), x);
+      // a clock tick never repeats a minute label inside one stretch
+      for (let i = 1; i < texts.length; i++) assert.notStrictEqual(texts[i], texts[i - 1]);
+    });
+
+    test('[alpha7 S3] contrast: bar fills reach 3:1 against every surface in both themes; tool bars are full colour, only the track is faint', () => {
+      const LIGHT = /@media \(prefers-color-scheme: light\) \{\s*:root \{([^}]*)\}\s*\}/;
+      const DARK = /^:root \{([^}]*)\}/m;
+      const decls = (b) => Object.fromEntries([...b.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]));
+      const dark = decls(css.match(DARK)[1]);
+      const themes = { dark, light: Object.assign({}, dark, decls(css.match(LIGHT)[1])) };
+      const lum = (hex) => { const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+      const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+      let checked = 0;
+      for (const [mode, t] of Object.entries(themes)) {
+        for (const fill of ['--src-main', '--src-unattributed', '--src-subagent']) {
+          for (const surf of fill === '--src-unattributed' ? ['--bg'] : ['--bg', '--panel']) {
+            assert.match(t[fill], /^#[0-9a-f]{6}$/i);
+            assert.ok(ratio(t[fill], t[surf]) >= 3, `${mode} ${fill} on ${surf}: ${ratio(t[fill], t[surf]).toFixed(2)}`);
+            checked++;
+          }
+        }
+      }
+      assert.strictEqual(checked, 10, 'three fills on the page background, two on the panel, in two themes');
+      assert.match(css, /\.tl-attr-explicit \{ fill: var\(--src-main\); \}/, 'explicit bars use the full --src-main');
+      assert.ok(!/\.tl-tool[^{]*\{[^}]*opacity/.test(css), 'tool bars carry no opacity');
+      assert.ok(!/\.tl-attr-[a-z]+ \{[^}]*opacity/.test(css), 'the lane colour carries no opacity');
+      assert.match(css, /\.tl-track \{ fill-opacity: \.\d+; \}/);
+      assert.match(css, /\.tl-track-solo \{ fill-opacity: 1; \}/, 'a lane with no tool bars of its own is drawn in full colour');
+      const svg = X.tlSvg(detail(), 1000, NOW);
+      assert.strictEqual((svg.match(/<rect class="tl-track tl-track-solo /g) || []).length, 1, 'only the lane without tool bars');
+      assert.ok(!/<rect class="tl-tool[^>]*opacity/.test(svg));
+    });
+
+    test('[alpha7 S3] a missing branch or turns count is left out of the list row and the header, not drawn as a dash', () => {
+      const r = X.sessListHtml([row('nb', { branch: null }), row('eb', { branch: '' }), row('wb', { branch: 'feat/x' })], { filter: 'all', q: '', sel: null, nowMs: NOW });
+      assert.strictEqual((r.match(/class="nstatus mono"/g) || []).length, 1, 'only the row with a branch has the branch line');
+      assert.ok(!/\u2014/.test(r));
+      const hd = (over) => { const h = X.sessDetailHtml(detail(over), { tab: 'timeline', width: 900, nowMs: NOW }); return h.slice(h.indexOf('<div class="xmeta">'), h.indexOf('role="tablist"')); };
+      const nb = hd({ branch: null });
+      assert.ok(!/class="mono"/.test(nb) && !/\u2014/.test(nb) && !/>–</.test(nb), 'no branch item, no dash');
+      assert.match(nb, /^<div class="xmeta"><span class="num">47m 00s<\/span>/, 'the duration leads');
+      assert.ok(!/class="mono"/.test(hd({ branch: '' })));
+      assert.match(hd({ branch: 'feat/x' }), /<span class="mono">feat\/x<\/span>/);
+      assert.ok(!/turn/.test(hd({ turns: null })), 'no turns item without a count');
+      assert.match(hd({ turns: 0 }), /0 turns/, 'a real zero stays');
+      assert.match(hd({}), /5 turns/);
+      assert.ok(!/no branch/.test(cj));
+    });
+
+    test('[alpha7 S3] source rules: no inline styles, one innerHTML write, privacy canary clean, tokens only, 11px minimum, polling cadence', () => {
+      const from = cj.indexOf('Sessions tab (alpha.7 S3): pure helpers');
+      const to = cj.indexOf('/* ---------- boot ---------- */');
+      assert.ok(from > 0 && to > from);
+      const sec = cj.slice(from, to);
+      assert.ok(sec.length > 15000);
+      assert.ok(!/\bstyle\s*=/.test(sec), 'no inline style');
+      assert.ok(!/\.innerHTML\s*=/.test(sec) && (cj.match(/\.innerHTML\s*=/g) || []).length === 1, 'setHtml is the only write');
+      assert.ok(!/\.prompt\b|\['prompt|prompt_text|promptText|\.text\b|\.body\.text|\{\s*text\s*[:,}]/.test(cj), 'privacy canary');
+      assert.ok(!/description|tool_input|tool_use_id|transcript/.test(sec.replace(/Task description/g, '')), 'no Task description or tool input in the section');
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(sec.replace(/href="#|'#sessions|"#sessions|#projects|#pipeline|\(#|'#|"#/g, '')), 'no colour literals');
+      const cs = css.slice(css.indexOf('Sessions tab (alpha.7 S3)'), css.indexOf('Pipeline tab: one-screen layout'));
+      assert.ok(cs.length > 2000);
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(cs), 'CSS tokens only');
+      for (const m of cs.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+      assert.match(cj, /state\.route === 'sessions'\) refreshSessions\(false\); \}, 10000\)/);
+      assert.match(cj, /state\.route === 'sessions' && sessSelectedLive\(\)\) refreshSessDetail\(\); \}, 5000\)/);
+      assert.match(cj, /getJson\('\/api\/sessions\?range=' \+ encodeURIComponent\(s\.range\)\)/);
+      assert.match(cj, /getJson\('\/api\/sessions\/' \+ encodeURIComponent\(id\)\)/);
+      assert.match(cj, /history\.replaceState\(null, '', '#sessions\/' \+ encodeURIComponent\(id\)\)/);
+      assert.ok(!/postAction\([^)]*sessions/i.test(cj), 'Sessions posts nothing');
+      assert.ok(!/\r|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(cj + css), 'no CR or control bytes');
     });
   }
 

@@ -319,6 +319,7 @@ function attentionHtml(st, nowMs, opts) {
 function parseRoute(hash) {
   const h = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim().toLowerCase();
   if (/^spend(\/(projects|turns|cache))?(\?p=[^&#?]{1,1800})?$/.test(h)) return 'spend';
+  if (h === 'sessions' || /^sessions\/[a-z0-9._:-]{1,128}$/.test(h)) return 'sessions';
   return h === 'pipeline' || /^pipeline\/(work|signals|routing)$/.test(h) ? 'pipeline' : 'projects';
 }
 
@@ -331,7 +332,7 @@ function parsePipeSub(hash) {
 /** No hash -> the remembered tab (default projects); a hash always wins. */
 function initialRoute(hash, saved) {
   const h = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim();
-  if (h === '') return saved === 'spend' || saved === 'pipeline' ? saved : 'projects';
+  if (h === '') return saved === 'spend' || saved === 'pipeline' || saved === 'sessions' ? saved : 'projects';
   return parseRoute(hash);
 }
 
@@ -1600,13 +1601,14 @@ const state = {
   attn: null, attnToken: 0,   // attn: attentionState() output, { unavailable: true }, or null before the first read
   route: 'projects',
   proj: { mode: 'loading', list: [], counts: null, filter: 'active', q: '', sort: 'pinned', open: { inactive: false }, tab: 'branches', managing: false, sel: null, pluginMissing: false, token: 0, lastOk: null },
+  sess: { mode: 'loading', list: [], range: '7d', filter: 'all', q: '', tab: 'timeline', sel: null, detail: null, detailFor: null, missing: false, token: 0, dtoken: 0, lastOk: null },
   pipe: { mode: 'loading', body: null, token: 0, lastOk: null, sub: 'work', project: 'all', stage: 'all', sel: null, open: { idle: false, quiet: false } },
   sessions: [],               // /state sessions, for the Projects summary, filters and live strip
   liveMap: {}, liveSig: '', seenIds: new Set(),   // client-side live states from the SSE stream
   apiToken: null, reviewNA: false, reviewMsgs: {},
 };
 
-const TABS = { projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline' };
+const TABS = { projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline', sessions: 'Sessions' };
 
 function loadTab() {
   try { return localStorage.getItem('sereno.console.tab'); } catch (_) { return null; }
@@ -2109,6 +2111,7 @@ async function refreshSpendDetail() {
 function refreshActive() {
   if (state.route === 'spend') refresh();
   else if (state.route === 'pipeline') { refreshAttention(); refreshPipeline(); }
+  else if (state.route === 'sessions') { refreshAttention(); refreshSessions(); }
   else { refreshAttention(); refreshProjects(); }
 }
 
@@ -2116,9 +2119,10 @@ function applyRoute(route, first) {
   state.route = route;
   if (route === 'pipeline') state.pipe.sub = parsePipeSub(location.hash);
   if (route === 'projects') state.proj.sel = parseProjectSel(location.hash);
+  if (route === 'sessions') state.sess.sel = parseSessionSel(location.hash);
   if (route === 'spend') { const h = parseSpendHash(location.hash); state.spend.sub = h.sub; if (h.sel) state.spend.sel = h.sel; }
   const bodyEl = document.querySelector('.body');
-  if (bodyEl) { bodyEl.classList.toggle('pipe', route === 'pipeline'); bodyEl.classList.toggle('mode-projects', route === 'projects'); bodyEl.classList.toggle('spend', route === 'spend'); }
+  if (bodyEl) { bodyEl.classList.toggle('pipe', route === 'pipeline'); bodyEl.classList.toggle('mode-projects', route === 'projects'); bodyEl.classList.toggle('spend', route === 'spend'); bodyEl.classList.toggle('mode-sessions', route === 'sessions'); }
   renderAttention();   // the right column differs per tab
   document.querySelectorAll('.nav-item').forEach((a) => {
     const on = a.getAttribute('data-route') === route;
@@ -2132,12 +2136,15 @@ function applyRoute(route, first) {
     ? 'Totals include unattributed usage \u00b7 every figure is an estimate'
     : route === 'pipeline'
       ? 'Sereno observes the pipeline; it never acts \u00b7 every dollar figure is an estimate'
-      : 'Dollar figures are estimates \u00b7 nothing leaves this machine';
+      : route === 'sessions'
+        ? 'Sereno observes sessions; it never acts \u00b7 every dollar figure is an estimate'
+        : 'Dollar figures are estimates \u00b7 nothing leaves this machine';
   if (!first) saveTab(route);
   const side = document.getElementById('side-today');
   if (side) setHtml(side, '');
   if (route === 'spend') { render(); refresh(); }
   else if (route === 'pipeline') { renderPipeline(); refreshActive(); }
+  else if (route === 'sessions') { renderSessions(); refreshActive(); }
   else { renderProjects(); refreshActive(); }
 }
 
@@ -2155,7 +2162,954 @@ async function refreshSeries() {
 
 function tickSync() {
   const el = document.getElementById('sync');
-  if (el) el.textContent = syncLabel(state.route === 'spend' ? state.lastOk : state.route === 'pipeline' ? state.pipe.lastOk : state.proj.lastOk, Date.now());
+  if (el) el.textContent = syncLabel(state.route === 'spend' ? state.lastOk : state.route === 'pipeline' ? state.pipe.lastOk : state.route === 'sessions' ? state.sess.lastOk : state.proj.lastOk, Date.now());
+}
+
+/* ---------- Sessions tab (alpha.7 S3): pure helpers. Observe only; amber appears only on a permission wait. ---------- */
+
+const SESS_RANGES = [['today', 'Today'], ['7d', '7d'], ['30d', '30d']];
+const SESS_FILTERS = [['all', 'All'], ['running', 'Running'], ['ended', 'Ended']];
+const SESS_TABS = [['timeline', 'Timeline'], ['requests', 'Requests'], ['reviews', 'Reviews']];
+const SESS_STATE_TEXT = { running: 'Running', waiting: 'Waiting', idle: 'Idle', ended: 'Ended' };
+const SESS_ATTR_TEXT = { explicit: 'Explicit', inferred: 'Inferred', unattributed: 'Unattributed' };
+const TL = { labelW: 176, padR: 16, costH: 64, axisH: 36, laneH: 36, barH: 18, toolH: 12, revH: 30, waitH: 20, gapMs: 600000, gapPx: 24, mergePx: 30, breakMinPx: 8, charPx: 6.4 };
+const TL_STEPS = [1e3, 2e3, 5e3, 1e4, 15e3, 3e4, 6e4, 12e4, 3e5, 6e5, 9e5, 18e5, 36e5, 72e5, 108e5, 216e5, 432e5, 864e5];
+
+/** '#sessions/<id>' -> id (the collector's session id alphabet, up to 128 chars; case kept); anything else -> null. */
+function parseSessionSel(hash) {
+  const m = /^sessions\/([A-Za-z0-9._:-]{1,128})$/.exec(String(hash == null ? '' : hash).replace(/^#\/?/, '').trim());
+  return m ? m[1] : null;
+}
+
+/** '1m 12s', '47s', '2h 05m', '<1s' (under a second); '' for a missing or negative value. */
+function fmtDur(ms) {
+  const n = Number(ms);
+  if (ms == null || !Number.isFinite(n) || n < 0) return '';
+  if (n === 0) return '0s';
+  if (n < 1000) return '<1s';
+  const s = Math.round(n / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ' + String(s % 60).padStart(2, '0') + 's';
+  return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+}
+
+/** '$6.82 est.' from dollars (the sessions API sends dollars). */
+function costEst(usd) {
+  const n = Number(usd);
+  return '$' + (Number.isFinite(n) && n > 0 ? n : 0).toFixed(2) + ' est.';
+}
+
+/** Local 'HH:MM'; '' when the time is missing. */
+function fmtClock(ts) {
+  if (ts == null || !Number.isFinite(Number(ts))) return '';
+  const d = new Date(Number(ts));
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+/**
+ * '09:00-09:47' within one calendar day; 'Oct 19 13:20 - Oct 25 15:18' when it spans days; '09:00-now' while it runs.
+ * nowMs decides whether a running session has crossed midnight.
+ */
+function sessTimeRange(s, nowMs) {
+  const a = fmtClock(s && s.started);
+  if (!a) return '';
+  const running = !s || s.ended == null;
+  const endTs = running ? Number(nowMs) : Number(s.ended);
+  const multi = Number.isFinite(endTs) && sessDayKey(s.started) !== sessDayKey(endTs);
+  const b = running ? 'now' : fmtClock(s.ended);
+  if (!multi) return a + '–' + b;
+  return fmtDay(s.started) + ' ' + a + ' – ' + (running ? 'now' : fmtDay(s.ended) + ' ' + b);
+}
+
+/** '5 turns' / '1 turn'. */
+function turnsLabel(n) {
+  const v = Number.isFinite(Number(n)) && Number(n) > 0 ? Math.floor(Number(n)) : 0;
+  return v + (v === 1 ? ' turn' : ' turns');
+}
+
+/** The API state, or 'ended' for anything unknown. */
+function sessState(s) {
+  const st = s && typeof s.state === 'string' ? s.state : '';
+  return Object.prototype.hasOwnProperty.call(SESS_STATE_TEXT, st) ? st : 'ended';
+}
+
+function sessIsLive(s) {
+  return sessState(s) !== 'ended';
+}
+
+/** State pill: text always; the waiting pill is the one amber pill (a permission wait needs you). */
+function sessPillHtml(s) {
+  const st = sessState(s);
+  return '<span class="xpill xpill-' + st + '">' + esc(SESS_STATE_TEXT[st]) + '</span>';
+}
+
+/** Rows for a chip: 'all' | 'running' (anything not ended) | 'ended'. */
+function sessFilter(list, filter) {
+  const arr = (Array.isArray(list) ? list : []).filter((s) => s && typeof s === 'object');
+  return filter === 'running' ? arr.filter(sessIsLive) : filter === 'ended' ? arr.filter((s) => !sessIsLive(s)) : arr;
+}
+
+function sessCounts(list) {
+  return { all: sessFilter(list, 'all').length, running: sessFilter(list, 'running').length, ended: sessFilter(list, 'ended').length };
+}
+
+/** Search over project and branch (case-insensitive substring). */
+function sessSearch(list, q) {
+  const s = String(q == null ? '' : q).trim().toLowerCase();
+  const arr = Array.isArray(list) ? list : [];
+  if (!s) return arr;
+  return arr.filter((r) => String(r.project == null ? '' : r.project).toLowerCase().indexOf(s) >= 0 || String(r.branch == null ? '' : r.branch).toLowerCase().indexOf(s) >= 0);
+}
+
+/** Local calendar day key, 'YYYY-MM-DD'. */
+function sessDayKey(ms) {
+  const d = new Date(Number(ms));
+  if (!Number.isFinite(d.getTime())) return '';
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+/** 'Today', 'Yesterday', else 'Mon Oct 20'. */
+function sessDayLabel(ms, nowMs) {
+  const k = sessDayKey(ms);
+  if (k === sessDayKey(nowMs)) return 'Today';
+  if (k === sessDayKey(Number(nowMs) - 864e5)) return 'Yesterday';
+  const d = new Date(Number(ms));
+  if (!Number.isFinite(d.getTime())) return 'Unknown day';
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()] + ' ' + d.getDate();
+}
+
+/** Rows newest first, grouped by the local day they started: [{ key, label, rows }]. */
+function sessGroups(list, nowMs) {
+  const t = (s) => (Number.isFinite(Number(s.started)) ? Number(s.started) : 0);
+  const rows = (Array.isArray(list) ? list : []).slice().sort((a, b) => (t(b) - t(a)) || String(a.session_id).localeCompare(String(b.session_id)));
+  const out = [];
+  for (const r of rows) {
+    const key = sessDayKey(t(r));
+    let g = out.length ? out[out.length - 1] : null;
+    if (!g || g.key !== key) { g = { key, label: sessDayLabel(t(r), nowMs), rows: [] }; out.push(g); }
+    g.rows.push(r);
+  }
+  return out;
+}
+
+/** Filter, then search, as the list shows it. o: { filter, q }. */
+function sessVisible(list, o) {
+  return sessSearch(sessFilter(list, o.filter), o.q);
+}
+
+/** The selected id: the route's id if it is on screen, else the newest running session, else the newest (via navResolveSel). */
+function sessResolveSel(rows, sel) {
+  const adapted = (Array.isArray(rows) ? rows : []).map((s) => ({ id: s.session_id, name: s.project, hidden: false, pinned: false, active: sessIsLive(s), lastActivityAt: Number(s.started) }));
+  return navResolveSel(adapted, sel);
+}
+
+/** Session ids in on-screen order (day groups, newest first). */
+function sessVisibleIds(list, o) {
+  return sessGroups(sessVisible(list, o), o.nowMs).reduce((a, g) => a.concat(g.rows.map((r) => r.session_id)), []);
+}
+
+/** One list row: project, state pill, branch, time range, duration, cost (est.). o: { sel, focus }. */
+function sessRowHtml(s, o) {
+  const dur = fmtDur(s.duration_ms);
+  const when = [sessTimeRange(s, o.nowMs), dur].filter(Boolean).join(' · ');
+  return '<div class="xrow' + (o.sel ? ' sel' : '') + '" role="row" tabindex="' + (o.focus ? '0' : '-1') + '" data-xsel="' + esc(s.session_id) + '" aria-selected="' + (o.sel === true) + '">'
+    + '<div class="xmain" role="gridcell"><span class="xtop"><span class="nname">' + esc(projectLabel(s.project)) + '</span>' + sessPillHtml(s) + '</span>'
+    + (s.branch == null || s.branch === '' ? '' : '<span class="nstatus mono">' + esc(s.branch) + '</span>')
+    + '<span class="nstatus">' + esc(when) + '</span></div>'
+    + '<div class="xcost num" role="gridcell">' + esc(costEst(s.cost_est)) + '</div></div>';
+}
+
+/** The scrolling list grouped by day. o: { filter, q, sel, nowMs }. */
+function sessListHtml(list, o) {
+  const all = Array.isArray(list) ? list : [];
+  if (!all.length) return '<p class="empty-note">No sessions in this range.</p>';
+  const vis = sessVisible(all, o);
+  if (!vis.length) return '<p class="empty-note">No sessions match.</p>';
+  const ids = sessVisibleIds(all, o);
+  const focusId = ids.indexOf(o.sel) >= 0 ? o.sel : ids[0];
+  return sessGroups(vis, o.nowMs).map((g) => '<section class="ngroup"><h3 class="ngroup-title">' + esc(g.label) + ' <span>' + g.rows.length + '</span></h3>'
+    + '<div class="nrows" role="grid" aria-label="' + esc(g.label) + '">'
+    + g.rows.map((r) => sessRowHtml(r, { sel: r.session_id === o.sel, focus: r.session_id === focusId, nowMs: o.nowMs })).join('') + '</div></section>').join('');
+}
+
+/** Filter chips with counts and the search box. o: { filter, q }. */
+function sessControlsHtml(counts, o) {
+  return '<div class="nchips" role="group" aria-label="Filter">' + SESS_FILTERS.map((f) => '<button type="button" class="nchip' + (o.filter === f[0] ? ' on' : '')
+    + '" data-xfilter="' + f[0] + '" aria-pressed="' + (o.filter === f[0]) + '">' + f[1] + ' <span class="num">' + counts[f[0]] + '</span></button>').join('') + '</div>'
+    + '<div class="ntools"><input type="search" class="nsearch" data-xq aria-label="Search sessions" placeholder="Search project or branch" value="' + esc(o.q || '') + '" autocomplete="off"></div>';
+}
+
+/** The title row: heading and the Today / 7d / 30d switch. */
+function sessTitleHtml(range) {
+  return '<div class="title-row"><h1>Sessions</h1><div class="range" role="group" aria-label="Range">' + SESS_RANGES.map((r) => '<button type="button" data-xrange="' + r[0]
+    + '" class="' + (r[0] === range ? 'on' : '') + '" aria-pressed="' + (r[0] === range) + '">' + r[1] + '</button>').join('') + '</div></div>';
+}
+
+/** The reconciliation chip: matches, the difference, or nothing when the API sent none. */
+function sessReconHtml(rc) {
+  if (!rc || typeof rc !== 'object') return '';
+  if (rc.ok === true) return '<span class="chip chip-fresh">Ledger matches statusline</span>';
+  const n = Number(rc.diff);
+  const diff = rc.diff != null && Number.isFinite(n) ? Math.abs(Math.round(n * 10) / 10) + '%' : '';
+  return '<span class="chip chip-behind">' + (diff ? 'Ledger differs from statusline by ' + esc(diff) : 'Ledger differs from statusline') + '</span>';
+}
+
+/** 'Oct 19' (local). */
+function fmtDay(ts) {
+  const d = new Date(Number(ts));
+  return Number.isFinite(d.getTime()) ? ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()] + ' ' + d.getDate() : '';
+}
+
+/** Reviews of an ended session that fall inside its window (a minute of slack at each end); untimed ones stay. A running session keeps all. */
+function tlWindowReviews(d) {
+  const list = Array.isArray(d && d.reviews) ? d.reviews.filter(Boolean) : [];
+  const a = d && d.started != null ? Number(d.started) : NaN;
+  const b = d && d.ended != null ? Number(d.ended) : NaN;
+  if (!Number.isFinite(b)) return list;
+  return list.filter((r) => {
+    if (r.at == null || !Number.isFinite(Number(r.at))) return true;
+    const t = Number(r.at);
+    return t <= b + 60000 && (!Number.isFinite(a) || t >= a - 60000);
+  });
+}
+
+/**
+ * Activity intervals inside the span, sorted and merged: tool calls, permission waits, cost points, reviews and lane starts and stops.
+ * [[from, to]]; a point is [t, t]. The span's own ends are always included.
+ */
+function tlActivity(d, span) {
+  const fin = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+  const iv = [[span.t0, span.t0], [span.t1, span.t1]];
+  const add = (a, b) => { if (a !== null) iv.push([Math.max(span.t0, a), Math.min(span.t1, Math.max(a, b === null ? a : b))]); };
+  for (const t of (Array.isArray(d && d.tools) ? d.tools : [])) {
+    if (!t) continue;
+    const a = fin(t.ts);
+    add(a, fin(t.ended) !== null ? fin(t.ended) : (fin(t.duration_ms) !== null && a !== null ? a + fin(t.duration_ms) : null));
+  }
+  for (const w of (Array.isArray(d && d.waits) ? d.waits : [])) {
+    if (!w) continue;
+    const a = fin(w.ts);
+    add(a, fin(w.ended) !== null ? fin(w.ended) : (fin(w.duration_ms) !== null && a !== null ? a + fin(w.duration_ms) : null));
+  }
+  for (const p of (Array.isArray(d && d.cost_series) ? d.cost_series : [])) if (p) add(fin(p.ts), null);
+  for (const r of tlWindowReviews(d)) add(fin(r.at), null);
+  for (const l of (Array.isArray(d && d.lanes) ? d.lanes : [])) { if (l) { add(fin(l.started), null); add(fin(l.stopped), null); } }
+  iv.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const out = [];
+  for (const x of iv) {
+    const last = out[out.length - 1];
+    if (last && x[0] <= last[1]) last[1] = Math.max(last[1], x[1]);
+    else out.push([x[0], x[1]]);
+  }
+  return out;
+}
+
+/**
+ * The time axis with idle breaks. Every stretch longer than gapMs with no activity becomes a fixed-width break: gapPx wide, or
+ * narrower (down to 8 px) when the breaks would take more than 40% of the width. Only past that are the shortest gaps left
+ * linear (the longest stay compressed). Gaps are never merged: each active run keeps at least TL.mergePx of width (less only when
+ * there are too many runs for it), so activity is always visible outside the breaks, and the rest of the width is shared linearly.
+ * A break's idleMs is exactly its t1 - t0.
+ * Returns { t0, t1, x0, x1, segs: [{ kind: 'run' | 'gap', t0, t1, x0, x1, idleMs? }] }; tlX reads it in place of a plain span.
+ */
+function tlAxis(d, span, x0, x1, gapMs, gapPx) {
+  const gMs = Number.isFinite(Number(gapMs)) ? Number(gapMs) : TL.gapMs;
+  const gPx = Number.isFinite(Number(gapPx)) ? Number(gapPx) : TL.gapPx;
+  const iv = tlActivity(d, span);
+  let gaps = [];
+  for (let i = 1; i < iv.length; i++) if (iv[i][0] - iv[i - 1][1] > gMs) gaps.push({ t0: iv[i - 1][1], t1: iv[i][0], idleMs: iv[i][0] - iv[i - 1][1] });
+  const total = x1 - x0;
+  const budget = 0.4 * total;
+  let bw = gPx;
+  if (gaps.length * bw > budget) bw = Math.max(Math.min(gPx, TL.breakMinPx), budget / gaps.length);
+  if (gaps.length * bw > budget) {   // even at the minimum there is no room: keep the longest, leave the rest linear
+    const keep = Math.max(0, Math.floor(budget / bw));
+    gaps = gaps.slice().sort((a, b) => (b.t1 - b.t0) - (a.t1 - a.t0)).slice(0, keep).sort((a, b) => a.t0 - b.t0);
+  }
+  // runs between the kept breaks; a zero-length run at either end of the span is just the span's own edge, not activity, so it gets no width
+  const all = [];
+  let t = span.t0;
+  for (const g of gaps) { all.push({ t0: t, t1: g.t0 }); t = g.t1; }
+  all.push({ t0: t, t1: span.t1 });
+  const trimmed = all.filter((r, i) => !(all.length > 1 && r.t0 === r.t1 && (i === 0 || i === all.length - 1)));
+  const runs = trimmed.length ? trimmed : all;
+  const avail = Math.max(0, total - gaps.length * bw);
+  const minW = Math.min(TL.mergePx, avail / runs.length);
+  // linear share of the rest; a run whose linear width is under the minimum is held at the minimum and the others rescale
+  const fixed = runs.map(() => false);
+  let rate = 0;
+  for (let pass = 0; pass <= runs.length; pass++) {
+    const free = runs.filter((r, i) => !fixed[i]);
+    const freeMs = free.reduce((s, r) => s + (r.t1 - r.t0), 0);
+    const left = avail - fixed.filter(Boolean).length * minW;
+    rate = freeMs > 0 ? left / freeMs : 0;
+    const j = runs.findIndex((r, i) => !fixed[i] && (r.t1 - r.t0) * rate < minW);
+    if (j < 0) break;
+    fixed[j] = true;
+  }
+  const freeMs = runs.reduce((s, r, i) => s + (fixed[i] ? 0 : r.t1 - r.t0), 0);
+  const extra = freeMs > 0 ? 0 : (avail - runs.length * minW) / runs.length;   // every run held at the minimum: share what is left evenly
+  const segs = [];
+  let x = x0, k = 0;
+  all.forEach((r, i) => {
+    if (runs.indexOf(r) >= 0) {
+      const w = fixed[k] ? minW + extra : (r.t1 - r.t0) * rate;
+      k++;
+      segs.push({ kind: 'run', t0: r.t0, t1: r.t1, x0: x, x1: x + w });
+      x += w;
+    }
+    const g = gaps[i];
+    if (g) { segs.push({ kind: 'gap', t0: g.t0, t1: g.t1, x0: x, x1: x + bw, idleMs: g.t1 - g.t0 }); x += bw; }
+  });
+  if (segs.length) segs[segs.length - 1].x1 = x1;   // absorb rounding
+  return { t0: span.t0, t1: span.t1, x0, x1, segs };
+}
+
+/** Lane role: the API's role, or, when it says 'other', the agent type read the way the Pipeline tab does ('sereno:' prefix optional, tier variants). */
+function laneRole(l) {
+  if (l && (l.role === 'builder' || l.role === 'red-team' || l.role === 'scribe')) return l.role;
+  const raw = String(l ? (l.agent_type || l.label || '') : '').replace(/^sereno:/, '');
+  if (/^builder(-haiku|-opus)?$/.test(raw)) return 'builder';
+  if (/^red-team(-lean)?$/.test(raw)) return 'red-team';
+  if (raw === 'scribe') return 'scribe';
+  return l && l.role ? String(l.role) : 'other';
+}
+
+/** Short idle duration for the vertical band label: '28m', '3h 20m', '3h', '45s'. */
+function tlBreakShort(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1000) return '<1s';
+  const s = Math.round(n / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+}
+
+/**
+ * The text inside each idle band of the body, left to right: "28m idle", turned -90 degrees. A band shows it only when it is at least
+ * 14 px wide and the text fits between `y0` (default 0) and the body height (`bottom`); the full text stays in the band's <title>. [{ seg, full, label, show }]
+ */
+function tlBreakLabels(axis, bottom, y0) {
+  const top = Number.isFinite(Number(y0)) ? Number(y0) : 0;
+  const gaps = (axis && Array.isArray(axis.segs) ? axis.segs : []).filter((s) => s.kind === 'gap');
+  return gaps.map((g) => {
+    const ms = g.idleMs != null ? g.idleMs : g.t1 - g.t0;
+    const label = tlBreakShort(ms) + ' idle';
+    const show = g.x1 - g.x0 >= 14 && label.length * TL.charPx + 12 <= Number(bottom) - top;
+    return { seg: g, full: fmtDur(ms) + ' idle, compressed', label, show };
+  });
+}
+
+/** Axis labels are clock times when the session spans over 24 h or has an idle break; short continuous sessions keep relative ones. */
+function tlUseClock(span, axis) {
+  return (span.t1 - span.t0) > 864e5 || (!!axis && Array.isArray(axis.segs) && axis.segs.some((s) => s.kind === 'gap'));
+}
+
+/** 'HH:MM', or 'Oct 19 13:20' when the day differs from prevDay (a sessDayKey, or '' for the first label). { lab, day } */
+function tlClockLabel(ts, prevDay) {
+  const day = sessDayKey(ts);
+  const hm = fmtClock(ts);
+  return { lab: day !== prevDay ? fmtDay(ts) + ' ' + hm : hm, day };
+}
+
+/* ---- timeline geometry (pure; the SVG is built from these) ---- */
+
+/** The time axis: the start, and the end (the latest of the session end, any event end, or now while it runs). */
+function tlSpan(d, nowMs) {
+  const fin = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+  const tools = Array.isArray(d && d.tools) ? d.tools : [];
+  const waits = Array.isArray(d && d.waits) ? d.waits : [];
+  const series = Array.isArray(d && d.cost_series) ? d.cost_series : [];
+  const lanes = Array.isArray(d && d.lanes) ? d.lanes : [];
+  const all = [];
+  for (const t of tools) { const a = fin(t.ts); if (a !== null) { all.push(a); const e = fin(t.ended); all.push(e !== null ? e : a + (fin(t.duration_ms) || 0)); } }
+  for (const w of waits) { const a = fin(w.ts); if (a !== null) { all.push(a); const e = fin(w.ended); if (e !== null) all.push(e); else if (fin(w.duration_ms) !== null) all.push(a + fin(w.duration_ms)); } }
+  for (const p of series) { const a = fin(p.ts); if (a !== null) all.push(a); }
+  for (const l of lanes) { for (const k of [l.started, l.stopped]) { const a = fin(k); if (a !== null) all.push(a); } }
+  const s0 = fin(d && d.started);
+  const t0 = s0 !== null ? s0 : (all.length ? Math.min.apply(null, all) : fin(nowMs) || 0);
+  const running = !d || d.ended == null;
+  let t1 = fin(d && d.ended);
+  if (running && fin(nowMs) !== null) t1 = Math.max(t1 === null ? 0 : t1, fin(nowMs));
+  t1 = Math.max(t1 === null ? t0 : t1, all.length ? Math.max.apply(null, all) : t0);
+  return { t0, t1: Math.max(t1, t0 + 1000) };
+}
+
+/** Time to x on the shared axis, clamped to [x0, x1]. `span` is a plain { t0, t1 } (linear) or a tlAxis result (with idle breaks). */
+function tlX(t, span, x0, x1) {
+  const n = Number(t);
+  if (Array.isArray(span.segs) && span.segs.length) {
+    if (!Number.isFinite(n)) return span.segs[0].x0;
+    if (n <= span.t0) return span.segs[0].x0;
+    for (const s of span.segs) {
+      if (n <= s.t1) return s.t1 > s.t0 ? s.x0 + ((n - s.t0) / (s.t1 - s.t0)) * (s.x1 - s.x0) : s.x0;
+    }
+    return span.segs[span.segs.length - 1].x1;
+  }
+  const f = (n - span.t0) / (span.t1 - span.t0);
+  return x0 + Math.max(0, Math.min(1, Number.isFinite(f) ? f : 0)) * (x1 - x0);
+}
+
+/** Tick offsets (ms from the start) for a span: a round step (at least minStep), never more than maxIntervals intervals (default 10). */
+function tlTicks(spanMs, maxIntervals, minStep) {
+  const total = Math.max(1, Number(spanMs) || 1);
+  const max = Math.max(1, Math.floor(Number(maxIntervals)) || 10);
+  const floor = Number(minStep) > 0 ? Number(minStep) : 0;
+  const steps = TL_STEPS.filter((s) => s >= floor);
+  let step = steps.find((s) => total / s <= max);
+  if (!step) { step = steps[steps.length - 1]; while (total / step > max) step *= 2; }
+  const ticks = [];
+  for (let t = 0; t <= total; t += step) ticks.push(t);
+  return { step, ticks };
+}
+
+/** Axis label for an offset: '0', '30s', '5m', '1h 30m', '2d 6h'; with a step under an hour, days also show minutes ('3d 2m'). */
+function tlTickLabel(ms, stepMs) {
+  const s = Math.round(Number(ms) / 1000);
+  if (!(s > 0)) return '0';
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm' + (s % 60 ? ' ' + (s % 60) + 's' : '');
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+  return Math.floor(h / 24) + 'd' + (h % 24 ? ' ' + (h % 24) + 'h' : '') + (Number(stepMs) < 36e5 && m % 60 ? ' ' + (m % 60) + 'm' : '');
+}
+
+/**
+ * Lanes in order: the main session first, then one per agent, each with its tool rows.
+ * A tool whose agent has no lane gets its own unattributed lane. Labels never come from a Task description.
+ */
+function tlLanes(d) {
+  const src = Array.isArray(d && d.lanes) ? d.lanes.filter((l) => l && typeof l === 'object') : [];
+  const main = src.find((l) => l.kind === 'main') || { id: 'main', kind: 'main', attribution: 'explicit', started: d ? d.started : null, stopped: d ? d.ended : null, model: null, role: 'main', cost_est: 0 };
+  const out = [main].concat(src.filter((l) => l !== main)).map((l) => Object.assign({}, l, { tools: [] }));
+  const byId = {};
+  out.forEach((l) => { byId[String(l.id)] = l; });
+  for (const t of (Array.isArray(d && d.tools) ? d.tools : [])) {
+    if (!t || typeof t !== 'object') continue;
+    const key = t.agent_id ? String(t.agent_id) : String(main.id);
+    if (!byId[key]) {
+      const l = { id: key, kind: 'agent', label: 'Agent', role: 'other', model: null, attribution: 'unattributed', started: null, stopped: null, subtitle: null, cost_est: 0, tools: [] };
+      out.push(l); byId[key] = l;
+    }
+    byId[key].tools.push(t);
+  }
+  return out;
+}
+
+/** The lane's label and its second line (model, derived context such as Repair). */
+function tlLaneText(l) {
+  if (l.kind === 'main') return { label: 'Main session', sub: modelName(l.model) };
+  const role = laneRole(l);
+  const label = role === 'builder' || role === 'red-team' || role === 'scribe' ? ROLE_LABEL[role] : (l.label || l.agent_type || 'Agent');
+  return { label, sub: [modelName(l.model), l.subtitle].filter(Boolean).join(' · ') };
+}
+
+/** Which fill a lane bar gets: 'explicit' | 'inferred' | 'unattributed'. Only a subagent lane can be inferred; the main session is always explicit. */
+function tlAttribution(l) {
+  if (l.kind === 'main') return 'explicit';
+  return l.attribution === 'inferred' ? 'inferred' : l.attribution === 'unattributed' ? 'unattributed' : 'explicit';
+}
+
+/** Permission waits as bands: [{ x, w, dur, label }]. An open wait runs to the end of the axis. */
+function tlWaitBands(waits, span, x0, x1) {
+  const out = [];
+  for (const w of (Array.isArray(waits) ? waits : [])) {
+    if (!w || w.ts == null || !Number.isFinite(Number(w.ts))) continue;
+    const ts = Number(w.ts);
+    const hasDur = w.duration_ms != null && Number.isFinite(Number(w.duration_ms));
+    const end = w.ended != null && Number.isFinite(Number(w.ended)) ? Number(w.ended) : (hasDur ? ts + Number(w.duration_ms) : span.t1);
+    const dur = hasDur ? Number(w.duration_ms) : Math.max(0, end - ts);
+    const x = tlX(ts, span, x0, x1);
+    out.push({ x, w: Math.max(2, tlX(end, span, x0, x1) - x), dur, label: 'Wait ' + fmtDur(dur) });
+  }
+  return out;
+}
+
+/** The cumulative cost line: points from 0 at the start, scaled into [y0 (top), y1 (baseline)]; { pts: [[x, y]], max }. */
+function tlCostPoints(series, span, x0, x1, y0, y1) {
+  const s = (Array.isArray(series) ? series : []).filter((p) => p && Number.isFinite(Number(p.ts)) && Number.isFinite(Number(p.cost_est)));
+  if (!s.length) return { pts: [], max: 0 };
+  const max = Math.max.apply(null, s.map((p) => Number(p.cost_est)));
+  const y = (c) => (max > 0 ? y1 - (c / max) * (y1 - y0) : y1);
+  const pts = [[x0, y1]].concat(s.map((p) => [tlX(p.ts, span, x0, x1), y(Number(p.cost_est))]));
+  return { pts, max };
+}
+
+/** Review markers that have a time: [{ x, outcome, findings }]. */
+function tlReviews(reviews, span, x0, x1) {
+  return (Array.isArray(reviews) ? reviews : []).filter((r) => r && r.at != null && Number.isFinite(Number(r.at)))
+    .map((r) => ({ x: tlX(r.at, span, x0, x1), outcome: String(r.outcome || ''), findings: Number(r.findings) > 0 ? Math.floor(Number(r.findings)) : 0 }));
+}
+
+function findingsLabel(n) {
+  const v = Number(n) > 0 ? Math.floor(Number(n)) : 0;
+  return v + (v === 1 ? ' finding' : ' findings');
+}
+
+function tlHasEvents(d) {
+  return !!d && ((Array.isArray(d.tools) && d.tools.length > 0) || (Array.isArray(d.waits) && d.waits.length > 0) || (Array.isArray(d.cost_series) && d.cost_series.length > 0));
+}
+
+/** The shape of an outcome placed at (x, y) inside the waterfall. */
+function tlShape(outcome, x, y) {
+  return outcomeShape(outcome).replace('<svg ', '<svg x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="16" height="16" ');
+}
+
+/** Rank of an outcome when markers merge: the worst one names the cluster. Unknown outcomes rank below a pass. */
+const TL_OUTCOME_RANK = { block: 4, needs_context: 3, error: 2, pass: 1 };
+
+/** One review's label: 'Block · 2 findings'. */
+function tlReviewLabel(r) {
+  return (OUTCOME_LABEL[r.outcome] || r.outcome || 'Review') + (r.findings ? ' · ' + findingsLabel(r.findings) : '');
+}
+
+/**
+ * Review markers for the strip under the lanes. Markers whose x are within 18 px of the one before merge into one (shape of the worst
+ * outcome, label "N reviews", the full list in the title). A label is drawn only when it fits clear of every other label and marker
+ * and inside [0, W]; otherwise the marker is the shape alone and the label stays in the title.
+ * [{ x, outcome, count, title, label, showLabel, anchor, lx, items }]
+ */
+function tlReviewMarkers(revs, W) {
+  const list = (Array.isArray(revs) ? revs : []).filter((r) => r && Number.isFinite(Number(r.x))).slice().sort((a, b) => a.x - b.x);
+  const groups = [];
+  for (const r of list) {
+    const g = groups[groups.length - 1];
+    if (g && r.x - g.items[g.items.length - 1].x <= 18) g.items.push(r);
+    else groups.push({ items: [r] });
+  }
+  const out = groups.map((g) => {
+    const worst = g.items.reduce((a, r) => ((TL_OUTCOME_RANK[r.outcome] || 0) > (TL_OUTCOME_RANK[a.outcome] || 0) ? r : a), g.items[0]);
+    const x = g.items.reduce((s, r) => s + r.x, 0) / g.items.length;
+    const n = g.items.length;
+    const label = n > 1 ? n + ' reviews' : tlReviewLabel(worst);
+    const title = n > 1 ? n + ' reviews: ' + g.items.map(tlReviewLabel).join('; ') : label;
+    return { x, outcome: worst.outcome, count: n, title, label, showLabel: false, anchor: 'start', lx: x + 12, items: g.items };
+  });
+  const width = Number(W);
+  const placed = [];   // extents of shown labels
+  out.forEach((m, i) => {
+    const w = m.label.length * TL.charPx;
+    const tries = [{ anchor: 'start', l: m.x + 12, r: m.x + 12 + w }, { anchor: 'end', l: m.x - 12 - w, r: m.x - 12 }];
+    for (const t of tries) {
+      if (t.l < 0 || (Number.isFinite(width) && t.r > width)) continue;
+      const hitsLabel = placed.some((p) => t.l < p.r + 6 && t.r > p.l - 6);
+      const hitsMarker = out.some((o, k) => k !== i && t.l < o.x + 10 && t.r > o.x - 10);
+      if (hitsLabel || hitsMarker) continue;
+      m.showLabel = true; m.anchor = t.anchor; m.lx = t.anchor === 'start' ? t.l : t.r;
+      placed.push({ l: t.l, r: t.r });
+      break;
+    }
+  });
+  return out;
+}
+
+/**
+ * Where the tick labels go, left to right, in one pass. The axis does one job, time. With clock labels each active run starts with
+ * its own label, left-aligned to the run start (end anchor if that would run past the right edge); a wide run gets more ticks inside
+ * it, but never one that would cover the next run's start label. A label is skipped when it would touch the previous shown label
+ * (+6 px). Labels stay inside [0, W]. The label that changes the day carries the date; if it is skipped, the next shown label does.
+ * Gridlines belong to every tick, shown label or not.
+ * { grids: [x], texts: [{ x, anchor, label, l, r }] }
+ */
+function tlAxisTexts(axis, span, W, clock) {
+  const segs = axis && Array.isArray(axis.segs) ? axis.segs : [];
+  const runs = segs.filter((s) => s.kind === 'run');
+  const grids = [], texts = [];
+  let lastRight = -Infinity, prevDay = '';
+  const edgeFit = (x, w) => [{ anchor: 'start', l: x, r: x + w }, { anchor: 'end', l: x - w, r: x }].find((c) => c.l >= 0 && c.r <= W);
+  runs.forEach((s, ri) => {
+    const pxW = s.x1 - s.x0, segMs = s.t1 - s.t0;
+    const tk = segMs > 0 ? tlTicks(segMs, Math.max(1, Math.floor(pxW / (clock ? 84 : 70))), clock ? 60000 : 0) : { ticks: [0], step: 0 };
+    // where the next run's start label will sit (dated, so the widest), kept clear of this run's inner ticks
+    const nf = clock && runs[ri + 1] ? edgeFit(runs[ri + 1].x0, 12 * TL.charPx) : null;
+    for (const off of tk.ticks) {
+      const x = segMs > 0 ? s.x0 + (off / segMs) * pxW : s.x0;
+      grids.push(x);
+      const isStart = off === 0;
+      let text, day = '';
+      if (clock) { const c = tlClockLabel(s.t0 + off, prevDay); text = c.lab; day = c.day; } else text = tlTickLabel(s.t0 - span.t0 + off, tk.step);
+      const w = text.length * TL.charPx;
+      const fit = (clock && isStart ? edgeFit(x, w) : [{ anchor: 'middle', l: x - w / 2, r: x + w / 2 }, { anchor: 'start', l: x, r: x + w }, { anchor: 'end', l: x - w, r: x }]
+        .find((c) => c.l >= 0 && c.r <= W));
+      if (!fit || fit.l < lastRight + 6) continue;
+      if (!isStart && nf && fit.r > nf.l - 6 && fit.l < nf.r + 6) continue;
+      lastRight = fit.r;
+      if (clock) prevDay = day;
+      texts.push({ x, anchor: fit.anchor, label: text, l: fit.l, r: fit.r });
+    }
+  });
+  return { grids, texts };
+}
+
+/**
+ * The waterfall as two SVGs of the same width and x geometry: head (cost line, time axis), which stays put while the
+ * panel scrolls, and body (lanes, break bands, waits, reviews). Hover text comes from <title>; sizes and positions are geometry attributes.
+ * { head, body }
+ */
+function tlSvgParts(d, width, nowMs) {
+  const W = Math.max(480, Math.floor(Number(width)) || 900);
+  const x0 = TL.labelW, x1 = W - TL.padR;
+  const span = tlSpan(d, nowMs);
+  const axis = tlAxis(d, span, x0, x1);
+  const lanes = tlLanes(d);
+  const revs = tlReviews(tlWindowReviews(d), axis, x0, x1);
+  const headH = TL.costH + TL.axisH;
+  const lanesBottom = lanes.length * TL.laneH;
+  const bottom = lanesBottom + (revs.length ? TL.revH : 0);
+  const bodyH = bottom + TL.waitH;
+  const f = (n) => n.toFixed(1);
+  // ---- head ----
+  let h = '';
+  const cost = tlCostPoints(d && d.cost_series, axis, x0, x1, 22, TL.costH - 6);
+  h += '<text class="tl-text" x="0" y="14">Cumulative cost (est.)</text>';
+  if (cost.pts.length) {
+    h += '<line class="tl-grid" x1="' + x0 + '" x2="' + f(x1) + '" y1="' + (TL.costH - 6) + '" y2="' + (TL.costH - 6) + '"></line>'
+      + '<polyline class="tl-cost" points="' + cost.pts.map((p) => f(p[0]) + ',' + f(p[1])).join(' ') + '"><title>' + esc('Cumulative cost ' + costEst(cost.max)) + '</title></polyline>'
+      + '<text class="tl-text tl-strong" x="' + f(x1) + '" y="14" text-anchor="end">' + esc(costEst(cost.max)) + '</text>';
+  } else {
+    h += '<text class="tl-text" x="' + x0 + '" y="' + (TL.costH - 12) + '">No cost recorded yet</text>';
+  }
+  const clock = tlUseClock(span, axis);
+  const at = tlAxisTexts(axis, span, W, clock);
+  for (const s of axis.segs) {
+    if (s.kind !== 'gap') continue;
+    h += '<g class="tl-break"><title>' + esc(fmtDur(s.idleMs != null ? s.idleMs : s.t1 - s.t0) + ' idle, compressed') + '</title><rect class="tl-break-band" x="' + f(s.x0) + '" y="' + (TL.costH + 6) + '" width="' + f(s.x1 - s.x0) + '" height="' + (headH - TL.costH - 6) + '"></rect></g>';
+  }
+  h += '<text class="tl-text" x="0" y="' + (TL.costH + 32) + '">' + (clock ? 'Local time' : 'Elapsed') + '</text>';
+  for (const x of at.grids) h += '<line class="tl-grid" x1="' + f(x) + '" x2="' + f(x) + '" y1="' + (TL.costH + 6) + '" y2="' + headH + '"></line>';
+  for (const t of at.texts) h += '<text class="tl-text" x="' + f(t.x) + '" y="' + (TL.costH + 32) + '" text-anchor="' + t.anchor + '">' + esc(t.label) + '</text>';
+  // ---- body ----
+  let g = '<defs><pattern id="tl-inferred" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
+    + '<rect class="tl-hat-base" width="4" height="4"></rect><rect class="tl-hat-line" width="4" height="1.3"></rect></pattern></defs>';
+  const breakY = lanes.length > 1 ? TL.laneH + 6 : bottom; // below the main session lane; one lane: no label (title only)
+  for (const lb of tlBreakLabels(axis, bottom, breakY)) {
+    const s = lb.seg, cx = (s.x0 + s.x1) / 2 + 4;
+    g += '<rect class="tl-break-band" x="' + f(s.x0) + '" y="0" width="' + f(s.x1 - s.x0) + '" height="' + f(bottom) + '"><title>' + esc(lb.full) + '</title></rect>'
+      + (lb.show ? '<text class="tl-break-text" x="' + f(cx) + '" y="' + f(breakY) + '" text-anchor="end" transform="rotate(-90 ' + f(cx) + ' ' + f(breakY) + ')">' + esc(lb.label) + '</text>' : '');
+  }
+  for (const x of at.grids) g += '<line class="tl-grid" x1="' + f(x) + '" x2="' + f(x) + '" y1="0" y2="' + f(bottom) + '"></line>';
+  for (const b of tlWaitBands(d && d.waits, axis, x0, x1)) {
+    const lx = Math.max(x0 + 34, Math.min(x1 - 34, b.x + b.w / 2));
+    g += '<g class="tl-wait"><title>' + esc('Permission wait · ' + fmtDur(b.dur)) + '</title><rect class="tl-wait-band" x="' + f(b.x) + '" y="0" width="' + f(b.w) + '" height="' + f(bottom) + '"></rect>'
+      + '<line class="tl-wait-top" x1="' + f(b.x) + '" x2="' + f(b.x + b.w) + '" y1="1" y2="1"></line>'
+      + '<text class="tl-wait-label" x="' + f(lx) + '" y="' + f(bottom + 14) + '" text-anchor="middle">' + esc(b.label) + '</text></g>';
+  }
+  // lanes: a faint track for the run (full colour when the lane has no tool bars of its own), solid full-colour bars for the tool calls
+  lanes.forEach((l, i) => {
+    const y0 = i * TL.laneH;
+    const tx = tlLaneText(l);
+    const attr = tlAttribution(l);
+    const started = l.started != null && Number.isFinite(Number(l.started)) ? Number(l.started) : (l.kind === 'main' ? span.t0 : (l.tools.length ? Number(l.tools[0].ts) : span.t0));
+    const stopped = l.stopped != null && Number.isFinite(Number(l.stopped)) ? Number(l.stopped) : span.t1;
+    const bx = tlX(started, axis, x0, x1);
+    const bw = Math.max(3, tlX(stopped, axis, x0, x1) - bx);
+    const by = y0 + (TL.laneH - TL.barH) / 2;
+    const fill = attr === 'inferred' ? ' fill="url(#tl-inferred)"' : '';
+    g += '<line class="tl-grid" x1="0" x2="' + f(x1) + '" y1="' + (y0 + TL.laneH) + '" y2="' + (y0 + TL.laneH) + '"></line>'
+      + '<text class="tl-text tl-strong" x="0" y="' + (y0 + 15) + '">' + esc(tx.label.slice(0, 24)) + '</text>'
+      + (tx.sub ? '<text class="tl-text" x="0" y="' + (y0 + 29) + '">' + esc(tx.sub.slice(0, 28)) + '</text>' : '')
+      + '<rect class="tl-track' + (l.tools.length ? '' : ' tl-track-solo') + ' tl-attr-' + attr + '"' + fill + ' x="' + f(bx) + '" y="' + f(by) + '" width="' + f(bw) + '" height="' + TL.barH + '" rx="2">'
+      + '<title>' + esc(tx.label + ' · ' + SESS_ATTR_TEXT[attr].toLowerCase() + ' attribution') + '</title></rect>';
+    for (const t of l.tools) {
+      const tt = Number(t.ts);
+      if (!Number.isFinite(tt)) continue;
+      const dur = t.duration_ms != null && Number.isFinite(Number(t.duration_ms)) ? Number(t.duration_ms) : (t.ended != null ? Math.max(0, Number(t.ended) - tt) : 0);
+      const tx0 = tlX(tt, axis, x0, x1);
+      const tw = Math.max(2, tlX(tt + dur, axis, x0, x1) - tx0 - 1);   // a 1 px gap between neighbours
+      g += '<rect class="tl-tool tl-attr-' + attr + '"' + fill + ' x="' + f(tx0) + '" y="' + f(by) + '" width="' + f(tw) + '" height="' + TL.barH + '"><title>'
+        + esc(String(t.tool_name == null ? 'tool' : t.tool_name) + (dur > 0 ? ' · ' + fmtDur(dur) : '')) + '</title></rect>';
+    }
+  });
+  // review markers: the outcome shape; close ones merge; the label only when it fits
+  if (revs.length) {
+    g += '<text class="tl-text tl-strong" x="0" y="' + f(lanesBottom + 19) + '">Reviews</text>';
+    for (const m of tlReviewMarkers(revs, W)) {
+      g += '<g class="tl-review"><title>' + esc(m.title) + '</title>' + tlShape(m.outcome, m.x - 8, lanesBottom + 7)
+        + (m.showLabel ? '<text class="tl-text" x="' + f(m.lx) + '" y="' + f(lanesBottom + 19) + '" text-anchor="' + m.anchor + '">' + esc(m.label) + '</text>' : '') + '</g>';
+    }
+  }
+  const aria = 'Session waterfall, ' + fmtDur(span.t1 - span.t0) + ' long, ' + lanes.length + (lanes.length === 1 ? ' lane' : ' lanes');
+  return {
+    head: '<svg class="tl-svg" width="' + W + '" height="' + headH + '" viewBox="0 0 ' + W + ' ' + headH + '" role="img" aria-label="' + esc('Cumulative cost and time axis') + '">' + h + '</svg>',
+    body: '<svg class="tl-svg tl-svg-body" width="' + W + '" height="' + bodyH + '" viewBox="0 0 ' + W + ' ' + bodyH + '" role="img" aria-label="' + esc(aria) + '">' + g + '</svg>',
+  };
+}
+
+/** The waterfall as markup: the head SVG then the body SVG (tlSvgParts has them apart). */
+function tlSvg(d, width, nowMs) {
+  const p = tlSvgParts(d, width, nowMs);
+  return p.head + p.body;
+}
+
+/** True when the waterfall at this width has at least one idle break (the legend explains the grey columns only then). */
+function tlHasBreaks(d, width, nowMs) {
+  const W = Math.max(480, Math.floor(Number(width)) || 900);
+  const axis = tlAxis(d, tlSpan(d, nowMs), TL.labelW, W - TL.padR);
+  return axis.segs.some((s) => s.kind === 'gap');
+}
+
+/** Legend: explicit, inferred, unattributed, the wait band, and (with breaks) the compressed idle column. */
+function tlLegendHtml(hasBreaks) {
+  return '<div class="legend" aria-label="Legend">'
+    + '<span class="item"><i class="swatch seg-main"></i>Explicit</span>'
+    + '<span class="item"><i class="swatch tl-sw-inferred"></i>Inferred</span>'
+    + '<span class="item"><i class="swatch tl-sw-unattr"></i>Unattributed</span>'
+    + '<span class="item"><i class="swatch tl-sw-wait"></i>Permission wait</span>'
+    + (hasBreaks ? '<span class="item"><i class="swatch tl-sw-break"></i>Idle time (compressed)</span>' : '') + '</div>';
+}
+
+/* ---- below the timeline ---- */
+
+/** "What held it up": waits (the API's longest) and review results, in time order. [{ at, kind, what }] */
+function sessHeldUp(d) {
+  const start = Number.isFinite(Number(d && d.started)) ? Number(d.started) : 0;
+  const rel = (ts) => Math.max(0, Number(ts) - start);
+  const out = [];
+  for (const h of (Array.isArray(d && d.held_up) ? d.held_up : [])) {
+    if (!h || !Number.isFinite(Number(h.ts)) || !(Number(h.duration_ms) > 0)) continue;
+    out.push({ at: rel(h.ts), kind: 'wait', what: 'Permission wait · ' + fmtDur(h.duration_ms) });
+  }
+  for (const r of (Array.isArray(d && d.reviews) ? d.reviews : [])) {
+    if (!r || r.at == null || !Number.isFinite(Number(r.at))) continue;
+    const label = r.outcome === 'pass' ? 'Review passed' : r.outcome === 'block' ? 'Review blocked' : 'Review: ' + (OUTCOME_LABEL[r.outcome] || r.outcome || 'result');
+    out.push({ at: rel(r.at), kind: 'review', what: label + (Number(r.findings) > 0 ? ' · ' + findingsLabel(r.findings) : '') });
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+/** Session facts: waits, Builder active time over N runs, the review path, attribution counts. */
+function sessFacts(d, nowMs) {
+  const waits = (Array.isArray(d && d.waits) ? d.waits : []).filter((w) => w && w.duration_ms != null && Number.isFinite(Number(w.duration_ms)));
+  const span = tlSpan(d || {}, nowMs);
+  const builders = (Array.isArray(d && d.lanes) ? d.lanes : []).filter((l) => l && laneRole(l) === 'builder' && l.started != null && Number.isFinite(Number(l.started)));
+  const builderMs = builders.reduce((a, l) => a + Math.max(0, (l.stopped != null && Number.isFinite(Number(l.stopped)) ? Number(l.stopped) : span.t1) - Number(l.started)), 0);
+  let repairs = (Array.isArray(d && d.lanes) ? d.lanes : []).filter((l) => l && l.subtitle === 'Repair').length;
+  const path = [];
+  for (const r of (Array.isArray(d && d.reviews) ? d.reviews : [])) {
+    if (!r) continue;
+    path.push(OUTCOME_LABEL[r.outcome] || String(r.outcome || 'Review'));
+    if (r.outcome === 'block' && repairs > 0) { path.push('Repair'); repairs -= 1; }
+  }
+  const a = d && d.attribution && typeof d.attribution === 'object' ? d.attribution : {};
+  const n = (x) => (Number.isFinite(Number(x)) && Number(x) > 0 ? Math.floor(Number(x)) : 0);
+  return {
+    waitCount: waits.length, waitMs: waits.reduce((s, w) => s + Math.max(0, Number(w.duration_ms)), 0),
+    builderRuns: builders.length, builderMs, path, attribution: { explicit: n(a.explicit), inferred: n(a.inferred), unattributed: n(a.unattributed) },
+  };
+}
+
+function sessHeldUpHtml(d) {
+  const items = sessHeldUp(d);
+  return '<section class="xsect" aria-label="What held it up"><h3>What held it up</h3>'
+    + (items.length ? '<ul class="xheld">' + items.map((i) => '<li><span class="num quiet-text">+' + esc(fmtDur(i.at) || '0s') + '</span><span class="' + (i.kind === 'wait' ? 'xheld-wait' : '') + '">' + esc(i.what) + '</span></li>').join('') + '</ul>'
+      : '<p class="quiet-text">Nothing held this session up.</p>') + '</section>';
+}
+
+function sessFactsHtml(d, nowMs) {
+  const f = sessFacts(d, nowMs);
+  const row = (k, v) => '<div class="xfact"><dt>' + esc(k) + '</dt><dd>' + v + '</dd></div>';
+  const a = f.attribution;
+  return '<section class="xsect" aria-label="Session facts"><h3>Session facts</h3><dl class="xfacts">'
+    + row('Permission waits', f.waitCount ? esc(f.waitCount + (f.waitCount === 1 ? ' wait' : ' waits') + ' · ' + fmtDur(f.waitMs)) : 'None')
+    + row('Builder active time', f.builderRuns ? esc(fmtDur(f.builderMs) + ' over ' + f.builderRuns + (f.builderRuns === 1 ? ' run' : ' runs')) : 'No Builder runs')
+    + row('Review path', f.path.length ? esc(f.path.join(' → ')) : 'No reviews')
+    + row('Attribution', esc(a.explicit + ' explicit · ' + a.inferred + ' inferred · ' + a.unattributed + ' unattributed requests'))
+    + '</dl></section>';
+}
+
+/** The waterfall: a sticky head (cost line, axis) over the lanes; the detail panel is the only vertical scroller. */
+function tlWrapHtml(d, c) {
+  const p = tlSvgParts(d, c.width, c.nowMs);
+  return '<div class="tl-wrap" id="tl-host"><div class="tl-head">' + p.head + '</div>' + p.body + '</div>';
+}
+
+function sessTimelineHtml(d, c) {
+  const note = d.truncated === true ? '<p class="quiet-text">Showing the most recent tool calls only.</p>' : '';
+  const old = d.has_events === false;
+  const hasSeries = Array.isArray(d.cost_series) && d.cost_series.length > 0;
+  let body;
+  if (old) {
+    body = '<p class="empty-note">No tool calls or waits: this session was recorded before Sessions existed. Runs and cost ' + (hasSeries ? 'come from the ledger.' : 'will show once it has requests.') + '</p>'
+      + (hasSeries ? tlLegendHtml(tlHasBreaks(d, c.width, c.nowMs)) + tlWrapHtml(d, c) : '');
+  } else if (tlHasEvents(d)) {
+    body = tlLegendHtml(tlHasBreaks(d, c.width, c.nowMs)) + note + tlWrapHtml(d, c);
+  } else {
+    body = '<p class="empty-note">No events were recorded for this session. Tool calls and permission waits appear here once the hooks report them.</p>';
+  }
+  return '<section class="xsect" aria-label="Session waterfall"><h3>Session waterfall</h3>' + body + '</section>' + sessHeldUpHtml(d) + sessFactsHtml(d, c.nowMs);
+}
+
+function sessRequestsHtml(d) {
+  const lanes = tlLanes(d);
+  const a = d.attribution && typeof d.attribution === 'object' ? d.attribution : {};
+  const n = (x) => (Number.isFinite(Number(x)) ? Math.max(0, Math.floor(Number(x))) : 0);
+  return '<section class="xsect" aria-label="Requests"><h3>Requests by run</h3><table class="xtable"><thead><tr><th scope="col">Run</th><th scope="col">Model</th><th scope="col">Attribution</th><th scope="col" class="num">Cost (est.)</th></tr></thead><tbody>'
+    + lanes.map((l) => {
+      const tx = tlLaneText(l);
+      return '<tr><th scope="row">' + esc(tx.label) + (l.subtitle ? ' <span class="quiet-text">' + esc(l.subtitle) + '</span>' : '') + '</th><td>' + esc(modelName(l.model) || '—')
+        + '</td><td>' + esc(SESS_ATTR_TEXT[tlAttribution(l)]) + '</td><td class="num">' + esc(costEst(l.cost_est)) + '</td></tr>';
+    }).join('')
+    + '</tbody></table><p class="quiet-text rnote">Requests: ' + esc(n(a.explicit) + ' explicit · ' + n(a.inferred) + ' inferred · ' + n(a.unattributed) + ' unattributed') + '. Counts are per session, not per run.</p></section>';
+}
+
+function sessReviewsHtml(d) {
+  const rs = Array.isArray(d.reviews) ? d.reviews : [];
+  if (!rs.length) return '<p class="empty-note">No reviews in this session.</p>';
+  return '<section class="xsect" aria-label="Reviews"><h3>Reviews</h3><ul class="xrev">' + rs.map((r) => '<li>' + outcomeShape(String(r.outcome || '')) + '<span class="xrev-main"><strong>'
+    + esc(OUTCOME_LABEL[r.outcome] || r.outcome || 'Review') + '</strong> · ' + esc(findingsLabel(r.findings)) + (r.at != null ? ' · ' + esc(fmtClock(r.at)) : '')
+    + '</span><a class="xlink" href="#pipeline/work">Pipeline task ' + esc(r.task || '') + '</a></li>').join('') + '</ul></section>';
+}
+
+/** The detail pane. c: { tab, width, nowMs, missing }. d is the /api/sessions/<id> body, or null while it loads. */
+function sessDetailHtml(d, c) {
+  if (!d) return '<div class="ndetail-empty"><p class="empty-note">' + (c && c.missing ? 'This session is no longer in the ledger.' : c && c.loading ? 'Loading session…' : 'Select a session.') + '</p></div>';
+  const tab = SESS_TABS.some((t) => t[0] === c.tab) ? c.tab : 'timeline';
+  const nrev = Array.isArray(d.reviews) ? d.reviews.length : 0;
+  const tabs = '<div class="ntabs" role="tablist" aria-label="Session detail">' + SESS_TABS.map((t) => '<button type="button" role="tab" class="ntab' + (tab === t[0] ? ' on' : '')
+    + '" data-xtab="' + t[0] + '" aria-selected="' + (tab === t[0]) + '">' + t[1] + (t[0] === 'reviews' ? ' (' + nrev + ')' : '') + '</button>').join('') + '</div>';
+  const pane = tab === 'requests' ? sessRequestsHtml(d) : tab === 'reviews' ? sessReviewsHtml(d) : sessTimelineHtml(d, c);
+  const link = d.project_id ? '<a class="xlink" href="#projects/' + esc(encodeURIComponent(d.project_id)) + '">View project</a>' : '';
+  return '<div class="ndetail-head"><div class="ndetail-title"><h2>' + esc(projectLabel(d.project)) + '</h2>' + sessPillHtml(d) + sessReconHtml(d.reconciliation) + link + '</div>'
+    + '<div class="xmeta">' + (d.branch == null || d.branch === '' ? '' : '<span class="mono">' + esc(d.branch) + '</span>') + '<span class="num">' + esc(fmtDur(d.duration_ms) || '0s') + '</span>'
+    + '<span class="num">' + esc(costEst(d.cost_est)) + '</span>' + (d.has_events === false || d.turns == null ? '' : '<span class="num">' + esc(turnsLabel(d.turns)) + '</span>') + '<span class="quiet-text">' + esc(sessTimeRange(d, c.nowMs)) + '</span></div></div>'
+    + tabs + '<div class="ntabpanel" role="tabpanel">' + pane + '</div>';
+}
+
+/** The whole Sessions body below the title row. ctx: { list, ui: { filter, q, tab }, sel, detail, detailFor, missing, width, nowMs }. */
+function sessPage(ctx) {
+  const all = Array.isArray(ctx.list) ? ctx.list : [];
+  const vis = sessVisible(all, ctx.ui);
+  const sel = sessResolveSel(vis, ctx.sel);
+  const o = { filter: ctx.ui.filter, q: ctx.ui.q, sel, nowMs: ctx.nowMs };
+  const d = ctx.detail && ctx.detailFor === sel ? ctx.detail : null;
+  const n = all.length;
+  return '<p class="xsummary">' + n + (n === 1 ? ' session' : ' sessions') + ' · ' + sessCounts(all).running + ' running</p><div class="pnav">'
+    + '<div class="nleft">' + sessControlsHtml(sessCounts(all), ctx.ui) + '<div class="nlist" id="xlist">' + sessListHtml(all, o) + '</div></div>'
+    + '<section class="ndetail" id="xdetail" aria-label="Session detail">' + sessDetailHtml(d, { tab: ctx.ui.tab, width: ctx.width, nowMs: ctx.nowMs, missing: ctx.missing === true && !!sel, loading: ctx.missing !== true && !!sel }) + '</section></div>';
+}
+
+/* ---------- Sessions tab: rendering and data (alpha.7 S3) ---------- */
+
+function sessCtx() {
+  const s = state.sess;
+  const host = document.getElementById('xdetail');
+  const w = host && host.clientWidth ? host.clientWidth - 28 : 0;   // room for the lane scrollbar
+  return { list: s.list, ui: { filter: s.filter, q: s.q, tab: s.tab }, sel: s.sel, detail: s.detail, detailFor: s.detailFor, missing: s.missing, width: w > 0 ? w : 900, nowMs: Date.now() };
+}
+
+/** The id the page shows: the route's id if it is on screen, else the default. null with no rows. */
+function sessSelId() {
+  const s = state.sess;
+  return sessResolveSel(sessVisible(s.list, { filter: s.filter, q: s.q }), s.sel);
+}
+
+/** The element that holds focus, as a way to find its twin after a re-render. */
+function sessFocusKey(view) {
+  const ae = document.activeElement;
+  if (!ae || !ae.getAttribute || !view.contains(ae)) return null;
+  for (const a of ['data-xq', 'data-xsel', 'data-xtab', 'data-xfilter', 'data-xrange']) if (ae.getAttribute(a) !== null) return [a, ae.getAttribute(a)];
+  return null;
+}
+
+function sessRestoreFocus(view, key) {
+  if (!key) return;
+  const el = Array.from(view.querySelectorAll('[' + key[0] + ']')).find((x) => key[0] === 'data-xq' || x.getAttribute(key[0]) === key[1]);
+  if (!el) return;
+  el.focus();
+  if (key[0] === 'data-xq' && typeof el.setSelectionRange === 'function') { try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) { /* not a text input */ } }
+}
+
+function sessStatePanel(title, text) {
+  return sessTitleHtml(state.sess.range) + '<div class="state-panel"><h2>' + esc(title) + '</h2><p>' + esc(text) + '</p></div>';
+}
+
+function renderSessions() {
+  if (state.route !== 'sessions') return;
+  const view = document.getElementById('view');
+  const s = state.sess;
+  view.setAttribute('aria-busy', s.mode === 'loading' ? 'true' : 'false');
+  if (s.mode === 'loading') { setHtml(view, ''); return; }
+  if (s.mode === 'off') { setHtml(view, sessStatePanel('Session history is off', 'Turn it on from the Sereno tray: Keep spend history.')); return; }
+  if (s.mode === 'unavailable') { setHtml(view, sessStatePanel('Sessions are unavailable right now', 'Sereno will try again on the next refresh.')); return; }
+  const key = sessFocusKey(view);
+  setHtml(view, sessTitleHtml(s.range) + sessPage(sessCtx()));
+  sessRestoreFocus(view, key);
+}
+
+/** The detail pane only (a poll, a sub-tab, a resize): the list, its scroll and its focus stay put. */
+function renderSessDetail() {
+  if (state.route !== 'sessions' || state.sess.mode !== 'data') return;
+  const host = document.getElementById('xdetail');
+  if (!host) { renderSessions(); return; }
+  const c = sessCtx();
+  const sel = sessSelId();
+  const keep = host.scrollTop || 0;   // the detail panel is the one vertical scroller
+  const key = sessFocusKey(host);
+  const d = c.detail && c.detailFor === sel ? c.detail : null;
+  setHtml(host, sessDetailHtml(d, { tab: c.ui.tab, width: c.width, nowMs: c.nowMs, missing: c.missing === true && !!sel, loading: c.missing !== true && !!sel }));
+  if (keep) host.scrollTop = keep;
+  sessRestoreFocus(host, key);
+}
+
+/** The list and the detail pane: typing in the search box or moving the selection leaves the controls (and their focus) alone. */
+function renderSessPanes() {
+  if (state.route !== 'sessions' || state.sess.mode !== 'data') return;
+  const list = document.getElementById('xlist');
+  if (!list) { renderSessions(); return; }
+  const c = sessCtx();
+  const sel = sessSelId();
+  setHtml(list, sessListHtml(c.list, { filter: c.ui.filter, q: c.ui.q, sel, nowMs: c.nowMs }));
+  renderSessDetail();
+}
+
+/** Select a session: keep it in the route (#sessions/<id>) without adding history entries, then load its detail. */
+function selectSession(id, focus) {
+  state.sess.sel = id;
+  try { history.replaceState(null, '', '#sessions/' + encodeURIComponent(id)); } catch (_) { /* file:// or sandboxed: the route just stays */ }
+  renderSessPanes();
+  if (focus) {
+    const on = Array.from(document.querySelectorAll('.xrow')).find((x) => x.getAttribute('data-xsel') === id);
+    if (on) on.focus();
+  }
+  refreshSessDetail();
+}
+
+async function refreshSessions(withDetail) {
+  const s = state.sess;
+  const token = ++s.token;
+  const r = await getJson('/api/sessions?range=' + encodeURIComponent(s.range));
+  if (token !== s.token || state.route !== 'sessions') return;
+  if (r.body && r.body.enabled === false) { s.mode = 'off'; s.list = []; }
+  else if (!r.body || !Array.isArray(r.body.sessions)) { if (s.mode !== 'data') s.mode = 'unavailable'; }   // keep the last good list on a blip
+  else { s.list = r.body.sessions.filter((x) => x && typeof x === 'object' && typeof x.session_id === 'string'); s.mode = 'data'; s.lastOk = Date.now(); }
+  renderSessions();
+  tickSync();
+  if (withDetail !== false) refreshSessDetail();
+}
+
+async function refreshSessDetail() {
+  const s = state.sess;
+  const id = s.mode === 'data' ? sessSelId() : null;
+  if (!id) { s.detail = null; s.detailFor = null; s.missing = false; renderSessDetail(); return; }
+  const token = ++s.dtoken;
+  const r = await getJson('/api/sessions/' + encodeURIComponent(id));
+  if (token !== s.dtoken || state.route !== 'sessions') return;
+  if (r.body && typeof r.body === 'object' && r.body.session_id === id) { s.detail = r.body; s.detailFor = id; s.missing = false; }
+  else if (r.status === 404) { s.detail = null; s.detailFor = id; s.missing = true; }
+  else if (s.detailFor !== id) { s.detail = null; s.detailFor = id; s.missing = false; }   // a blip keeps the last good detail of the same session
+  renderSessDetail();
+}
+
+/** True while the selected session is live (the 5 s detail poll runs only then). */
+function sessSelectedLive() {
+  const s = state.sess;
+  const id = s.mode === 'data' ? sessSelId() : null;
+  const row = id ? s.list.find((x) => x.session_id === id) : null;
+  return !!row && sessIsLive(row);
 }
 
 /* ---------- boot ---------- */
@@ -2182,6 +3136,8 @@ function boot() {
   viewEl.addEventListener('input', (e) => {
     const sq = e.target && e.target.closest ? e.target.closest('input[data-sq]') : null;
     if (sq) { state.spend.q = sq.value.slice(0, 80); renderSpendTable(); return; }
+    const xq = e.target && e.target.closest ? e.target.closest('input[data-xq]') : null;
+    if (xq) { state.sess.q = xq.value.slice(0, 80); renderSessPanes(); return; }
     const q = e.target && e.target.closest ? e.target.closest('input[data-nq]') : null;
     if (!q) return;
     state.proj.q = q.value.slice(0, 80);
@@ -2205,6 +3161,16 @@ function boot() {
       selectProject(next);
       renderNavPanes();
       focusNavRow(viewEl, next);
+      return;
+    }
+    if (state.route === 'sessions') {
+      if (!(e.target && e.target.closest && e.target.closest('.xrow')) || state.sess.mode !== 'data') return;   // keys act only from the list
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('xrow')) { e.preventDefault(); selectSession(e.target.getAttribute('data-xsel'), true); return; }
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+      e.preventDefault();
+      const ids = Array.from(viewEl.querySelectorAll('.xrow')).map((x) => x.getAttribute('data-xsel'));
+      const next = navMove(ids, sessSelId(), e.key);
+      if (next !== null) selectSession(next, true);
       return;
     }
     if (state.route === 'spend') {
@@ -2231,7 +3197,27 @@ function boot() {
   });
   viewEl.addEventListener('click', (e) => {
     const tgt = e.target && e.target.closest ? e.target : null;
-    const rowEl = tgt ? tgt.closest('.prow[data-sel]') : null;
+    if (tgt && state.route === 'sessions') {
+      const xr = tgt.closest('[data-xrange]');
+      if (xr) {
+        const r = xr.getAttribute('data-xrange');
+        if (SESS_RANGES.some((x) => x[0] === r) && r !== state.sess.range) { state.sess.range = r; refreshSessions(); renderSessions(); }
+        return;
+      }
+      const xf = tgt.closest('button[data-xfilter]');
+      if (xf) { state.sess.filter = SESS_FILTERS.some((x) => x[0] === xf.getAttribute('data-xfilter')) ? xf.getAttribute('data-xfilter') : 'all'; renderSessions(); refreshSessDetail(); return; }
+      const xt = tgt.closest('button[data-xtab]');
+      if (xt) {
+        state.sess.tab = SESS_TABS.some((x) => x[0] === xt.getAttribute('data-xtab')) ? xt.getAttribute('data-xtab') : 'timeline';
+        renderSessDetail();
+        const again = Array.from(viewEl.querySelectorAll('[data-xtab]')).find((x) => x.getAttribute('data-xtab') === state.sess.tab);
+        if (again) again.focus();
+        return;
+      }
+      const xs = tgt.closest('.xrow[data-xsel]');
+      if (xs) { selectSession(xs.getAttribute('data-xsel'), true); return; }
+    }
+    const rowEl =tgt ? tgt.closest('.prow[data-sel]') : null;
     if (rowEl) { state.pipe.sel = rowEl.getAttribute('data-sel'); renderPipeline(); return; }
     const act = tgt ? tgt.closest('button[data-act], button[data-filter]') : null;
     if (act) {
@@ -2273,6 +3259,7 @@ function boot() {
     if (r !== state.route) applyRoute(r, false);
     else if (r === 'pipeline') { state.pipe.sub = parsePipeSub(location.hash); renderPipeline(); }
     else if (r === 'projects') { state.proj.sel = parseProjectSel(location.hash); renderProjects(); }
+    else if (r === 'sessions') { state.sess.sel = parseSessionSel(location.hash); renderSessPanes(); refreshSessDetail(); }
     else if (r === 'spend') {
       const h = parseSpendHash(location.hash);
       const changed = h.sub !== state.spend.sub;
@@ -2287,6 +3274,8 @@ function boot() {
   setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'spend') refresh(); }, 60000);
   setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'projects') refreshProjects(); }, 30000);
   setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'pipeline') refreshPipeline(); }, 30000);
+  setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'sessions') refreshSessions(false); }, 10000);   // the list
+  setInterval(() => { if (document.visibilityState === 'visible' && state.route === 'sessions' && sessSelectedLive()) refreshSessDetail(); }, 5000);   // the detail, only while it runs
   // The /events stream drives the attention panel; poll /state only while it is not open.
   setInterval(() => {
     if (stream && stream.readyState === 2) { stream = null; openStream(); }   // the server refused or dropped it: try again
@@ -2299,7 +3288,7 @@ function boot() {
   let raf = 0;
   window.addEventListener('resize', () => {
     if (raf) return;
-    raf = requestAnimationFrame(() => { raf = 0; drawChart(); });
+    raf = requestAnimationFrame(() => { raf = 0; drawChart(); if (state.route === 'sessions') renderSessDetail(); });
   });
   applyRoute(initialRoute(location.hash, loadTab()), true);   // also reads /state; the panel stays empty until it answers
 }

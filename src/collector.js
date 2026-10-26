@@ -820,13 +820,15 @@ function createCollector(store, port, opts) {
         session_id: row.id,
         project: pStr(owner ? owner.name : row.project, 128),
         project_id: owner ? pStr(owner.id, 64) : null,
-        branch: pStr(row.branch !== null ? row.branch : branchForCwd(ctx.snap, row.cwd), 256),
+        // the poller knows today's branch: only a live session may borrow it; an ended one shows what was stored (or nothing)
+        branch: pStr(row.branch !== null ? row.branch : (isLive ? branchForCwd(ctx.snap, row.cwd) : null), 256),
         state,
         started: row.firstSeen,
         ended,
         duration_ms: Math.max(0, (ended !== null ? ended : ctx.asOf) - row.firstSeen),
         cost_est: microsToCents(row.costMicros),
         turns: row.turns,
+        has_events: row.hasEvents === true,
       },
     };
   }
@@ -871,9 +873,11 @@ function createCollector(store, port, opts) {
       for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
         if (!g || typeof g !== 'object') continue;
         const at = pTime(g.reviewed_at);
+        // a timed review counts only inside the session's own window (a later review that names the session id is not part of it)
+        const inWindow = at !== null && at >= row.firstSeen - REVIEW_SLACK_MS && at <= endEdge;
         const mine = typeof g.session_id === 'string' && g.session_id
-          ? g.session_id === id
-          : (at !== null && at >= row.firstSeen - REVIEW_SLACK_MS && at <= endEdge);
+          ? g.session_id === id && (at === null || inWindow)
+          : inWindow;
         if (mine) reviews.push({ task: pStr(t.task, 128), outcome: pStr(g.outcome, 32), findings: Array.isArray(g.findings) ? g.findings.length : 0, at });
       }
       const atts = Array.isArray(t.attempts) ? t.attempts : [];
@@ -895,7 +899,9 @@ function createCollector(store, port, opts) {
     }];
     for (const a of agents) {
       agentMicros += a.costMicros;
-      const role = a.agentType !== null && Object.prototype.hasOwnProperty.call(rmap, a.agentType) ? rmap[a.agentType] : 'other';
+      // the map is keyed 'sereno:<name>'; an agent recorded without the prefix is the same agent
+      const mapKey = a.agentType === null ? null : (Object.prototype.hasOwnProperty.call(rmap, a.agentType) ? a.agentType : 'sereno:' + a.agentType.replace(/^sereno:/, ''));
+      const role = mapKey !== null && Object.prototype.hasOwnProperty.call(rmap, mapKey) ? rmap[mapKey] : 'other';
       lanes.push({
         id: pStr(a.agentId, 128), kind: 'agent', label: pStr(a.agentType, 128) || 'agent', agent_type: pStr(a.agentType, 128), role,
         model: pStr(a.model, 128), attribution: 'explicit', started: a.started, stopped: a.stopped,
