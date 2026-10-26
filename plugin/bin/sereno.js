@@ -34,9 +34,10 @@
  *                           task/<t> has no attempts and no commits of its own and the tree is clean, it
  *                           fast-forwards task/<t> to the base tip (else a `warning`, branch untouched);
  *                           otherwise error code after_not_merged. /sereno:build calls it first.
- *   preflight [--timeout-sec <n>]
+ *   preflight [--task <t>] [--timeout-sec <n>]
  *                           runs the repo's pre-commit hook against the current tree, without committing:
- *                           { hook, passed, timed_out, dirty_after, output_head }. Hooks can modify files
+ *                           { hook, passed, timed_out, dirty_after, output_head, output_tail, branch_note }.
+ *                           With --task the hook runs on task/<t> (switched to and back when the tree is clean). Hooks can modify files
  *                           (lint --fix): it reports dirty_after when the tree changed and never undoes it.
  *   spec ... [--after <task|none>] [--hold <text>]
  *                           `after` queues the task behind another; `hold` (<= 200 chars, one line) is
@@ -51,6 +52,9 @@
  *   stop --task <t>         retires a task: records a new attempt with outcome `stopped` (recovery maps it to done,
  *                           so the task leaves the in-progress list). Refused while the newest attempt is running
  *                           or when there is none. Writes one record; never touches git.
+ *   attempt ... --no-verify-approved
+ *                           on a new running record: stores no_verify_approved: true (the user approved
+ *                           --no-verify for this task's Builder commit). Without it the Builder must not use it.
  *   attempt --start-commit <sha>
  *                           records the commit the Builder started from, on the running record.
  */
@@ -395,7 +399,7 @@ const COMMANDS = {
   attempt(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
       value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash', 'head', 'start-commit'],
-      bool: ['json', 'adopt'],
+      bool: ['json', 'adopt', 'no-verify-approved'],
     });
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
@@ -439,6 +443,8 @@ const COMMANDS = {
     };
     if (specHash !== null) /** @type {any} */ (record).spec_hash = specHash;
     if (startCommit) /** @type {any} */ (record).start_commit = startCommit;
+    // The user's per-task approval to use --no-verify on the Builder's commit; recorded so it is auditable.
+    if (a['no-verify-approved']) /** @type {any} */ (record).no_verify_approved = true;
     return allocateAttempt(fsafe, task, record);
   },
 
@@ -620,11 +626,12 @@ const COMMANDS = {
   },
 
   preflight(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['timeout-sec'], bool: ['json'] });
+    const a = parseArgs(argv, { value: ['timeout-sec', 'task'], bool: ['json'] });
     const ts = str(a, 'timeout-sec');
+    const ptask = str(a, 'task') === undefined ? undefined : rec.checkTask(str(a, 'task'));
     if (ts !== undefined && !/^[1-9]\d{0,3}$/.test(ts)) throw new SerenoError('invalid_arg', '--timeout-sec must be a positive integer');
     const { root } = needRepo();
-    return preflightLib.preflight({ root, timeoutMs: ts === undefined ? undefined : Number(ts) * 1000 });
+    return preflightLib.preflight({ root, task: ptask, timeoutMs: ts === undefined ? undefined : Number(ts) * 1000 });
   },
 
   paths(/** @type {string[]} */ argv) {
@@ -687,7 +694,7 @@ function allocateAttempt(fsafe, task, record) {
  * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, string | boolean>} a
  */
 function adoptAttempt(root, fsafe, task, a) {
-  for (const k of ['update', 'spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'agent-id', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'head', 'start-commit']) {
+  for (const k of ['update', 'spec', 'spec-hash', 'project', 'spec-revision', 'builder', 'agent', 'agent-id', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'head', 'start-commit', 'no-verify-approved']) {
     if (a[k] !== undefined) throw new SerenoError('usage', '--' + k + ' cannot be combined with --adopt');
   }
   if (gitlib.currentBranch(root) !== 'task/' + task) throw new SerenoError('branch_mismatch', 'check out task/' + task + ' first; --adopt records the tip of the branch you are on');

@@ -9,13 +9,15 @@ allowed-tools: Bash, Read, Grep, Glob, Edit(.sereno/cache/spec-*.md)
 
 ## How to run commands
 
+A plain reply from the user starts a new turn on the session model and loses this skill's model, so this skill never waits for an answer: where it needs one, it ends the turn and prints the command to re-run.
+
 Run every shell command in this skill with the Bash tool, never PowerShell or cmd. The commands here use bash syntax (quoting, heredocs), which PowerShell cannot run as written. Run every command and every agent in the foreground and wait for it in this turn: a background result arrives as a new turn on the session model with a cold cache. Never use `run_in_background`. For a long command such as the test run, pass a Bash `timeout` of 600000.
 
 You are the architect. You plan; you do not write the feature code. Turn the request
 into a spec a Builder can follow with no other context, then create its branch.
 
 Arguments: `$ARGUMENTS`. The first word is the task name (letters, digits, `.`, `_`,
-`-`; up to 64 characters). The rest is the goal. If the name is missing, ask for it.
+`-`; up to 64 characters). The rest is the goal. If the name is missing, stop and show the usage `/sereno:task <name> <goal>`.
 
 This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process.
 
@@ -55,8 +57,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" branch --task <name>
 It prints one JSON object. If `ok` is false, show the `error` to the user and stop. It
 refuses an existing branch, a dirty working tree and an invalid name. Do not work around
 a refusal. Note `from_branch` in the result: it is the branch the task branch was created
-from, and `/sereno:ship` merges back into it. If it is null (detached HEAD), ask the user
-which branch the work should merge into. If the branch already exists, you are revising
+from, and `/sereno:ship` merges back into it. If it is null (detached HEAD), stop and tell the user to check out the branch the work should merge into, then run `/sereno:task` again. If the branch already exists, you are revising
 the spec: skip this step.
 
 ## 4. Write the spec
@@ -99,6 +100,6 @@ staging". A hold is printed, never run. Both are kept when you revise the spec w
 
 ## 5. Report
 
-Reply in a few lines: spec path and revision, the Builder you chose and why, and the
+End with a few lines: spec path and revision, the Builder you chose and why, and the
 branch. Tell the user to run `/sereno:build <name>` next. Do not start the Builder
 yourself, and do not switch branches.

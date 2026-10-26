@@ -53,7 +53,8 @@ Write the specs, then let `/sereno:next` carry them. It runs every step that nee
 
 - **`--after <task>`** queues a task behind another. `/sereno:build` refuses it (`after_not_merged`) until that task is merged into the base. With no argument, `/sereno:next` takes the one task in progress, else the oldest spec that is ready; with two in progress it asks which.
 - **`--hold "<one line>"`** on `/sereno:task` names a human step outside the pipeline, such as applying a migration to staging. `next` and `merge` print it before the merge. Typing `/sereno:merge` confirms it is done; the plugin never runs it.
-- **Preflight.** Before the first build, `next` runs the repo's pre-commit hook (`sereno.js preflight`) and stops, before any Builder tokens are spent, if it fails.
+- **Preflight.** Before the first build, `next` runs the repo's pre-commit hook (`sereno.js preflight --task <name>`) with `task/<name>` checked out (it switches to it and back when the tree is clean; with a dirty tree it runs in place and says so in `branch_note`). If the hook fails, `next` stops before any Builder tokens are spent and shows the last lines of the output (`output_tail`). To go on past a hook failure, run `/sereno:next <name> approve-no-verify` (or `/sereno:build <name> approve-no-verify`): that approves `--no-verify` for that task's Builder commit only and stores `no_verify_approved: true` in the attempt record. Without it the Builder never uses `--no-verify`.
+- **No choice waits for a plain reply.** A plain reply starts a new turn on your session model and loses the skill's `sonnet`, so every skill that needs your decision ends its turn and prints the options as commands to run.
 - **Squash merges done outside `/sereno:merge` are not detected.** Use `/sereno:merge`; if the branch was squash-merged and deleted by hand, run `sereno.js stop --task <name>` to retire the task.
 - **A hook that refuses the Builder's commit** is recorded as `hook_failed`, and the work stays staged. Fix the hook on its own branch, or approve a commit that skips it, then run `sereno.js attempt --adopt --task <name>` to record that commit so ship can go on. Nothing skips a hook without your yes.
 - `next` runs at most 3 build or ship steps per invocation, never merges and never touches a remote.
@@ -107,6 +108,30 @@ Models are tier aliases (`haiku`, `sonnet`, `opus`, `fable`) set in each agent f
 spec chooses the Builder per task, and that choice is never changed automatically.
 
 **Cheapest setup:** start the session on Sonnet (`claude --model sonnet`) when you run the pipeline. A result that arrives in a later turn, such as a background agent or the ship test retry, runs on the session model, so on an Opus session it can cost an extra cold-cache Opus turn. In our small-task benchmark, Opus leaked this way in 2 of 3 `default` ships, adding about $0.44 each (an estimate).
+
+## Cost: run agents in the foreground
+
+`/sereno:next` is built to run its whole loop in one turn. When Claude Code runs subagents in the background, each agent result arrives as a new turn on your session model, with a cold cache, plus agent progress summaries. In a field test, switching this off cut a run from $5.45 to $2.92 (est.). Set `CLAUDE_CODE_FORK_SUBAGENT=0` (`sereno.js doctor` reports `background_subagents` as `on`, `off` or `unknown` from this variable and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`). The plugin never writes your settings.
+
+PowerShell, for the current session:
+
+```
+$env:CLAUDE_CODE_FORK_SUBAGENT = "0"
+```
+
+bash:
+
+```
+export CLAUDE_CODE_FORK_SUBAGENT=0
+```
+
+Or in `settings.json`, which applies to every Claude Code session:
+
+```json
+{ "env": { "CLAUDE_CODE_FORK_SUBAGENT": "0" } }
+```
+
+If an agent still runs in the background, the skills carry on from the step after it and never start a second Builder or red team for the same attempt.
 
 ## Presets and pipeline.json
 

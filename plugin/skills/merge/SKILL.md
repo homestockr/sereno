@@ -15,7 +15,7 @@ Typing `/sereno:merge` is the user's explicit yes. You merge one task branch int
 branch with a local `--no-ff` merge, and nothing else. You do not write feature code and you
 do not review anything.
 
-Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, ask for it.
+Arguments: `$ARGUMENTS`. The first word is the task name. If it is missing, stop and show the usage `/sereno:merge <task>`. A plain reply from the user starts a new turn on the session model and loses this skill's model, so a choice never waits for an answer in this turn: end the turn and print each option as a command to re-run.
 
 Rules that hold throughout: never run anything against a remote. Every script result is one
 JSON object; if `ok` is false, show the `error` and stop.
@@ -25,7 +25,7 @@ This skill is the process for this run. Don't invoke other plugins' skills (plan
 ## 1. Check the rules
 
 - Read `.sereno/specs/<task>.md`. Take `base_branch` from its front matter. If it is null
-  or missing, ask the user which branch this task merges into.
+  or missing, stop: tell the user to set it with `/sereno:task <task>` (revise the spec), then run `/sereno:merge <task>` again.
 - Ask the rules what is next:
 
 ```

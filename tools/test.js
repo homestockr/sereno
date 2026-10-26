@@ -9909,7 +9909,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const dir = mk();
       const put = (task, text) => { fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true }); fs.writeFileSync(path.join(dir, '.sereno', 'specs', task + '.md'), text); };
       put('fm', '---\ntask: "fm"\ntitle: "From front matter"\n---\n\n# Heading\n');
-      put('h1', '---\ntask: "h1"\nkind: feature\n---\n\nintro line\n\n## Add the `thing` "now" $HOME \\ it\'s\n- x\n');
+      put('h1', '---\ntask: "h1"\nkind: feature\n---\n\nintro line\n\n# Add the `thing` "now" $HOME \\ it\'s\n- x\n');
       put('none', '---\ntask: "none"\n---\n\nno heading here\n');
       put('long', '---\ntask: "long"\n---\n\n# ' + 'word '.repeat(40) + '\n');
       put('nofm', '# Plain file\nbody\n');
@@ -15267,6 +15267,195 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('[alpha6 exit] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
+  /* ---- [plugin-0.4 field] fixes from two real /sereno:next runs ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const speclib = require('../plugin/bin/lib/spec.js');
+    const preflightLib = require('../plugin/bin/lib/preflight.js');
+    const doctorLib = require('../plugin/bin/lib/doctor.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-fld-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, env) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }, env || {}) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const skill = (n) => fs.readFileSync(path.join(PLUGIN, 'skills', n, 'SKILL.md'), 'utf8');
+    const SKILLS = ['task', 'build', 'ship', 'merge', 'next', 'brief'];
+    function repoOnDev() {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'dev');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      git(dir, 'switch', '-q', '-c', 'task/t1');
+      fs.writeFileSync(path.join(dir, 'drift.marker'), 'x\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'marker');
+      git(dir, 'switch', '-q', 'dev');
+      // Warns on any branch that is not a task branch, prints 12 lines, and fails only where the marker exists.
+      fs.writeFileSync(path.join(dir, '.git', 'hooks', 'pre-commit'), [
+        '#!/bin/sh',
+        'b=$(git symbolic-ref --short HEAD)',
+        'case "$b" in task/*) ;; *) echo "WARNING: Committing straight to \'$b\'";; esac',
+        'for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "check $i"; done',
+        'if [ -f drift.marker ]; then echo "Expo drift: run npx expo install" >&2; exit 1; fi',
+        'exit 0', ''].join('\n'), { mode: 0o755 });
+      return dir;
+    }
+
+    // ---- 1 preflight on the task branch ----
+    test('[plugin-0.4 field] preflight --task: the hook runs on task/<t>, shows its real failure in output_tail, and the branch is restored', () => {
+      const dir = repoOnDev();
+      let r = S(dir, ['preflight']).out;
+      assert.deepStrictEqual([r.passed, r.branch_note], [true, null], 'on dev the hook sees no marker');
+      assert.strictEqual(r.output_head[0], "WARNING: Committing straight to 'dev'");
+      r = S(dir, ['preflight', '--task', 't1']).out;
+      assert.deepStrictEqual([r.ok, r.passed, r.branch_note], [true, false, null]);
+      assert.ok(!r.output_head.some((l) => /WARNING/.test(l)), 'no dev warning: it ran on the task branch');
+      assert.strictEqual(r.output_tail.length, 8);
+      assert.ok(r.output_tail.some((l) => /Expo drift/.test(l)), JSON.stringify(r.output_tail));
+      assert.strictEqual(git(dir, 'branch', '--show-current'), 'dev', 'switched back');
+      assert.strictEqual(git(dir, 'status', '--porcelain', '--untracked-files=all'), '');
+    });
+    test('[plugin-0.4 field] preflight --task: a dirty tree is not switched; the hook runs in place and branch_note says where', () => {
+      const dir = repoOnDev();
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'changed\n');
+      const r = S(dir, ['preflight', '--task', 't1']).out;
+      assert.deepStrictEqual([r.passed, r.branch_note], [true, 'ran on dev']);
+      assert.strictEqual(git(dir, 'branch', '--show-current'), 'dev');
+      assert.strictEqual(S(dir, ['preflight', '--task', 'nope']).out.branch_note, 'ran on dev (task/nope does not exist)');
+      assert.strictEqual(S(dir, ['preflight', '--task', '../x']).out.ok, false);
+    });
+    test('[plugin-0.4 field] preflight --task: already on the task branch stays there; a throw while the hook runs still restores the branch', () => {
+      const dir = repoOnDev();
+      git(dir, 'switch', '-q', 'task/t1');
+      assert.deepStrictEqual([S(dir, ['preflight', '--task', 't1']).out.passed, git(dir, 'branch', '--show-current')], [false, 'task/t1']);
+      git(dir, 'switch', '-q', 'dev');
+      const real = spawnSync;
+      const spawn = (f, a, o) => { if (a[0] === 'hook') throw new Error('boom'); return real(f, a, o); };
+      assert.throws(() => preflightLib.preflight({ root: dir, task: 't1', spawn }), /boom/);
+      assert.strictEqual(git(dir, 'branch', '--show-current'), 'dev', 'finally switched back');
+    });
+    test('[plugin-0.4 field] preflight: output_tail is the last 8 lines, each cut to 200 characters', () => {
+      const t = preflightLib.tail(Array.from({ length: 20 }, (_, i) => 'L' + (i + 1)).join('\n') + '\n' + 'z'.repeat(500));
+      assert.strictEqual(t.length, 8);
+      assert.strictEqual(t[0], 'L14');
+      assert.strictEqual(t[7].length, 200);
+      assert.deepStrictEqual(preflightLib.tail(''), []);
+    });
+    test('[plugin-0.4 field] next skill passes --task to preflight and shows output_tail', () => {
+      const n = skill('next');
+      assert.ok(n.includes('bin/sereno.js" preflight --task <task>'));
+      assert.ok(/output_tail/.test(n) && /branch_note/.test(n));
+    });
+
+    // ---- 2 never continue on a plain reply ----
+    test('[plugin-0.4 field] no skill tells the user to reply or "tell me which", or waits on an answer', () => {
+      const sentence = /A plain reply from the user starts a new turn[^.]*\./g;
+      for (const k of SKILLS) {
+        const t = skill(k).replace(sentence, '');
+        assert.ok(!/\breply\b/i.test(t), k + ' mentions reply');
+        assert.ok(!/tell me (which|what)|let me know|reply approved/i.test(t), k + ' waits for an answer');
+        assert.ok(!/\bask (the user|which|for it|whether)\b/i.test(t), k + ' asks the user');
+      }
+      for (const k of ['task', 'build', 'ship', 'merge', 'next']) assert.ok(/plain reply[^.]*new turn on the session model/.test(skill(k)), k + ' explains why');
+    });
+    test('[plugin-0.4 field] approve-no-verify is documented in next and build, and the argument words are parsed', () => {
+      for (const k of ['next', 'build']) {
+        const t = skill(k);
+        assert.match(t, /approve-no-verify`: the user approves/);
+        assert.match(t, /first word(, if there is one,)? is the task name; any other words are flags/);
+        assert.match(t, /this task's Builder commit only/);
+      }
+      assert.match(skill('next'), /\/sereno:next <task> approve-no-verify/);
+      assert.match(skill('build'), /\/sereno:build <task> approve-no-verify/);
+      assert.match(skill('build'), /--no-verify-approved/);
+      assert.match(skill('build'), /Without `approve-no-verify`, the Builder must not use `--no-verify`/);
+      assert.match(skill('next'), /no_verify_approved: true/);
+    });
+    test('[plugin-0.4 field] attempt --no-verify-approved stores no_verify_approved: true on the running record; absent otherwise', () => {
+      const dir = repoOnDev();
+      git(dir, 'switch', '-q', 'task/t1');
+      const base = ['attempt', '--task', 't1', '--builder', 'sonnet', '--kind', 'feature', '--diagnosis', 'none', '--outcome', 'running'];
+      let r = S(dir, base.concat(['--no-verify-approved'])).out;
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, r.path), 'utf8')).no_verify_approved, true);
+      const u = S(dir, ['attempt', '--task', 't1', '--update', String(r.attempt), '--outcome', 'built']).out;
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, u.path), 'utf8')).no_verify_approved, true, 'kept on update');
+      r = S(dir, base).out;
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(JSON.parse(fs.readFileSync(path.join(dir, r.path), 'utf8')), 'no_verify_approved'), false);
+      assert.strictEqual(S(dir, ['attempt', '--adopt', '--task', 't1', '--no-verify-approved']).out.code, 'usage');
+    });
+
+    // ---- 3 background agents ----
+    test('[plugin-0.4 field] doctor: background_subagents is on / off / unknown from the env vars, with the advice when on', () => {
+      const f = doctorLib.backgroundSubagents;
+      assert.deepStrictEqual([f({}), f({ CLAUDE_CODE_FORK_SUBAGENT: '1' }), f({ CLAUDE_CODE_FORK_SUBAGENT: '0' }), f({ CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' }), f({ CLAUDE_CODE_FORK_SUBAGENT: '1', CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' }), f({ CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '0' })], ['unknown', 'on', 'off', 'off', 'off', 'unknown']);
+      const dir = repoOnDev();
+      const on = S(dir, ['doctor'], { CLAUDE_CODE_FORK_SUBAGENT: '1', CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '' }).out;
+      assert.strictEqual(on.background_subagents, 'on');
+      assert.ok(!on.checks.some((x) => /background/.test(x.name)), 'not a check: the check list is unchanged');
+      assert.ok(on.background_advice.includes('Set CLAUDE_CODE_FORK_SUBAGENT=0 so /sereno:next runs in one turn; in a field test this cut a run from $5.45 to $2.92 (est.), removing agent progress summaries and session-model pickups.'));
+      const off = S(dir, ['doctor'], { CLAUDE_CODE_FORK_SUBAGENT: '0' }).out;
+      assert.strictEqual(off.background_subagents, 'off');
+      assert.strictEqual(off.background_advice, null);
+      assert.strictEqual(doctorLib.runDoctor(dir, {}).background_subagents, 'unknown');
+    });
+    test('[plugin-0.4 field] README: "Cost: run agents in the foreground" has the PowerShell, bash and settings.json forms', () => {
+      const r = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
+      const i = r.indexOf('## Cost: run agents in the foreground');
+      assert.ok(i > 0);
+      const sec = r.slice(i, r.indexOf('\n## ', i + 5));
+      for (const k of ['$env:CLAUDE_CODE_FORK_SUBAGENT = "0"', 'export CLAUDE_CODE_FORK_SUBAGENT=0', '"env": { "CLAUDE_CODE_FORK_SUBAGENT": "0" }', '$5.45', '$2.92', '(est.)', 'background_subagents', 'never writes your settings']) assert.ok(sec.includes(k), k);
+    });
+
+    // ---- 4 skills that work with background agents too ----
+    test('[plugin-0.4 field] next, build and ship say what to do when a background agent result arrives later', () => {
+      for (const k of ['next', 'build', 'ship']) {
+        const t = skill(k);
+        assert.match(t, /continue from the step after that agent/, k);
+        assert.match(t, k === 'ship' ? /recovery --task <task>. command of step 5/ : /sereno[.]js" next --task <task>/, k);
+        assert.match(t, /Never start a second Builder or red team for the same attempt/, k);
+        assert.match(t, /attempt record/, k);
+      }
+    });
+
+    // ---- 5 the merge title ----
+    test('[plugin-0.4 field] spec title: front matter, then the first H1, then the first line under ## Goal (word cut at 72), then the task name', () => {
+      const dir = mk();
+      const put = (task, text) => { fs.mkdirSync(path.join(dir, '.sereno', 'specs'), { recursive: true }); fs.writeFileSync(path.join(dir, '.sereno', 'specs', task + '.md'), text); };
+      const T = (task) => speclib.readSpecTitle(dir, task);
+      put('fm', '---\ntask: "fm"\ntitle: "From front matter"\n---\n\n# Heading\n\n## Goal\nGoal line\n');
+      put('h1', '---\ntask: "h1"\n---\n\n## Goal\nnot this\n\n# The real title\n');
+      put('goal', '---\ntask: "goal"\n---\n\n## Background\nsome text\n\n## Goal\n\n- Add a retry to the uploader\nmore\n\n## Tests\nx\n');
+      put('longgoal', '---\ntask: "longgoal"\n---\n\n## Goal\n' + 'alpha beta gamma '.repeat(10) + '\n');
+      put('generich1', '---\ntask: "generich1"\n---\n\n# Goal\n\n## Goal\nFrom the goal section\n');
+      put('onlygeneric', '---\ntask: "onlygeneric"\n---\n\n# Acceptance criteria\n## Notes\nx\n## Tests\ny\n');
+      put('h2only', '---\ntask: "h2only"\n---\n\n## Add the thing\nbody\n');
+      put('nogoal', '---\ntask: "nogoal"\n---\n\nplain body\n');
+      put('meta', '---\ntask: "meta"\n---\n\n# Fix the "login" $HOME `x` \\ it\'s flow\n');
+      put('fence', '---\ntask: "fence"\n---\n\n```\n# not a heading\n```\n\n## Goal\nReal goal\n');
+      put('emptygoal', '---\ntask: "emptygoal"\n---\n\n## Goal\n\n## Tests\nSome test\n');
+      assert.strictEqual(T('fm'), 'From front matter');
+      assert.strictEqual(T('h1'), 'The real title');
+      assert.strictEqual(T('goal'), 'Add a retry to the uploader');
+      assert.strictEqual(T('longgoal'), 'alpha beta gamma alpha beta gamma alpha beta gamma alpha beta gamma');
+      assert.strictEqual(T('generich1'), 'From the goal section');
+      for (const k of ['onlygeneric', 'h2only', 'nogoal', 'emptygoal', 'missing']) assert.strictEqual(T(k), k, k);
+      assert.strictEqual(T('meta'), 'Fix the login HOME x it' + 's flow');
+      assert.strictEqual(T('fence'), 'Real goal');
+      for (const g of ['Goal', 'Background', 'Acceptance criteria', 'Tests', 'Out of scope', 'Notes']) {
+        put('g', '---\ntask: "g"\n---\n\n# ' + g + '\n');
+        assert.strictEqual(T('g'), 'g', g + ' is never a title');
+      }
+    });
+
+    await atest('[plugin-0.4 field] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

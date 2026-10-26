@@ -13,9 +13,13 @@ Run every shell command in this skill with the Bash tool, never PowerShell or cm
 
 You are the architect for the whole run. You ask what comes next, do the steps that need no human, in this one turn, and stop at the first step that does. You do not write feature code and you do not review the diff yourself.
 
-Arguments: `$ARGUMENTS`. The first word, if there is one, is the task name. With none, the script picks the task.
+Arguments: `$ARGUMENTS`. The first word, if there is one, is the task name; any other words are flags. With no task, the script picks the task. The one flag is `approve-no-verify`: the user approves `--no-verify` for this task's Builder commit only, and only when the preflight hook failure is the reason (see step 2). Any other word: stop and show the usage `/sereno:next [task] [approve-no-verify]`.
+
+A plain reply from the user starts a new turn on the session model and loses this skill's model, so a choice never waits for an answer in this turn: end the turn and print each option as a command to re-run.
 
 This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process.
+
+Background agents: if an agent was started in the background anyway and its result arrives in a later turn, continue from the step after that agent. Use the attempt record (`.sereno/attempts/<task>-<n>.json`) and `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" next --task <task>` to find where you are. Never start a second Builder or red team for the same attempt.
 
 Rules that hold throughout: never merge (merging is `/sereno:merge`, which only the user can start) and never run anything against a remote. Every script result is one JSON object; if `ok` is false, show the `error` and stop.
 
@@ -32,14 +36,16 @@ Pass `--task` only when the user gave a task. `<n>` is the number of build / shi
 Before the first `build` step of a task in this run, run the repo's commit-hook check:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" preflight
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" preflight --task <task>
 ```
 
-If `passed` is false, stop with one line naming the `hook` and the first line of `output_head`, then the two options: fix the hook on its own branch, or approve a commit that uses `--no-verify` for this task's commit. Never skip a hook yourself, and do not start the Builder. If `dirty_after` is true, say the hook changed files in the working tree and leave them as they are.
+`--task` makes the hook run with `task/<task>` checked out (the script switches to it and back when the tree is clean). If `branch_note` is set, the hook ran on another branch; mention it in one clause.
+
+If `passed` is false: show the `hook`, the `output_tail` lines (the real failure is at the end; `output_head` is only the start) and any `branch_note`. Without `approve-no-verify`, do not start the Builder and end the turn with the two options as commands: fix the hook on its own branch and run `/sereno:next <task>` again, or `/sereno:next <task> approve-no-verify` to approve `--no-verify` for this task's Builder commit. With `approve-no-verify`, carry on, and the build step passes `approve-no-verify` on (it records `no_verify_approved: true` in the attempt). Never skip a hook yourself. If `dirty_after` is true, say the hook changed files in the working tree and leave them as they are.
 
 ## 3. Do the step
 
-- `build`: read `${CLAUDE_PLUGIN_ROOT}/skills/build/SKILL.md` and follow it for the task, then go back to step 1.
+- `build`: read `${CLAUDE_PLUGIN_ROOT}/skills/build/SKILL.md` and follow it for the task (with `approve-no-verify` if the user gave it), then go back to step 1.
 - `ship`, `repair` or `retry`: read `${CLAUDE_PLUGIN_ROOT}/skills/ship/SKILL.md` and follow it for the task (it includes its one repair), then go back to step 1. If ship ends at "Review needs a decision" or at its merge prompt, do not repeat that message: go back to step 1 and let the next result be the single stop line.
 
 Which ship step to enter: for `step: "retry"` (an environment failure) and for `step: "repair"` (one repair is due: a defect), go straight to the `retry` / `repair` bullet in ship's step 5 and skip its steps 1 to 4: the latest attempt is final, so nothing is left to test or review yet. Key on `step` only, never on the wording of `reason`. A `ship` step for a built attempt starts at ship's step 1.
@@ -59,6 +65,6 @@ Stop at the first step that is not `build`, `ship`, `repair` or `retry`. Print e
 - `merge`: "Gate passed for <task>. Before merging: <hold>. Run /sereno:merge <task>." Leave out the "Before merging" sentence when `hold` is null.
 - `decide`: the `reason`, then the `command` if there is one (its options are a person's call, so list them if the reason does). When the reason says the branch is gone, tell the user the whole reason line (it names both options, one of them the `stop` command); never run `stop` yourself.
 - `done` or `idle`: the `reason`, then "Nothing queued." (skip it when the reason already says so) or, when another task is waiting, that task's name.
-- `pick`: list the tasks and ask which one to run, then stop. Do not guess.
+- `pick`: list the tasks, each as a command to run (`/sereno:next <task>`), then end the turn. Do not guess and do not wait for an answer.
 
 Do not merge, switch to the base branch, or touch a remote.

@@ -19,11 +19,16 @@
  * Windows). Only that path is used: a `.husky/pre-commit` that core.hooksPath does not point at
  * is not a hook git would run, so it is ignored. No hook means passed.
  *
- * Result: { hook: path | null, passed, timed_out, may_still_run, dirty_after, output_head }.
+ * With `task`, the hook runs with task/<task> checked out: if another branch is current and the tree is
+ * clean the branch is switched first and restored in a finally; with a dirty tree (or a missing branch)
+ * nothing is switched and `branch_note` says where it ran. A hook then sees the branch the Builder will
+ * commit on (not the user's `dev`, where a "committing straight to dev" warning hid the real failure).
+ *
+ * Result: { hook: path | null, passed, timed_out, may_still_run, dirty_after, output_head, output_tail, branch_note }.
  * On a timeout spawnSync has already killed the direct child, and nothing else is killed: its pid is
  * dead by then and may be reused, so a kill by pid could hit an unrelated process. The hook's own
  * children may survive, so may_still_run is true and dirty_after is the tree as of now.
- * output_head is the first 5 lines of the hook's output, each cut to 200 characters.
+ * output_head is the first 5 lines of the hook's output, output_tail the last 8, each cut to 200 characters.
  * Nothing is written to disk and nothing is sent anywhere.
  */
 
@@ -37,6 +42,7 @@ const rec = require('./records.js');
 const DEFAULT_TIMEOUT_MS = 60 * 1000;
 const MAX_TIMEOUT_MS = 10 * 60 * 1000;
 const HEAD_LINES = 5;
+const TAIL_LINES = 8;
 const LINE_MAX = 200;
 
 /** @param {string} cwd @param {string[]} args @param {(f: string, a: string[], o: any) => any} spawn */
@@ -57,6 +63,11 @@ function head(text) {
   return text.split(/\r?\n/).map((l) => rec.cleanText(l, LINE_MAX)).filter(Boolean).slice(0, HEAD_LINES);
 }
 
+/** @param {string} text @returns {string[]} */
+function tail(text) {
+  return text.split(/\r?\n/).map((l) => rec.cleanText(l, LINE_MAX)).filter(Boolean).slice(-TAIL_LINES);
+}
+
 /** @param {string} v "git version 2.54.0.windows.1" @returns {boolean} */
 function hasHookRun(v) {
   const m = /(\d+)\.(\d+)/.exec(v);
@@ -64,10 +75,31 @@ function hasHookRun(v) {
 }
 
 /**
- * @param {{ root: string, timeoutMs?: number, spawn?: (f: string, a: string[], o: any) => any }} a
+ * @param {{ root: string, task?: string, timeoutMs?: number, spawn?: (f: string, a: string[], o: any) => any }} a
  */
 function preflight(a) {
   const spawn = a.spawn || childProcess.spawnSync;
+  const root = a.root;
+  if (!a.task) return runHook(a, spawn, null);
+  const target = 'task/' + a.task;
+  const cur = gitlib.currentBranch(root);
+  if (cur === target) return runHook(a, spawn, null);
+  const curLabel = cur || 'a detached HEAD';
+  const exists = plainGit(root, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + target], spawn) !== null;
+  if (!exists) return runHook(a, spawn, 'ran on ' + curLabel + ' (' + target + ' does not exist)');
+  const files = gitlib.cleanFiles(root);
+  if (files === null || files.length) return runHook(a, spawn, 'ran on ' + curLabel);
+  const back = cur ? ['switch', '--quiet', cur] : ['switch', '--quiet', '--detach', String(plainGit(root, ['rev-parse', 'HEAD'], spawn) || '').trim()];
+  if (plainGit(root, ['switch', '--quiet', target], spawn) === null) return runHook(a, spawn, 'ran on ' + curLabel);
+  try {
+    return runHook(a, spawn, null);
+  } finally {
+    plainGit(root, back, spawn);
+  }
+}
+
+/** @param {{ root: string, timeoutMs?: number }} a @param {(f: string, a: string[], o: any) => any} spawn @param {string | null} branchNote */
+function runHook(a, spawn, branchNote) {
   const root = a.root;
   const timeout = Math.min(Math.max(a.timeoutMs || DEFAULT_TIMEOUT_MS, 1000), MAX_TIMEOUT_MS);
 
@@ -80,7 +112,7 @@ function preflight(a) {
   }
   // Only the path git itself would run (core.hooksPath is honoured by --git-path). A bare
   // .husky/pre-commit that git is not configured to use is not a hook git would run.
-  if (!hookAbs) return { hook: null, passed: true, timed_out: false, may_still_run: false, dirty_after: false, output_head: [] };
+  if (!hookAbs) return { hook: null, passed: true, timed_out: false, may_still_run: false, dirty_after: false, output_head: [], output_tail: [], branch_note: branchNote };
 
   const rel = path.relative(root, hookAbs).split(path.sep).join('/');
   const hookLabel = rel && !rel.startsWith('..') ? rel : hookAbs;
@@ -105,6 +137,8 @@ function preflight(a) {
     // so dirty_after only describes the tree as of now.
     may_still_run: timedOut,
     dirty_after: before !== after,
+    output_tail: tail(out),
+    branch_note: branchNote,
     output_head: head(timedOut ? 'the hook did not finish within ' + Math.round(timeout / 1000) + ' s; it may still be running, and dirty_after is as of now\n' + out : out),
   };
 }
@@ -112,4 +146,4 @@ function preflight(a) {
 /** @param {string} p */
 function isFile(p) { try { return fs.statSync(p).isFile(); } catch (_e) { return false; } }
 
-module.exports = { preflight, head, hasHookRun, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS };
+module.exports = { preflight, head, tail, hasHookRun, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS };

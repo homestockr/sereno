@@ -103,11 +103,25 @@ function readSpecMeta(root, task) {
   };
 }
 
+const GENERIC_HEADINGS = ['goal', 'background', 'acceptance criteria', 'tests', 'out of scope', 'notes'];
+/** @param {string} h */
+const isGeneric = (h) => GENERIC_HEADINGS.includes(h.replace(/[:\s#]+$/, '').trim().toLowerCase());
+
+/** Cut at 72 characters on a word boundary (a single long word is cut hard). @param {string} s */
+function wordCut(s) {
+  if (s.length <= 72) return s;
+  const cut = s.slice(0, 73);
+  const i = cut.lastIndexOf(' ');
+  return (i > 0 ? cut.slice(0, i) : s.slice(0, 72)).trim();
+}
+
 /**
- * The spec's title for a commit message: `title:` in the front matter if it has one, else the
- * first markdown heading of the body, else the task name. One line, at most 72 characters, and
- * the characters a shell treats specially inside double quotes (" ` $ \ ') are removed, so the
- * result is safe to place inside "..." on a command line.
+ * The spec's title for a commit message, in this order: `title:` in the front matter; the first
+ * `# ` (H1) heading of the body; the first non-empty line of the section under a `## Goal` heading;
+ * else the task name. Generic headings (Goal, Background, Acceptance criteria, Tests, Out of scope,
+ * Notes) never count as a title. One line, at most 72 characters (cut on a word boundary), and the
+ * characters a shell treats specially inside double quotes (" ` $ \ ') are removed, so the result is
+ * safe to place inside "..." on a command line.
  * @param {string} root real repo root @param {string} task @returns {string}
  */
 function readSpecTitle(root, task) {
@@ -122,10 +136,28 @@ function readSpecTitle(root, task) {
       const body = parts ? parts.slice(1).join('\n---\n') : text;
       const m = /^title:[ \t]*(.*?)[ \t]*$/m.exec(head);
       if (m && m[1]) { try { const v = JSON.parse(m[1]); raw = typeof v === 'string' ? v : null; } catch (_e) { raw = m[1]; } }
-      if (!raw) { const h = /^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/m.exec(body); if (h) raw = h[1]; }
+      if (!raw || !raw.trim()) {
+        raw = null;
+        let fence = false, inGoal = false;
+        for (const line of body.split(/\r?\n/)) {
+          if (/^\s*(```|~~~)/.test(line)) { fence = !fence; continue; }
+          if (fence) continue;
+          const h1 = /^#[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(line);
+          if (h1 && !isGeneric(h1[1])) { raw = h1[1]; break; }
+        }
+        if (!raw) {
+          fence = false;
+          for (const line of body.split(/\r?\n/)) {
+            if (/^\s*(```|~~~)/.test(line)) { fence = !fence; if (!inGoal) continue; }
+            const h = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(fence ? '' : line);
+            if (h) { if (inGoal) break; inGoal = h[1] === '##' && h[2].trim().toLowerCase() === 'goal'; continue; }
+            if (inGoal && line.trim()) { raw = line.trim().replace(/^(?:[-*+>]|\d+[.)])[ \t]+/, ''); break; }
+          }
+        }
+      }
     }
   } catch (_e) { raw = null; }
-  const clean = rec.cleanText(raw || '', 200).replace(/["`$\\']/g, '').replace(/ {2,}/g, ' ').trim().slice(0, 72).trim();
+  const clean = wordCut(rec.cleanText(raw || '', 400).replace(/["`$\\']/g, '').replace(/ {2,}/g, ' ').trim());
   return clean || task;
 }
 

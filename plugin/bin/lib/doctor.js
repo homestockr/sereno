@@ -11,8 +11,17 @@ const { resolveCommand } = require('./testrun.js');
 
 const AGENTS_DIR = path.join(__dirname, '..', '..', 'agents');
 
-/** @param {string} cwd @returns {{ ok: boolean, checks: { name: string, ok: boolean, detail: string }[], config_hash: string | null }} */
-function runDoctor(cwd) {
+/** @param {Record<string, string | undefined>} env @returns {'on' | 'off' | 'unknown'} */
+function backgroundSubagents(env) {
+  if (env.CLAUDE_CODE_FORK_SUBAGENT === '0' || env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS === '1') return 'off';
+  if (env.CLAUDE_CODE_FORK_SUBAGENT !== undefined && env.CLAUDE_CODE_FORK_SUBAGENT !== '') return 'on';
+  return 'unknown';
+}
+
+const BG_ADVICE = 'Set CLAUDE_CODE_FORK_SUBAGENT=0 so /sereno:next runs in one turn; in a field test this cut a run from $5.45 to $2.92 (est.), removing agent progress summaries and session-model pickups.';
+
+/** @param {string} cwd @param {Record<string, string | undefined>} [env] @returns {{ ok: boolean, checks: { name: string, ok: boolean, detail: string }[], config_hash: string | null, background_subagents: 'on' | 'off' | 'unknown', background_advice: string | null }} */
+function runDoctor(cwd, env) {
   /** @type {{ name: string, ok: boolean, detail: string }[]} */
   const checks = [];
   /** @param {string} name @param {() => { ok: boolean, detail: string }} fn */
@@ -78,7 +87,11 @@ function runDoctor(cwd) {
     return missing.length ? { ok: false, detail: 'missing under plugin/agents/: ' + missing.join(', ') } : { ok: true, detail: names.join(', ') };
   });
 
-  return { ok: checks.every((c) => c.ok), checks, config_hash: loaded ? loaded.config_hash : null };
+  const bg = backgroundSubagents(env || process.env);
+  // Advice only: the plugin never writes settings, and this never fails the doctor.
+  const advice = bg === 'on' ? BG_ADVICE : bg === 'unknown' ? 'Background agents are not set either way here. If runs show agent progress summaries, see the plugin README, "Cost: run agents in the foreground".' : null;
+
+  return { ok: checks.every((c) => c.ok), checks, config_hash: loaded ? loaded.config_hash : null, background_subagents: bg, background_advice: advice };
 }
 
-module.exports = { runDoctor };
+module.exports = { runDoctor, backgroundSubagents };
