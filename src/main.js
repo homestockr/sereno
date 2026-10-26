@@ -797,6 +797,17 @@ if (CLI_UNWIRE) {
     catch (e) { return { ok: false, error: e.message }; }
   });
 
+  // Clear Sereno's own ledger only. The confirmation and the delete both happen here; there is no HTTP route for it.
+  ipcMain.handle('sereno:clear-history', async () => {
+    try {
+      if (!ledger) return { ok: true, cleared: false, reason: 'off' };
+      const { response } = await dialog.showMessageBox(ledgerLife.clearHistoryDialog());
+      if (response !== 0) return { ok: true, cleared: false, reason: 'cancelled' };
+      ledger.clearHistory();
+      return { ok: true, cleared: true };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+
   ipcMain.handle('sereno:wiring-status', () => {
     const st = wiring.status([shimCommands().shimPath]);
     return Object.assign({ packaged: app.isPackaged }, st);

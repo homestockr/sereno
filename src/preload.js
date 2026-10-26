@@ -28,5 +28,6 @@ contextBridge.exposeInMainWorld('sereno', {
 
   // Sereno's own settings, which live nowhere near Claude Code's.
   settings: () => ipcRenderer.invoke('sereno:settings'),
+  clearHistory: () => ipcRenderer.invoke('sereno:clear-history'),
   setAutoLaunch: (on) => ipcRenderer.invoke('sereno:set-auto-launch', !!on),
 });

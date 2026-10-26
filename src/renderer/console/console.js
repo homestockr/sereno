@@ -319,7 +319,7 @@ function attentionHtml(st, nowMs, opts) {
 function parseRoute(hash) {
   const h = String(hash == null ? '' : hash).replace(/^#\/?/, '').trim().toLowerCase();
   if (/^spend(\/(projects|turns|cache))?(\?p=[^&#?]{1,1800})?$/.test(h)) return 'spend';
-  if (h === 'sessions' || /^sessions\/[a-z0-9._:-]{1,128}$/.test(h)) return 'sessions';
+  if (h === 'sessions' || /^sessions\/[a-z0-9._:-]{1,128}$/.test(h) || /^sessions\?p=[a-z0-9_-]{1,64}$/.test(h)) return 'sessions';
   return h === 'pipeline' || /^pipeline\/(work|signals|routing)$/.test(h) ? 'pipeline' : 'projects';
 }
 
@@ -754,7 +754,8 @@ function navDetailHtml(p, c) {
     + '" data-ntab="' + t[0] + '" aria-selected="' + (tab === t[0]) + '">' + t[1] + '</button>').join('') + '</div>';
   const pane = tab === 'activity' ? navActivityHtml(p, c.nowMs) : tab === 'git' ? navGitHtml(p, c.nowMs) : navBranchesHtml(p, c.nowMs);
   return '<div class="ndetail-head"><div class="ndetail-title"><h2>' + esc(p.name) + '</h2><span class="chip ' + chip.cls + '">' + esc(chip.label) + '</span>'
-    + (blocked ? '<span class="pill-amber">' + ringIcon() + 'Needs you</span>' : '') + '</div>' + git + review + '</div>'
+    + (blocked ? '<span class="pill-amber">' + ringIcon() + 'Needs you</span>' : '')
+    + (typeof p.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(p.id) ? '<a class="xlink" href="' + esc(sessionsProjectHash(p.id)) + '">Recent sessions</a>' : '') + '</div>' + git + review + '</div>'
     + navBriefHtml(p, c) + navSpendHtml(p) + tabs + '<div class="ntabpanel" role="tabpanel">' + pane + '</div>' + navLiveStrip(p, c.sessions, c.nowMs);
 }
 
@@ -1180,7 +1181,8 @@ function pipelineBody(body, projectsList, ui, nowMs) {
   const summary = c.active + (c.active === 1 ? ' active task' : ' active tasks') + ' · ' + c.repairs + (c.repairs === 1 ? ' repair' : ' repairs') + ' · '
     + c.decisions + (c.decisions === 1 ? ' decision' : ' decisions') + ' · ' + c.runs + (c.runs === 1 ? ' run' : ' runs') + ' this week';
   const content = u.sub === 'signals' ? signalsHtml(body, nowMs, u.open) : u.sub === 'routing' ? routingTabHtml(body) : workHtml(body, u);
-  return '<p class="summary">' + esc(summary) + '</p>' + subtabsHtml(u.sub) + content;
+  const wrapped = u.sub === 'work' ? content : '<div class="pscroll" id="pscroll">' + content + '</div>';
+  return '<p class="summary">' + esc(summary) + '</p>' + subtabsHtml(u.sub) + wrapped;
 }
 
 /** A live top-level session id inside the project's repo (from /api/projects p.live.sessionIds and /state), or null. */
@@ -1254,12 +1256,14 @@ function panelHtml(row, ctx) {
   const pinned = Array.isArray(c.pinned) ? c.pinned : [];
   const review = c.sid && pinned.indexOf(c.sid) < 0 ? reviewControl({ sessionId: c.sid }, c.opts) : '';
   const attempts = Array.isArray(t.attempts) ? t.attempts : [];
+  const revLink = t.gate && sessionHash(t.gate.sessionId) ? '<p class="plink"><a class="xlink" href="' + esc(sessionHash(t.gate.sessionId)) + '">Open the review session</a></p>' : '';
   const attList = attempts.length
     ? '<h4>Attempts</h4><ul class="plist2">' + attempts.map((a) => {
       const s = a && a.startedAt != null ? relTime(a.startedAt, nowMs) : '';
       const e = a && a.endedAt != null ? relTime(a.endedAt, nowMs) : '';
       return '<li><span class="num">#' + esc(a && a.attempt != null ? a.attempt : '?') + '</span><span>' + esc(a && a.outcome ? (OUTCOME_LABEL[a.outcome] || a.outcome) : '—') + '</span>'
-        + '<span class="quiet-text">' + (s ? 'started ' + esc(s) : '') + (e ? ' · ended ' + esc(e) : '') + '</span></li>';
+        + '<span class="quiet-text">' + (s ? 'started ' + esc(s) : '') + (e ? ' · ended ' + esc(e) : '') + '</span>'
+        + (a && sessionHash(a.sessionId) ? '<a class="xlink" href="' + esc(sessionHash(a.sessionId)) + '">Session</a>' : '') + '</li>';
     }).join('') + '</ul>' : '';
   const actLines = acts.map((e) => ({ e, line: activityText(e) })).filter((x) => x.line);
   const actList = actLines.length
@@ -1267,7 +1271,7 @@ function panelHtml(row, ctx) {
   const find = Array.isArray(t.findings) && t.findings.length ? '<h4>Latest findings</h4>' + findingsHtml(t.findings, true) : '';
   return '<section class="ppanel' + (open ? ' ppanel-dec' : '') + '" aria-label="Selected task"><div class="ppanel-head"><h2 class="mono">' + esc(t.task) + '</h2>' + pill + '</div>'
     + '<div class="ppanel-sub"><span>' + esc(row.project.name) + '</span><span class="mono">task/' + esc(t.task) + '</span></div>'
-    + tl + kv + review + find + attList + actList + '</section>';
+    + tl + kv + revLink + review + find + attList + actList + '</section>';
 }
 
 /**
@@ -1453,7 +1457,7 @@ function turnsTableHtml(rows, opts) {
   const body = list.map((r, i) => '<tr>' + (o.compact ? '' : '<td class="rank">' + String(i + 1).padStart(2, '0') + '</td>')
     + '<td class="num">' + esc(formatTime(r.ts)) + '</td>'
     + '<td>' + esc(projectLabel(r.project)) + '</td>'
-    + (o.compact ? '' : '<td class="mono">' + esc(r.sessionShort) + '</td>')
+    + (o.compact ? '' : '<td class="mono">' + (sessionHash(r.sessionId) ? '<a class="xlink" href="' + esc(sessionHash(r.sessionId)) + '">' + esc(r.sessionShort) + '</a>' : esc(r.sessionShort)) + '</td>')
     + '<td class="num">' + esc(estMoney(r.costMicros)) + '</td>'
     + '<td>' + modelsHtml(r.models) + '</td>'
     + (o.compact ? '' : '<td>' + esc(ATTR_LABEL[r.attribution] || 'Unattributed') + '</td>') + '</tr>').join('');
@@ -1601,7 +1605,7 @@ const state = {
   attn: null, attnToken: 0,   // attn: attentionState() output, { unavailable: true }, or null before the first read
   route: 'projects',
   proj: { mode: 'loading', list: [], counts: null, filter: 'active', q: '', sort: 'pinned', open: { inactive: false }, tab: 'branches', managing: false, sel: null, pluginMissing: false, token: 0, lastOk: null },
-  sess: { mode: 'loading', list: [], range: '7d', filter: 'all', q: '', tab: 'timeline', sel: null, detail: null, detailFor: null, missing: false, token: 0, dtoken: 0, lastOk: null },
+  sess: { mode: 'loading', list: [], project: null, range: '7d', filter: 'all', q: '', tab: 'timeline', sel: null, detail: null, detailFor: null, missing: false, token: 0, dtoken: 0, lastOk: null },
   pipe: { mode: 'loading', body: null, token: 0, lastOk: null, sub: 'work', project: 'all', stage: 'all', sel: null, open: { idle: false, quiet: false } },
   sessions: [],               // /state sessions, for the Projects summary, filters and live strip
   liveMap: {}, liveSig: '', seenIds: new Set(),   // client-side live states from the SSE stream
@@ -1918,7 +1922,11 @@ function renderPipeline() {
   if (p.mode === 'unavailable') { setHtml(view, pipelineTitle() + pipelineBody(null, [], pipeUiOf(), Date.now())); renderAttention(); return; }
   const ae = document.activeElement;
   const keep = ae && ae.getAttribute && view.contains(ae) ? (ae.getAttribute('data-sel') !== null ? '.prow[data-sel]' : ae.getAttribute('data-pf') !== null ? 'select[data-pf="' + ae.getAttribute('data-pf') + '"]' : '') : '';
+  const oldScroll = view.querySelector('#pscroll');
+  const scrollTop = oldScroll ? oldScroll.scrollTop : 0;
   setHtml(view, pipelineTitle() + pipelineBody(p.body, state.proj.list, pipeUiOf(), Date.now()));
+  const newScroll = view.querySelector('#pscroll');
+  if (newScroll && scrollTop) newScroll.scrollTop = scrollTop;
   if (keep) { const el = keep.indexOf('.prow') === 0 ? view.querySelector('.prow.sel') : view.querySelector(keep); if (el) el.focus(); }   // a refresh must not drop keyboard focus
   renderAttention();
 }
@@ -2119,7 +2127,7 @@ function applyRoute(route, first) {
   state.route = route;
   if (route === 'pipeline') state.pipe.sub = parsePipeSub(location.hash);
   if (route === 'projects') state.proj.sel = parseProjectSel(location.hash);
-  if (route === 'sessions') state.sess.sel = parseSessionSel(location.hash);
+  if (route === 'sessions') { state.sess.sel = parseSessionSel(location.hash); state.sess.project = parseSessionProject(location.hash); }
   if (route === 'spend') { const h = parseSpendHash(location.hash); state.spend.sub = h.sub; if (h.sel) state.spend.sel = h.sel; }
   const bodyEl = document.querySelector('.body');
   if (bodyEl) { bodyEl.classList.toggle('pipe', route === 'pipeline'); bodyEl.classList.toggle('mode-projects', route === 'projects'); bodyEl.classList.toggle('spend', route === 'spend'); bodyEl.classList.toggle('mode-sessions', route === 'sessions'); }
@@ -2133,11 +2141,11 @@ function applyRoute(route, first) {
   if (crumb) crumb.textContent = TABS[route];
   const foot = document.getElementById('foot-note');
   if (foot) foot.textContent = route === 'spend'
-    ? 'Totals include unattributed usage \u00b7 every figure is an estimate'
+    ? 'Totals include unattributed usage \u00b7 every figure is an estimate \u00b7 Clear history from the widget\u2019s settings.'
     : route === 'pipeline'
       ? 'Sereno observes the pipeline; it never acts \u00b7 every dollar figure is an estimate'
       : route === 'sessions'
-        ? 'Sereno observes sessions; it never acts \u00b7 every dollar figure is an estimate'
+        ? 'Sereno observes sessions; it never acts \u00b7 every dollar figure is an estimate \u00b7 Clear history from the widget\u2019s settings.'
         : 'Dollar figures are estimates \u00b7 nothing leaves this machine';
   if (!first) saveTab(route);
   const side = document.getElementById('side-today');
@@ -2179,6 +2187,38 @@ const TL_STEPS = [1e3, 2e3, 5e3, 1e4, 15e3, 3e4, 6e4, 12e4, 3e5, 6e5, 9e5, 18e5,
 function parseSessionSel(hash) {
   const m = /^sessions\/([A-Za-z0-9._:-]{1,128})$/.exec(String(hash == null ? '' : hash).replace(/^#\/?/, '').trim());
   return m ? m[1] : null;
+}
+
+/**
+ * '#sessions?p=<project id>' -> the project id (the collector's id alphabet [A-Za-z0-9_-], 1-64 chars, case kept); anything
+ * else (a second parameter, a slash, an over-long or odd id) -> null, which is the plain tab.
+ */
+function parseSessionProject(hash) {
+  const m = /^sessions\?p=([A-Za-z0-9_-]{1,64})$/.exec(String(hash == null ? '' : hash).replace(/^#\/?/, '').trim());
+  return m ? m[1] : null;
+}
+
+/** The hash for the Sessions tab filtered to a project (the inverse of parseSessionProject); '#sessions' without a valid id. */
+function sessionsProjectHash(projectId) {
+  return typeof projectId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(projectId) ? '#sessions?p=' + projectId : '#sessions';
+}
+
+/** The hash for one session; '' when the id is not in the collector's alphabet (no link then). */
+function sessionHash(id) {
+  return typeof id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(id) ? '#sessions/' + id : '';
+}
+
+/** Rows of one project (by the API's project_id); everything when no project is set. */
+function sessScope(list, projectId) {
+  const arr = Array.isArray(list) ? list : [];
+  return projectId ? arr.filter((s) => s && s.project_id === projectId) : arr;
+}
+
+/** The filter chip: 'Project: <name> x', a button that removes the filter. '' when there is no filter. */
+function sessProjectChipHtml(projectId, name) {
+  if (!projectId) return '';
+  return '<div class="nchips"><span class="nchip on">Project: ' + esc(name || projectId) + '</span>'
+    + '<button type="button" class="nchip" data-xclearp aria-label="Remove the project filter">\u00d7</button></div>';
 }
 
 /** '1m 12s', '47s', '2h 05m', '<1s' (under a second); '' for a missing or negative value. */
@@ -2933,7 +2973,7 @@ function sessTimelineHtml(d, c) {
   const hasSeries = Array.isArray(d.cost_series) && d.cost_series.length > 0;
   let body;
   if (old) {
-    body = '<p class="empty-note">No tool calls or waits: this session was recorded before Sessions existed. Runs and cost ' + (hasSeries ? 'come from the ledger.' : 'will show once it has requests.') + '</p>'
+    body = '<p class="empty-note">No tool calls or waits: this session was recorded before Sessions existed. ' + (hasSeries ? 'Runs and cost come from the ledger.' : sessIsLive(d) ? 'Runs and cost will show once it has requests.' : 'No requests were recorded.') + '</p>'
       + (hasSeries ? tlLegendHtml(tlHasBreaks(d, c.width, c.nowMs)) + tlWrapHtml(d, c) : '');
   } else if (tlHasEvents(d)) {
     body = tlLegendHtml(tlHasBreaks(d, c.width, c.nowMs)) + note + tlWrapHtml(d, c);
@@ -2987,24 +3027,34 @@ function sessPage(ctx) {
   const o = { filter: ctx.ui.filter, q: ctx.ui.q, sel, nowMs: ctx.nowMs };
   const d = ctx.detail && ctx.detailFor === sel ? ctx.detail : null;
   const n = all.length;
-  return '<p class="xsummary">' + n + (n === 1 ? ' session' : ' sessions') + ' · ' + sessCounts(all).running + ' running</p><div class="pnav">'
+  return '<p class="xsummary">' + n + (n === 1 ? ' session' : ' sessions') + ' · ' + sessCounts(all).running + ' running</p>' + sessProjectChipHtml(ctx.project, ctx.projectName) + '<div class="pnav">'
     + '<div class="nleft">' + sessControlsHtml(sessCounts(all), ctx.ui) + '<div class="nlist" id="xlist">' + sessListHtml(all, o) + '</div></div>'
     + '<section class="ndetail" id="xdetail" aria-label="Session detail">' + sessDetailHtml(d, { tab: ctx.ui.tab, width: ctx.width, nowMs: ctx.nowMs, missing: ctx.missing === true && !!sel, loading: ctx.missing !== true && !!sel }) + '</section></div>';
 }
 
 /* ---------- Sessions tab: rendering and data (alpha.7 S3) ---------- */
 
+/** The filtered project's name: from the session rows, else the project list, else null (the chip then shows the id). */
+function sessProjectName() {
+  const s = state.sess;
+  if (!s.project) return null;
+  const row = s.list.find((x) => x && x.project_id === s.project && typeof x.project === 'string' && x.project);
+  if (row) return projectLabel(row.project);
+  const p = (state.proj.list || []).find((x) => x && x.id === s.project);
+  return p && p.name ? String(p.name) : null;
+}
+
 function sessCtx() {
   const s = state.sess;
   const host = document.getElementById('xdetail');
   const w = host && host.clientWidth ? host.clientWidth - 28 : 0;   // room for the lane scrollbar
-  return { list: s.list, ui: { filter: s.filter, q: s.q, tab: s.tab }, sel: s.sel, detail: s.detail, detailFor: s.detailFor, missing: s.missing, width: w > 0 ? w : 900, nowMs: Date.now() };
+  return { list: sessScope(s.list, s.project), project: s.project, projectName: sessProjectName(), ui: { filter: s.filter, q: s.q, tab: s.tab }, sel: s.sel, detail: s.detail, detailFor: s.detailFor, missing: s.missing, width: w > 0 ? w : 900, nowMs: Date.now() };
 }
 
 /** The id the page shows: the route's id if it is on screen, else the default. null with no rows. */
 function sessSelId() {
   const s = state.sess;
-  return sessResolveSel(sessVisible(s.list, { filter: s.filter, q: s.q }), s.sel);
+  return sessResolveSel(sessVisible(sessScope(s.list, s.project), { filter: s.filter, q: s.q }), s.sel);
 }
 
 /** The element that holds focus, as a way to find its twin after a re-render. */
@@ -3204,6 +3254,12 @@ function boot() {
         if (SESS_RANGES.some((x) => x[0] === r) && r !== state.sess.range) { state.sess.range = r; refreshSessions(); renderSessions(); }
         return;
       }
+      if (tgt.closest('[data-xclearp]')) {
+        state.sess.project = null;
+        try { history.replaceState(null, '', '#sessions'); } catch (_) { /* file:// or sandboxed */ }
+        renderSessions(); refreshSessDetail();
+        return;
+      }
       const xf = tgt.closest('button[data-xfilter]');
       if (xf) { state.sess.filter = SESS_FILTERS.some((x) => x[0] === xf.getAttribute('data-xfilter')) ? xf.getAttribute('data-xfilter') : 'all'; renderSessions(); refreshSessDetail(); return; }
       const xt = tgt.closest('button[data-xtab]');
@@ -3259,7 +3315,7 @@ function boot() {
     if (r !== state.route) applyRoute(r, false);
     else if (r === 'pipeline') { state.pipe.sub = parsePipeSub(location.hash); renderPipeline(); }
     else if (r === 'projects') { state.proj.sel = parseProjectSel(location.hash); renderProjects(); }
-    else if (r === 'sessions') { state.sess.sel = parseSessionSel(location.hash); renderSessPanes(); refreshSessDetail(); }
+    else if (r === 'sessions') { state.sess.sel = parseSessionSel(location.hash); state.sess.project = parseSessionProject(location.hash); renderSessions(); refreshSessDetail(); }
     else if (r === 'spend') {
       const h = parseSpendHash(location.hash);
       const changed = h.sub !== state.spend.sub;

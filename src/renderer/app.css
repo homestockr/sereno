@@ -582,3 +582,5 @@ html, body { height: 100%; }
 .plugin-cmds .review { flex: none; width: auto; margin: 0; padding: 4px 8px; }
 #brief-row { align-items: center; }
 #brief-row .review { flex: none; width: auto; margin: 0 0 0 auto; padding: 6px 10px; }
+#clear-row { align-items: center; }
+#clear-row .review { flex: none; width: auto; margin: 0 0 0 auto; padding: 6px 10px; }

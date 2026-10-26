@@ -544,7 +544,7 @@ function openLedger(opts = {}) {
       if (r.model != null) e.models.add(String(r.model));
     }
     return [...m.values()].map(e => ({
-      ts: e.ts, project: e.project, sessionShort: e.sid ? String(e.sid).slice(0, 8) : null,
+      ts: e.ts, project: e.project, sessionShort: e.sid ? String(e.sid).slice(0, 8) : null, sessionId: e.sid ? String(e.sid) : null,
       costMicros: e.costMicros, models: [...e.models].sort(),
       attribution: e.ne === e.n ? 'explicit' : e.nu === e.n ? 'unknown' : 'mixed',
     })).sort((x, y) => y.costMicros - x.costMicros || x.ts - y.ts).slice(0, lim);
@@ -696,6 +696,19 @@ function openLedger(opts = {}) {
     return q.sessList.all(Number(sinceMs) || 0).map(sessRow);
   }
 
+  /** True when the ledger has this session (a link target must exist). @param {string} sessionId */
+  function hasSession(sessionId) {
+    live();
+    return !!db.prepare('SELECT 1 AS x FROM sessions WHERE session_id=?').get(String(sessionId));
+  }
+
+  /** The session an agent ran in (newest if the id repeats), or null. @param {string} agentId @returns {string|null} */
+  function sessionOfAgent(agentId) {
+    live();
+    const r = db.prepare('SELECT session_id FROM agents WHERE agent_id=? ORDER BY COALESCE(stopped, started) DESC LIMIT 1').get(String(agentId));
+    return r ? String(r.session_id) : null;
+  }
+
   /** One session's row (same shape as sessionList), or null. @param {string} sessionId */
   function sessionRow(sessionId) {
     live();
@@ -777,6 +790,22 @@ function openLedger(opts = {}) {
     });
   }
 
+  /**
+   * "Clear history": deletes every row of every ledger table (listed from sqlite_master, so a table added
+   * later is covered) in one transaction. The schema and user_version stay. Then the WAL is truncated and
+   * the file compacted. Only the database changes; live in-memory state is the caller's and untouched.
+   * @returns {{ tables: string[] }}
+   */
+  function clearHistory() {
+    live();
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND substr(name, 1, 7) <> 'sqlite_'")
+      .all().map((r) => String(r.name));
+    tx(() => { for (const t of tables) db.exec('DELETE FROM "' + t.replace(/"/g, '""') + '"'); });
+    try { db.exec('VACUUM'); } catch (_) { /* compaction is best effort; the rows are already gone */ }
+    try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch (_) { /* a reader holds the WAL; it truncates at close */ }
+    return { tables };
+  }
+
   function close() {
     if (closed) return;
     clearInterval(pruneTimer);
@@ -787,7 +816,7 @@ function openLedger(opts = {}) {
   // Prune again daily while the app runs, not only at open. unref: never keeps the process alive.
   const pruneTimer = setInterval(() => { try { if (!closed) prune(retentionDays); } catch (_) { /* next tick retries */ } }, pruneEveryMs);
   if (typeof pruneTimer.unref === 'function') pruneTimer.unref();
-  return { file, setBranch, _pruneTimer: pruneTimer, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, breakdown, cacheTotals, projectDetail, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, sessionList, sessionRow, sessionEvents, sessionAgents, sessionCostPoints, sessionAttribution, prune, close, _db: db };
+  return { file, setBranch, _pruneTimer: pruneTimer, ingestRequests, ingestSpans, recordHook, recordStatus, totals, series, projects, trend, trends, spendByCwdPrefix, topPrompts, breakdown, cacheTotals, projectDetail, today, hasAny, roleSpend, spendForAgent, spendForAgentId, reconcile, sessionList, hasSession, sessionOfAgent, sessionRow, sessionEvents, sessionAgents, sessionCostPoints, sessionAttribution, prune, clearHistory, close, _db: db };
   } catch (e) {
     // setup failed after the file was opened: release the handle (Windows keeps it locked)
     try { db.close(); } catch (_) { /* ignore */ }

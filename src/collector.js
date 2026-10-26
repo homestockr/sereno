@@ -442,7 +442,7 @@ function createCollector(store, port, opts) {
       sendJson(res, 200, {
         enabled: true, asOf, range,
         rows: rows.map((r) => ({
-          ts: r.ts, project: r.project, sessionShort: r.sessionShort, costMicros: r.costMicros,
+          ts: r.ts, project: r.project, sessionShort: r.sessionShort, sessionId: typeof r.sessionId === 'string' && SESSION_ID_RE.test(r.sessionId) ? r.sessionId : null, costMicros: r.costMicros,
           models: r.models.slice(), attribution: r.attribution,
         })),
       });
@@ -607,9 +607,22 @@ function createCollector(store, port, opts) {
   const pStr = (v, max) => (typeof v === 'string' ? v.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max) : null);
   const pNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   const pBool = (v) => v === true;
+  /**
+   * A ledger session id a Pipeline row may link to: the record's session when the ledger holds it, else the session
+   * its agent ran in, else null. Never a guess: no ledger or no match means no link.
+   */
+  function linkSession(sessionId, agentId) {
+    if (!ledger) return null;
+    try {
+      if (typeof sessionId === 'string' && SESSION_ID_RE.test(sessionId) && ledger.hasSession(sessionId)) return sessionId;
+      if (typeof agentId === 'string' && agentId) { const s = ledger.sessionOfAgent(agentId); return s && SESSION_ID_RE.test(s) ? s : null; }
+    } catch (_) { /* ledger closing: no link */ }
+    return null;
+  }
   function pipeGate(g) {
     if (!g || typeof g !== 'object') return null;
-    return { review_run_id: pStr(g.review_run_id, 64), outcome: pStr(g.outcome, 32), tests_passed: pBool(g.tests_passed), reviewed_at: pStr(g.reviewed_at, 40), model: pStr(g.model, 128) };
+    return { review_run_id: pStr(g.review_run_id, 64), outcome: pStr(g.outcome, 32), tests_passed: pBool(g.tests_passed), reviewed_at: pStr(g.reviewed_at, 40), model: pStr(g.model, 128),
+      sessionId: linkSession(g.session_id, g.agent_id) };
   }
   function pipeFinding(f) {
     f = f && typeof f === 'object' ? f : {};
@@ -649,7 +662,7 @@ function createCollector(store, port, opts) {
   function pipeAttempts(t) {
     return (Array.isArray(t.attempts) ? t.attempts : []).slice(0, 10).map((a) => {
       a = a && typeof a === 'object' ? a : {};
-      return { attempt: pNum(a.attempt), outcome: pStr(a.outcome, 32), startedAt: pTime(a.started_at), endedAt: pTime(a.ended_at) };
+      return { attempt: pNum(a.attempt), outcome: pStr(a.outcome, 32), startedAt: pTime(a.started_at), endedAt: pTime(a.ended_at), sessionId: linkSession(null, a.agent_id) };
     });
   }
   /** Earliest attempt start (epoch ms) over every attempt the server holds; the API's attempts list is capped, this is not. */

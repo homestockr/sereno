@@ -26,6 +26,7 @@ const ui = {
   setupActionLabel: el('setup-action-label'), setupNote: el('setup-note'),
   settingsToggle: el('settings-toggle'), collapse: el('collapse'),
   autoLaunchRow: el('autolaunch-row'), autoLaunch: el('autolaunch'),
+  clearRow: el('clear-row'), clearStatus: el('clear-status'), clearAction: el('clear-action'),
   pluginRow: el('plugin-row'), pluginStatus: el('plugin-status'), pluginCmds: el('plugin-cmds'), briefRow: el('brief-row'), briefStatus: el('brief-status'), briefAction: el('brief-action'),
   spend: el('spend'), consoleLine: el('console-line'),
 };
@@ -811,6 +812,21 @@ ui.briefAction.addEventListener('click', async () => {
     ui.setupNote.textContent = 'Could not remove the /brief command: ' + ((res && res.error) || 'unknown error');
   }
   await refreshBrief();
+  reportHeight();
+});
+
+/** "Clear history": the confirmation is a native dialog in the main process; this only asks. Hidden in a browser tab. */
+ui.clearRow.hidden = !(api && api.clearHistory);
+ui.clearAction.addEventListener('click', async () => {
+  if (!api || !api.clearHistory) return;
+  ui.clearAction.disabled = true;
+  let res;
+  try { res = await api.clearHistory(); } catch (e) { res = { ok: false, error: e.message }; }
+  ui.clearAction.disabled = false;
+  ui.clearStatus.textContent = !res || !res.ok ? 'Could not clear: ' + ((res && res.error) || 'unknown error')
+    : res.cleared ? 'History cleared.'
+      : res.reason === 'off' ? 'Spend history is off; nothing is recorded.'
+        : 'Spend, sessions and timelines. Claude Code is not touched.';
   reportHeight();
 });
 

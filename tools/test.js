@@ -3537,7 +3537,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         checkKeys(tp, ['status', 'enabled', 'asOf', 'range', 'rows'], 'top-prompts');
         assert.strictEqual(tp.range, 'month'); assert.strictEqual(tp.rows.length, 3);
         for (const r of tp.rows) {
-          checkKeys(r, ['ts', 'project', 'sessionShort', 'costMicros', 'models', 'attribution'], 'top-prompts row');
+          checkKeys(r, ['ts', 'project', 'sessionShort', 'sessionId', 'costMicros', 'models', 'attribution'], 'top-prompts row');
           assert.strictEqual(r.sessionShort.length, 8);
         }
         assert.strictEqual(tp.rows[0].costMicros, 7000);
@@ -4279,7 +4279,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const W = new Function(['estMoney', 'spendMode'].map((n) => lf(appSrc, n)).join('\n') + '\nreturn { estMoney, spendMode };')();
     const CN = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry',
       'attributionSplit', 'formatTime', 'projectLabel', 'sparkPoints', 'sparkSvg', 'sw', 'dayLabel', 'chartSvg', 'legendHtml', 'chartTitle',
-      'chartBlock', 'modelName', 'pillText', 'ringIcon', 'pillHtml', 'nz', 'spendHash', 'spendRows', 'wherePreview', 'modelsHtml', 'fmtTokens', 'mixBar',
+      'chartBlock', 'modelName', 'pillText', 'ringIcon', 'pillHtml', 'nz', 'sessionHash', 'spendHash', 'spendRows', 'wherePreview', 'modelsHtml', 'fmtTokens', 'mixBar',
       'spendHeaderHtml', 'spendTabsHtml', 'wherePreviewHtml', 'turnsTableHtml', 'projectsTableHtml', 'cacheCardHtml', 'spendCacheHtml',
       'spendSideHtml', 'spendPageHtml'];
     const mkCon = () => new Function("const RANGES = ['24h', '7d', '30d'];\n"
@@ -4331,7 +4331,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     // every key that may appear in an /api/spend/* body at any depth (the Step 1 documented shapes)
     const ALLOWED = new Set(['status', 'enabled', 'hasTelemetry', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution',
       'unattributedN', 'range', 'buckets', 'key', 'since', 'until', 'rows', 'unattributed', 'project', 'trend', 'ts',
-      'sessionShort', 'models', 'attribution']);
+      'sessionShort', 'sessionId', 'models', 'attribution']);
     const LEAF_MAPS = { bySource: ['main', 'subagent', 'auxiliary'], byAttribution: ['explicit', 'unknown'] };
     const walkKeys = (o, where) => {
       if (Array.isArray(o)) { o.forEach((x, i) => walkKeys(x, where + '[' + i + ']')); return; }
@@ -10757,8 +10757,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin'],
       project: ['id', 'name', 'tasks', 'idle'],
       task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt'],
-      attempt: ['attempt', 'outcome', 'startedAt', 'endedAt'], activity: ['at', 'kind', 'outcome'],
-      gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model'],
+      attempt: ['attempt', 'outcome', 'startedAt', 'endedAt', 'sessionId'], activity: ['at', 'kind', 'outcome'],
+      gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'sessionId'],
       finding: ['severity', 'kind', 'file', 'line', 'summary'],
       signals: ['days', 'projects', 'outcomes', 'seq', 'rework', 'runsThisWeek'],
       sigProject: ['id', 'gate'], sigGate: ['outcome', 'task', 'ageMs'],
@@ -10808,6 +10808,39 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.deepStrictEqual(b.routing.projects.find((p) => p.id === 'p2').redTeam, { agent: 'red-team-lean', fallback: null, onFallback: 'never' });
         assert.strictEqual(b.routing.projects.find((p) => p.id === 'p4').redTeam, null);
       } finally { await haltP(c); l.close(); }
+    });
+
+    await atest('[alpha7 S4] /api/pipeline: a review and an attempt link to the ledger session they ran in; no ledger or no match means null', async () => {
+      const l = openLedger({ file: ':memory:' });
+      l.recordHook('SessionStart', { session_id: 'sess-rev', cwd: 'C:\\w\\one' });
+      l.recordHook('SessionStart', { session_id: 'sess-build', cwd: 'C:\\w\\one' });
+      l.recordHook('SubagentStart', { session_id: 'sess-build', agent_id: 'a-fix', agent_type: 'sereno:builder' });
+      const snap = () => ({ p1: { pipeline: { tasks: [
+        tview('t-link', 'builder', {
+          gate: gate('t-link', 'block', NOW - DAY, { session_id: 'sess-rev', agent_id: 'a-rev' }),
+          attempts: [
+            { attempt: 2, outcome: 'pass', agent_id: 'a-fix', started_at: iso(NOW - 3600000), ended_at: iso(NOW - 1800000) },
+            { attempt: 1, outcome: 'block', agent_id: 'a-gone', started_at: iso(NOW - DAY), ended_at: iso(NOW - DAY + 1000) },
+          ],
+        }),
+        tview('t-nomatch', 'builder', { gate: gate('t-nomatch', 'block', NOW - DAY, { session_id: 'sess-unknown', agent_id: 'a-unknown' }) }),
+        tview('t-hostile', 'builder', { gate: gate('t-hostile', 'block', NOW - DAY, { session_id: 'bad id/<x>', agent_id: null }) }),
+      ], skipped: 0, error: false, redTeam: null, hasData: true } } });
+      const withL = await bootP({ projects: reg(), repos: { snapshot: snap }, ledger: l });
+      const without = await bootP({ projects: reg(), repos: { snapshot: snap } });
+      try {
+        const b = JSON.parse((await getP(withL.port, '/api/pipeline')).text);
+        const t = (n) => b.projects[0].tasks.find((x) => x.task === n);
+        assert.strictEqual(t('t-link').gate.sessionId, 'sess-rev', 'the review links to the session named in its record');
+        assert.strictEqual(t('t-link').attempts.find((a) => a.attempt === 2).sessionId, 'sess-build', 'an attempt links through its agent');
+        assert.strictEqual(t('t-link').attempts.find((a) => a.attempt === 1).sessionId, null, 'an agent the ledger never saw gives no link');
+        assert.strictEqual(t('t-nomatch').gate.sessionId, null, 'a session id the ledger does not hold is not offered');
+        assert.strictEqual(t('t-hostile').gate.sessionId, null, 'an id outside the alphabet is not offered');
+        const w = JSON.parse((await getP(without.port, '/api/pipeline')).text);
+        assert.strictEqual(w.projects[0].tasks[0].gate.sessionId, null, 'no ledger, no link');
+        assert.ok(w.projects[0].tasks[0].attempts.every((a) => a.sessionId === null));
+        checkBody(b); checkBody(w);
+      } finally { await haltP(withL); await haltP(without); l.close(); }
     });
 
     await atest('[4b-api] /api/pipeline: no command, prompt, spec body, path, hash or id text even when records carry extra fields', async () => {
@@ -10883,7 +10916,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const a = b.projects[0].tasks[0].attempts;
         assert.strictEqual(a.length, 10);
         assert.deepStrictEqual(a.map((x) => x.attempt), [14, 13, 12, 11, 10, 9, 8, 7, 6, 5]);
-        assert.deepStrictEqual(a[0], { attempt: 14, outcome: 'running', startedAt: NOW - 14 * 3600000, endedAt: null });
+        assert.deepStrictEqual(a[0], { attempt: 14, outcome: 'running', startedAt: NOW - 14 * 3600000, endedAt: null, sessionId: null });
         assert.strictEqual(a[1].startedAt, null);
         assert.strictEqual(a[2].endedAt, NOW - 12 * 3600000 + 60000);
         assert.ok(!/a14|agent_id/.test(JSON.stringify(a)));
@@ -11336,7 +11369,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
       'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'cmdRow', 'installHtml', 'pipelineHasData',
       'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
-      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
+      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'sessionHash', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
     const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -11380,6 +11413,37 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(T.initialRoute('#pipeline/signals', 'spend'), 'pipeline');
       const tabs = T.pipelineBody(body([task('builder')]), [], { sub: 'signals' }, NOW);
       assert.match(tabs, /<a class="spill" href="#pipeline">Work<\/a><a class="spill on" href="#pipeline\/signals" aria-current="page">Signals<\/a><a class="spill" href="#pipeline\/routing">Routing<\/a>/);
+    });
+
+    // ---- Pipeline Signals and Routing: one scroller under a fixed header ----
+    test('[alpha7 pipe-scroll] Signals and Routing content sits in one #pscroll element; Work is not wrapped', () => {
+      const b = body([task('builder')]);
+      for (const sub of ['signals', 'routing']) {
+        const h = T.pipelineBody(b, [], { sub }, NOW);
+        assert.strictEqual((h.match(/class="pscroll"/g) || []).length, 1, sub);
+        assert.ok(h.indexOf('class="spills"') < h.indexOf('class="pscroll"'), 'the sub-tabs stay above the scroller');
+        assert.ok(h.indexOf('class="summary"') < h.indexOf('class="spills"'));
+        assert.ok(h.indexOf('class="pscroll"') < h.indexOf('class="sig"'), 'content is inside the scroller');
+        assert.ok(h.trim().endsWith('</div>'));
+      }
+      assert.ok(!/pscroll/.test(T.pipelineBody(b, [], { sub: 'work' }, NOW)), 'Work keeps its own one-screen layout');
+      assert.match(T.pipelineBody(b, [], { sub: 'routing' }, NOW), /<thead>/);
+    });
+
+    test('[alpha7 pipe-scroll] css: .pscroll is the only scroller, tables get sticky heads, narrow widths scroll the page', () => {
+      const rules = (sel) => [...css.matchAll(new RegExp('(^|\\n)' + sel.replace(/\./g, '\\.') + ' \\{([^}]*)\\}', 'g'))].map((m) => m[2]).join(' ');
+      const sc = rules('.pscroll');
+      assert.match(sc, /overflow-y: auto/);
+      assert.match(sc, /min-height: \d+px/);
+      assert.match(sc, /height: calc\(100vh - \d+px\)/);
+      assert.match(rules('.body.pipe .main'), /min-height: 0/);
+      const th = rules('.pscroll thead th');
+      assert.match(th, /position: sticky/);
+      assert.match(th, /top: 0/);
+      assert.match(th, /background: var\(--bg\)/);
+      assert.match(rules('.pscroll .table-wrap'), /overflow: visible/, 'a table-wrap scroller would capture the sticky head');
+      assert.match(css, /@media \(max-width: 900px\) \{ \.pscroll \{ height: auto; min-height: 0; overflow: visible; \} \}/);
+      assert.match(cj, /querySelector\('#pscroll'\)/, 'scroll position survives a refresh');
     });
 
     test('[4b-tab] nav order is Projects, Spend, Pipeline and the tab is registered', () => {
@@ -12321,7 +12385,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const b = JSON.parse(text);
         const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin', 'versions',
           'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt', 'endedAt', 'at',
-          'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'severity', 'kind', 'file', 'line', 'summary',
+          'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'sessionId', 'severity', 'kind', 'file', 'line', 'summary',
           'days', 'outcomes', 'seq', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
           'enabled', 'roles', 'builder', 'red-team', 'scribe', 'unattributed', 'explicit', 'inferred', 'mean',
           'models', 'agent', 'role', 'redTeam', 'fallback', 'onFallback', 'installed', 'detected', 'version']);
@@ -12488,7 +12552,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const fnNames = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
       'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'parseRoute', 'initialRoute', 'parseProjectSel', 'navCounts', 'navFilter',
       'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navMove', 'navBranches', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
-      'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
+      'navControlsHtml', 'sessionsProjectHash', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
       'navManageHtml', 'navPage'];
     const lifted = fnNames.map((n) => {
       const m = cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'));
@@ -12721,7 +12785,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const detail = html.slice(html.indexOf('id="ndetail"') >= 0 ? html.indexOf('id="ndetail"') : 0);
         for (const m of detail.matchAll(/data-act="([a-z-]+)"/g)) assert.ok(['review', 'copy'].includes(m[1]), 'unexpected action ' + m[1]);
         for (const m of detail.matchAll(/<button\b[^>]*>/g)) assert.match(m[0], /data-act="(review|copy)"|data-ntab=/, m[0]);
-        assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin)"/.test(detail));
+        assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin)"/.test(detail.replace(/<a class="xlink" href="#sessions\?p=[A-Za-z0-9_-]{1,64}">Recent sessions<\/a>/, '')), 'alpha7 S4: the Recent sessions link is the only anchor');
       }
     });
 
@@ -12983,7 +13047,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(t.rows.length, 14, 'twelve base turns, the subagent turn, the pr-a turn');
         const sub = t.rows.find((r) => r.costMicros === 500 && r.project === 'p01');
         assert.strictEqual(sub.attribution, 'unknown');
-        for (const r of t.rows) assert.deepStrictEqual(Object.keys(r).sort(), ['attribution', 'costMicros', 'models', 'project', 'sessionShort', 'ts']);
+        for (const r of t.rows) assert.deepStrictEqual(Object.keys(r).sort(), ['attribution', 'costMicros', 'models', 'project', 'sessionId', 'sessionShort', 'ts']);
         for (let i = 1; i < t.rows.length; i++) assert.ok(t.rows[i - 1].costMicros >= t.rows[i].costMicros);
       });
     });
@@ -13050,7 +13114,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       await withApi(async (port) => {
         const KEYS = new Set(['enabled', 'asOf', 'range', 'since', 'until', 'day', 'today', 'month', 'costMicros', 'requests', 'unattributedMicros',
           'unattributedN', 'rows', 'other', 'total', 'unattributed', 'project', 'count', 'bySource', 'byAttribution', 'byAttributionN', 'trend',
-          'cacheReadTokens', 'cacheCreationTokens', 'inputTokens', 'cacheReadSharePct', 'ts', 'sessionShort', 'models', 'attribution',
+          'cacheReadTokens', 'cacheCreationTokens', 'inputTokens', 'cacheReadSharePct', 'ts', 'sessionShort', 'sessionId', 'models', 'attribution',
           'hasTelemetry', 'buckets', 'key']);
         const LEAF = { bySource: ['main', 'subagent', 'auxiliary'], byAttribution: ['explicit', 'inferred', 'unknown'], byAttributionN: ['explicit', 'inferred', 'unknown'] };
         const walk = (o, where) => {
@@ -13071,7 +13135,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           const b = JSON.parse(res.body);
           assert.strictEqual(b.enabled, true, r);
           walk(b, r);
-          assert.ok(!/long-session-id|cwd|prompt_id|promptId|prompt_text|request_key|work/i.test(res.body), r + ' leaks an identifier');
+          assert.ok(!/long-session-id|cwd|prompt_id|promptId|prompt_text|request_key|work/i.test(res.body.replace(/"sessionId":("[A-Za-z0-9._:-]{1,128}"|null)/g, '"sessionId":null')), r + ' leaks an identifier');   // alpha7 S4: the one session id a Turns row links to
           for (const row of b.rows || []) if ('sessionShort' in row) assert.ok(row.sessionShort.length <= 8);
         }
         // the only string leaves in the where body are project names and the range
@@ -13133,7 +13197,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
     const conCss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
     const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
-    const SP_NAMES = ['parseRoute', 'initialRoute', 'parseSpendHash', 'spendHash', 'projectIdFor', 'spendResolveSel', 'spendRows', 'navMove',
+    const SP_NAMES = ['sessionHash', 'parseRoute', 'initialRoute', 'parseSpendHash', 'spendHash', 'projectIdFor', 'spendResolveSel', 'spendRows', 'navMove',
       'nz', 'esc', 'estMoney', 'modelName', 'modelsHtml', 'projectLabel', 'formatTime', 'largestRemainder', 'attributionSplit', 'sparkPoints', 'sparkSvg',
       'fmtTokens', 'mixBar', 'wherePreview', 'wherePreviewHtml', 'turnsTableHtml', 'projectsTableHtml', 'cacheCardHtml', 'spendCacheHtml',
       'spendSideHtml', 'spendHeaderHtml', 'spendTabsHtml', 'spendPageHtml', 'pillText', 'ringIcon', 'pillHtml', 'chartBlock', 'chartTitle', 'legendHtml', 'sw'];
@@ -13305,7 +13369,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(PAGES[2][1], /<span class="mdl" title="claude-haiku-4-5-20251001">Haiku<\/span>, <span class="mdl" title="claude-sonnet-5">Sonnet<\/span>/);
     });
 
-    test('[alpha6-spend] no session links anywhere; session ids are plain text; no Open session history', () => {
+    test('[alpha6-spend] no session links unless a row carries a session id (alpha7 S4 links those); ids are plain text otherwise; no Open session history', () => {
       for (const [name, html] of PAGES.concat([['side', SIDE]])) {
         for (const a of html.match(/<a [^>]*>/g) || []) assert.ok(!/session/i.test(a), name + ': ' + a);
         assert.ok(!/Open session|session history/i.test(html), name);
@@ -13531,7 +13595,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const names = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
       'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'navCounts', 'navFilter', 'navBranches',
       'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
-      'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
+      'navControlsHtml', 'sessionsProjectHash', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
       'navManageHtml', 'navPage'];
     const consts = ["const OUTCOME_LABEL = { pass: 'Pass', block: 'Block', needs_context: 'Needs context', error: 'Error', skipped: 'Skipped' };",
       "const INSTALL_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];"].concat(cjs.match(/^const NAV_\w+ = .*;$/gm));
@@ -13702,7 +13766,7 @@ test('missing rate_limits degrades instead of throwing', () => {
               const d = detail(pageOf(r, { sel, sessions: ses, ui: UI({ filter: 'all', tab }) }));
               for (const m of d.matchAll(/data-act="([a-z-]+)"/g)) assert.ok(['review', 'copy'].includes(m[1]), 'unexpected action ' + m[1]);
               for (const m of d.matchAll(/<button\b[^>]*>/g)) assert.match(m[0], /data-act="(review|copy)"|data-ntab=/, m[0]);
-              assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin|resume|kill|stop)"/.test(d));
+              assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin|resume|kill|stop)"/.test(d.replace(/<a class="xlink" href="#sessions\?p=[A-Za-z0-9_-]{1,64}">Recent sessions<\/a>/, '')), 'alpha7 S4: the Recent sessions link is the only anchor');
               if (ses.length === 0 || sel === 'pq') assert.ok(!/data-act="review"/.test(d));
             }
           }
@@ -14397,7 +14461,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       'sessDayKey', 'sessDayLabel', 'sessGroups', 'sessVisible', 'sessResolveSel', 'sessVisibleIds', 'sessRowHtml', 'sessListHtml', 'sessControlsHtml', 'sessTitleHtml',
       'sessReconHtml', 'tlSpan', 'tlX', 'tlTicks', 'tlTickLabel', 'tlLanes', 'tlLaneText', 'tlAttribution', 'tlWaitBands', 'tlCostPoints', 'tlReviews', 'tlWindowReviews', 'findingsLabel',
       'tlHasEvents', 'tlShape', 'tlSvg', 'tlSvgParts', 'tlWrapHtml', 'tlReviewLabel', 'tlReviewMarkers', 'tlAxisTexts', 'tlBreakLabels', 'tlBreakShort', 'tlHasBreaks', 'tlUseClock', 'tlClockLabel', 'tlLegendHtml', 'sessHeldUp', 'sessFacts', 'sessHeldUpHtml', 'sessFactsHtml', 'sessTimelineHtml', 'sessRequestsHtml',
-      'sessReviewsHtml', 'sessDetailHtml', 'sessPage'];
+      'sessReviewsHtml', 'sessDetailHtml', 'sessProjectChipHtml', 'sessPage'];
     const consts = cj.match(/^const (SESS_\w+|TL|TL_STEPS|TL_OUTCOME_RANK|OUTCOME_LABEL|ROLE_LABEL) = .*;$/gm);
     assert.strictEqual(consts.length, 10, 'the single-line constants the helpers need');
     const lifted = names.map((n) => {
@@ -15361,6 +15425,16 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!/No timeline/.test(old));
     });
 
+    test('[alpha7 S4] old session with no cost series: ended says no requests were recorded, running keeps the wait note', () => {
+      const mk = (state, ended) => X.sessDetailHtml(detail({ state, ended, has_events: false, tools: [], waits: [], reviews: [], held_up: [], cost_series: [] }), { tab: 'timeline', width: 900, nowMs: NOW });
+      const ended = mk('ended', T0 + MIN);
+      assert.match(ended, /<p class="empty-note">No tool calls or waits: this session was recorded before Sessions existed\. No requests were recorded\.<\/p>/);
+      assert.ok(!/will show once it has requests/.test(ended));
+      const live = mk('running', null);
+      assert.match(live, /recorded before Sessions existed\. Runs and cost will show once it has requests\./);
+      assert.ok(!/No requests were recorded/.test(live));
+    });
+
     test('[alpha7 S3] ticks: clock times for sessions over 24 h or with a break, dated at each new day; short ones stay relative', () => {
       const lab = X.tlClockLabel(at(0, 13, 20), '');
       assert.deepStrictEqual([lab.lab, lab.day], ['Oct 25 13:20', X.sessDayKey(at(0, 13, 20))]);
@@ -15461,6 +15535,218 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!/\r|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(cj + css), 'no CR or control bytes');
     });
   }
+
+  /* ---- alpha7 S4: cross-links into Sessions, and "Clear history" (Sereno's own ledger only) ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const life = require('../src/ledger-life.js');
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cj = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const lift = (names) => names.map((n) => {
+      const m = cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'));
+      assert.ok(m, 'console.js has ' + n);
+      return m[0];
+    }).join('\n');
+
+    /* -- Part A: cross-links -- */
+    const X = new Function('esc', lift(['parseRoute', 'parseSessionProject', 'sessionsProjectHash', 'sessionHash', 'sessScope', 'sessProjectChipHtml'])
+      + '\nreturn { parseRoute, parseSessionProject, sessionsProjectHash, sessionHash, sessScope, sessProjectChipHtml };')(
+      (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+
+    test('[alpha7 S4] hash: #sessions?p=<project id> is parsed strictly; anything else is the plain tab', () => {
+      assert.strictEqual(X.parseSessionProject('#sessions?p=proj-1_A'), 'proj-1_A', 'the id keeps its case');
+      assert.strictEqual(X.parseSessionProject('#/sessions?p=abc'), 'abc');
+      assert.strictEqual(X.parseRoute('#sessions?p=abc'), 'sessions');
+      const bad = ['#sessions', '#sessions?p=', '#sessions?p=a b', '#sessions?p=a%20b', '#sessions?p=<b>', '#sessions?p=a&q=1', '#sessions?p=a&p=b', '#sessions?p=a/b', '#sessions/x?p=abc',
+        '#sessions?x=abc', '#sessions?p=a.b', '#sessions?p=a:b', '#sessions?p=' + 'x'.repeat(65), '#projects?p=abc', '#spend?p=abc', null, undefined, 42];
+      for (const h of bad) assert.strictEqual(X.parseSessionProject(h), null, String(h));
+      for (const h of ['#sessions?p=', '#sessions?p=a b', '#sessions?p=a&q=1', '#sessions?p=' + 'x'.repeat(65), '#sessions?x=abc', '#sessions?p=a/b']) assert.notStrictEqual(X.parseRoute(h), 'sessions', h);
+      assert.strictEqual(X.sessionsProjectHash('abc-1_Z'), '#sessions?p=abc-1_Z');
+      assert.strictEqual(X.parseSessionProject(X.sessionsProjectHash('abc-1_Z')), 'abc-1_Z', 'build and parse round-trip');
+      for (const b of ['', 'a b', 'a&p=b', 'x'.repeat(65), null, undefined, 7, '<i>']) assert.strictEqual(X.sessionsProjectHash(b), '#sessions', String(b));
+      assert.strictEqual(X.sessionHash('abc-1.2:x_y'), '#sessions/abc-1.2:x_y');
+      for (const b of ['', 'a b', 'a/b', '<x>', 'x'.repeat(129), null, undefined, 3]) assert.strictEqual(X.sessionHash(b), '', String(b));
+    });
+
+    test('[alpha7 S4] sessions list: the project filter keeps that project\'s rows; the chip names it, escapes it, and has a remove button', () => {
+      const list = [{ session_id: 'a', project_id: 'p1' }, { session_id: 'b', project_id: 'p2' }, { session_id: 'c', project_id: 'p1' }, { session_id: 'd', project_id: null }];
+      assert.deepStrictEqual(X.sessScope(list, 'p1').map((s) => s.session_id), ['a', 'c']);
+      assert.deepStrictEqual(X.sessScope(list, null).map((s) => s.session_id), ['a', 'b', 'c', 'd'], 'no filter, every row');
+      assert.deepStrictEqual(X.sessScope(list, 'nope'), [], 'a project with no sessions in range shows an empty list');
+      assert.deepStrictEqual(X.sessScope(null, 'p1'), []);
+      assert.strictEqual(X.sessProjectChipHtml(null, 'x'), '');
+      const chip = X.sessProjectChipHtml('p1', 'My <b>repo</b>');
+      assert.match(chip, /Project: My &lt;b&gt;repo&lt;\/b&gt;/);
+      assert.ok(!/<b>/.test(chip));
+      assert.match(chip, /<button type="button" class="nchip" data-xclearp aria-label="Remove the project filter">/);
+      assert.match(X.sessProjectChipHtml('p1', null), /Project: p1/, 'the id stands in when the name is unknown');
+      assert.ok(!/\bstyle\s*=/.test(chip));
+    });
+
+    test('[alpha7 S4] wiring: the route reads the filter, the chip clears it, the list and selection are scoped, Projects links in', () => {
+      assert.match(cj, /state\.sess\.project = parseSessionProject\(location\.hash\)/);
+      assert.ok((cj.match(/state\.sess\.project = parseSessionProject\(location\.hash\)/g) || []).length >= 2, 'applyRoute and hashchange');
+      assert.match(cj, /tgt\.closest\('\[data-xclearp\]'\)[\s\S]{0,120}state\.sess\.project = null/);
+      assert.match(cj, /list: sessScope\(s\.list, s\.project\)/);
+      assert.match(cj, /sessResolveSel\(sessVisible\(sessScope\(s\.list, s\.project\)/);
+      assert.match(cj, /href="' \+ esc\(sessionsProjectHash\(p\.id\)\) \+ '">Recent sessions<\/a>/, 'the project detail links to its recent sessions');
+      assert.match(cj, /sessionsProjectHash\(p\.id\)[^;]*\/\^\[A-Za-z0-9_-\]\{1,64\}\$\/\.test\(p\.id\)|\/\^\[A-Za-z0-9_-\]\{1,64\}\$\/\.test\(p\.id\)[^;]*sessionsProjectHash\(p\.id\)/, 'only for ids in the collector alphabet');
+      assert.match(cj, /View project<\/a>' : '';\s*return '<div class="ndetail-head">/, 'the session detail keeps its View project link');
+      assert.ok(!/postAction\([^)]*sessions/i.test(cj), 'cross-links post nothing');
+    });
+
+    test('[alpha7 S4] spend turns: the session cell links to the session when the row has an id; otherwise it is plain text', () => {
+      const fn = new Function('esc', 'estMoney', 'formatTime', 'projectLabel', 'modelsHtml', 'ATTR_LABEL', 'sessionHash', lift(['turnsTableHtml']) + '\nreturn turnsTableHtml;');
+      const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      const t = fn(esc, () => '$1.00 est.', () => '09:00', (p) => p || 'Unattributed', () => 'Opus', { explicit: 'Explicit' }, X.sessionHash);
+      const html = t([{ ts: 1, project: 'a', sessionShort: 'abcdefgh', sessionId: 'abcdefgh-1234', costMicros: 1, models: [], attribution: 'explicit' },
+        { ts: 2, project: 'b', sessionShort: 'zzzzzzzz', sessionId: null, costMicros: 1, models: [], attribution: 'explicit' },
+        { ts: 3, project: 'c', sessionShort: 'hostile1', sessionId: 'x"><script>', costMicros: 1, models: [], attribution: 'explicit' }], { limit: 10 });
+      assert.match(html, /<a class="xlink" href="#sessions\/abcdefgh-1234">abcdefgh<\/a>/);
+      assert.match(html, /<td class="mono">zzzzzzzz<\/td>/, 'no id, no link');
+      assert.match(html, /<td class="mono">hostile1<\/td>/, 'an id outside the alphabet is not linked');
+      assert.ok(!/<script>/.test(html));
+      const compact = t([{ ts: 1, project: 'a', sessionShort: 'abcdefgh', sessionId: 'abcdefgh-1234', costMicros: 1, models: [], attribution: 'explicit' }], { compact: true });
+      assert.ok(!/#sessions\//.test(compact), 'the compact preview has no session column');
+    });
+
+    test('[alpha7 S4] pipeline panel: links to the review session and to an attempt\'s session only when the API sent an id', () => {
+      assert.match(cj, /t\.gate && sessionHash\(t\.gate\.sessionId\) \? '<p class="plink"><a class="xlink" href="' \+ esc\(sessionHash\(t\.gate\.sessionId\)\)/);
+      assert.match(cj, /a && sessionHash\(a\.sessionId\) \? '<a class="xlink" href="' \+ esc\(sessionHash\(a\.sessionId\)\)/);
+      assert.match(cj, /tl \+ kv \+ revLink \+ review/);
+    });
+
+    test('[alpha7 S4] top-prompts rows carry the full session id (collector alphabet) beside sessionShort; the ledger returns it', () => {
+      const l = openLedger({ file: ':memory:' });
+      const T = Date.now();
+      l.ingestRequests([{ requestKey: 'k1', requestId: 'r1', sessionId: 'full-session-id-123', promptId: null, ts: T, model: 'm', querySource: null, source: 'main', agentName: null,
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 5, durationMs: 0 }]);
+      const r = l.topPrompts({ since: T - 1000, until: T + 1000, limit: 5 });
+      assert.strictEqual(r[0].sessionId, 'full-session-id-123');
+      assert.strictEqual(r[0].sessionShort, 'full-ses');
+      assert.strictEqual(l.hasSession('full-session-id-123'), true);
+      assert.strictEqual(l.hasSession('nope'), false);
+      l.recordHook('SubagentStart', { session_id: 'full-session-id-123', agent_id: 'ag1', agent_type: 'b' });
+      assert.strictEqual(l.sessionOfAgent('ag1'), 'full-session-id-123');
+      assert.strictEqual(l.sessionOfAgent('ag-none'), null);
+      l.close();
+    });
+
+    /* -- Part B: Clear history -- */
+    const tmpDbFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-clear-')), 'sereno.db');
+
+    test('[alpha7 S4] ledger.clearHistory empties every table (listed from sqlite_master) in the file, keeps the schema version, and the ledger still works', () => {
+      const file = tmpDbFile();
+      const l = openLedger({ file });
+      try {
+        const T = Date.now();
+        l.ingestRequests([{ requestKey: 'k1', requestId: 'r1', sessionId: 's1', promptId: 'p1', ts: T, model: 'm', querySource: null, source: 'subagent', agentName: null,
+          inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 1000, durationMs: 5 }]);
+        l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a1', ts: T }]);
+        l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+        l.recordHook('SubagentStart', { session_id: 's1', agent_id: 'a1', agent_type: 'builder' });
+        l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Bash', tool_use_id: 'tu1' });
+        l.recordHook('UserPromptSubmit', { session_id: 's1', prompt_id: 'p1' });
+        l.recordStatus('s1', 1.5, T);
+        const db = l._db;
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name);
+        for (const need of ['requests', 'spans', 'sessions', 'agents', 'status', 'session_events']) assert.ok(tables.includes(need), 'schema has ' + need);
+        const count = (t) => Number(db.prepare('SELECT COUNT(*) AS n FROM "' + t + '"').get().n);
+        for (const t of tables) assert.ok(count(t) > 0, 'fixture must put a row in ' + t + ' (a new table needs a fixture here)');
+        const ver = db.prepare('PRAGMA user_version').get().user_version;
+        const out = l.clearHistory();
+        assert.deepStrictEqual(out.tables.slice().sort(), tables.slice().sort(), 'every table was cleared, none by a hard-coded list');
+        for (const t of tables) assert.strictEqual(count(t), 0, t + ' is empty');
+        assert.deepStrictEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name).sort(), tables.slice().sort(), 'the schema stays');
+        assert.strictEqual(db.prepare('PRAGMA user_version').get().user_version, ver, 'the migration version stays');
+        assert.strictEqual(l.hasAny(), false);
+        assert.deepStrictEqual(l.sessionList(0), []);
+        // still usable, and a second clear on an empty ledger is harmless
+        l.recordHook('SessionStart', { session_id: 's2', cwd: 'C:\\w\\proj' });
+        assert.strictEqual(l.sessionList(0).length, 1);
+        l.clearHistory(); l.clearHistory();
+        assert.strictEqual(l.sessionList(0).length, 0);
+        // the WAL was folded back into the file
+        const wal = file + '-wal';
+        assert.ok(!fs.existsSync(wal) || fs.statSync(wal).size === 0, 'the write-ahead log is truncated');
+      } finally { try { l.close(); } catch (_) { /* closed */ } fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    test('[alpha7 S4] ledger.clearHistory is one transaction: a failure part-way leaves every table as it was', () => {
+      const l = openLedger({ file: ':memory:' });
+      try {
+        l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+        l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Bash', tool_use_id: 'tu1' });
+        l._db.exec('CREATE TRIGGER block_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, \'no\'); END');
+        assert.throws(() => l.clearHistory());
+        assert.strictEqual(Number(l._db.prepare('SELECT COUNT(*) AS n FROM session_events').get().n), 1, 'events survive a rolled-back clear');
+        assert.strictEqual(Number(l._db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n), 1);
+        l._db.exec('DROP TRIGGER block_delete');
+        l.clearHistory();
+        assert.strictEqual(Number(l._db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n), 0);
+      } finally { l.close(); }
+    });
+
+    test('[alpha7 S4] the confirmation dialog: exact text, Clear history / Cancel, and both Enter (default) and Escape (cancel) land on Cancel', () => {
+      const d = life.clearHistoryDialog();
+      assert.strictEqual(d.message, "Clear Sereno's history?");
+      assert.strictEqual(d.detail, "Deletes all recorded spend, sessions and timelines from Sereno's database. Claude Code and your projects are not touched. This can't be undone.");
+      assert.deepStrictEqual(d.buttons, ['Clear history', 'Cancel']);
+      assert.strictEqual(d.buttons[d.defaultId], 'Cancel', 'Enter cancels');
+      assert.strictEqual(d.buttons[d.cancelId], 'Cancel', 'Escape cancels');
+      assert.strictEqual(d.noLink, true);
+      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const h = main.slice(main.indexOf("ipcMain.handle('sereno:clear-history'"), main.indexOf("ipcMain.handle('sereno:wiring-status'"));
+      assert.ok(h.length > 100, 'the handler exists');
+      assert.match(h, /dialog\.showMessageBox\(ledgerLife\.clearHistoryDialog\(\)\)/);
+      assert.match(h, /if \(response !== 0\) return \{ ok: true, cleared: false, reason: 'cancelled' \}/, 'only the first button clears');
+      assert.ok(h.indexOf('showMessageBox') < h.indexOf('ledger.clearHistory()'), 'the dialog comes before the delete');
+      assert.match(h, /if \(!ledger\) return \{ ok: true, cleared: false, reason: 'off' \}/);
+      assert.ok(!/liveStore|store\.|new Store/.test(h), 'live in-memory state is untouched');
+      const pre = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+      assert.match(pre, /clearHistory: \(\) => ipcRenderer\.invoke\('sereno:clear-history'\)/);
+      const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+      assert.match(app, /api\.clearHistory\(\)/);
+      assert.match(app, /ui\.clearRow\.hidden = !\(api && api\.clearHistory\)/, 'hidden in a browser tab');
+      const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+      assert.match(html, /id="clear-row"[\s\S]{0,400}id="clear-action"[^>]*>Clear history</);
+      assert.ok(!/\bstyle\s*=/.test(html.slice(html.indexOf('id="clear-row"'), html.indexOf('id="autolaunch-row"'))), 'no inline style');
+    });
+
+    test('[alpha7 S4] the collector cannot clear anything: no route or source mentions it, and POST / DELETE to likely paths change nothing', async () => {
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'collector.js'), 'utf8');
+      assert.ok(!/clearHistory|clear-history|clear_history/i.test(src), 'collector.js never calls or names it');
+      for (const m of src.matchAll(/(?:url|req\.url|p)\s*===?\s*'([^']*)'/g)) assert.ok(!/clear|erase|wipe|purge/i.test(m[1]), 'route ' + m[1]);
+      for (const m of src.matchAll(/req\.method\s*===\s*'(POST|DELETE|PUT|PATCH)'[^\n]*/g)) assert.ok(!/clear|erase|wipe|purge|history/i.test(m[0]), m[0]);
+      const l = openLedger({ file: ':memory:' });
+      l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+      const c = createCollector(new Store(), 0, { ledger: l });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      try {
+        const send = (method, p) => new Promise((resolve) => {
+          const rq = http.request({ host: '127.0.0.1', port: c.port, path: p, method, agent: false, headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:' + c.port } }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode)); });
+          rq.on('error', () => resolve(0)); rq.end('{}');
+        });
+        for (const m of ['POST', 'DELETE', 'PUT']) {
+          for (const p of ['/api/history', '/api/history/clear', '/api/clear', '/api/clear-history', '/api/ledger', '/api/sessions', '/api/spend', '/api/spend/clear', '/clear', '/console/clear']) {
+            const st = await send(m, p);
+            assert.ok(st < 200 || st >= 300, m + ' ' + p + ' answered ' + st);
+          }
+        }
+        assert.strictEqual(l.sessionList(0).length, 1, 'the ledger is untouched');
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+
+    test('[alpha7 S4] README: the Settings action replaces the delete-the-file paragraph, which stays as a fallback; consoles hint where to clear', () => {
+      const rd = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+      assert.match(rd, /To erase all history, open the widget's settings \(the gear\) and choose \*\*Clear history\*\*, then confirm\./);
+      assert.match(rd, /touches nothing of Claude Code's or your projects'/);
+      assert.match(rd, /As a fallback, quit Sereno, then delete `sereno\.db`, `sereno\.db-wal` and `sereno\.db-shm`\./);
+      assert.ok(!/To erase all history, quit Sereno/.test(rd), 'the old lead-in is gone');
+      assert.ok((cj.match(/Clear history from the widget\\u2019s settings\./g) || []).length === 2, 'the one-line hint on Sessions and Spend');
+    });
+  }
+
 
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
