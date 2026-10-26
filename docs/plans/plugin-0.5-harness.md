@@ -1,7 +1,7 @@
 # Plugin 0.5.0: checks that run the app, agreeing on done, measuring the reviewer
 
-Status: planned (Robe, 2026-10-25). It starts after 0.4.0 is merged. Item H4 is app-side and
-ships with alpha.8.
+Status: P1–P4 built on feat/plugin-0.5 (2026-10-26); red team and an end-to-end run with a browse
+check pending. Item H4 is app-side and ships with alpha.8.
 
 ## Why
 
@@ -243,8 +243,8 @@ browse check.
 
 - **P1:** H3, the stubs in the review pack. It is small, so it goes first. Done: 73fadb4.
 - **P2a:** H1 `cmd`, `serve`/`ready` and `http` checks, plus `browse` recorded as unverified
-  (see the decisions above).
-- **P2b:** H1 `browse` checks verified by the red team with browser tools.
-- **P3:** H2, the spec review step in `/sereno:next`.
-- **P4:** H5 in the README; H4 rides alpha.8.
+  (see the decisions above). Done: a37bd37.
+- **P2b:** H1 `browse` checks verified by the red team with browser tools. Done: f64b6e3.
+- **P3:** H2, the spec review step in `/sereno:next`. Done: 1547107.
+- **P4:** H5 in the README; H4 rides alpha.8. Done: P4: this commit.
 - Then the red team on the branch, the end-to-end run, and merge (which is the release).

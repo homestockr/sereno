@@ -9568,12 +9568,22 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['/sereno:next', '--after', '--hold', 'preflight', 'hook_failed', 'attempt --adopt', '/sereno:merge', 'after_not_merged']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes('`next`, `build`') || r.includes('`task`, `next`, `build`'));
     });
-    test('[plugin-0.4 A2] plugin.json, marketplace and README all say 0.4.0', () => {
+    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.5.0', () => {
       const pj = JSON.parse(rd('.claude-plugin/plugin.json'));
       const mp = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
-      assert.strictEqual(pj.version, '0.4.0');
-      assert.strictEqual(mp.plugins[0].version, '0.4.0');
-      assert.ok(rd('README.md').includes('Version 0.4.0.'));
+      assert.strictEqual(pj.version, '0.5.0');
+      assert.strictEqual(mp.plugins[0].version, '0.5.0');
+      assert.ok(rd('README.md').includes('Version 0.5.0.'));
+    });
+    test('[plugin-0.5 P4] README has the lighter-setup section and the 0.5.0 notes', () => {
+      const r = rd('README.md');
+      const i = r.indexOf('### Trying a lighter setup'), j = r.indexOf('## Recovery');
+      assert.ok(i > 0 && j > i);
+      const sec = r.slice(i, j);
+      for (const k of ['roles.redTeam.light.kinds', 'roles.redTeam.specReview', 'lean', '--fixes', 'alpha.8', 'Nothing switches automatically']) assert.ok(sec.includes(k), k);
+      assert.ok(sec.split('\n').length <= 15);
+      assert.ok(r.includes('New in 0.5.0') && r.includes('spec review before the'));
+      assert.ok(/--fixes/.test(rd('skills/task/SKILL.md')));
     });
     test('[plugin-0.4 A2] the skills directory is exactly task, next, build, ship, merge, brief', () => {
       assert.deepStrictEqual(fs.readdirSync(path.join(PLUGIN, 'skills')).sort(), ['brief', 'build', 'merge', 'next', 'ship', 'task']);

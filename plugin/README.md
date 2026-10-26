@@ -7,8 +7,12 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.4.0. Windows is the first
+can observe the files it writes. Version 0.5.0. Windows is the first
 platform; other systems are not yet tested.
+
+New in 0.5.0: stub markers in the review pack; runnable checks in specs (`cmd`, `serve`,
+`http`, `browse`); a browse reviewer with `serve --start`/`--stop`; a spec review before the
+first build; a note on trying a lighter setup (see Presets and pipeline.json).
 
 ## Install
 
@@ -212,6 +216,16 @@ A minimal example:
   "tests": { "command": "npm test", "timeoutSec": 600 }
 }
 ```
+
+### Trying a lighter setup
+
+Every component of the pipeline encodes an assumption about what the model cannot do alone.
+Those assumptions go stale, so remove one piece at a time and see what you lose. Turn
+`roles.redTeam.light.kinds` on for more kinds, turn `roles.redTeam.specReview` off, or try the
+`lean` preset for a week. Then compare follow-up fixes (`/sereno:task --fixes <task>` records
+one) and cost per merge (an estimate) against the week before. The Sereno app will show escaped
+defects per reviewer in a later release (alpha.8). Nothing switches automatically: you change
+the config and you decide whether to keep it.
 
 ## Recovery
 
