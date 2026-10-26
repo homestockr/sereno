@@ -13,7 +13,7 @@ const OPT_IN_BUTTONS = ['Yes', 'Not now'];
 
 // "Clear history" confirmation. Cancel is both the default and the dismissal, so Enter and Escape never clear.
 const CLEAR_MESSAGE = "Clear Sereno's history?";
-const CLEAR_DETAIL = "Deletes all recorded spend, sessions and timelines from Sereno's database. Claude Code and your projects are not touched. This can't be undone.";
+const CLEAR_DETAIL = "Deletes all recorded spend, sessions and timelines from Sereno's database. Claude Code and your projects are not touched. This can't be undone. A session that is running carries on; its timeline starts again from now.";
 const CLEAR_BUTTONS = ['Clear history', 'Cancel'];
 const CLEAR_DEFAULT_ID = 1;
 const CLEAR_CANCEL_ID = 1;

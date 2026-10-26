@@ -10619,10 +10619,10 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('[4a-heredoc] gate and spec read a bash heredoc body', () => {
       const probe = spawnSync('bash', ['-c', 'true'], { encoding: 'utf8' });
-      if (probe.error || probe.status !== 0) return; // no bash on this machine
+      if (probe.error || probe.status !== 0) { console.log('  skip [4a-heredoc] no bash on this machine'); return; }
       if (process.platform === 'win32') {   // PATH may hold WSL's bash (Linux), which cannot run the Windows node path
         const un = spawnSync('bash', ['-c', 'uname -s'], { encoding: 'utf8' });
-        if (un.error || !/MINGW|MSYS|CYGWIN/i.test(String(un.stdout))) return;
+        if (un.error || !/MINGW|MSYS|CYGWIN/i.test(String(un.stdout))) { console.log('  skip [4a-heredoc] bash is not MSYS/MinGW/Cygwin'); return; }
       }
       const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hd-')));
       try {
@@ -17318,7 +17318,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[alpha7 S4] the confirmation dialog: exact text, Clear history / Cancel, and both Enter (default) and Escape (cancel) land on Cancel', () => {
       const d = life.clearHistoryDialog();
       assert.strictEqual(d.message, "Clear Sereno's history?");
-      assert.strictEqual(d.detail, "Deletes all recorded spend, sessions and timelines from Sereno's database. Claude Code and your projects are not touched. This can't be undone.");
+      assert.strictEqual(d.detail, "Deletes all recorded spend, sessions and timelines from Sereno's database. Claude Code and your projects are not touched. This can't be undone. A session that is running carries on; its timeline starts again from now.");
       assert.deepStrictEqual(d.buttons, ['Clear history', 'Cancel']);
       assert.strictEqual(d.buttons[d.defaultId], 'Cancel', 'Enter cancels');
       assert.strictEqual(d.buttons[d.cancelId], 'Cancel', 'Escape cancels');
@@ -17369,6 +17369,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const rd = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
       assert.match(rd, /To erase all history, open the widget's settings \(the gear\) and choose \*\*Clear history\*\*, then confirm\./);
       assert.match(rd, /touches nothing of Claude Code's or your projects'/);
+      assert.match(rd, /A session that is running carries on; its timeline starts again from now./);
       assert.match(rd, /As a fallback, quit Sereno, then delete `sereno\.db`, `sereno\.db-wal` and `sereno\.db-shm`\./);
       assert.ok(!/To erase all history, quit Sereno/.test(rd), 'the old lead-in is gone');
       assert.ok((cj.match(/Clear history from the widget\\u2019s settings\./g) || []).length === 2, 'the one-line hint on Sessions and Spend');

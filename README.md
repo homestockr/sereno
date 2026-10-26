@@ -239,7 +239,8 @@ run it twice to undo both.
 
 To erase all history, open the widget's settings (the gear) and choose **Clear history**,
 then confirm. It deletes the recorded spend, sessions and timelines from Sereno's own
-database and touches nothing of Claude Code's or your projects'. As a fallback, quit
+database and touches nothing of Claude Code's or your projects'. A session that is running carries on;
+its timeline starts again from now. As a fallback, quit
 Sereno, then delete `sereno.db`, `sereno.db-wal` and `sereno.db-shm`.
 
 Every dollar figure is an estimate, not a bill. The ledger records Claude Code's own
