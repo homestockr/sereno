@@ -102,7 +102,7 @@ Add a `checks` block under the acceptance criteria only for a criterion that can
 ```
 
 - At most 20 items, at most one `serve`, each value on one line and at most 500 characters. Nothing else may appear in the block.
-- `cmd` expects `exit <n>` or `stdout contains <text>`. `http` is a GET only and expects `status <n>` or `body contains <text>`. `serve` starts a server for the `http` checks and is always stopped afterwards. Always write its `ready` URL when the block has `http` or `browse` checks, so the checks wait for the real bind. `browse` is not run; it is listed for the reviewer and for the person merging.
+- `cmd` expects `exit <n>` or `stdout contains <text>`. `http` is a GET only and expects `status <n>` or `body contains <text>`. `serve` starts a server for the `http` checks and is always stopped afterwards. Every `serve` needs a `ready` URL (a spec without one is refused), so the checks wait for the real bind. `browse` is not run; it is listed for the reviewer and for the person merging.
 - URLs are `http:` or `https:` and the host must be `localhost`, `127.0.0.1` or `[::1]`. For any other host, use it only when the user named that host in this conversation, and pass it with `--check-hosts <host>[,<host>]` (bare host names). Never add a host the user did not name. `spec` refuses a malformed block with `invalid_checks`: fix the block and run it again.
 
 Then run:

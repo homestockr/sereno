@@ -26,7 +26,7 @@
  *
  *   serve --task <t> --start | --stop
  *                           --start launches the spec's `serve` detached (it outlives the command), waits for its
- *                           `ready` URL and writes .sereno/cache/serve-<t>.json {pid, started_at, ready}; refuses
+ *                           `ready` URL and writes .sereno/cache/serve-<t>.json {pid, started_at, ready, ident}; refuses
  *                           while a live one exists; a no-op ok when the spec has no browse checks or no serve.
  *                           --stop kills the process tree and removes the file; safe to repeat. The ship skill
  *                           brackets the browse reviewer with these. doctor lists a leftover file.

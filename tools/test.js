@@ -15917,9 +15917,8 @@ test('missing rate_limits degrades instead of throwing', () => {
         { n: 6, kind: 'browse', url: 'http://[::1]:3000/items', look: 'the empty state says "No items yet"' },
       ]);
     });
-    test('[plugin-0.5 H1] parseChecks: no block is [], a serve may have no ready, and a fence inside another fence is example text', () => {
+    test('[plugin-0.5 H1] parseChecks: no block is [], and a fence inside another fence is example text', () => {
       assert.deepStrictEqual(speclib.parseChecks('## Goal\nx\n'), []);
-      assert.deepStrictEqual(speclib.parseChecks(blk('- serve: node s.js')), [{ n: 1, kind: 'serve', serve: 'node s.js', ready: null }]);
       const nested = '## Goal\n\n````md\n' + FENCE + 'checks\n- cmd: rm -rf x\n  expect: exit 0\n' + FENCE + '\n````\n';
       assert.deepStrictEqual(speclib.parseChecks(nested), []);
       assert.deepStrictEqual(speclib.parseChecks('---\ntask: "a"\n---\n' + blk('- cmd: a', '  expect: exit 1')).map((c) => c.cmd), ['a']);
@@ -16348,7 +16347,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const a = ckRepo(blk('- browse: http://127.0.0.1:3000/', '  look: x'));
       const s = S(a.dir, ['serve', '--task', 'ck', '--start']);
       assert.deepStrictEqual([s.status, s.out.ok, s.out.started], [0, true, false]);
-      const b = ckRepo(blk('- serve: node server.js 1'));
+      const b = ckRepo(blk('- serve: node server.js 1', '  ready: http://127.0.0.1:1/'));
       const t = S(b.dir, ['serve', '--task', 'ck', '--start']);
       assert.deepStrictEqual([t.status, t.out.ok, t.out.started], [0, true, false]);
       for (const d of [a.dir, b.dir]) assert.ok(!fs.existsSync(path.join(d, '.sereno', 'cache', 'serve-ck.json')));
@@ -16707,19 +16706,86 @@ test('missing rate_limits degrades instead of throwing', () => {
       fs.writeFileSync(path.join(r.dir, 'a.txt'), 'three\n'); git(r.dir, 'add', 'a.txt'); git(r.dir, 'commit', '-q', '-m', 'more');
       assert.strictEqual(deps(r).browseChecks('ck').length, 2, 'the task tip moved after the gate');
     });
-    await atest('[plugin-0.5 rt1] runChecks: a serve with no ready URL waits for the first http check URL to answer before the checks; one that never answers is server_not_ready', async () => {
-      const port = await freePort(); const u = 'http://127.0.0.1:' + port;
-      const d = work();
-      const r = await run(['- serve: node -e "setTimeout(()=>require(\'http\').createServer((q,r)=>r.end(\'hello\')).listen(' + port + ',\'127.0.0.1\'),900)"', '- http: ' + u + '/', '  expect: body contains hello'], d, { readyTotalMs: 8000, readyPollMs: 100 });
-      assert.deepStrictEqual(r.results.map((x) => x.result), ['pass', 'pass'], JSON.stringify(r.results));
-      assert.match(r.results[0].detail, /^answering at /);
-      const never = await run(['- serve: node -e "setTimeout(()=>{},4000)"', '- http: http://127.0.0.1:' + (await freePort()) + '/', '  expect: status 200'], d, { readyTotalMs: 700, readyPollMs: 100 });
-      assert.deepStrictEqual(never.results.map((x) => x.result), ['server_not_ready', 'server_not_ready']);
-      const none = await run(['- serve: node -e "setTimeout(()=>{},300)"', '- cmd: node -e "process.exit(0)"', '  expect: exit 0'], d);
-      assert.strictEqual(none.results[0].detail, 'started (no ready URL)');
+    test('[plugin-0.5 rt1] task skill: write ready with every serve', () => {
+      assert.match(skillText('task'), /Every `serve` needs a `ready` URL \(a spec without one is refused\)/);
     });
-    test('[plugin-0.5 rt1] task skill: write ready whenever a serve has http or browse checks', () => {
-      assert.match(skillText('task'), /Always write its `ready` URL when the block has `http` or `browse` checks/);
+
+    // ---- [plugin-0.5 rt2] red-team pass 2 fixes ----
+    const serveLib = require('../plugin/bin/lib/serve.js');
+    test('[plugin-0.5 rt2] parseChecks: a serve without ready is refused as invalid_checks serve, with its line', () => {
+      assert.throws(() => speclib.parseChecks(blk('- cmd: a', '  expect: exit 0', '- serve: node s.js')), (e) => e.code === 'invalid_checks' && /^invalid_checks serve \(line \d+\): a serve needs a ready URL$/.test(e.message), 'refused');
+      bad(blk('- serve: node s.js', '- http: http://localhost:3000/', '  expect: status 200'), 'serve');
+      assert.strictEqual(speclib.parseChecks(blk('- serve: node s.js', '  ready: http://localhost:3000/'))[0].ready, 'http://localhost:3000/');
+      assert.match(fs.readFileSync(path.join(ROOT, 'docs', 'plans', 'plugin-0.5-harness.md'), 'utf8'), /`ready` is required on every `serve`/);
+    });
+    await atest('[plugin-0.5 rt2] a server already on the ready URL while the serve child stays alive without binding: serve fail, http server_not_ready, and serve --start fails', async () => {
+      // The holder is another process: S() blocks this one, so an in-process server could not answer.
+      const holder = require('node:child_process').spawn(process.execPath, ['-e', "const s=require('http').createServer((q,r)=>r.end('x'));s.listen(0,'127.0.0.1',()=>console.log(s.address().port))"], { stdio: ['ignore', 'pipe', 'ignore'] });
+      try {
+        const port = await new Promise((resolve) => { let b = ''; holder.stdout.on('data', (c) => { b += c; if (b.includes('\n')) resolve(parseInt(b, 10)); }); });
+        const u = 'http://127.0.0.1:' + port;
+        const idle = 'node -e "setTimeout(()=>{},20000)"';
+        const d = work();
+        const r = await run(['- serve: ' + idle, '  ready: ' + u + '/health', '- http: ' + u + '/health', '  expect: status 200'], d, { readyTotalMs: 3000, readyPollMs: 100 });
+        assert.deepStrictEqual(r.results.map((x) => x.result), ['fail', 'server_not_ready'], JSON.stringify(r.results));
+        assert.match(r.results[0].detail, /something already answers at/);
+        assert.strictEqual(r.servePid, null, 'the child was never spawned');
+        const rp = ckRepo(blk('- serve: ' + idle, '  ready: ' + u + '/health', '- browse: ' + u + '/', '  look: x'));
+        const f = S(rp.dir, ['serve', '--task', 'ck', '--start']);
+        assert.deepStrictEqual([f.out.ok, f.out.code, f.status], [false, 'server_not_ready', 27], JSON.stringify(f.out));
+        assert.match(f.out.error, /something already answers at/);
+        assert.ok(!fs.existsSync(path.join(rp.dir, '.sereno', 'cache', 'serve-ck.json')));
+      } finally { holder.kill(); }
+    });
+    await atest('[plugin-0.5 rt2] serve identity: unknown (unreadable) is not a mismatch - --start refuses and keeps the file, --stop kills and says ident unknown', async () => {
+      const r = ckRepo(BROWSE_BLK(await freePort()));
+      const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+      try {
+        const file = path.join(r.dir, '.sereno', 'cache', 'serve-ck.json');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ pid: child.pid, started_at: '2026-01-01T00:00:00.000Z', ready: null, ident: null }));
+        const again = S(r.dir, ['serve', '--task', 'ck', '--start']);
+        assert.deepStrictEqual([again.out.ok, again.out.code, again.status], [false, 'serve_running', 26], JSON.stringify(again.out));
+        assert.ok(fs.existsSync(file), 'the file is kept');
+        const st = S(r.dir, ['serve', '--task', 'ck', '--stop']);
+        assert.deepStrictEqual([st.out.ok, st.out.was_alive, st.out.ident, st.out.reason], [true, true, 'unknown', undefined], JSON.stringify(st.out));
+        assert.ok(await goneSoon(child.pid), 'killed, as before identities existed');
+        assert.ok(!fs.existsSync(file));
+      } finally { try { child.kill(); } catch (_e) { /* gone */ } }
+    });
+    await atest('[plugin-0.5 rt2] identity: image|start, start times compared when both are known else image names; leftovers report match / mismatch / unknown', async () => {
+      const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+      try {
+        const id = testrunLib.procIdentity(child.pid);
+        assert.match(id, /^[^|]*\|[^|]*$/, 'image|start: ' + id);
+        if (process.platform === 'win32') assert.match(id, /^node\.exe\|\d{10,20}$/, 'image name and a file time');
+        assert.strictEqual(testrunLib.identityCheck(id, child.pid), 'match');
+        assert.strictEqual(testrunLib.identityCheck(null, child.pid), 'unknown');
+        const [image, start] = id.split('|');
+        if (start) assert.strictEqual(testrunLib.identityCheck(image + '|' + start.slice(0, -1) + (start.endsWith('1') ? '2' : '1'), child.pid), 'mismatch', 'same image, other start time');
+        if (image) {
+          assert.strictEqual(testrunLib.identityCheck('other.exe|' + start, child.pid), start ? 'match' : 'mismatch', 'start times decide when both are known');
+          assert.strictEqual(testrunLib.identityCheck('other.exe|', child.pid), 'mismatch', 'no start time on the record: image names decide');
+          assert.strictEqual(testrunLib.identityCheck(image + '|', child.pid), 'match', 'one side has no start time: image names');
+          assert.strictEqual(testrunLib.identityCheck('definitely-not-this-process', child.pid), 'mismatch', 'an older image-only record');
+        }
+        assert.strictEqual(testrunLib.identityCheck(id, 2147483000), 'unknown', 'no such process');
+        const r = ckRepo(BROWSE_BLK(await freePort()));
+        const dir = path.join(r.dir, '.sereno', 'cache'); fs.mkdirSync(dir, { recursive: true });
+        const put = (task, ident) => fs.writeFileSync(path.join(dir, 'serve-' + task + '.json'), JSON.stringify({ pid: child.pid, started_at: '2026-01-01T00:00:00.000Z', ready: null, ident }));
+        put('a', id); put('b', 'definitely-not-this-process'); put('c', null);
+        const by = Object.fromEntries(serveLib.leftovers(p2bSafeFs(r.dir)).map((l) => [l.task, [l.alive, l.identity]]));
+        assert.deepStrictEqual(by, { a: [true, 'match'], b: [false, 'mismatch'], c: [true, 'unknown'] });
+      } finally { try { child.kill(); } catch (_e) { /* gone */ } }
+    });
+    test('[plugin-0.5 rt2] stubMarkers: pathological lines just under the 1000-character guard each scan in under 50 ms', () => {
+      const reviewLib3 = require('../plugin/bin/lib/review.js');
+      const diff = (l) => 'diff --git a/x.js b/x.js\n--- a/x.js\n+++ b/x.js\n@@ -0,0 +1,2 @@\n+' + l + '\n+}\n';
+      for (const l of ['a(b '.repeat(249).slice(0, 996), 'function a(b '.repeat(76).slice(0, 990), 'f('.repeat(495), 'function f('.repeat(90), '{ '.repeat(498), '(a, '.repeat(249).slice(0, 996)]) {
+        assert.ok(l.length < 1000);
+        const t0 = process.hrtime.bigint(); reviewLib3.stubMarkers(diff(l)); const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+        assert.ok(ms < 50, 'took ' + ms + ' ms on ' + l.slice(0, 12));
+      }
     });
 
     await atest('[plugin-0.5 H1] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });

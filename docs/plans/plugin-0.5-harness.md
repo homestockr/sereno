@@ -125,7 +125,10 @@ Each item is a small YAML-like list entry; nothing else in the block is valid:
   killed on timeout (reuse `killTree`). `expect` is either `exit <n>` or
   `stdout contains <text>`, the second meaning a plain substring of the first 1 MiB.
 - **`serve` and `ready`.**
-  - These are optional. The test step starts `serve` in the background, then polls `ready` with
+  - `ready` is required on every `serve` (decided after red-team pass 2): a serve without one is
+    refused at parse time with `invalid_checks serve (line N): a serve needs a ready URL`. If
+    something already answers at `ready`, the serve fails and is never started over it. The test
+    step starts `serve` in the background, then polls `ready` with
     GET until it returns any 2xx or 3xx.
   - It polls every 500 ms for up to 60 s. If `ready` never comes, every `http` check fails as
     `server_not_ready`.

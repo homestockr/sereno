@@ -164,7 +164,7 @@ function checkUrl(value, line, hosts) {
 
 /**
  * @typedef {{ n: number, kind: 'cmd', cmd: string, expect: { type: 'exit', code: number } | { type: 'stdout', text: string } }
- *   | { n: number, kind: 'serve', serve: string, ready: string | null }
+ *   | { n: number, kind: 'serve', serve: string, ready: string }
  *   | { n: number, kind: 'http', url: string, expect: { type: 'status', code: number } | { type: 'body', text: string } }
  *   | { n: number, kind: 'browse', url: string, look: string }} Check
  */
@@ -235,9 +235,10 @@ function parseChecks(text, hosts) {
       out[out.length] = { n, kind: 'cmd', cmd: c.value, expect: m ? { type: 'exit', code: parseInt(m[1], 10) } : { type: 'stdout', text: /** @type {RegExpExecArray} */ (s)[1] } };
     } else if (c.kind === 'serve') {
       if (c.expect !== undefined || c.look !== undefined) throw badChecks('syntax', c.line, 'serve takes only ready');
+      if (c.ready === undefined) throw badChecks('serve', c.line, 'a serve needs a ready URL');
       serves++;
       if (serves > 1) throw badChecks('serve', c.line, 'at most one serve');
-      out[out.length] = { n, kind: 'serve', serve: c.value, ready: c.ready === undefined ? null : checkUrl(c.ready, c.line, allowed) };
+      out[out.length] = { n, kind: 'serve', serve: c.value, ready: checkUrl(c.ready, c.line, allowed) };
     } else if (c.kind === 'http') {
       if (c.expect === undefined) throw badChecks('expect', c.line, 'http needs an expect line');
       if (c.ready !== undefined || c.look !== undefined) throw badChecks('syntax', c.line, 'http takes only expect');

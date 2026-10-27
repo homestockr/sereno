@@ -50,9 +50,10 @@ function pidAlive(pid) {
 
 /**
  * A start identity for a live pid, recorded beside it so a later --stop can tell the process it
- * started from a different process that was given the same pid. win32: the image name from
- * `tasklist` (the creation time needs PowerShell, which is too slow here). Elsewhere: the
- * `ps` start time. Null when it cannot be read.
+ * started from a different process that was given the same pid. Format `image|start`.
+ * win32: the image name from `tasklist` plus the process start time from PowerShell (a file time);
+ * the start time is left out when PowerShell fails. Elsewhere: `|` plus the `ps` start time.
+ * Null when nothing can be read. Slow on win32 (PowerShell): call it only at start and stop.
  * @param {number} pid @returns {string | null}
  */
 function procIdentity(pid) {
@@ -60,13 +61,38 @@ function procIdentity(pid) {
   try {
     if (process.platform === 'win32') {
       const r = spawnSync('tasklist', ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'], { windowsHide: true, encoding: 'utf8', timeout: 10000 });
-      const m = /^"([^"]{1,260})","(\d+)"/m.exec(String(r.stdout || ''));
-      return m && parseInt(m[2], 10) === pid ? m[1].toLowerCase() : null;
+      const m = /^"([^"|]{1,260})","(\d+)"/m.exec(String(r.stdout || ''));
+      const image = m && parseInt(m[2], 10) === pid ? m[1].toLowerCase() : '';
+      let start = '';
+      try {
+        const p = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', '(Get-Process -Id ' + pid + ').StartTime.ToFileTimeUtc()'], { windowsHide: true, encoding: 'utf8', timeout: 10000 });
+        const s = String(p.stdout || '').trim();
+        if (p.status === 0 && /^\d{10,20}$/.test(s)) start = s;
+      } catch (_e) { /* image name alone */ }
+      return image || start ? image + '|' + start : null;
     }
     const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 10000 });
-    const t = String(r.stdout || '').trim();
-    return t ? t.slice(0, 100) : null;
+    const t = String(r.stdout || '').trim().replace(/\|/g, ' ');
+    return t ? '|' + t.slice(0, 98) : null;
   } catch (_e) { return null; }
+}
+
+/**
+ * Does a recorded identity still describe the live process at this pid? 'mismatch' only on a
+ * positive difference (both start times known and different, else both image names known and
+ * different); 'unknown' when either side cannot be read or compared. A value without `|` is an
+ * image name from an older record.
+ * @param {string | null} recorded @param {number} pid @returns {'match' | 'mismatch' | 'unknown'}
+ */
+function identityCheck(recorded, pid) {
+  if (!recorded) return 'unknown';
+  const now = procIdentity(pid);
+  if (!now) return 'unknown';
+  const parse = (/** @type {string} */ v) => { const i = v.lastIndexOf('|'); return i < 0 ? { image: v, start: '' } : { image: v.slice(0, i), start: v.slice(i + 1) }; };
+  const a = parse(recorded), b = parse(now);
+  if (a.start && b.start) return a.start === b.start ? 'match' : 'mismatch';
+  if (a.image && b.image) return a.image === b.image ? 'match' : 'mismatch';
+  return 'unknown';
 }
 
 let aborted = false;
@@ -486,14 +512,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Poll a ready URL until it answers 2xx or 3xx. Shared by runChecks and `serve --start`.
- * @param {string} url @param {{ exited: () => boolean, aborted?: () => boolean, readyMs: number, pollMs: number, httpMs: number, anyStatus?: boolean }} o
+ * @param {string} url @param {{ exited: () => boolean, aborted?: () => boolean, readyMs: number, pollMs: number, httpMs: number }} o
  * @returns {Promise<boolean>}
  */
 async function pollReady(url, o) {
   const until = Date.now() + o.readyMs;
   while (!(o.aborted && o.aborted()) && !o.exited() && Date.now() < until) {
     const r = await httpGet(url, Math.min(2000, o.httpMs));
-    if (r.status !== null && (o.anyStatus || (r.status >= 200 && r.status < 400))) {
+    if (r.status !== null && r.status >= 200 && r.status < 400) {
       // An answer only counts while the serve child is still alive: a server that was already there
       // (or a child that died of EADDRINUSE in the same tick) must not read as ready.
       if (o.exited()) return false;
@@ -520,13 +546,13 @@ async function alreadyAnswers(url, httpMs) {
  * its pid. On failure (not ready in time, or it exited) the tree is killed and ok is false. Never
  * rejects. On win32 `detached` gives the child its own console-less process group; elsewhere its
  * own session. The tree is found later by pid (taskkill /T on win32, the process group elsewhere).
- * @param {string} command @param {string | null} ready @param {string} cwd
+ * @param {string} command @param {string} ready @param {string} cwd
  * @param {{ httpTimeoutMs?: number, readyTotalMs?: number, readyPollMs?: number }} [opts]
  * @returns {Promise<{ ok: boolean, pid: number | null, why: string }>}
  */
 async function startDetached(command, ready, cwd, opts) {
   const o = opts || {};
-  if (ready && await alreadyAnswers(ready, o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS)) return { ok: false, pid: null, why: 'something already answers at ' + ready + '; stop it first' };
+  if (await alreadyAnswers(ready, o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS)) return { ok: false, pid: null, why: 'something already answers at ' + ready + '; stop it first' };
   let child;
   try {
     child = spawn(command, { shell: true, cwd, windowsHide: true, stdio: 'ignore', detached: true });
@@ -537,12 +563,10 @@ async function startDetached(command, ready, cwd, opts) {
   const pid = child.pid || null;
   if (!pid) return { ok: false, pid: null, why: 'could not start' };
   const readyMs = o.readyTotalMs || CHECK_READY_TOTAL_MS;
-  if (ready) {
-    const ok = await pollReady(ready, { exited: () => exited, readyMs, pollMs: o.readyPollMs || CHECK_READY_POLL_MS, httpMs: o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS });
-    if (!ok) {
-      killPid(pid, child);
-      return { ok: false, pid, why: exited ? 'the server exited' + (code === null ? '' : ' with code ' + code) + ' before it was ready' : 'no 2xx or 3xx from ' + ready + ' within ' + Math.round(readyMs / 1000) + ' s' };
-    }
+  const ok = await pollReady(ready, { exited: () => exited, readyMs, pollMs: o.readyPollMs || CHECK_READY_POLL_MS, httpMs: o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS });
+  if (!ok) {
+    killPid(pid, child);
+    return { ok: false, pid, why: exited ? 'the server exited' + (code === null ? '' : ' with code ' + code) + ' before it was ready' : 'no 2xx or 3xx from ' + ready + ' within ' + Math.round(readyMs / 1000) + ' s' };
   }
   child.unref();
   return { ok: true, pid, why: '' };
@@ -588,7 +612,7 @@ async function runChecks(checks, cwd, opts) {
       if (aborted) { record(c, c.kind, targetOf(c), 'refused', 'the run was interrupted', ''); continue; }
       if (c.kind === 'browse') { record(c, 'browse', c.url, 'unverified', clip(c.look, CHECK_DETAIL_MAX), c.look); continue; }
       if (c.kind === 'serve') {
-        if (c.ready && await alreadyAnswers(c.ready, httpMs)) {
+        if (await alreadyAnswers(c.ready, httpMs)) {
           serverReady = false;
           const why = 'something already answers at ' + c.ready + '; stop it first';
           record(c, 'serve', c.serve, 'fail', why, why);
@@ -605,18 +629,11 @@ async function runChecks(checks, cwd, opts) {
         if (child.stderr) child.stderr.on('data', take);
         child.on('error', () => { serveExited = true; });
         child.on('close', (code) => { serveExited = true; serveCode = code; });
-        let readyUrl = c.ready;
-        if (!readyUrl) {
-          // No ready URL: when http checks follow, wait for the first one's URL to answer (any status).
-          const first = checks.find((x) => x.kind === 'http' && x.n > c.n);
-          if (!first || first.kind !== 'http') { record(c, 'serve', c.serve, 'pass', 'started (no ready URL)', ''); continue; }
-          readyUrl = first.url;
-        }
-        const ok = await pollReady(readyUrl, { exited: () => serveExited, aborted: () => aborted, readyMs, pollMs, httpMs, anyStatus: !c.ready });
-        if (ok) record(c, 'serve', c.serve, 'pass', (c.ready ? 'ready at ' : 'answering at ') + readyUrl, '');
+        const ok = await pollReady(c.ready, { exited: () => serveExited, aborted: () => aborted, readyMs, pollMs, httpMs });
+        if (ok) record(c, 'serve', c.serve, 'pass', 'ready at ' + c.ready, '');
         else {
           serverReady = false;
-          const why = serveExited ? 'the server exited' + (serveCode === null ? '' : ' with code ' + serveCode) + ' before it was ready' : (c.ready ? 'no 2xx or 3xx from ' : 'no answer from ') + readyUrl + ' within ' + Math.round(readyMs / 1000) + ' s';
+          const why = serveExited ? 'the server exited' + (serveCode === null ? '' : ' with code ' + serveCode) + ' before it was ready' : 'no 2xx or 3xx from ' + c.ready + ' within ' + Math.round(readyMs / 1000) + ' s';
           record(c, 'serve', c.serve, 'server_not_ready', why, why + '\n' + Buffer.concat(serveOut).toString('utf8'));
         }
         continue;
@@ -812,4 +829,4 @@ async function runTests(o) {
   };
 }
 
-module.exports = { killPid, pidAlive, procIdentity, startDetached, pollReady, runChecks, httpGet, sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };
+module.exports = { killPid, pidAlive, procIdentity, identityCheck, startDetached, pollReady, runChecks, httpGet, sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };

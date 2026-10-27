@@ -5,7 +5,10 @@
  *
  * --start launches the spec's `serve` command detached (it outlives this command), waits for its
  * `ready` URL with the same polling as the test step's checks, and records the pid in
- * .sereno/cache/serve-<task>.json. --stop kills the process tree by that pid and removes the file.
+ * .sereno/cache/serve-<task>.json as {pid, started_at, ready, ident} (ident is the process identity,
+ * image name plus start time, or null when it could not be read). --stop kills the process tree by
+ * that pid and removes the file; a positive identity mismatch means the pid was reused and nothing
+ * is killed, an unreadable identity is unknown and is treated as the same process.
  * The ship skill stops it after the reviewer on every path. Nothing here reads the pid file as
  * anything but data: the pid must be a plain integer.
  */
@@ -38,7 +41,7 @@ function readServeFile(fsafe, rel) {
 async function start(a) {
   const rel = serveRel(a.task);
   const existing = readServeFile(a.fsafe, rel);
-  if (existing && testrun.pidAlive(existing.pid) && (existing.ident === null || testrun.procIdentity(existing.pid) === existing.ident)) {
+  if (existing && testrun.pidAlive(existing.pid) && testrun.identityCheck(existing.ident, existing.pid) !== 'mismatch') {
     throw new SerenoError('serve_running', 'a server for task ' + a.task + ' is already running (pid ' + existing.pid + '); run serve --stop first', { task: a.task, pid: existing.pid });
   }
   let text;
@@ -77,22 +80,24 @@ function stop(a) {
     return { task: a.task, stopped: false, reason: 'no server recorded for task ' + a.task };
   }
   const alive = testrun.pidAlive(f.pid);
-  // A recorded start identity must still match: a pid that now belongs to another process is never killed.
-  if (alive && f.ident !== null && testrun.procIdentity(f.pid) !== f.ident) {
+  // Only a positive identity mismatch means the pid was reused and is never killed; an identity
+  // that cannot be read is unknown and the process is killed, as before identities were recorded.
+  const ident = alive ? testrun.identityCheck(f.ident, f.pid) : null;
+  if (ident === 'mismatch') {
     a.fsafe.removeFile(rel);
     return { task: a.task, stopped: true, pid: f.pid, was_alive: false, reason: 'pid reused' };
   }
   if (alive) testrun.killPid(f.pid);
   a.fsafe.removeFile(rel);
-  return { task: a.task, stopped: true, pid: f.pid, was_alive: alive };
+  return ident ? { task: a.task, stopped: true, pid: f.pid, was_alive: true, ident } : { task: a.task, stopped: true, pid: f.pid, was_alive: false };
 }
 
 /**
  * Leftover serve files, for doctor. @param {{ listDir: (rel: string) => string[], readFile: (rel: string, max: number) => Buffer }} fsafe
- * @returns {{ task: string, file: string, pid: number | null, alive: boolean }[]}
+ * @returns {{ task: string, file: string, pid: number | null, alive: boolean, identity: 'match' | 'mismatch' | 'unknown' | null }[]}
  */
 function leftovers(fsafe) {
-  /** @type {{ task: string, file: string, pid: number | null, alive: boolean }[]} */
+  /** @type {{ task: string, file: string, pid: number | null, alive: boolean, identity: 'match' | 'mismatch' | 'unknown' | null }[]} */
   const out = [];
   let names = [];
   try { names = fsafe.listDir('.sereno/cache'); } catch (_e) { return out; }
@@ -100,7 +105,10 @@ function leftovers(fsafe) {
     const m = /^serve-([A-Za-z0-9][A-Za-z0-9._-]{0,63})\.json$/.exec(n);
     if (!m) continue;
     const f = readServeFile(fsafe, '.sereno/cache/' + n);
-    out[out.length] = { task: m[1], file: '.sereno/cache/' + n, pid: f ? f.pid : null, alive: !!f && testrun.pidAlive(f.pid) };
+    // Alive only when the pid runs and its identity matches or cannot be read; a mismatch is a reused pid.
+    const running = !!f && testrun.pidAlive(f.pid);
+    const identity = f && running ? testrun.identityCheck(f.ident, f.pid) : null;
+    out[out.length] = { task: m[1], file: '.sereno/cache/' + n, pid: f ? f.pid : null, alive: running && identity !== 'mismatch', identity };
   }
   return out;
 }
