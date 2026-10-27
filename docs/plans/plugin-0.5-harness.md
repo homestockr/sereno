@@ -169,7 +169,10 @@ Sources: the Claude Code subagents docs (https://code.claude.com/docs/en/sub-age
 **The agent.** A new `sereno:red-team-browse`. Its prompt is the red team's prompt plus the
 browse rules. It has no `tools` list and sets `disallowedTools: Write, Edit, NotebookEdit`, so it
 inherits whichever browser MCP the user has (Claude in Chrome, Playwright or others) and still
-cannot edit files.
+cannot edit files. `disallowedTools` is `Write, Edit, NotebookEdit, WebFetch, WebSearch, Agent, Task`
+(red team rt1), so it cannot fetch the web, search or spawn agents. It still inherits EVERY MCP
+server the user has (databases, deploys, design tools, messaging). The only limit on those is the
+prompt, which says to use browser tools only: an instruction, not a block.
 - It is read-only by instruction for Bash, as the other red-team agents are.
 - It may open only the URLs of the spec's `browse` checks, or same-origin pages reached from
   them. It never submits forms, signs in or enters data.
@@ -195,7 +198,7 @@ full browse reviewer. Without browse checks nothing changes.
 - The gate records the per-check results.
 
 **The check before release.** On a real install, run `/agents` and confirm that
-`red-team-browse` shows MCP browser tools and no Write or Edit. Spawn it once on a spec with a
+`red-team-browse` shows MCP browser tools and none of Write, Edit, WebFetch, WebSearch or Agent. Spawn it once on a spec with a
 browse check.
 
 ## H2 decisions (architect, 2026-10-26)

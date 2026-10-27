@@ -113,7 +113,7 @@ parameter. Prompt: the spec path, the base commit and the head commit, the revie
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" serve --task <task> --start
 ```
 
-  If the result has `ok: false`, show the `error`, run the `--stop` command below, and carry on with the spawn anyway: the reviewer will report the checks it cannot reach as `unverified`. A result with `started: false` needs no stop but is harmless to stop. After the reviewer's final answer, and on every path that follows the `--start` call (a context round, a model-unavailable fallback, an error from the Agent tool, an answer with no verdict), run:
+  If the result has `ok: false`, show the `error` and run the `--stop` command below. When the error was `serve_running` (an old server for this task), run the `--start` command once more after the `--stop`. If `--start` still fails, carry on with the spawn anyway and say so: the reviewer will report the checks it cannot reach as `unverified`. A result with `started: false` needs no stop but is harmless to stop. After the reviewer's final answer, and on every path that follows the `--start` call (a context round, a model-unavailable fallback, an error from the Agent tool, an answer with no verdict), run:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" serve --task <task> --stop

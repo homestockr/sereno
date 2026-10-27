@@ -22,13 +22,13 @@ function serveRel(task) { return '.sereno/cache/serve-' + rec.checkTask(task) + 
 
 /**
  * @param {{ readFile: (rel: string, max: number) => Buffer }} fsafe @param {string} rel
- * @returns {{ pid: number, started_at: string, ready: string | null } | null}
+ * @returns {{ pid: number, started_at: string, ready: string | null, ident: string | null } | null}
  */
 function readServeFile(fsafe, rel) {
   let j;
   try { j = JSON.parse(fsafe.readFile(rel, FILE_MAX).toString('utf8')); } catch (_e) { return null; }
   if (!j || typeof j !== 'object' || !Number.isInteger(j.pid) || j.pid <= 1) return null;
-  return { pid: j.pid, started_at: typeof j.started_at === 'string' ? rec.cleanText(j.started_at, 40) : '', ready: typeof j.ready === 'string' ? rec.cleanText(j.ready, 500) : null };
+  return { pid: j.pid, started_at: typeof j.started_at === 'string' ? rec.cleanText(j.started_at, 40) : '', ready: typeof j.ready === 'string' ? rec.cleanText(j.ready, 500) : null, ident: typeof j.ident === 'string' && j.ident ? j.ident.slice(0, 100) : null };
 }
 
 /**
@@ -38,7 +38,7 @@ function readServeFile(fsafe, rel) {
 async function start(a) {
   const rel = serveRel(a.task);
   const existing = readServeFile(a.fsafe, rel);
-  if (existing && testrun.pidAlive(existing.pid)) {
+  if (existing && testrun.pidAlive(existing.pid) && (existing.ident === null || testrun.procIdentity(existing.pid) === existing.ident)) {
     throw new SerenoError('serve_running', 'a server for task ' + a.task + ' is already running (pid ' + existing.pid + '); run serve --stop first', { task: a.task, pid: existing.pid });
   }
   let text;
@@ -55,7 +55,8 @@ async function start(a) {
   }
   const startedAt = new Date().toISOString();
   try {
-    a.fsafe.writeJson(rel, { pid: r.pid, started_at: startedAt, ready: serve.ready });
+    const ident = r.pid ? testrun.procIdentity(r.pid) : null;
+    a.fsafe.writeJson(rel, { pid: r.pid, started_at: startedAt, ready: serve.ready, ident });
   } catch (e) {
     testrun.killPid(r.pid || undefined);
     throw e;
@@ -76,6 +77,11 @@ function stop(a) {
     return { task: a.task, stopped: false, reason: 'no server recorded for task ' + a.task };
   }
   const alive = testrun.pidAlive(f.pid);
+  // A recorded start identity must still match: a pid that now belongs to another process is never killed.
+  if (alive && f.ident !== null && testrun.procIdentity(f.pid) !== f.ident) {
+    a.fsafe.removeFile(rel);
+    return { task: a.task, stopped: true, pid: f.pid, was_alive: false, reason: 'pid reused' };
+  }
   if (alive) testrun.killPid(f.pid);
   a.fsafe.removeFile(rel);
   return { task: a.task, stopped: true, pid: f.pid, was_alive: alive };

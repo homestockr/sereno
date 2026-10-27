@@ -67,11 +67,12 @@ function lineOrNull(v) {
  * @param {unknown} raw @param {number[]} [allowed] the spec's browse check numbers; others are dropped
  * @returns {{ n: number, result: 'pass' | 'fail' | 'unverified', note: string }[]}
  */
+const MAX_CHECK_ENTRIES = 1000; // a safety cap on the raw array, applied before ranking, so a late `fail` is never cut off
 function sanitizeChecks(raw, allowed) {
   const rank = { fail: 2, unverified: 1, pass: 0 };
   /** @type {Map<number, { n: number, result: 'pass' | 'fail' | 'unverified', note: string }>} */
   const by = new Map();
-  for (const c of Array.isArray(raw) ? raw.slice(0, MAX_CHECKS * 2) : []) {
+  for (const c of Array.isArray(raw) ? raw.slice(0, MAX_CHECK_ENTRIES) : []) {
     if (!c || typeof c !== 'object' || Array.isArray(c)) continue;
     const n = c.n;
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > MAX_CHECKS) continue;

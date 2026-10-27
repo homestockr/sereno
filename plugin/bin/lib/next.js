@@ -289,7 +289,7 @@ function realDeps(a) {
       try {
         /** @type {{ url: string, look: string }[]} */
         const out = [];
-        const passed = latestGatePasses(root, fsafe, task);
+        const passed = latestGatePasses(root, fsafe, task, currentSpecHash(root, task), gitlib.resolveCommit(root, 'refs/heads/task/' + task));
         for (const c of speclib.parseChecks(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'), 'utf8'))) if (c.kind === 'browse' && !passed.has(c.n)) out[out.length] = { url: c.url, look: c.look };
         return out;
       } catch (_e) { return []; }
@@ -297,12 +297,20 @@ function realDeps(a) {
   };
 }
 
+/** @param {string} root @param {string} task @returns {string | null} */
+function currentSpecHash(root, task) {
+  try { return rec.sha256(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'))); } catch (_e) { return null; }
+}
+
 /**
  * The check numbers the task's newest gate record (by reviewed_at) records as `pass`. A browse check
- * with no result there is still unverified. Unreadable or oversized records count as nothing.
- * @param {string} root @param {{ listDir: (rel: string) => string[] }} fsafe @param {string} task @returns {Set<number>}
+ * with no result there is still unverified. Unreadable or oversized records count as nothing. The
+ * gate must be for the current spec (its spec_hash equals specHash) and, when the task tip is
+ * known, for that tip (its head_commit equals tip); otherwise nothing counts as passed.
+ * @param {string} root @param {{ listDir: (rel: string) => string[] }} fsafe @param {string} task
+ * @param {string | null} specHash @param {string | null} tip @returns {Set<number>}
  */
-function latestGatePasses(root, fsafe, task) {
+function latestGatePasses(root, fsafe, task, specHash, tip) {
   /** @type {Set<number>} */
   const out = new Set();
   let best = '';
@@ -320,6 +328,7 @@ function latestGatePasses(root, fsafe, task) {
       if (g.reviewed_at >= best) { best = g.reviewed_at; latest = g; }
     } catch (_e) { /* skip */ }
   }
+  if (latest && (!specHash || latest.spec_hash !== specHash || (tip && latest.head_commit !== tip))) return out;
   if (latest && Array.isArray(latest.checks)) for (const c of latest.checks) if (c && c.result === 'pass' && Number.isInteger(c.n)) out.add(c.n);
   return out;
 }

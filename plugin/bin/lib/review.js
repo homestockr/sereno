@@ -207,10 +207,11 @@ const RE_TODO = /\b(?:TODO|FIXME|XXX)\b/;
 const RE_NOT_IMPL = /not implemented|NotImplementedError|NotImplementedException|UnsupportedOperationException|\btodo!\s*\(|\bunimplemented!\s*\(|panic\(\s*["'`]TODO/i;
 const RE_SKIP = /\.skip\s*\(|\bxit\s*\(|\bxdescribe\s*\(|\b(?:it|test)\.todo\s*\(|@pytest\.mark\.skip|@unittest\.skip|#\[ignore\b|\bt\.Skip(?:f|Now)?\s*\(/;
 // A function opener and its closing body on one line: `function x() {}`, `=> {}`, `name(args) { }`, `def f(): pass`.
-const RE_EMPTY_ONE = /^\s*def\s.*:\s*(?:pass|\.\.\.)\s*$|\bfunction\b[^{;]*\([^)]*\)\s*\{\s*\}|=>\s*\{\s*\}|(?:^|[\s.])(?!(?:if|for|while|switch|catch|with)\b)[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{\s*\}\s*;?\s*$/;
+const RE_EMPTY_ONE = /^\s*def\s.{0,200}:\s*(?:pass|\.\.\.)\s*$|\bfunction\b[^{;]{0,200}\([^)]{0,200}\)\s*\{\s*\}|=>\s*\{\s*\}|(?:^|[\s.])(?!(?:if|for|while|switch|catch|with)\b)[A-Za-z_$][\w$]{0,100}\s*\([^)]{0,200}\)\s*\{\s*\}\s*;?\s*$/;
 // An opener that ends a line, for the two-line form (`function x() {` then `}`), and a Python def.
-const RE_OPEN = /(?:\bfunction\b[^{;]*\([^)]*\)|=>|(?:^|[\s.])(?!(?:if|for|while|switch|catch|with|else|try|do)\b)[A-Za-z_$][\w$]*\s*\([^)]*\))\s*\{\s*$/;
-const RE_PY_DEF = /^\s*(?:async\s+)?def\s+\w+\s*\(.*\)\s*(?:->\s*[^:]+)?:\s*$/;
+const RE_OPEN = /(?:\bfunction\b[^{;]{0,200}\([^)]{0,200}\)|=>|(?:^|[\s.])(?!(?:if|for|while|switch|catch|with|else|try|do)\b)[A-Za-z_$][\w$]{0,100}\s*\([^)]{0,200}\))\s*\{\s*$/;
+const RE_PY_DEF = /^\s*(?:async\s+)?def\s+\w{1,100}\s*\(.{0,200}\)\s*(?:->\s*[^:]{1,100})?:\s*$/;
+const HEURISTIC_LINE_MAX = 1000; // longer added lines (minified code, data) skip the empty-body heuristics
 
 /**
  * Stub markers on the ADDED lines of a unified diff (`git diff base head`, any context). Returns
@@ -254,8 +255,9 @@ function stubMarkers(diffText, max) {
         if (RE_NOT_IMPL.test(t) || /throw\s+new\s+\w*Error\(\s*["'`]TODO/.test(t)) hit('not_implemented');
         const trimmed = t.trim();
         const consecutive = prevLine === line - 1;
-        if (RE_EMPTY_ONE.test(t) || (consecutive && trimmed === '}' && RE_OPEN.test(prevText))
-          || (consecutive && RE_PY_DEF.test(prevText) && (trimmed === 'pass' || trimmed === '...'))) hit('empty_body');
+        if (t.length <= HEURISTIC_LINE_MAX && prevText.length <= HEURISTIC_LINE_MAX
+          && (RE_EMPTY_ONE.test(t) || (consecutive && trimmed === '}' && RE_OPEN.test(prevText))
+          || (consecutive && RE_PY_DEF.test(prevText) && (trimmed === 'pass' || trimmed === '...')))) hit('empty_body');
         if (RE_SKIP.test(t)) hit('skipped_test');
       }
       prevText = t; prevLine = line; line++;

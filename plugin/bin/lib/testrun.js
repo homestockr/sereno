@@ -48,6 +48,27 @@ function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return /** @type {any} */ (e).code === 'EPERM'; }
 }
 
+/**
+ * A start identity for a live pid, recorded beside it so a later --stop can tell the process it
+ * started from a different process that was given the same pid. win32: the image name from
+ * `tasklist` (the creation time needs PowerShell, which is too slow here). Elsewhere: the
+ * `ps` start time. Null when it cannot be read.
+ * @param {number} pid @returns {string | null}
+ */
+function procIdentity(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  try {
+    if (process.platform === 'win32') {
+      const r = spawnSync('tasklist', ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'], { windowsHide: true, encoding: 'utf8', timeout: 10000 });
+      const m = /^"([^"]{1,260})","(\d+)"/m.exec(String(r.stdout || ''));
+      return m && parseInt(m[2], 10) === pid ? m[1].toLowerCase() : null;
+    }
+    const r = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 10000 });
+    const t = String(r.stdout || '').trim();
+    return t ? t.slice(0, 100) : null;
+  } catch (_e) { return null; }
+}
+
 let aborted = false;
 
 /** Kill every running suite and run every pending cleanup. Used on SIGINT and the deadline. After it no suite starts. */
@@ -460,21 +481,38 @@ function httpGet(url, timeoutMs) {
 }
 
 /** @param {number} ms */
+const READY_SETTLE_MS = 300;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Poll a ready URL until it answers 2xx or 3xx. Shared by runChecks and `serve --start`.
- * @param {string} url @param {{ exited: () => boolean, aborted?: () => boolean, readyMs: number, pollMs: number, httpMs: number }} o
+ * @param {string} url @param {{ exited: () => boolean, aborted?: () => boolean, readyMs: number, pollMs: number, httpMs: number, anyStatus?: boolean }} o
  * @returns {Promise<boolean>}
  */
 async function pollReady(url, o) {
   const until = Date.now() + o.readyMs;
   while (!(o.aborted && o.aborted()) && !o.exited() && Date.now() < until) {
     const r = await httpGet(url, Math.min(2000, o.httpMs));
-    if (r.status !== null && r.status >= 200 && r.status < 400) return true;
+    if (r.status !== null && (o.anyStatus || (r.status >= 200 && r.status < 400))) {
+      // An answer only counts while the serve child is still alive: a server that was already there
+      // (or a child that died of EADDRINUSE in the same tick) must not read as ready.
+      if (o.exited()) return false;
+      await sleep(READY_SETTLE_MS);
+      return !o.exited();
+    }
     await sleep(o.pollMs);
   }
   return false;
+}
+
+/**
+ * Does anything answer at this URL (any HTTP status)? Used before spawning a `serve`, so a ready
+ * URL that is already taken is never mistaken for the new server. Never rejects.
+ * @param {string} url @param {number} httpMs @returns {Promise<boolean>}
+ */
+async function alreadyAnswers(url, httpMs) {
+  const r = await httpGet(url, Math.min(2000, httpMs));
+  return r.status !== null;
 }
 
 /**
@@ -488,6 +526,7 @@ async function pollReady(url, o) {
  */
 async function startDetached(command, ready, cwd, opts) {
   const o = opts || {};
+  if (ready && await alreadyAnswers(ready, o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS)) return { ok: false, pid: null, why: 'something already answers at ' + ready + '; stop it first' };
   let child;
   try {
     child = spawn(command, { shell: true, cwd, windowsHide: true, stdio: 'ignore', detached: true });
@@ -549,6 +588,12 @@ async function runChecks(checks, cwd, opts) {
       if (aborted) { record(c, c.kind, targetOf(c), 'refused', 'the run was interrupted', ''); continue; }
       if (c.kind === 'browse') { record(c, 'browse', c.url, 'unverified', clip(c.look, CHECK_DETAIL_MAX), c.look); continue; }
       if (c.kind === 'serve') {
+        if (c.ready && await alreadyAnswers(c.ready, httpMs)) {
+          serverReady = false;
+          const why = 'something already answers at ' + c.ready + '; stop it first';
+          record(c, 'serve', c.serve, 'fail', why, why);
+          continue;
+        }
         let child;
         try {
           child = spawn(c.serve, { shell: true, cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
@@ -560,12 +605,18 @@ async function runChecks(checks, cwd, opts) {
         if (child.stderr) child.stderr.on('data', take);
         child.on('error', () => { serveExited = true; });
         child.on('close', (code) => { serveExited = true; serveCode = code; });
-        if (!c.ready) { record(c, 'serve', c.serve, 'pass', 'started (no ready URL)', ''); continue; }
-        const ok = await pollReady(c.ready, { exited: () => serveExited, aborted: () => aborted, readyMs, pollMs, httpMs });
-        if (ok) record(c, 'serve', c.serve, 'pass', 'ready at ' + c.ready, '');
+        let readyUrl = c.ready;
+        if (!readyUrl) {
+          // No ready URL: when http checks follow, wait for the first one's URL to answer (any status).
+          const first = checks.find((x) => x.kind === 'http' && x.n > c.n);
+          if (!first || first.kind !== 'http') { record(c, 'serve', c.serve, 'pass', 'started (no ready URL)', ''); continue; }
+          readyUrl = first.url;
+        }
+        const ok = await pollReady(readyUrl, { exited: () => serveExited, aborted: () => aborted, readyMs, pollMs, httpMs, anyStatus: !c.ready });
+        if (ok) record(c, 'serve', c.serve, 'pass', (c.ready ? 'ready at ' : 'answering at ') + readyUrl, '');
         else {
           serverReady = false;
-          const why = serveExited ? 'the server exited' + (serveCode === null ? '' : ' with code ' + serveCode) + ' before it was ready' : 'no 2xx or 3xx from ' + c.ready + ' within ' + Math.round(readyMs / 1000) + ' s';
+          const why = serveExited ? 'the server exited' + (serveCode === null ? '' : ' with code ' + serveCode) + ' before it was ready' : (c.ready ? 'no 2xx or 3xx from ' : 'no answer from ') + readyUrl + ' within ' + Math.round(readyMs / 1000) + ' s';
           record(c, 'serve', c.serve, 'server_not_ready', why, why + '\n' + Buffer.concat(serveOut).toString('utf8'));
         }
         continue;
@@ -761,4 +812,4 @@ async function runTests(o) {
   };
 }
 
-module.exports = { killPid, pidAlive, startDetached, pollReady, runChecks, httpGet, sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };
+module.exports = { killPid, pidAlive, procIdentity, startDetached, pollReady, runChecks, httpGet, sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };
