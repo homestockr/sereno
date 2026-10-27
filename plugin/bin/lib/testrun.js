@@ -62,7 +62,7 @@ function procIdentity(pid) {
     if (process.platform === 'win32') {
       const r = spawnSync('tasklist', ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'], { windowsHide: true, encoding: 'utf8', timeout: 10000 });
       const m = /^"([^"|]{1,260})","(\d+)"/m.exec(String(r.stdout || ''));
-      const image = m && parseInt(m[2], 10) === pid ? m[1].toLowerCase() : '';
+      const image = m && parseInt(m[2], 10) === pid ? m[1].toLowerCase().slice(0, 60) : '';
       let start = '';
       try {
         const p = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', '(Get-Process -Id ' + pid + ').StartTime.ToFileTimeUtc()'], { windowsHide: true, encoding: 'utf8', timeout: 10000 });

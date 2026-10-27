@@ -119,7 +119,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" serve --task <task> --start
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" serve --task <task> --stop
 ```
 
-  Never end the turn, stop for the user or go to step 3 with the server still running. `--stop` is safe to repeat. Run both commands with Bash in the foreground, like every command here. Put the verdict's `checks` array into the verdict file as given (step 3).
+  Never end the turn, stop for the user or go to step 3 with the server still running. `--stop` is safe to repeat. If it reports `still running after kill`, say so in the final output. Run both commands with Bash in the foreground, like every command here. Put the verdict's `checks` array into the verdict file as given (step 3).
 - **Context requests.** If the verdict is `needs_context` with `context_requests`, fetch
   those files once and ask the same agent again with the content:
 

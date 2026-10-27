@@ -16685,6 +16685,38 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.ok(await goneSoon(child.pid), 'a matching identity is killed');
       } finally { try { child.kill(); } catch (_e) { /* gone */ } }
     });
+    // ---- [plugin-0.5 rt3] red-team pass 3 fixes ----
+    await atest('[plugin-0.5 rt3] serve ident: a long ident (up to 120 chars) survives the read and still compares match; stop with a kill that does nothing reports still running and keeps the file', async () => {
+      const serveLib3 = require('../plugin/bin/lib/serve.js');
+      const r = ckRepo(BROWSE_BLK(await freePort()));
+      const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+      try {
+        const sfs = p2bSafeFs(r.dir);
+        const file = path.join(r.dir, '.sereno', 'cache', 'serve-ck.json');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const put = (id) => fs.writeFileSync(file, JSON.stringify({ pid: child.pid, started_at: '2026-01-01T00:00:00.000Z', ready: null, ident: id }));
+        const long = 'x'.repeat(115);
+        put(long);
+        assert.strictEqual(serveLib3.readServeFile(sfs, '.sereno/cache/serve-ck.json').ident, long, 'not clipped at 100');
+        const real = testrunLib.procIdentity(child.pid);
+        assert.ok(real && real.split('|')[0].length <= 60, 'image name is clipped at the writer: ' + real);
+        put(real);
+        assert.strictEqual(testrunLib.identityCheck(serveLib3.readServeFile(sfs, '.sereno/cache/serve-ck.json').ident, child.pid), 'match');
+        const out = serveLib3.stop({ fsafe: sfs, task: 'ck', killPid: () => {} });
+        assert.deepStrictEqual([out.stopped, out.killed, out.was_alive, out.reason], [false, false, true, 'still running after kill'], JSON.stringify(out));
+        assert.ok(fs.existsSync(file), 'the pid file is kept so doctor lists it');
+        assert.ok(alive(child.pid));
+        const ok = serveLib3.stop({ fsafe: sfs, task: 'ck' });
+        assert.strictEqual(ok.stopped, true, JSON.stringify(ok));
+        assert.ok(!fs.existsSync(file));
+        assert.ok(await goneSoon(child.pid));
+      } finally { try { child.kill(); } catch (_e) { /* gone */ } }
+    });
+    test('[plugin-0.5 rt3] ship skill: --stop reporting still running is said in the final output', () => {
+      const s = skillText('ship');
+      assert.ok(s.includes('If it reports `still running after kill`, say so in the final output'));
+      assert.ok(!/npm/.test(s) && !/push/.test(s));
+    });
     test('[plugin-0.5 rt1] sanitizeChecks: 60 entries with a trailing fail for check 3 still rank as fail', () => {
       const raw = []; for (let i = 0; i < 59; i++) raw.push({ n: 3, result: 'pass', note: 'ok' });
       raw.push({ n: 3, result: 'fail', note: 'late' });

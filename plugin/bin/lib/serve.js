@@ -31,7 +31,7 @@ function readServeFile(fsafe, rel) {
   let j;
   try { j = JSON.parse(fsafe.readFile(rel, FILE_MAX).toString('utf8')); } catch (_e) { return null; }
   if (!j || typeof j !== 'object' || !Number.isInteger(j.pid) || j.pid <= 1) return null;
-  return { pid: j.pid, started_at: typeof j.started_at === 'string' ? rec.cleanText(j.started_at, 40) : '', ready: typeof j.ready === 'string' ? rec.cleanText(j.ready, 500) : null, ident: typeof j.ident === 'string' && j.ident ? j.ident.slice(0, 100) : null };
+  return { pid: j.pid, started_at: typeof j.started_at === 'string' ? rec.cleanText(j.started_at, 40) : '', ready: typeof j.ready === 'string' ? rec.cleanText(j.ready, 500) : null, ident: typeof j.ident === 'string' && j.ident ? j.ident.slice(0, 120) : null };
 }
 
 /**
@@ -70,7 +70,7 @@ async function start(a) {
 /**
  * Kill the recorded server's tree and remove the file. Idempotent: no file is a successful no-op.
  * A recorded pid that is no longer running is only cleaned up, never signalled (pids get reused).
- * @param {{ fsafe: any, task: string }} a @returns {Record<string, any>}
+ * @param {{ fsafe: any, task: string, killPid?: (pid: number) => void }} a @returns {Record<string, any>}
  */
 function stop(a) {
   const rel = serveRel(a.task);
@@ -87,7 +87,16 @@ function stop(a) {
     a.fsafe.removeFile(rel);
     return { task: a.task, stopped: true, pid: f.pid, was_alive: false, reason: 'pid reused' };
   }
-  if (alive) testrun.killPid(f.pid);
+  if (alive) {
+    (a.killPid || testrun.killPid)(f.pid);
+    // The kill can lag or fail: look again for up to ~1 s. A survivor keeps its file so doctor lists it.
+    let still = testrun.pidAlive(f.pid);
+    for (let i = 0; still && i < 10; i++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      still = testrun.pidAlive(f.pid);
+    }
+    if (still) return { task: a.task, stopped: false, killed: false, pid: f.pid, was_alive: true, reason: 'still running after kill' };
+  }
   a.fsafe.removeFile(rel);
   return ident ? { task: a.task, stopped: true, pid: f.pid, was_alive: true, ident } : { task: a.task, stopped: true, pid: f.pid, was_alive: false };
 }
