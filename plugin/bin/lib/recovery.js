@@ -64,6 +64,16 @@ function readAttempts(root, task, files) {
 }
 
 /**
+ * The first attempt the red team actually reviewed and held back: its gate record says block or needs_context.
+ * A failed test run has no gate and does not count. Shared by recovery and the reviewer choice.
+ * @param {{ n: number, rec: any, gate: any | null }[]} attempts
+ * @returns {{ n: number, rec: any, gate: any } | undefined}
+ */
+function openReviewBlock(attempts) {
+  return /** @type {any} */ (attempts.find((x) => x.gate && (x.gate.outcome === 'block' || x.gate.outcome === 'needs_context')));
+}
+
+/**
  * The commit a task's success was recorded at: the newest attempt's passing gate head, or the
  * head a skipped attempt carries. null when the newest attempt is neither. Used when the task
  * branch has been deleted after a merge.
@@ -137,8 +147,8 @@ function decide(a) {
     if (red.enabled && !bySpec) return out('decide', 'attempt is marked skipped but the red team is enabled');
     // A review the spec skips must not close an open block: an earlier gate block or needs_context stands until a review passes.
     if (bySpec) {
-      const open = before.find((x) => x.rec.outcome === 'block' || x.rec.outcome === 'needs_context' || (x.gate && (x.gate.outcome === 'block' || x.gate.outcome === 'needs_context')));
-      if (open) return out('decide', 'attempt ' + open.n + ' has an open ' + ((open.gate && open.gate.outcome) || open.rec.outcome) + ' from the red team; a spec that chose no review does not clear it');
+      const open = openReviewBlock(before);
+      if (open) return out('decide', 'attempt ' + open.n + ' was blocked by the red team (gate ' + open.gate.outcome + '); a spec that chose no review does not clear it');
     }
     // With the gate off, the skipped attempt itself carries the head it was tested at (sereno.js attempt --update --head).
     const sh = last.rec.head_commit;
@@ -177,4 +187,4 @@ function decide(a) {
   return out('decide', 'the latest attempt has an unknown outcome');
 }
 
-module.exports = { decide, recordedHead, DEFECT_KINDS, gateHasDefect };
+module.exports = { decide, readAttempts, openReviewBlock, recordedHead, DEFECT_KINDS, gateHasDefect };

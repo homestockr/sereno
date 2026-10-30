@@ -17217,7 +17217,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const row = t.split('\n').find((l) => l.startsWith('| `none`'));
       assert.ok(row && !/Assets, copy, config/.test(row) && /Assets, copy and generated files/.test(row), row);
       const r = rd('README.md');
-      for (const k of ['.sereno/**', '.github/**', '.claude/**', '`package.json`', '`CLAUDE.md`', 'skip_refused', 'open block', 'no files', 'tip of `task/<task>`']) assert.ok(r.includes(k), k);
+      for (const k of ['.sereno/pipeline.json', '.github/**', '.claude/**', '`package.json`', '`CLAUDE.md`', 'skip_refused', 'open block', 'no files', 'tip of `task/<task>`']) assert.ok(r.includes(k), k);
       assert.ok(r.includes('next` and `spec-review-needed` both read the level'));
       assert.ok(t.includes('omit `--review` unless `$ARGUMENTS` or the user asks for a level'));
       assert.ok(rd('skills/ship/SKILL.md').includes('--skip spec --diagnosis none --head <head> --ended-at now --base <base>'));
@@ -17226,11 +17226,15 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const prior of [{ outcome: 'block', diagnosis: 'defect' }, { outcome: 'needs_context' }]) {
         const { dir, head } = skipSetup(null, 'none');
         const a1 = readJ(dir, '.sereno/attempts/a-1.json');
-        fs.writeFileSync(path.join(dir, '.sereno/attempts/a-1.json'), JSON.stringify(Object.assign({}, a1, prior)));
+        // rt2: only a gate the red team wrote counts, so the block lives on the gate record
+        const rr0 = 'rr_20260101T000000Z_abcdef' + (prior.outcome === 'block' ? '1' : '2');
+        fs.mkdirSync(path.join(dir, '.sereno/gates'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.sereno/gates/' + rr0 + '.json'), JSON.stringify({ outcome: prior.outcome, task_id: 'a' }));
+        fs.writeFileSync(path.join(dir, '.sereno/attempts/a-1.json'), JSON.stringify(Object.assign({}, a1, prior, { review_run_id: rr0 })));
         fs.writeFileSync(path.join(dir, '.sereno/attempts/a-2.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'skipped', skip: 'spec', head_commit: head })));
         const r = S(dir, ['recovery', '--task', 'a']).out;
         assert.strictEqual(r.next, 'decide', JSON.stringify(r));
-        assert.ok(r.reason.includes('attempt 1') && r.reason.includes('open ' + prior.outcome), r.reason);
+        assert.ok(r.reason.includes('attempt 1') && r.reason.includes('gate ' + prior.outcome), r.reason);
       }
       // a block recorded only on the gate counts too
       const { dir, head } = skipSetup(null, 'none');
@@ -17242,7 +17246,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       fs.writeFileSync(path.join(dir, '.sereno/attempts/a-2.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'skipped', skip: 'spec', head_commit: head })));
       const rg = S(dir, ['recovery', '--task', 'a']).out;
       assert.strictEqual(rg.next, 'decide', JSON.stringify(rg));
-      assert.ok(rg.reason.includes('open block'), rg.reason);
+      assert.ok(rg.reason.includes('attempt 1') && rg.reason.includes('gate block'), rg.reason);
       // no earlier block: merges
       const c = skipSetup(null, 'none');
       const b1 = readJ(c.dir, '.sereno/attempts/a-1.json');
@@ -17302,6 +17306,97 @@ test('missing rate_limits degrades instead of throwing', () => {
         r = S(dir, ['reviewer', '--task', task, '--base', t.base, '--head', tip]).out;
         assert.strictEqual(r.skip === true || r.light === true, true, 'the real tip is accepted: ' + JSON.stringify(r));
       }
+    });
+
+    // ---- plugin-0.6 rt2 ----
+    test('[plugin-0.6 rt2] floor: committed .sereno specs and attempts do not trip it; .sereno/pipeline.json still does', () => {
+      const dir = repo();
+      const t = mkTask(dir, 'sp', 'feature', { 'assets/i.svg': '<svg/>\n', '.sereno/attempts/sp-1.json': '{}\n', '.sereno/gates/g.json': '{}\n', '.sereno/briefs/b.md': 'x\n' }, ['--review', 'none']);
+      // the task's own spec is committed too (a repo that commits .sereno/)
+      git(dir, 'switch', '-q', 'task/sp'); git(dir, 'add', '-f', '--', '.sereno/specs/sp.md'); git(dir, 'commit', '-q', '-m', 'spec');
+      t.head = git(dir, 'rev-parse', 'HEAD');
+      const specText = fs.readFileSync(path.join(dir, '.sereno/specs/sp.md'), 'utf8');
+      git(dir, 'switch', '-q', 'main');
+      fs.mkdirSync(path.join(dir, '.sereno/specs'), { recursive: true }); fs.writeFileSync(path.join(dir, '.sereno/specs/sp.md'), specText); // the reviewer reads the spec from the checked-out tree
+      const r = rv(dir, 'sp', t);
+      assert.deepStrictEqual([r.agent, r.skip], [null, true], JSON.stringify(r));
+      const t2 = mkTask(dir, 'sq', 'feature', { 'assets/i.svg': '<svg/>\n', '.sereno/pipeline.json': '{}\n' }, ['--review', 'none']);
+      const r2 = rv(dir, 'sq', t2);
+      assert.deepStrictEqual([r2.agent, 'skip' in r2], ['red-team', false], JSON.stringify(r2));
+      assert.match(r2.reason, /\.sereno\/pipeline\.json matches/);
+    });
+    test('[plugin-0.6 rt2] recovery: a test failure (no gate) followed by a repair that spec-skips merges', () => {
+      const { dir, head } = skipSetup(null, 'none');
+      const a1 = readJ(dir, '.sereno/attempts/a-1.json');
+      fs.writeFileSync(path.join(dir, '.sereno/attempts/a-1.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'block', diagnosis: 'defect' })));
+      fs.writeFileSync(path.join(dir, '.sereno/attempts/a-2.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'skipped', skip: 'spec', head_commit: head })));
+      const r = S(dir, ['recovery', '--task', 'a']).out;
+      assert.deepStrictEqual([r.next, r.head_commit], ['merge', head], JSON.stringify(r));
+    });
+    test('[plugin-0.6 rt2] reviewer: an earlier red team block or needs_context gives none and light the full review; refused up front', () => {
+      for (const lvl of ['none', 'light']) {
+        for (const oc of ['block', 'needs_context']) {
+          const { dir, head } = skipSetup(null, lvl);
+          const a1 = readJ(dir, '.sereno/attempts/a-1.json');
+          const rr = 'rr_20260101T000000Z_abcdef' + (oc === 'block' ? '1' : '2');
+          fs.mkdirSync(path.join(dir, '.sereno/gates'), { recursive: true });
+          fs.writeFileSync(path.join(dir, '.sereno/gates/' + rr + '.json'), JSON.stringify({ outcome: oc, task_id: 'a' }));
+          fs.writeFileSync(path.join(dir, '.sereno/attempts/a-1.json'), JSON.stringify(Object.assign({}, a1, { outcome: oc, review_run_id: rr })));
+          fs.writeFileSync(path.join(dir, '.sereno/attempts/a-2.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'running' })));
+          const r = S(dir, ['reviewer', '--task', 'a', '--base', git(dir, 'rev-parse', 'main'), '--head', head]).out;
+          assert.deepStrictEqual([r.agent, r.light, 'skip' in r], ['red-team', false, false], lvl + oc + JSON.stringify(r));
+          assert.strictEqual(r.reason, 'attempt 1 was blocked by the red team; full review until a review passes');
+          const u = S(dir, ['attempt', '--task', 'a', '--update', '2', '--outcome', 'skipped', '--diagnosis', 'none', '--head', head, '--base', git(dir, 'rev-parse', 'main'), '--ended-at', 'now', '--skip', 'spec']).out;
+          assert.deepStrictEqual([u.ok, u.code], [false, 'invalid_arg'], JSON.stringify(u));
+          assert.match(u.error, /^skip_refused/);
+        }
+      }
+      // a test failure with no gate does not change the choice
+      const s = skipSetup(null, 'none');
+      const b1 = readJ(s.dir, '.sereno/attempts/a-1.json');
+      fs.writeFileSync(path.join(s.dir, '.sereno/attempts/a-1.json'), JSON.stringify(Object.assign({}, b1, { outcome: 'block', diagnosis: 'defect' })));
+      assert.strictEqual(S(s.dir, ['reviewer', '--task', 'a', '--base', git(s.dir, 'rev-parse', 'main'), '--head', s.head]).out.skip, true);
+    });
+    test('[plugin-0.6 rt2] floor: test files with removed lines and lockfiles get the full review for none and light', () => {
+      const dir = repo();
+      fs.mkdirSync(path.join(dir, 'tests'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'tests', 'old.js'), 'one\ntwo\n');
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'tests');
+      let i = 0;
+      for (const lvl of ['none', 'light']) {
+        // only added lines in a test file: still skips (none) or goes light
+        const ta = 'ta' + (i++);
+        const a = mkTask(dir, ta, 'feature', { 'assets/i.svg': '<svg/>\n', 'tests/new.test.js': 'x\n' }, ['--review', lvl]);
+        const ra = rv(dir, ta, a);
+        assert.strictEqual(ra.skip === true || ra.light === true, true, lvl + JSON.stringify(ra));
+        // a test file that loses a line
+        const tr = 'tr' + (i++);
+        const rm = mkTask(dir, tr, 'feature', { 'assets/i.svg': '<svg/>\n', 'tests/old.js': 'one\n' }, ['--review', lvl]);
+        const rr = rv(dir, tr, rm);
+        assert.deepStrictEqual([rr.agent, rr.light, 'skip' in rr], ['red-team', false, false], lvl + JSON.stringify(rr));
+        assert.ok(rr.reason.includes('tests/old.js') && rr.reason.includes('removed lines'), rr.reason);
+        for (const lock of ['package-lock.json', 'sub/yarn.lock', 'pnpm-lock.yaml']) {
+          const tl = 'tl' + (i++);
+          const l = mkTask(dir, tl, 'feature', { 'assets/i.svg': '<svg/>\n', [lock]: 'x\n' }, ['--review', lvl]);
+          const rl = rv(dir, tl, l);
+          assert.deepStrictEqual([rl.agent, rl.light, 'skip' in rl], ['red-team', false, false], lvl + lock + JSON.stringify(rl));
+          assert.ok(rl.reason.includes(lock), rl.reason);
+        }
+      }
+      // config-driven light is unchanged: a test file with removed lines and a lockfile do not trip it
+      const d2 = repo(LEAN);
+      fs.mkdirSync(path.join(d2, 'tests'), { recursive: true });
+      fs.writeFileSync(path.join(d2, 'tests', 'old.js'), 'one\ntwo\n');
+      git(d2, 'add', '-f', '.'); git(d2, 'commit', '-q', '-m', 'tests');
+      const t2 = mkTask(d2, 'm', 'mechanical', { 'tests/old.js': 'one\n', 'yarn.lock': 'x\n' });
+      assert.strictEqual(rv(d2, 'm', t2).light, true);
+    });
+    test('[plugin-0.6 rt2] docs: ship skill continues on skip_refused, README lists the narrowed floor and the gate-only open block', () => {
+      const s = rd('skills/ship/SKILL.md');
+      assert.ok(s.includes('skip_refused') && s.includes('re-run `reviewer`') && s.includes('as a normal review'));
+      const r = rd('README.md');
+      for (const k of ['**/.sereno/pipeline.json', 'removed lines', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'red team gate says']) assert.ok(r.includes(k), k);
+      assert.ok(!r.includes('.sereno/**'));
     });
 
     await atest('[plugin-0.6] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
