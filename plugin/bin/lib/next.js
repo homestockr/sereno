@@ -4,8 +4,9 @@
  * sereno.js next: what /sereno:next does, as code. Read-only; it writes nothing.
  *
  * Answers { task, step, reason, hold, command }:
- *   step     build | ship | repair | retry | merge | decide | done | pick | idle
- *            (repair: recovery says one repair is due; ship is entered at its repair bullet)
+ *   step     spec_review | build | ship | repair | retry | merge | decide | done | pick | idle
+ *            (repair: recovery says one repair is due; ship is entered at its repair bullet;
+ *            spec_review: the red team reads the spec before the first build, see specreview.js)
  *   command  the exact slash command the user types next, or null when `next` itself
  *            carries on (build, ship, repair, retry) or there is nothing to type (pick, idle)
  *   hold     the spec's hold_before_merge text, only on a `merge` stop
@@ -23,6 +24,7 @@ const gitlib = require('./git.js');
 const rec = require('./records.js');
 const speclib = require('./spec.js');
 const recovery = require('./recovery.js');
+const specreview = require('./specreview.js');
 
 /**
  * @typedef {{ task: string, base_branch: string | null, after: string | null, hold_before_merge: string | null, created_at: string | null }} Meta
@@ -36,6 +38,8 @@ const recovery = require('./recovery.js');
  * @property {(task: string) => string | null} [recordedHead] the commit the newest success was recorded at
  * @property {() => string[] | null} [cleanFiles] tracked files with uncommitted changes (null: unknown)
  * @property {(task: string) => { pinned: string | null, current: string | null }} [specPin] the spec hash the newest pinned attempt carries, and the spec's hash now
+ * @property {(task: string) => { url: string, look: string }[]} [browseChecks] the spec's browse checks (nothing verifies them); [] when none or the checks block is unreadable
+ * @property {(task: string) => { needed: boolean, outcome: string | null, point: string | null }} [specReview] is a spec review wanted, and what is recorded for the spec's current revision (outcome and first point); when absent, none is wanted
  * @property {(task: string) => boolean} [branchExists] does refs/heads/task/<task> resolve (when absent, assumed yes)
  */
 
@@ -135,6 +139,14 @@ function stateOf(d, m) {
   if (d.attemptCount(task) === 0) {
     const a = afterState(d, m);
     if (!a.ok) return mk('idle', a.after && d.lastOutcome(a.after) === 'stopped' ? a.after + ' was stopped; run /sereno:task ' + task + ' --after none to unblock' : 'after_not_merged: ' + task + ' waits for ' + a.after + ' to be merged' + (a.base ? ' into ' + a.base : ''), null, null);
+    const sr = typeof d.specReview === 'function' ? d.specReview(task) : null;
+    if (sr && sr.needed) {
+      if (!sr.outcome) return mk('spec_review', 'the spec has not been reviewed yet', null, null);
+      if (sr.outcome !== 'agree') {
+        // A new spec revision (/sereno:task) is reviewed again. Build does not require the review, so building directly is the way past it.
+        return mk('decide', 'spec review: ' + sr.outcome + ' — ' + (sr.point || 'no detail') + ' (/sereno:build ' + task + ' builds without the review)', '/sereno:task ' + task, null);
+      }
+    }
     return mk('build', 'the spec exists and nothing has been built yet', null, null);
   }
   if (mergedInto(d, task, m.base_branch)) {
@@ -154,7 +166,13 @@ function stateOf(d, m) {
     }
     case 'retry': return mk('retry', r.reason, null, null);
     case 'repair': return mk('repair', r.reason, null, null);
-    case 'merge': return mk('merge', r.reason, '/sereno:merge ' + task, m.hold_before_merge);
+    case 'merge': {
+      const st = mk('merge', r.reason, '/sereno:merge ' + task, m.hold_before_merge);
+      // Browse checks are never run by the test step. Like a hold, they are printed at the merge stop, and typing /sereno:merge is the person's yes.
+      const b = typeof d.browseChecks === 'function' ? d.browseChecks(task) : [];
+      if (!b.length) return st;
+      return Object.assign(st, { browse_unverified: b, browse_note: b.length + ' browse check' + (b.length === 1 ? '' : 's') + ' unverified: check ' + (b.length === 1 ? 'it' : 'them') + ' yourself' });
+    }
     case 'done': return mk('done', r.reason, '/sereno:next', null);
     default: {
       if (r.reason.startsWith('the latest attempt never finished')) {
@@ -260,7 +278,59 @@ function realDeps(a) {
     },
     recordedHead: (task) => recovery.recordedHead({ root, task, listAttempts: () => fsafe.listDir('.sereno/attempts') }),
     branchExists: (task) => !!gitlib.resolveCommit(root, 'refs/heads/task/' + task),
+    specReview: (task) => {
+      const m = speclib.readSpecMeta(root, task);
+      if (!m) return { needed: false, outcome: null, point: null };
+      if (!specreview.needed({ config, kind: m.kind }).needed) return { needed: false, outcome: null, point: null };
+      const r = specreview.latest(root, task, m.spec_revision);
+      return { needed: true, outcome: r ? r.outcome : null, point: r && r.points.length ? r.points[0] : null };
+    },
+    browseChecks: (task) => {
+      try {
+        /** @type {{ url: string, look: string }[]} */
+        const out = [];
+        const passed = latestGatePasses(root, fsafe, task, currentSpecHash(root, task), gitlib.resolveCommit(root, 'refs/heads/task/' + task));
+        for (const c of speclib.parseChecks(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'), 'utf8'))) if (c.kind === 'browse' && !passed.has(c.n)) out[out.length] = { url: c.url, look: c.look };
+        return out;
+      } catch (_e) { return []; }
+    },
   };
+}
+
+/** @param {string} root @param {string} task @returns {string | null} */
+function currentSpecHash(root, task) {
+  try { return rec.sha256(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'))); } catch (_e) { return null; }
+}
+
+/**
+ * The check numbers the task's newest gate record (by reviewed_at) records as `pass`. A browse check
+ * with no result there is still unverified. Unreadable or oversized records count as nothing. The
+ * gate must be for the current spec (its spec_hash equals specHash) and, when the task tip is
+ * known, for that tip (its head_commit equals tip); otherwise nothing counts as passed.
+ * @param {string} root @param {{ listDir: (rel: string) => string[] }} fsafe @param {string} task
+ * @param {string | null} specHash @param {string | null} tip @returns {Set<number>}
+ */
+function latestGatePasses(root, fsafe, task, specHash, tip) {
+  /** @type {Set<number>} */
+  const out = new Set();
+  let best = '';
+  /** @type {any} */ let latest = null;
+  let names = [];
+  try { names = fsafe.listDir('.sereno/gates'); } catch (_e) { return out; }
+  for (const f of names) {
+    if (!/^rr_[A-Za-z0-9_]+.json$/.test(f)) continue;
+    try {
+      const file = path.join(root, '.sereno', 'gates', f);
+      const st = fs.lstatSync(file);
+      if (!st.isFile() || st.size > 1024 * 1024) continue;
+      const g = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!g || g.task_id !== task || typeof g.reviewed_at !== 'string') continue;
+      if (g.reviewed_at >= best) { best = g.reviewed_at; latest = g; }
+    } catch (_e) { /* skip */ }
+  }
+  if (latest && (!specHash || latest.spec_hash !== specHash || (tip && latest.head_commit !== tip))) return out;
+  if (latest && Array.isArray(latest.checks)) for (const c of latest.checks) if (c && c.result === 'pass' && Number.isInteger(c.n)) out.add(c.n);
+  return out;
 }
 
 /**
@@ -321,4 +391,4 @@ function refreshQueuedBranch(a) {
 // The cap is counted by the model (it passes --steps-done), so it is a backstop, not a hard limit.
 const STEP_CAP = 3;
 
-module.exports = { STEP_CAP, decide, realDeps, refreshQueuedBranch, branchMerged, headMergedFor, afterState, baseFor, commandForDecide, stateOf, mergedInto };
+module.exports = { STEP_CAP, latestGatePasses, decide, realDeps, refreshQueuedBranch, branchMerged, headMergedFor, afterState, baseFor, commandForDecide, stateOf, mergedInto };

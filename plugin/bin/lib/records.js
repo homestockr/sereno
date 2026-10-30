@@ -18,6 +18,9 @@ const PATH_MAX = 260;
 
 const GATE_OUTCOMES = ['pass', 'block', 'needs_context', 'error', 'skipped'];
 const SEVERITIES = ['high', 'medium', 'low'];
+const CHECK_RESULTS = ['pass', 'fail', 'unverified'];
+const CHECK_NOTE_MAX = 300;
+const MAX_CHECKS = 20;
 const BUILDERS = ['haiku', 'sonnet', 'opus'];
 const KINDS = ['mechanical', 'feature', 'fix', 'refactor'];
 const DIAGNOSES = ['environment', 'spec', 'defect', 'hook_failed', 'none'];
@@ -58,8 +61,33 @@ function lineOrNull(v) {
 }
 
 /**
+ * A verdict's per-check results (browse checks). Only a positive integer n, one of pass / fail /
+ * unverified (anything else is unverified) and a cleaned note are kept. One entry per n: the most
+ * severe result wins (fail, then unverified, then pass), so a duplicate cannot launder a failure.
+ * @param {unknown} raw @param {number[]} [allowed] the spec's browse check numbers; others are dropped
+ * @returns {{ n: number, result: 'pass' | 'fail' | 'unverified', note: string }[]}
+ */
+const MAX_CHECK_ENTRIES = 1000; // a safety cap on the raw array, applied before ranking, so a late `fail` is never cut off
+function sanitizeChecks(raw, allowed) {
+  const rank = { fail: 2, unverified: 1, pass: 0 };
+  /** @type {Map<number, { n: number, result: 'pass' | 'fail' | 'unverified', note: string }>} */
+  const by = new Map();
+  for (const c of Array.isArray(raw) ? raw.slice(0, MAX_CHECK_ENTRIES) : []) {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) continue;
+    const n = c.n;
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > MAX_CHECKS) continue;
+    if (allowed && !allowed.includes(n)) continue;
+    const r = enumOr(c.result, CHECK_RESULTS);
+    const result = /** @type {'pass' | 'fail' | 'unverified'} */ (r === 'unknown' ? 'unverified' : r);
+    const prev = by.get(n);
+    if (!prev || rank[result] > rank[prev.result]) by.set(n, { n, result, note: cleanText(c.note, CHECK_NOTE_MAX) });
+  }
+  return Array.from(by.values()).sort((x, y) => x.n - y.n);
+}
+
+/**
  * @param {unknown} verdict untrusted red-team verdict
- * @returns {{ outcome: string, findings: any[], context_requests: string[] }}
+ * @returns {{ outcome: string, findings: any[], context_requests: string[], checks: { n: number, result: 'pass' | 'fail' | 'unverified', note: string }[] }}
  */
 function sanitizeVerdict(verdict) {
   const v = verdict && typeof verdict === 'object' && !Array.isArray(verdict) ? /** @type {Record<string, any>} */ (verdict) : {};
@@ -81,7 +109,7 @@ function sanitizeVerdict(verdict) {
     const p = repoRelative(c);
     if (p && context.length < MAX_CONTEXT) context.splice(context.length, 0, p);
   }
-  return { outcome: enumOr(v.outcome, GATE_OUTCOMES), findings, context_requests: context };
+  return { outcome: enumOr(v.outcome, GATE_OUTCOMES), findings, context_requests: context, checks: sanitizeChecks(v.checks) };
 }
 
 /** @param {string | Buffer} bytes @returns {string} */
@@ -106,6 +134,6 @@ function checkTask(t) {
 }
 
 module.exports = {
-  sanitizeVerdict, cleanText, enumOr, repoRelative, sha256, makeRunId, checkTask, compactUtc,
+  sanitizeVerdict, sanitizeChecks, cleanText, enumOr, repoRelative, sha256, makeRunId, checkTask, compactUtc,
   RUN_ID, FINAL_OUTCOMES, BUILDERS, KINDS, DIAGNOSES, ATTEMPT_OUTCOMES, GATE_OUTCOMES, MAX_FINDINGS,
 };

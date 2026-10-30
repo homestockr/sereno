@@ -452,7 +452,7 @@ const SIGNAL_DAYS = 30;
 const WEEK_DAYS = 7;
 const ROLE_MAP = Object.freeze({
   'sereno:builder': 'builder', 'sereno:builder-haiku': 'builder', 'sereno:builder-opus': 'builder',
-  'sereno:red-team': 'red-team', 'sereno:red-team-lean': 'red-team',
+  'sereno:red-team': 'red-team', 'sereno:red-team-lean': 'red-team', 'sereno:red-team-browse': 'red-team',
   'sereno:scribe': 'scribe',
 });
 const AGENT_HEAD_BYTES = 4096;

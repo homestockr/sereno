@@ -8,6 +8,7 @@ const { SerenoError, createSafeFs } = require('./fsafe.js');
 const gitlib = require('./git.js');
 const { loadConfig, inertKeys } = require('./config.js');
 const { resolveCommand } = require('./testrun.js');
+const serveLib = require('./serve.js');
 
 const AGENTS_DIR = path.join(__dirname, '..', '..', 'agents');
 
@@ -26,11 +27,11 @@ const BG_ADVICE = 'Set CLAUDE_CODE_FORK_SUBAGENT=0 so /sereno:next runs in one t
 function runDoctor(cwd, env) {
   /** @type {{ name: string, ok: boolean, detail: string }[]} */
   const checks = [];
-  /** @param {string} name @param {() => { ok: boolean, detail: string }} fn */
+  /** @param {string} name @param {() => { ok: boolean, detail: string } | null} fn a null result adds no line */
   const check = (name, fn) => {
     let r;
     try { r = fn(); } catch (e) { r = { ok: false, detail: e instanceof SerenoError ? e.message : 'check failed unexpectedly' }; }
-    checks.splice(checks.length, 0, { name, ok: !!r.ok, detail: String(r.detail) });
+    if (r) checks.splice(checks.length, 0, { name, ok: !!r.ok, detail: String(r.detail) });
   };
 
   const major = parseInt(process.versions.node.split('.')[0], 10);
@@ -87,6 +88,14 @@ function runDoctor(cwd, env) {
     const names = [r.agent].concat(r.fallback ? [r.fallback] : []);
     const missing = names.filter((/** @type {string} */ n) => !/^[a-z][a-z0-9-]*$/.test(n) || !fs.existsSync(path.join(AGENTS_DIR, n + '.md')));
     return missing.length ? { ok: false, detail: 'missing under plugin/agents/: ' + missing.join(', ') } : { ok: true, detail: names.join(', ') };
+  });
+
+  // Informational, and listed only when something is left over: a browse-review server file with its state; `serve --stop` clears it.
+  check('browse review servers', () => {
+    if (!root) return { ok: false, detail: 'needs a git repository' };
+    const left = serveLib.leftovers(createSafeFs(root));
+    if (!left.length) return null;
+    return { ok: true, detail: 'leftover: ' + left.map((l) => l.file + ' (pid ' + (l.pid === null ? 'unreadable' : l.pid) + ', ' + (l.alive ? 'still running' : 'not running') + ')').join('; ') + '; run serve --stop --task <task> to clear' };
   });
 
   const bg = backgroundSubagents(env || process.env);

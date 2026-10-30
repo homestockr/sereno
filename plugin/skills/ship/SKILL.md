@@ -62,7 +62,9 @@ Always pass `--task <task>` to `test` and `gate`; without it the script refuses 
 after `/sereno:build`: stop and say so.
 
 The result has `passed` (a `deadline` result has only `status`, `code`, `deadline_sec` and `passed: false`), `diagnosis` (`none`, `environment`, `defect`, `unknown_baseline`),
-`newFailures` and `note`. Failures that already fail at the base are not counted.
+`newFailures`, `note` and `checks`. Failures that already fail at the base are not counted.
+
+If the spec has a `checks` block, `test` runs it at head after the suite and `checks` lists `{ n, kind, target, result, detail }` for each item. A `cmd` or `http` check that did not pass (`fail`, `timeout`, `server_not_ready`) is in `newFailures` as `check <n>: <kind>` and counts as a defect. A `browse` check is `unverified`: it never fails the test. Do not run the checks yourself and do not edit the spec's checks block; the spec is pinned.
 
 If `passed` is false, update the attempt, then go to step 5:
 
@@ -105,6 +107,19 @@ Spawn the red team with the Agent tool, `subagent_type` set to `sereno:` plus th
 parameter. Prompt: the spec path, the base commit and the head commit, the review pack path (`abs`) if there is one, and "review
 `git diff <base>...<head>` against the spec and answer with the verdict JSON".
 
+- **Browse reviewer.** When `reviewer` returned `red-team-browse`, the spec has browse checks. Start the spec's dev server first, immediately before spawning it:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" serve --task <task> --start
+```
+
+  If the result has `ok: false`, show the `error` and run the `--stop` command below. When the error was `serve_running` (an old server for this task), run the `--start` command once more after the `--stop`. If `--start` still fails, carry on with the spawn anyway and say so: the reviewer will report the checks it cannot reach as `unverified`. A result with `started: false` needs no stop but is harmless to stop. After the reviewer's final answer, and on every path that follows the `--start` call (a context round, a model-unavailable fallback, an error from the Agent tool, an answer with no verdict), run:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" serve --task <task> --stop
+```
+
+  Never end the turn, stop for the user or go to step 3 with the server still running. `--stop` is safe to repeat. If it reports `still running after kill`, say so in the final output. Run both commands with Bash in the foreground, like every command here. Put the verdict's `checks` array into the verdict file as given (step 3).
 - **Context requests.** If the verdict is `needs_context` with `context_requests`, fetch
   those files once and ask the same agent again with the content:
 
@@ -125,13 +140,13 @@ Extract the single fenced `json` block from the red team's response. If there is
 the verdict is the single object `{"outcome":"error"}`.
 
 First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (an absolute path spelled like your working directory). Use it exactly as given, for both Write and the file argument below: never rebuild it from `repo_root`, and never change its letter case.
-Write exactly that one JSON object, nothing else, with the Write tool to
+Write exactly that one JSON object (with its `checks` array, if the browse reviewer gave one), nothing else, with the Write tool to
 `<cacheDir>/verdict-<review_run_id>.json`. This is the only path you write to; never put
 JSON (or any `{"`) on a Bash command line, and never use heredocs, `echo` or pipes for it. Then
 run the gate (its `--file` is the same `<cacheDir>/verdict-<review_run_id>.json` path, exactly as given), which reads that file and deletes it:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file <cacheDir>/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team or red-team-lean, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true --reviewer-reason "<reason from reviewer>"
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file <cacheDir>/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team, red-team-lean or red-team-browse, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true --reviewer-reason "<reason from reviewer>"
 ```
 
 Leave out `--reviewer-reason` when `reviewer` failed. The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.
