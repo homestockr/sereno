@@ -23,13 +23,14 @@ const MAX_BYTES = 64 * 1024;
 
 /**
  * Is a spec review wanted for a spec of this kind? No model decides this.
- * @param {{ config: any, kind: string | null }} a
+ * @param {{ config: any, kind: string | null, review?: string | null }} a
  * @returns {{ needed: boolean, reason: string }}
  */
 function needed(a) {
   const r = a.config && a.config.roles && a.config.roles.redTeam ? a.config.roles.redTeam : {};
   if (r.specReview !== true) return { needed: false, reason: 'roles.redTeam.specReview is off' };
   if (r.enabled === false) return { needed: false, reason: 'the red team is off' };
+  if (a.review === 'none' || a.review === 'light') return { needed: false, reason: 'the spec asks for ' + a.review + ' review, so no spec review' };
   const kinds = r.light && Array.isArray(r.light.kinds) ? r.light.kinds : [];
   if (a.kind && kinds.includes(a.kind)) return { needed: false, reason: 'a ' + a.kind + ' spec gets the light review, so no spec review' };
   return { needed: true, reason: 'the red team reviews the spec before the build' };

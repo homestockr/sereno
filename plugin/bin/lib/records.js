@@ -25,6 +25,8 @@ const BUILDERS = ['haiku', 'sonnet', 'opus'];
 const KINDS = ['mechanical', 'feature', 'fix', 'refactor'];
 const DIAGNOSES = ['environment', 'spec', 'defect', 'hook_failed', 'none'];
 const ATTEMPT_OUTCOMES = ['pass', 'block', 'needs_context', 'error', 'skipped', 'stopped', 'running', 'built'];
+/** Why an attempt was skipped (plugin 0.6): the red team is off, or the spec chose no review. */
+const SKIPS = ['off', 'spec'];
 const FINAL_OUTCOMES = ['pass', 'block', 'needs_context', 'error', 'skipped', 'stopped'];
 
 // Control characters, DEL, C1, zero-width, bidi marks and isolates, line/paragraph separators.
@@ -135,5 +137,5 @@ function checkTask(t) {
 
 module.exports = {
   sanitizeVerdict, sanitizeChecks, cleanText, enumOr, repoRelative, sha256, makeRunId, checkTask, compactUtc,
-  RUN_ID, FINAL_OUTCOMES, BUILDERS, KINDS, DIAGNOSES, ATTEMPT_OUTCOMES, GATE_OUTCOMES, MAX_FINDINGS,
+  RUN_ID, SKIPS, FINAL_OUTCOMES, BUILDERS, KINDS, DIAGNOSES, ATTEMPT_OUTCOMES, GATE_OUTCOMES, MAX_FINDINGS,
 };

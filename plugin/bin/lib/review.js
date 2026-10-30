@@ -89,8 +89,10 @@ function diffInfo(root, base, head) {
 /**
  * A spec with browse checks gets the browse red team (a full review, never light), whatever the
  * config says about light review; `a.browse` is the number of browse checks.
- * @param {{ root: string, config: any, kind: string | null, base: string, head: string, browse?: number }} a
- * @returns {{ agent: string, light: boolean, reason: string }}
+ * The spec's own `review` (plugin 0.6) is applied after the browse rule: `none` / `light` still go to the
+ * full red team when the diff touches a floor path (DEFAULT_NEVER, NEVER_WORDS, light.never) or cannot be read.
+ * @param {{ root: string, config: any, kind: string | null, base: string, head: string, browse?: number, review?: string | null }} a
+ * @returns {{ agent: string | null, light: boolean, reason: string, skip?: boolean }}
  */
 function chooseReviewer(a) {
   const red = a.config.roles.redTeam;
@@ -100,6 +102,17 @@ function chooseReviewer(a) {
   const normal = (/** @type {string} */ reason) => ({ agent: red.agent, light: false, reason: safe(reason) });
   const kind = a.kind || 'unknown';
   if (a.browse && a.browse > 0) return { agent: BROWSE_AGENT, light: false, reason: safe('the spec has ' + a.browse + ' browse check' + (a.browse === 1 ? '' : 's') + '; full review with a browser') };
+  if (a.review === 'none' || a.review === 'light') {
+    const d0 = diffInfo(a.root, a.base, a.head);
+    if (!d0) return normal('the spec asks for ' + a.review + ' review, but the diff could not be read; full review');
+    for (const f of d0.files) {
+      const rule = neverRule(f, light.never);
+      if (rule) return normal('the spec asks for ' + a.review + ' review, but ' + f + ' matches ' + rule + '; full review');
+    }
+    if (a.review === 'none') return { agent: null, light: false, skip: true, reason: safe('no review: chosen in the spec') };
+    return { agent: light.agent, light: true, reason: safe('the spec asks for light review; ' + d0.lines + ' lines, no sensitive path') };
+  }
+  if (a.review === 'full') return normal('the spec asks for full review');
   if (!light.kinds.length) return normal('light review is off (roles.redTeam.light.kinds is empty)');
   if (!light.kinds.includes(kind)) return normal('kind ' + kind + ' is not one of: ' + light.kinds.join(', '));
   const d = diffInfo(a.root, a.base, a.head);

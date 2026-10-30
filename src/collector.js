@@ -628,7 +628,9 @@ function createCollector(store, port, opts) {
   function pipeAttempts(t) {
     return (Array.isArray(t.attempts) ? t.attempts : []).slice(0, 10).map((a) => {
       a = a && typeof a === 'object' ? a : {};
-      return { attempt: pNum(a.attempt), outcome: pStr(a.outcome, 32), startedAt: pTime(a.started_at), endedAt: pTime(a.ended_at) };
+      const r = { attempt: pNum(a.attempt), outcome: pStr(a.outcome, 32), startedAt: pTime(a.started_at), endedAt: pTime(a.ended_at) };
+      if (a.skip === 'off' || a.skip === 'spec') r.skip = a.skip;
+      return r;
     });
   }
   /** Earliest attempt start (epoch ms) over every attempt the server holds; the API's attempts list is capped, this is not. */
@@ -643,12 +645,12 @@ function createCollector(store, port, opts) {
   /** Newest-first events from timestamps already read: no free text. */
   function pipeActivity(t) {
     const ev = [];
-    const add = (at, kind, outcome) => { if (at !== null) ev.push({ at, kind, outcome: outcome || null }); };
+    const add = (at, kind, outcome, skip) => { if (at !== null) { const e = { at, kind, outcome: outcome || null }; if (skip) e.skip = skip; ev.push(e); } };
     add(pTime(t.specCreatedAt), 'spec', null);
     for (const a of (Array.isArray(t.attempts) ? t.attempts : [])) {
       if (!a || typeof a !== 'object') continue;
       add(pTime(a.started_at), 'attempt-start', null);
-      add(pTime(a.ended_at), 'attempt-end', pStr(a.outcome, 32));
+      add(pTime(a.ended_at), 'attempt-end', pStr(a.outcome, 32), a.skip === 'off' || a.skip === 'spec' ? a.skip : null);
     }
     for (const g of (Array.isArray(t.gates) ? t.gates : [])) {
       if (g && typeof g === 'object') add(pTime(g.reviewed_at), 'gate', pStr(g.outcome, 32));

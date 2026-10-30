@@ -67,7 +67,7 @@ function previousBaseBranch(root, task) {
  * spec. Bounded read, no symlinks. Keys a spec does not have (older specs have no `after`
  * or `hold_before_merge`) come back null. `created_at` is the ISO string or null.
  * @param {string} root real repo root @param {string} task
- * @returns {{ task: string, builder: string | null, kind: string | null, base_branch: string | null, after: string | null, hold_before_merge: string | null, spec_revision: number, created_at: string | null, check_hosts: string[] } | null}
+ * @returns {{ task: string, builder: string | null, kind: string | null, base_branch: string | null, after: string | null, hold_before_merge: string | null, spec_revision: number, created_at: string | null, check_hosts: string[], review: 'full' | 'light' | 'none' | null } | null}
  */
 function readSpecMeta(root, task) {
   const file = path.join(root, '.sereno', 'specs', task + '.md');
@@ -101,8 +101,15 @@ function readSpecMeta(root, task) {
     spec_revision: typeof rev === 'number' ? rev : 0,
     created_at: str('created_at'),
     check_hosts: hostsOf(head),
+    review: reviewOf(str('review')),
   };
 }
+
+/** The review levels a spec may choose (plugin 0.6). */
+const REVIEWS = ['full', 'light', 'none'];
+
+/** @param {string | null} v @returns {'full' | 'light' | 'none' | null} */
+function reviewOf(v) { return v === 'full' || v === 'light' || v === 'none' ? v : null; }
 
 /* ---- runnable checks (plugin 0.5 H1) ---- */
 
@@ -348,7 +355,7 @@ function readSpecTitle(root, task) {
 
 /**
  * Build the spec file text.
- * @param {{ task: string, builder: string, kind: string, reason: string, fixes: string | null, baseBranch?: string | null, after?: string | null, hold?: string | null, checkHosts?: string[], revision: number, body: string, now?: Date }} p
+ * @param {{ task: string, builder: string, kind: string, reason: string, fixes: string | null, baseBranch?: string | null, after?: string | null, hold?: string | null, checkHosts?: string[], review?: string | null, revision: number, body: string, now?: Date }} p
  */
 function renderSpec(p) {
   // JSON strings are valid YAML scalars, so free text can never break the front matter.
@@ -357,6 +364,7 @@ function renderSpec(p) {
     'task: ' + JSON.stringify(p.task),
     'builder: ' + p.builder,
     'kind: ' + p.kind,
+    ...(p.review ? ['review: ' + p.review] : []),
     'reason: ' + JSON.stringify(p.reason),
     'fixes: ' + (p.fixes === null ? 'null' : JSON.stringify(p.fixes)),
     'base_branch: ' + (p.baseBranch ? JSON.stringify(p.baseBranch) : 'null'),
@@ -373,7 +381,7 @@ function renderSpec(p) {
 
 /**
  * Write .sereno/specs/<task>.md.
- * @param {{ root: string, fsafe: { writeFile: (rel: string, data: string) => string }, task: string, allowed?: string[], builder?: string, kind?: string, reason?: string, fixes?: string, baseBranch?: string, after?: string, hold?: string, checkHosts?: string[], body: string }} a
+ * @param {{ root: string, fsafe: { writeFile: (rel: string, data: string) => string }, task: string, allowed?: string[], builder?: string, kind?: string, reason?: string, fixes?: string, baseBranch?: string, after?: string, hold?: string, checkHosts?: string[], review?: string, body: string }} a
  */
 function writeSpec(a) {
   const task = rec.checkTask(a.task);
@@ -407,9 +415,12 @@ function writeSpec(a) {
   }
   // check_hosts: omitted keeps the earlier spec's list; an empty list clears it. Only the user's own hosts belong here.
   const checkHosts = a.checkHosts !== undefined ? cleanCheckHosts(a.checkHosts) : (prev ? prev.check_hosts : []);
+  // review: omitted keeps the earlier spec's value; a new spec with none has no field (the config decides, as before 0.6).
+  if (a.review !== undefined && !REVIEWS.includes(a.review)) throw new SerenoError('usage', '--review must be one of: ' + REVIEWS.join(', '));
+  const review = a.review !== undefined ? a.review : (prev ? prev.review : null);
   parseChecks(a.body, checkHosts); // a malformed checks block is refused at write time, never at test time
   const revision = previousRevision(a.root, task) + 1;
-  const text = renderSpec({ task, builder: /** @type {string} */ (a.builder), kind: /** @type {string} */ (a.kind), reason, fixes, baseBranch, after, hold, checkHosts, revision, body: a.body });
+  const text = renderSpec({ task, builder: /** @type {string} */ (a.builder), kind: /** @type {string} */ (a.kind), reason, fixes, baseBranch, after, hold, checkHosts, review, revision, body: a.body });
   const rel = '.sereno/specs/' + task + '.md';
   a.fsafe.writeFile(rel, text);
   return { path: rel, spec_revision: revision, spec_hash: rec.sha256(Buffer.from(text, 'utf8')) };
@@ -438,4 +449,4 @@ function createTaskBranch(a) {
   return { branch, base_commit: head, from_branch: gitlib.currentBranch(a.root) };
 }
 
-module.exports = { parseChecks, cleanCheckHosts, CHECKS_MAX, CHECK_VALUE_MAX, validBranchName, previousRevision, previousBaseBranch, readSpecMeta, readSpecTitle, HOLD_MAX, renderSpec, writeSpec, createTaskBranch };
+module.exports = { REVIEWS, parseChecks, cleanCheckHosts, CHECKS_MAX, CHECK_VALUE_MAX, validBranchName, previousRevision, previousBaseBranch, readSpecMeta, readSpecTitle, HOLD_MAX, renderSpec, writeSpec, createTaskBranch };
