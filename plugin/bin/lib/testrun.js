@@ -542,10 +542,32 @@ async function alreadyAnswers(url, httpMs) {
 }
 
 /**
+ * How a long-lived `serve` server is launched.
+ *
+ * win32 is the hard case. Plain `spawn(cmd, { shell: true, detached: true })` gives cmd.exe no console
+ * (libuv uses DETACHED_PROCESS), `windowsHide` hides only cmd.exe, and a console-program grandchild such
+ * as `node server.js` then gets a brand new VISIBLE console window. Dropping `detached` fixes the window
+ * (cmd.exe gets a hidden console the grandchild inherits) but ties cmd.exe to the parent's console: it dies
+ * when this process exits, leaving the server orphaned and the recorded pid dead (measured). So on win32
+ * the launch goes through PowerShell `Start-Process -WindowStyle Hidden -PassThru`: cmd.exe gets its own
+ * hidden console, is independent of this process, and its pid (the root of the tree, so `taskkill /T /F`
+ * ends the server and everything it started) is printed on stdout. The command travels in an environment
+ * variable, never on a command line, so it needs no quoting. Elsewhere `detached` gives the server its own
+ * session and process group, which killPid signals.
+ * @param {string} command @param {string} cwd @param {string} [platform]
+ * @returns {{ file: string, args: string[], options: import('node:child_process').SpawnOptions & { env?: any } }}
+ */
+function serveLaunch(command, cwd, platform) {
+  if ((platform || process.platform) !== 'win32') return { file: command, args: [], options: { shell: true, cwd, windowsHide: true, stdio: 'ignore', detached: true } };
+  const script = "$p = Start-Process -FilePath cmd.exe -ArgumentList ('/d /s /c \"' + $env:SERENO_SERVE_CMD + '\"') -WorkingDirectory $env:SERENO_SERVE_CWD -WindowStyle Hidden -PassThru; [Console]::Out.Write($p.Id)";
+  return { file: 'powershell', args: ['-NoProfile', '-NonInteractive', '-Command', script], options: { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], env: Object.assign({}, process.env, { SERENO_SERVE_CMD: command, SERENO_SERVE_CWD: cwd }) } };
+}
+
+/**
  * Start a `serve` command detached so it outlives this process, wait for its ready URL, and return
  * its pid. On failure (not ready in time, or it exited) the tree is killed and ok is false. Never
- * rejects. On win32 `detached` gives the child its own console-less process group; elsewhere its
- * own session. The tree is found later by pid (taskkill /T on win32, the process group elsewhere).
+ * rejects. The tree is found later by pid (taskkill /T on win32, the process group elsewhere).
+ * Launch mechanism: see serveLaunch.
  * @param {string} command @param {string} ready @param {string} cwd
  * @param {{ httpTimeoutMs?: number, readyTotalMs?: number, readyPollMs?: number }} [opts]
  * @returns {Promise<{ ok: boolean, pid: number | null, why: string }>}
@@ -553,22 +575,34 @@ async function alreadyAnswers(url, httpMs) {
 async function startDetached(command, ready, cwd, opts) {
   const o = opts || {};
   if (await alreadyAnswers(ready, o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS)) return { ok: false, pid: null, why: 'something already answers at ' + ready + '; stop it first' };
-  let child;
-  try {
-    child = spawn(command, { shell: true, cwd, windowsHide: true, stdio: 'ignore', detached: true });
-  } catch (_e) { return { ok: false, pid: null, why: 'could not start' }; }
+  const launch = serveLaunch(command, cwd);
+  let pid = /** @type {number | null} */ (null);
   let exited = false, code = /** @type {number | null} */ (null);
-  child.on('error', () => { exited = true; });
-  child.on('exit', (c) => { exited = true; code = c; });
-  const pid = child.pid || null;
+  /** @type {import('node:child_process').ChildProcess | undefined} */ let child;
+  try {
+    if (process.platform === 'win32') {
+      const r = spawnSync(launch.file, launch.args, Object.assign({}, launch.options, { encoding: 'utf8', timeout: 20000 }));
+      const n = /^\d{1,10}$/.test(String(r.stdout || '').trim()) ? parseInt(String(r.stdout).trim(), 10) : 0;
+      pid = n > 1 ? n : null;
+    } else {
+      child = spawn(launch.file, launch.options);
+      child.on('error', () => { exited = true; });
+      child.on('exit', (c) => { exited = true; code = c; });
+      pid = child.pid || null;
+    }
+  } catch (_e) { return { ok: false, pid: null, why: 'could not start' }; }
   if (!pid) return { ok: false, pid: null, why: 'could not start' };
+  const rootPid = pid;
+  // win32 has no child handle: the root cmd.exe is watched by pid instead.
+  const isExited = () => (child ? exited : !pidAlive(rootPid));
   const readyMs = o.readyTotalMs || CHECK_READY_TOTAL_MS;
-  const ok = await pollReady(ready, { exited: () => exited, readyMs, pollMs: o.readyPollMs || CHECK_READY_POLL_MS, httpMs: o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS });
+  const ok = await pollReady(ready, { exited: isExited, readyMs, pollMs: o.readyPollMs || CHECK_READY_POLL_MS, httpMs: o.httpTimeoutMs || CHECK_HTTP_TIMEOUT_MS });
   if (!ok) {
+    const gone = isExited();
     killPid(pid, child);
-    return { ok: false, pid, why: exited ? 'the server exited' + (code === null ? '' : ' with code ' + code) + ' before it was ready' : 'no 2xx or 3xx from ' + ready + ' within ' + Math.round(readyMs / 1000) + ' s' };
+    return { ok: false, pid, why: gone ? 'the server exited' + (code === null ? '' : ' with code ' + code) + ' before it was ready' : 'no 2xx or 3xx from ' + ready + ' within ' + Math.round(readyMs / 1000) + ' s' };
   }
-  child.unref();
+  if (child) child.unref();
   return { ok: true, pid, why: '' };
 }
 
@@ -829,4 +863,4 @@ async function runTests(o) {
   };
 }
 
-module.exports = { killPid, pidAlive, procIdentity, identityCheck, startDetached, pollReady, runChecks, httpGet, sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };
+module.exports = { serveLaunch, killPid, pidAlive, procIdentity, identityCheck, startDetached, pollReady, runChecks, httpGet, sweepStale, tapValid, runAtBase, parseCounts, parseSummary, runTests, parseFailures, resolveCommand, abortAll, runSuite };
