@@ -1356,6 +1356,54 @@ test('the window can grow from its minimum height', () => {
   assert.strictEqual(measure([117, 130], 1450, 2), 1699);
 });
 
+// ---------- [widget-jitter] ----------
+
+test('[widget-jitter] the session list reserves its scrollbar gutter and meta uses tabular numerals', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+  const rule = (sel) => {
+    const out = [];
+    for (const m of css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)) if (m[1].trim() === sel) out.push(m[2]);
+    return out.join('; ');
+  };
+  assert.ok(/scrollbar-gutter:\s*stable/.test(rule('.rows')), '.rows must reserve the scrollbar gutter');
+  assert.ok(/font-variant-numeric:\s*tabular-nums/.test(rule('.meta')), '.meta numbers must be tabular');
+  assert.ok(/font-variant-numeric:\s*tabular-nums/.test(rule('.state')), '.state must be tabular');
+  assert.ok(/font-variant-numeric:\s*tabular-nums/.test(rule('.agent-timer')), '.agent-timer must be tabular');
+  assert.ok(/white-space:\s*nowrap/.test(rule('.meta > span:last-child')), 'the spend figure must not re-wrap');
+});
+
+test('[widget-jitter] reportHeight does not repeat itself or ping-pong between two heights', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const consts = app.match(/let lastHeight = 0;[\s\S]*?const SETTLE_MS = \d+;/)[0];
+  const fn = app.match(/function reportHeight[\s\S]*?\n}/)[0];
+  const reports = [];
+  let scroll = 1000;
+  let nowMs = 100000;
+  const ui = {
+    grip: {},
+    rows: { hidden: false, scrollHeight: 0, offsetHeight: 0 },
+    window: { children: [], offsetHeight: 2, clientHeight: 0 },
+  };
+  ui.window.children = [ui.rows];
+  Object.defineProperty(ui.rows, 'scrollHeight', { get: () => scroll });
+  const api = { reportHeight: (h) => reports.push(h) };
+  const make = new Function('ui', 'api', 'Date', consts + '\n' + fn + '\nreturn reportHeight;');
+  const reportHeight = make(ui, api, { now: () => nowMs });
+
+  reportHeight(); reportHeight();
+  assert.deepStrictEqual(reports, [1002], 'same height is reported once');
+
+  // A scrollbar flapping the layout by a few px, every 100 ms (inside the 1.5 s settle window), must not be chased.
+  for (let i = 0; i < 10; i++) { scroll = i % 2 ? 1000 : 1004; nowMs += 100; reportHeight(); }
+  assert.deepStrictEqual(reports, [1002], 'a few-px flip right after a report is ignored');
+
+  // Real growth still gets through, immediately when large and after the window when small.
+  scroll = 1300; nowMs += 100; reportHeight();
+  assert.deepStrictEqual(reports, [1002, 1302]);
+  scroll = 1305; nowMs += 2000; reportHeight();
+  assert.deepStrictEqual(reports, [1002, 1302, 1307]);
+});
+
 test('only the session list scrolls', () => {
   // The alert, the promoted request and the allowances are the parts you opened
   // the widget to look at; they must not scroll away with the list.

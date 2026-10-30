@@ -554,6 +554,12 @@ function tick() {
 }
 
 let lastHeight = 0;
+let lastReportAt = 0;
+// A layout that flips between two heights a few px apart (a scrollbar appearing
+// and disappearing) must not make the window chase itself: a small change right
+// after our own report is treated as settled. Real growth is picked up later.
+const SETTLE_PX = 8;
+const SETTLE_MS = 1500;
 function reportHeight() {
   if (!api || !api.reportHeight) return;
 
@@ -577,7 +583,10 @@ function reportHeight() {
   const chrome = ui.window.offsetHeight - ui.window.clientHeight;   // borders
 
   const h = Math.ceil(content + chrome);
-  if (h && h !== lastHeight) { lastHeight = h; api.reportHeight(h); }
+  if (!h || h === lastHeight) return;
+  const now = Date.now();
+  if (lastHeight && Math.abs(h - lastHeight) <= SETTLE_PX && now - lastReportAt < SETTLE_MS) return;
+  lastHeight = h; lastReportAt = now; api.reportHeight(h);
 }
 
 /* ---------- interaction ---------- */
