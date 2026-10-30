@@ -189,6 +189,9 @@ full browse reviewer. Without browse checks nothing changes.
 - `--start` launches the spec's `serve` detached, waits for `ready`, and writes its pid to
   `.sereno/cache/serve-<task>.json`.
 - `--stop` kills the process tree.
+- On Windows the server is launched through hidden PowerShell `Start-Process -PassThru` (a detached
+  cmd.exe has no console, so a console grandchild opens a visible window; a non-detached one dies with
+  its parent). The recorded pid is that hidden cmd.exe, the root of the tree; `taskkill /T` ends it.
 - The ship skill starts it before spawning the browse reviewer and always stops it afterwards,
   on every path including errors.
 - `sereno.js doctor` reports a leftover pid file.

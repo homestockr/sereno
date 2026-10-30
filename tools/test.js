@@ -16685,6 +16685,44 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.ok(await goneSoon(child.pid), 'a matching identity is killed');
       } finally { try { child.kill(); } catch (_e) { /* gone */ } }
     });
+    // ---- [plugin-0.5 serve-window] no visible console for a serve server on Windows ----
+    test('[plugin-0.5 serve-window] serveLaunch: win32 starts the server through hidden PowerShell Start-Process (never a detached cmd.exe, which opens a visible console for a console grandchild); the command travels in the environment; elsewhere a detached shell; startDetached uses it', () => {
+      const w = testrunLib.serveLaunch('node s.js "a b"', 'C:\\x', 'win32'), l = testrunLib.serveLaunch('node s.js', '/x', 'linux');
+      assert.strictEqual(w.file, 'powershell');
+      const script = w.args[w.args.length - 1];
+      for (const k of ['Start-Process', '-FilePath cmd.exe', '-WindowStyle Hidden', '-PassThru', '$env:SERENO_SERVE_CMD', '$env:SERENO_SERVE_CWD']) assert.ok(script.includes(k), 'script has ' + k);
+      assert.ok(!script.includes('node s.js'), 'the command is not on the command line');
+      assert.deepStrictEqual([w.options.env.SERENO_SERVE_CMD, w.options.env.SERENO_SERVE_CWD, w.options.windowsHide, w.options.detached], ['node s.js "a b"', 'C:\\x', true, undefined]);
+      assert.strictEqual(w.options.stdio[0], 'ignore');
+      assert.deepStrictEqual([l.file, l.options.shell, l.options.detached, l.options.windowsHide, l.options.stdio], ['node s.js', true, true, true, 'ignore']);
+      const src = fs.readFileSync(path.join(PLUGIN, 'bin', 'lib', 'testrun.js'), 'utf8');
+      const fn = /async function startDetached[\s\S]*?\n}\n/.exec(src)[0];
+      assert.ok(fn.includes('serveLaunch(command, cwd)') && !/detached\s*:\s*true/.test(fn), 'startDetached takes its launch from serveLaunch');
+    });
+    await atest('[plugin-0.5 serve-window] serve --start with the real mechanism: the server still answers after --start returned, the recorded pid is the live root of its tree, --stop ends the whole tree and the port closes', async () => {
+      const port = await freePort();
+      const r = ckRepo(BROWSE_BLK(port));
+      const st = S(r.dir, ['serve', '--task', 'ck', '--start']);
+      assert.strictEqual(st.status, 0, JSON.stringify(st.out));
+      const serverPid = await readPid(path.join(r.dir, 's.pid'));
+      try {
+        await new Promise((res) => setTimeout(res, 500));
+        const got = await testrunLib.httpGet('http://127.0.0.1:' + port + '/health', 3000);
+        assert.strictEqual(got.status, 200, 'the server outlives the process that started it');
+        assert.ok(alive(st.out.pid) && alive(serverPid));
+        const ident = JSON.parse(fs.readFileSync(path.join(r.dir, '.sereno', 'cache', 'serve-ck.json'), 'utf8')).ident;
+        assert.strictEqual(testrunLib.identityCheck(ident, st.out.pid), 'match', 'the recorded identity describes the recorded pid');
+        const stop = S(r.dir, ['serve', '--task', 'ck', '--stop']);
+        assert.deepStrictEqual([stop.out.ok, stop.out.stopped, stop.out.was_alive], [true, true, true], JSON.stringify(stop.out));
+        assert.ok(await goneSoon(st.out.pid) && await goneSoon(serverPid), 'root and server gone');
+        const after = await testrunLib.httpGet('http://127.0.0.1:' + port + '/health', 1500);
+        assert.strictEqual(after.status, null, 'nothing answers after --stop');
+      } finally { try { testrunLib.killPid(st.out.pid); } catch (_e) { /* gone */ } }
+    });
+    // Manual check (not automatable here): on Windows run `sereno.js serve --task <t> --start` from a normal
+    // terminal with a browse spec; no console window may appear for the server. Verified by hand with
+    // EnumWindows: a detached cmd.exe added one visible node console window; a non-detached one added none but died with its parent, so the PowerShell Start-Process launch is used.
+
     // ---- [plugin-0.5 rt3] red-team pass 3 fixes ----
     await atest('[plugin-0.5 rt3] serve ident: a long ident (up to 120 chars) survives the read and still compares match; stop with a kill that does nothing reports still running and keeps the file', async () => {
       const serveLib3 = require('../plugin/bin/lib/serve.js');
