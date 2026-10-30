@@ -135,6 +135,11 @@ function decide(a) {
     // skip: "spec" (plugin 0.6) means the spec chose no review; any other skipped attempt needs the red team off.
     const bySpec = last.rec.skip === 'spec';
     if (red.enabled && !bySpec) return out('decide', 'attempt is marked skipped but the red team is enabled');
+    // A review the spec skips must not close an open block: an earlier gate block or needs_context stands until a review passes.
+    if (bySpec) {
+      const open = before.find((x) => x.rec.outcome === 'block' || x.rec.outcome === 'needs_context' || (x.gate && (x.gate.outcome === 'block' || x.gate.outcome === 'needs_context')));
+      if (open) return out('decide', 'attempt ' + open.n + ' has an open ' + ((open.gate && open.gate.outcome) || open.rec.outcome) + ' from the red team; a spec that chose no review does not clear it');
+    }
     // With the gate off, the skipped attempt itself carries the head it was tested at (sereno.js attempt --update --head).
     const sh = last.rec.head_commit;
     if (typeof sh !== 'string' || !/^[0-9a-f]{40}$/.test(sh)) return out('decide', 'head_unknown: the skipped attempt does not record which commit was tested');

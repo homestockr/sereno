@@ -126,11 +126,13 @@ A spec can carry one `checks` fenced block under its acceptance criteria. `/sere
 
 Each spec has a `review` field in its front matter, set with `sereno.js spec --review full|light|none` (`/sereno:task` proposes a level, and `--review <level>` or plain words like "no review" override it). It is part of the spec, so changing it after a build is a `spec_changed`. A revision that omits `--review` keeps the earlier level; a spec with no `review` field (any written before 0.6.0) behaves as before.
 
-- `none`: no review. Tests still run; the attempt is recorded `skipped` with `skip: "spec"`, and `/sereno:merge` accepts it. Meant for assets, copy and config with no new logic.
+- `none`: no review. Tests still run; the attempt is recorded `skipped` with `skip: "spec"`, and `/sereno:merge` accepts it. Meant for assets, copy and generated files with no new logic, not config.
 - `light`: the light reviewer, whatever the kind or diff size.
 - `full`: the full red team.
 
-Safety floor: a spec of `none` or `light` still gets the full red team when the diff touches a path that always does (`**/migrations/**`, `supabase/**`, auth, permission, payment, delete, secret, and so on, plus `roles.redTeam.light.never`), or when the diff cannot be read. Browse checks always get the browse reviewer. `roles.redTeam.enabled: false` still turns the review off for the whole repo (`skip: "off"`). A spec with `none` or `light` also gets no spec review.
+Safety floor: a spec of `none` or `light` still gets the full red team when the diff touches a path that always does (`**/migrations/**`, `supabase/**`, auth, permission, payment, delete, secret, and so on; the pipeline's own control files `.sereno/**`, `.github/**`, `.claude/**`, `package.json` and `CLAUDE.md` (`package.json` and `CLAUDE.md` at any depth); plus `roles.redTeam.light.never`), or when the diff cannot be read, has no files, or ends at a commit that is not the tip of `task/<task>`. Browse checks always get the browse reviewer. `roles.redTeam.enabled: false` still turns the review off for the whole repo (`skip: "off"`). A spec with `none` or `light` also gets no spec review (`next` and `spec-review-needed` both read the level).
+
+`attempt --update --skip spec` is checked, not trusted: it needs `--base` and `--head`, re-runs the reviewer choice, and refuses with `skip_refused` unless that choice is `skip: true`. A spec skip never clears an open block: if an earlier attempt has a red team `block` or `needs_context`, `recovery` returns `decide` and names it, and a revision of the spec keeps its earlier review level unless you ask for another.
 
 ### Spec review
 

@@ -52,11 +52,11 @@ Every spec carries `--review full|light|none`, the review this task gets. Propos
 
 | Level | For |
 |---|---|
-| `none` | Assets, copy, config or generated files with no new logic, where the tests or checks cover the result. Example: add an icon and its mapping. |
+| `none` | Assets, copy and generated files with no new logic, where the tests or checks cover the result. Example: add an icon and its mapping. Never for config or the pipeline's own files (`.sereno/`, `package.json`, `.github/`, `.claude/`, `CLAUDE.md`): code gives those the full red team anyway. |
 | `light` | Small, plain fixes and mechanical changes with logic in them. |
 | `full` | Features, new logic, data or schema, anything near sensitive paths (auth, permissions, payments, secrets, migrations), any Opus task. |
 
-If `$ARGUMENTS` has `--review <level>` or the user says plainly "no review", "light review" or "full review", use that; it always wins. Code still gives a sensitive path the full red team whatever the spec says. A spec revision keeps the earlier level when you omit `--review`. Pass the level to the `spec` command in step 4.
+If `$ARGUMENTS` has `--review <level>` or the user says plainly "no review", "light review" or "full review", use that; it always wins. Code still gives a sensitive path the full red team whatever the spec says. On a revision of an existing spec, omit `--review` unless `$ARGUMENTS` or the user asks for a level, so the earlier level is kept. For a new spec, always pass the level you chose (step 4).
 
 ## 3. Create the branch (new tasks only)
 
@@ -126,7 +126,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|s
 Add `--base-branch <from_branch>` when you just created the branch (a spec revision keeps
 the earlier value when you omit it). Add `--fixes "<task>"` when it applies.
 
-`--review <level>` (see Choose the review) is always passed. Two optional arguments in `$ARGUMENTS` pass straight through to the same `spec` command:
+`--review <level>` (see Choose the review) is always passed for a new spec; on a revision pass it only when `$ARGUMENTS` or the user asks for a level. Two optional arguments in `$ARGUMENTS` pass straight through to the same `spec` command:
 `--after <task>` queues this task behind another (`/sereno:build` refuses it until that task is
 merged into the base; the branch is still created now, from the current HEAD) and
 `--hold "<one line>"` records a human step to do before merge, for example "Apply the migration to

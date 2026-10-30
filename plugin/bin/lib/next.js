@@ -281,7 +281,7 @@ function realDeps(a) {
     specReview: (task) => {
       const m = speclib.readSpecMeta(root, task);
       if (!m) return { needed: false, outcome: null, point: null };
-      if (!specreview.needed({ config, kind: m.kind }).needed) return { needed: false, outcome: null, point: null };
+      if (!specreview.needed({ config, kind: m.kind, review: m.review }).needed) return { needed: false, outcome: null, point: null };
       const r = specreview.latest(root, task, m.spec_revision);
       return { needed: true, outcome: r ? r.outcome : null, point: r && r.points.length ? r.points[0] : null };
     },

@@ -17039,7 +17039,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n'); git(dir, 'commit', '-q', '-am', 'work');
       return { dir, head: git(dir, 'rev-parse', 'HEAD') };
     }
-    const upd = (dir, head, extra) => S(dir, ['attempt', '--task', 'a', '--update', '1', '--outcome', 'skipped', '--diagnosis', 'none', '--head', head, '--ended-at', 'now'].concat(extra || [])).out;
+    const upd = (dir, head, extra) => S(dir, ['attempt', '--task', 'a', '--update', '1', '--outcome', 'skipped', '--diagnosis', 'none', '--head', head, '--base', git(dir, 'rev-parse', 'main'), '--ended-at', 'now'].concat(extra || [])).out;
     test('[plugin-0.6 R3] attempt --update --skip: only with --outcome skipped, off or spec; recorded on the attempt', () => {
       const { dir, head } = skipSetup(null, 'none');
       let r = S(dir, ['attempt', '--task', 'a', '--update', '1', '--skip', 'spec']).out;
@@ -17089,7 +17089,9 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(S(d4.dir, ['recovery', '--task', 'a']).out.next, 'decide');
       // a spec skip still needs the recorded head
       const d5 = skipSetup(null, 'none');
-      assert.strictEqual(S(d5.dir, ['attempt', '--task', 'a', '--update', '1', '--outcome', 'skipped', '--skip', 'spec', '--ended-at', 'now']).out.ok, true);
+      // --skip spec now needs --base and --head, so write the record without a head by hand
+      const a1p = path.join(d5.dir, '.sereno', 'attempts', 'a-1.json');
+      fs.writeFileSync(a1p, JSON.stringify(Object.assign(readJ(d5.dir, '.sereno/attempts/a-1.json'), { outcome: 'skipped', skip: 'spec' })));
       r = S(d5.dir, ['recovery', '--task', 'a']).out;
       assert.strictEqual(r.next, 'decide'); assert.match(r.reason, /^head_unknown/);
     });
@@ -17175,6 +17177,131 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(r.includes('New in 0.6.0') && r.includes('New in 0.5.0'));
       assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.0');
       assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.0');
+    });
+
+    // ---- red-team follow-ups ----
+    test('[plugin-0.6 rt] next --task: a review:none spec on the default preset (spec review on) is not sent to spec_review', () => {
+      const dir = repo();
+      assert.strictEqual(S(dir, ['branch', '--task', 'n1']).out.ok, true);
+      assert.strictEqual(S(dir, specArgs('n1', ['--review', 'full']), '## Goal\nx\n').out.ok, true);
+      assert.strictEqual(S(dir, ['next', '--task', 'n1']).out.step, 'spec_review', 'control: a full spec is reviewed');
+      assert.strictEqual(S(dir, specArgs('n1', ['--review', 'none']), '## Goal\nx\n').out.ok, true);
+      const r = S(dir, ['next', '--task', 'n1']).out;
+      assert.notStrictEqual(r.step, 'spec_review', JSON.stringify(r));
+      assert.strictEqual(r.step, 'build', JSON.stringify(r));
+      S(dir, specArgs('n1', ['--review', 'light']), '## Goal\nx\n');
+      assert.notStrictEqual(S(dir, ['next', '--task', 'n1']).out.step, 'spec_review', 'light too');
+    });
+    test('[plugin-0.6 rt] floor: the pipeline control files always get the full red team for none and light', () => {
+      const dir = repo();
+      const cases = [['.sereno/pipeline.json', '{}\n'], ['package.json', '{}\n'], ['.github/workflows/x.yml', 'a: 1\n'], ['pkg/package.json', '{}\n'], ['CLAUDE.md', 'x\n'], ['.claude/x.md', 'x\n']];
+      let i = 0;
+      for (const lvl of ['none', 'light']) {
+        for (const [f, c] of cases) {
+          const task = 'cf' + (i++);
+          const t = mkTask(dir, task, 'feature', { [f]: c }, ['--review', lvl]);
+          const r = rv(dir, task, t);
+          assert.deepStrictEqual([r.agent, r.light, 'skip' in r], ['red-team', false, false], lvl + ' ' + f + ' ' + JSON.stringify(r));
+          assert.ok(r.reason.includes(f + ' matches ') && r.reason.endsWith('full review'), r.reason);
+        }
+      }
+      // config-driven light (spec has no review, lean preset) hits the same floor
+      const d2 = repo(LEAN);
+      const t2 = mkTask(d2, 'm', 'mechanical', { 'package.json': '{}\n' });
+      const r2 = rv(d2, 'm', t2);
+      assert.deepStrictEqual([r2.agent, r2.light], [S(d2, ['config']).out.config.roles.redTeam.agent, false], JSON.stringify(r2));
+      assert.match(r2.reason, /^touches package\.json/);
+    });
+    test('[plugin-0.6 rt] floor: docs, skill and README say none is not for config and list the control files', () => {
+      const t = rd('skills/task/SKILL.md');
+      const row = t.split('\n').find((l) => l.startsWith('| `none`'));
+      assert.ok(row && !/Assets, copy, config/.test(row) && /Assets, copy and generated files/.test(row), row);
+      const r = rd('README.md');
+      for (const k of ['.sereno/**', '.github/**', '.claude/**', '`package.json`', '`CLAUDE.md`', 'skip_refused', 'open block', 'no files', 'tip of `task/<task>`']) assert.ok(r.includes(k), k);
+      assert.ok(r.includes('next` and `spec-review-needed` both read the level'));
+      assert.ok(t.includes('omit `--review` unless `$ARGUMENTS` or the user asks for a level'));
+      assert.ok(rd('skills/ship/SKILL.md').includes('--skip spec --diagnosis none --head <head> --ended-at now --base <base>'));
+    });
+    test('[plugin-0.6 rt] recovery: a spec skip after an earlier block or needs_context is a decide that names the block; with none it still merges', () => {
+      for (const prior of [{ outcome: 'block', diagnosis: 'defect' }, { outcome: 'needs_context' }]) {
+        const { dir, head } = skipSetup(null, 'none');
+        const a1 = readJ(dir, '.sereno/attempts/a-1.json');
+        fs.writeFileSync(path.join(dir, '.sereno/attempts/a-1.json'), JSON.stringify(Object.assign({}, a1, prior)));
+        fs.writeFileSync(path.join(dir, '.sereno/attempts/a-2.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'skipped', skip: 'spec', head_commit: head })));
+        const r = S(dir, ['recovery', '--task', 'a']).out;
+        assert.strictEqual(r.next, 'decide', JSON.stringify(r));
+        assert.ok(r.reason.includes('attempt 1') && r.reason.includes('open ' + prior.outcome), r.reason);
+      }
+      // a block recorded only on the gate counts too
+      const { dir, head } = skipSetup(null, 'none');
+      const a1 = readJ(dir, '.sereno/attempts/a-1.json');
+      fs.mkdirSync(path.join(dir, '.sereno/gates'), { recursive: true });
+      const rr = 'rr_20260101T000000Z_abcdef0';
+      fs.writeFileSync(path.join(dir, '.sereno/gates/' + rr + '.json'), JSON.stringify({ outcome: 'block', task_id: 'a' }));
+      fs.writeFileSync(path.join(dir, '.sereno/attempts/a-1.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'error', diagnosis: 'environment', review_run_id: rr })));
+      fs.writeFileSync(path.join(dir, '.sereno/attempts/a-2.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'skipped', skip: 'spec', head_commit: head })));
+      const rg = S(dir, ['recovery', '--task', 'a']).out;
+      assert.strictEqual(rg.next, 'decide', JSON.stringify(rg));
+      assert.ok(rg.reason.includes('open block'), rg.reason);
+      // no earlier block: merges
+      const c = skipSetup(null, 'none');
+      const b1 = readJ(c.dir, '.sereno/attempts/a-1.json');
+      fs.writeFileSync(path.join(c.dir, '.sereno/attempts/a-1.json'), JSON.stringify(Object.assign({}, b1, { outcome: 'error', diagnosis: 'environment' })));
+      fs.writeFileSync(path.join(c.dir, '.sereno/attempts/a-2.json'), JSON.stringify(Object.assign({}, b1, { outcome: 'skipped', skip: 'spec', head_commit: c.head })));
+      const r2 = S(c.dir, ['recovery', '--task', 'a']).out;
+      assert.deepStrictEqual([r2.next, r2.head_commit], ['merge', c.head], JSON.stringify(r2));
+    });
+    test('[plugin-0.6 rt] attempt --update --skip spec: needs --base and --head, and refuses what the reviewer would not skip', () => {
+      // missing base or head
+      let s = skipSetup(null, 'none');
+      let r = S(s.dir, ['attempt', '--task', 'a', '--update', '1', '--outcome', 'skipped', '--skip', 'spec', '--head', s.head]).out;
+      assert.deepStrictEqual([r.ok, r.code], [false, 'usage'], JSON.stringify(r));
+      r = S(s.dir, ['attempt', '--task', 'a', '--update', '1', '--outcome', 'skipped', '--skip', 'spec', '--base', git(s.dir, 'rev-parse', 'main')]).out;
+      assert.deepStrictEqual([r.ok, r.code], [false, 'usage'], JSON.stringify(r));
+      assert.strictEqual(readJ(s.dir, '.sereno/attempts/a-1.json').outcome, 'running', 'a refusal writes nothing');
+      // a full spec
+      s = skipSetup(null, 'full');
+      r = upd(s.dir, s.head, ['--skip', 'spec']);
+      assert.deepStrictEqual([r.ok, r.code], [false, 'invalid_arg'], JSON.stringify(r));
+      assert.match(r.error, /^skip_refused/);
+      assert.strictEqual(readJ(s.dir, '.sereno/attempts/a-1.json').outcome, 'running');
+      // a none spec that touches supabase/
+      s = skipSetup(null, 'none');
+      fs.mkdirSync(path.join(s.dir, 'supabase'), { recursive: true });
+      fs.writeFileSync(path.join(s.dir, 'supabase', 'x.sql'), 'select 1;\n');
+      git(s.dir, 'add', 'supabase'); git(s.dir, 'commit', '-q', '-m', 'sql');
+      const head2 = git(s.dir, 'rev-parse', 'HEAD');
+      r = upd(s.dir, head2, ['--skip', 'spec']);
+      assert.deepStrictEqual([r.ok, r.code], [false, 'invalid_arg'], JSON.stringify(r));
+      assert.match(r.error, /skip_refused.*supabase\/x\.sql/);
+      assert.ok(!('skip' in readJ(s.dir, '.sereno/attempts/a-1.json')));
+      // a plain none asset diff
+      s = skipSetup(null, 'none');
+      r = upd(s.dir, s.head, ['--skip', 'spec']);
+      assert.strictEqual(r.ok, true, JSON.stringify(r));
+      assert.strictEqual(readJ(s.dir, '.sereno/attempts/a-1.json').skip, 'spec');
+      // the reviewer command says the same thing
+      assert.strictEqual(S(s.dir, ['reviewer', '--task', 'a', '--base', git(s.dir, 'rev-parse', 'main'), '--head', s.head]).out.skip, true);
+    });
+    test('[plugin-0.6 rt] reviewer: an empty range or a head that is not the task tip gets the full red team for none and light', () => {
+      const dir = repo();
+      for (const lvl of ['none', 'light']) {
+        const task = 'e-' + lvl;
+        const t = mkTask(dir, task, 'feature', { 'assets/i.svg': '<svg/>\n' }, ['--review', lvl]);
+        let r = S(dir, ['reviewer', '--task', task, '--base', t.head, '--head', t.head]).out;
+        assert.deepStrictEqual([r.agent, r.light, 'skip' in r], ['red-team', false, false], lvl + JSON.stringify(r));
+        assert.strictEqual(r.reason, 'the spec asks for ' + lvl + ' review, but the diff has no files; full review');
+        // a later commit moves the tip; the earlier head no longer is it
+        git(dir, 'switch', '-q', 'task/' + task);
+        fs.writeFileSync(path.join(dir, 'assets', 'j.svg'), '<svg/>\n'); git(dir, 'add', 'assets'); git(dir, 'commit', '-q', '-m', 'more');
+        const tip = git(dir, 'rev-parse', 'HEAD');
+        git(dir, 'switch', '-q', 'main');
+        r = S(dir, ['reviewer', '--task', task, '--base', t.base, '--head', t.head]).out;
+        assert.deepStrictEqual([r.agent, r.light, 'skip' in r], ['red-team', false, false], lvl + JSON.stringify(r));
+        assert.strictEqual(r.reason, 'the spec asks for ' + lvl + ' review, but head is not the tip of task/' + task + '; full review');
+        r = S(dir, ['reviewer', '--task', task, '--base', t.base, '--head', tip]).out;
+        assert.strictEqual(r.skip === true || r.light === true, true, 'the real tip is accepted: ' + JSON.stringify(r));
+      }
     });
 
     await atest('[plugin-0.6] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });

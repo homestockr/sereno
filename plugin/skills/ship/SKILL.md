@@ -94,7 +94,7 @@ Choose the reviewer. This is code, not your judgment: the gate always runs, only
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" reviewer --task <task> --base <base> --head <head>
 ```
 
-The result has `agent`, `light`, `reason` and, when the spec chose no review, `skip: true`. If `skip` is true there is no review and no gate: update the attempt with `--outcome skipped --skip spec --diagnosis none --head <head> --ended-at now` (the same command as above, plus `--skip spec` and `--head`), then go to step 5. Otherwise keep `reason` for the gate. Then write the review pack, a short map of the change for the reviewer:
+The result has `agent`, `light`, `reason` and, when the spec chose no review, `skip: true`. If `skip` is true there is no review and no gate: update the attempt with `--outcome skipped --skip spec --diagnosis none --head <head> --ended-at now --base <base>` (the same command as above, plus `--skip spec`, `--head` and `--base`; the command re-runs the reviewer choice and refuses the skip if it would not give `skip: true`), then go to step 5. Otherwise keep `reason` for the gate. Then write the review pack, a short map of the change for the reviewer:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" review-pack --task <task> --base <base> --head <head>

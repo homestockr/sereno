@@ -21,7 +21,9 @@ const { SerenoError } = require('./fsafe.js');
 const BROWSE_AGENT = 'red-team-browse';
 
 /** Always get the full red team. A repo's roles.redTeam.light.never adds to these and cannot remove them. */
-const DEFAULT_NEVER = ['**/migrations/**', 'supabase/**'];
+const DEFAULT_NEVER = ['**/migrations/**', 'supabase/**',
+  // The pipeline's own control files (plugin 0.6 follow-up): a change here can alter what gets reviewed or how code runs.
+  '.sereno/**', '.github/**', '.claude/**', '**/package.json', '**/CLAUDE.md'];
 /** A touched path whose lowercased form contains any of these always gets the full red team. */
 const NEVER_WORDS = ['auth', 'permission', 'payment', 'delete', 'secret', 'password', 'credential', 'token', 'billing', 'rbac', 'acl'];
 /** Short words that would match inside ordinary names ("oracle"): they must be a whole path word. */
@@ -91,7 +93,7 @@ function diffInfo(root, base, head) {
  * config says about light review; `a.browse` is the number of browse checks.
  * The spec's own `review` (plugin 0.6) is applied after the browse rule: `none` / `light` still go to the
  * full red team when the diff touches a floor path (DEFAULT_NEVER, NEVER_WORDS, light.never) or cannot be read.
- * @param {{ root: string, config: any, kind: string | null, base: string, head: string, browse?: number, review?: string | null }} a
+ * @param {{ root: string, config: any, kind: string | null, base: string, head: string, browse?: number, review?: string | null, task?: string }} a
  * @returns {{ agent: string | null, light: boolean, reason: string, skip?: boolean }}
  */
 function chooseReviewer(a) {
@@ -105,6 +107,12 @@ function chooseReviewer(a) {
   if (a.review === 'none' || a.review === 'light') {
     const d0 = diffInfo(a.root, a.base, a.head);
     if (!d0) return normal('the spec asks for ' + a.review + ' review, but the diff could not be read; full review');
+    // An empty diff, or a head that is not the task branch tip, is a range that proves nothing about what will merge.
+    if (!d0.files.length) return normal('the spec asks for ' + a.review + ' review, but the diff has no files; full review');
+    if (a.task) {
+      const tip = gitlib.resolveCommit(a.root, 'refs/heads/task/' + a.task);
+      if (!tip || tip !== a.head) return normal('the spec asks for ' + a.review + ' review, but head is not the tip of task/' + a.task + '; full review');
+    }
     for (const f of d0.files) {
       const rule = neverRule(f, light.never);
       if (rule) return normal('the spec asks for ' + a.review + ' review, but ' + f + ' matches ' + rule + '; full review');
