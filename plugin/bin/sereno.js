@@ -32,7 +32,10 @@
  *                           brackets the browse reviewer with these. doctor lists a leftover file.
  *
  *   reviewer --task <t> --base <sha> --head <sha>
- *                           read-only: { agent, light, reason }. Light only when the spec's kind is in
+ *                           read-only: { agent, light, reason, skip? }. A spec `review` of none returns skip: true (no
+ *                           reviewer; ship records attempt --update --outcome skipped --skip spec); a floor path
+ *                           (never rules) forces the full red team whatever the spec says.
+ *                           Without a spec `review`: Light only when the spec's kind is in
  *                           roles.redTeam.light.kinds, the diff is at most maxDiffLines, and no touched
  *                           path trips a `never` rule (the built-in ones always apply). Ship stores the
  *                           reason in the gate as reviewer_reason (gate --reviewer-reason).
@@ -59,6 +62,9 @@
  *                           `after` queues the task behind another; `hold` (<= 200 chars, one line) is
  *                           a human step printed before merge. Omitted keeps the earlier spec's value;
  *                           `--after none` and `--hold ""` clear it.
+ *   spec ... [--review full|light|none]
+ *                           the review this task gets (plugin 0.6), stored in the front matter after `kind`. Omitted keeps
+ *                           the earlier spec's value; a spec with none behaves as before 0.6. Anything else: usage.
  *   spec ... [--check-hosts <a,b>]
  *                           bare host names (no scheme, port or path) that the spec's `checks` block may
  *                           use besides localhost, 127.0.0.1 and [::1]; at most 10. Only /sereno:task passes
@@ -438,7 +444,7 @@ const COMMANDS = {
 
   attempt(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash', 'head', 'start-commit'],
+      value: ['task', 'project', 'spec-revision', 'builder', 'agent', 'kind', 'fixes', 'diagnosis', 'outcome', 'review-run-id', 'started-at', 'ended-at', 'update', 'agent-id', 'spec', 'spec-hash', 'head', 'start-commit', 'skip', 'base'],
       bool: ['json', 'adopt', 'no-verify-approved'],
     });
     const task = rec.checkTask(str(a, 'task'));
@@ -447,6 +453,8 @@ const COMMANDS = {
     if (a.adopt) return adoptAttempt(root, fsafe, task, a);
     if (a.update !== undefined) return updateAttempt(root, fsafe, task, a);
     if (a.head !== undefined) throw new SerenoError('usage', '--head is only for --update with --outcome skipped');
+    if (a.skip !== undefined) throw new SerenoError('usage', '--skip is only for --update with --outcome skipped');
+    if (a.base !== undefined) throw new SerenoError('usage', '--base is only for --update with --skip spec');
     const { config_hash } = loadConfig(root);
     const fixes = str(a, 'fixes');
     const rr = str(a, 'review-run-id');
@@ -532,7 +540,7 @@ const COMMANDS = {
   },
 
   spec(/** @type {string[]} */ argv) {
-    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes', 'base-branch', 'after', 'hold', 'check-hosts', 'body-file'], bool: ['json', 'stdin'] });
+    const a = parseArgs(argv, { value: ['task', 'builder', 'kind', 'reason', 'fixes', 'base-branch', 'after', 'hold', 'check-hosts', 'review', 'body-file'], bool: ['json', 'stdin'] });
     if (!!a['body-file'] === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --body-file or --stdin');
     const task = rec.checkTask(str(a, 'task'));
     const { root, fsafe } = needRepo();
@@ -546,7 +554,7 @@ const COMMANDS = {
       cacheRel = cf.rel;
       body = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
     }
-    const out = speclib.writeSpec({ root, fsafe, task, allowed: loadConfig(root).config.roles.builder.allowed, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), after: str(a, 'after'), hold: str(a, 'hold'), checkHosts: str(a, 'check-hosts') === undefined ? undefined : /** @type {string} */ (str(a, 'check-hosts')).split(',').map((x) => x.trim()).filter(Boolean), body });
+    const out = speclib.writeSpec({ root, fsafe, task, allowed: loadConfig(root).config.roles.builder.allowed, builder: str(a, 'builder'), kind: str(a, 'kind'), reason: str(a, 'reason'), fixes: str(a, 'fixes'), baseBranch: str(a, 'base-branch'), after: str(a, 'after'), hold: str(a, 'hold'), review: str(a, 'review'), checkHosts: str(a, 'check-hosts') === undefined ? undefined : /** @type {string} */ (str(a, 'check-hosts')).split(',').map((x) => x.trim()).filter(Boolean), body });
     if (cacheRel) fsafe.removeFile(cacheRel);
     return out;
   },
@@ -638,17 +646,7 @@ const COMMANDS = {
     const a = parseArgs(argv, { value: ['task', 'base', 'head'], bool: ['json'] });
     const task = rec.checkTask(str(a, 'task'));
     const { root } = needRepo();
-    const base = gitlib.resolveCommit(root, str(a, 'base') || '');
-    const head = gitlib.resolveCommit(root, str(a, 'head') || '');
-    if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
-    if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
-    const meta = speclib.readSpecMeta(root, task);
-    if (!meta) throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first');
-    const { config } = loadConfig(root);
-    // A spec with browse checks gets the browse red team (its checks block must parse; if it does not, the normal choice stands).
-    let browse = 0;
-    try { const b = reviewLib.browseChecks(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'), 'utf8')); browse = b ? b.length : 0; } catch (_e) { browse = 0; }
-    return reviewLib.chooseReviewer({ root, config, kind: meta.kind, base, head, browse });
+    return reviewerChoice(root, task, str(a, 'base') || '', str(a, 'head') || '');
   },
 
   'spec-review-needed'(/** @type {string[]} */ argv) {
@@ -658,7 +656,7 @@ const COMMANDS = {
     const meta = speclib.readSpecMeta(root, task);
     if (!meta) throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first');
     const { config } = loadConfig(root);
-    return specReviewLib.needed({ config, kind: meta.kind });
+    return specReviewLib.needed({ config, kind: meta.kind, review: meta.review });
   },
 
   'spec-review'(/** @type {string[]} */ argv) {
@@ -889,6 +887,25 @@ function adoptAttempt(root, fsafe, task, a) {
 }
 
 /**
+ * The reviewer choice for a task and commit range. Shared by the `reviewer` command and the check behind
+ * `attempt --update --skip spec`, so the two cannot drift.
+ * @param {string} root @param {string} task @param {string} baseArg @param {string} headArg
+ */
+function reviewerChoice(root, task, baseArg, headArg) {
+  const base = gitlib.resolveCommit(root, baseArg);
+  const head = gitlib.resolveCommit(root, headArg);
+  if (!base) throw new SerenoError('invalid_arg', '--base must name an existing commit');
+  if (!head) throw new SerenoError('invalid_arg', '--head must name an existing commit');
+  const meta = speclib.readSpecMeta(root, task);
+  if (!meta) throw new SerenoError('not_found', 'no spec for task ' + task + '; run /sereno:task first');
+  const { config } = loadConfig(root);
+  // A spec with browse checks gets the browse red team (its checks block must parse; if it does not, the normal choice stands).
+  let browse = 0;
+  try { const b = reviewLib.browseChecks(fs.readFileSync(path.join(root, '.sereno', 'specs', task + '.md'), 'utf8')); browse = b ? b.length : 0; } catch (_e) { browse = 0; }
+  return reviewLib.chooseReviewer({ root, config, kind: meta.kind, base, head, browse, review: meta.review, task });
+}
+
+/**
  * attempt --update <n>: merge outcome, diagnosis, review run id and end time into
  * an existing record. A record whose outcome is final is never changed.
  * @param {string} root @param {ReturnType<typeof createSafeFs>} fsafe @param {string} task @param {Record<string, string | boolean>} a
@@ -930,6 +947,19 @@ function updateAttempt(root, fsafe, task, a) {
     const h = gitlib.resolveCommit(root, headArg);
     if (!h) throw new SerenoError('invalid_arg', '--head must name an existing commit');
     record.head_commit = h;
+  }
+  const skipArg = str(a, 'skip');
+  if (skipArg !== undefined) {
+    if (record.outcome !== 'skipped') throw new SerenoError('usage', '--skip is only for --outcome skipped');
+    if (!rec.SKIPS.includes(skipArg)) throw new SerenoError('usage', '--skip must be off or spec');
+    if (skipArg === 'spec') {
+      // The record must not be able to claim a skip the reviewer command would not give: same choice, same inputs.
+      const baseArg = str(a, 'base');
+      if (baseArg === undefined || headArg === undefined) throw new SerenoError('usage', '--skip spec requires --base and --head');
+      const choice = reviewerChoice(root, task, baseArg, headArg);
+      if (!choice.skip) throw new SerenoError('invalid_arg', 'skip_refused: the spec does not allow skipping the review here (' + choice.reason + ')');
+    }
+    record.skip = skipArg;
   }
   const agentId = str(a, 'agent-id');
   if (agentId !== undefined) record.agent_id = matchId(agentId, '--agent-id', /^[A-Za-z0-9._:-]{1,128}$/);

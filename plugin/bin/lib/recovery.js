@@ -15,7 +15,7 @@
  *                   (diagnosis hook_failed, always a decision) or any other
  *                   failure, including a budget or turn-cap stop (diagnosis none)
  *   needs_context   review could not finish, or the baseline said nothing
- *   pass / skipped  tests passed and the gate passed / was switched off
+ *   pass / skipped  tests passed and the gate passed / was switched off or the spec chose no review (skip: spec)
  *   stopped         the user ended the task
  */
 
@@ -61,6 +61,16 @@ function readAttempts(root, task, files) {
   }
   attempts.sort((x, y) => x.n - y.n);
   return attempts;
+}
+
+/**
+ * The first attempt the red team actually reviewed and held back: its gate record says block or needs_context.
+ * A failed test run has no gate and does not count. Shared by recovery and the reviewer choice.
+ * @param {{ n: number, rec: any, gate: any | null }[]} attempts
+ * @returns {{ n: number, rec: any, gate: any } | undefined}
+ */
+function openReviewBlock(attempts) {
+  return /** @type {any} */ (attempts.find((x) => x.gate && (x.gate.outcome === 'block' || x.gate.outcome === 'needs_context')));
 }
 
 /**
@@ -132,13 +142,20 @@ function decide(a) {
   if (o === 'stopped') return out('done', 'the task was stopped');
   if (o === 'needs_context') return out('decide', 'the review needs context, or the test baseline is unusable');
   if (o === 'skipped') {
-    if (red.enabled) return out('decide', 'attempt is marked skipped but the red team is enabled');
+    // skip: "spec" (plugin 0.6) means the spec chose no review; any other skipped attempt needs the red team off.
+    const bySpec = last.rec.skip === 'spec';
+    if (red.enabled && !bySpec) return out('decide', 'attempt is marked skipped but the red team is enabled');
+    // A review the spec skips must not close an open block: an earlier gate block or needs_context stands until a review passes.
+    if (bySpec) {
+      const open = openReviewBlock(before);
+      if (open) return out('decide', 'attempt ' + open.n + ' was blocked by the red team (gate ' + open.gate.outcome + '); a spec that chose no review does not clear it');
+    }
     // With the gate off, the skipped attempt itself carries the head it was tested at (sereno.js attempt --update --head).
     const sh = last.rec.head_commit;
     if (typeof sh !== 'string' || !/^[0-9a-f]{40}$/.test(sh)) return out('decide', 'head_unknown: the skipped attempt does not record which commit was tested');
     let pin;
     for (let i = attempts.length - 1; i >= 0; i--) if (typeof attempts[i].rec.spec_hash === 'string') { pin = attempts[i].rec.spec_hash; break; }
-    return mergeGuard(sh, pin) || { ...out('merge', 'tests passed and the gate is switched off in the config'), head_commit: sh };
+    return mergeGuard(sh, pin) || { ...out('merge', bySpec && red.enabled ? 'tests passed and the spec chose no review' : 'tests passed and the gate is switched off in the config'), head_commit: sh };
   }
   if (o === 'pass') {
     const g = last.gate;
@@ -170,4 +187,4 @@ function decide(a) {
   return out('decide', 'the latest attempt has an unknown outcome');
 }
 
-module.exports = { decide, recordedHead, DEFECT_KINDS, gateHasDefect };
+module.exports = { decide, readAttempts, openReviewBlock, recordedHead, DEFECT_KINDS, gateHasDefect };

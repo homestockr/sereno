@@ -7,8 +7,12 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.5.0. Windows is the first
+can observe the files it writes. Version 0.6.0. Windows is the first
 platform; other systems are not yet tested.
+
+New in 0.6.0: the review is chosen per task. A spec carries `review: full | light | none` (set with
+`/sereno:task --review`), the safety floor still forces the full red team on sensitive paths, and a
+spec that chose no review is recorded as skipped (see Review level).
 
 New in 0.5.0: stub markers in the review pack; runnable checks in specs (`cmd`, `serve`,
 `http`, `browse`); a browse reviewer with `serve --start`/`--stop`; a spec review before the
@@ -118,6 +122,18 @@ A spec can carry one `checks` fenced block under its acceptance criteria. `/sere
 - **Browse checks need a browser tool.** `sereno.js reviewer` picks `sereno:red-team-browse` whenever the spec has a `browse` check (a full review, never the light one). It inherits every MCP server you have installed, not only the browser one (Claude in Chrome or Playwright): databases, deploys and messaging tools included. It cannot write or edit files, fetch the web, search or spawn agents, but the only thing keeping it to browser tools is its instructions, not a block. Before relying on it, run `/agents` and confirm Write, Edit, WebFetch, WebSearch and Agent are absent from `red-team-browse`. It opens only the check's URL or same-origin pages reached from it, and never submits a form or signs in. If there is no browser tool it reports every browse check `unverified`, and they stay on the list for you to check before `/sereno:merge`. A `fail` makes the gate record `block`. `/sereno:ship` runs `sereno.js serve --task <task> --start` before that reviewer (the spec's `serve`, detached, polled at `ready`) and `--stop` after it on every path; `sereno.js doctor` reports a leftover server.
 - URLs must be `http:` or `https:` on `localhost`, `127.0.0.1` or `[::1]`. Any other host must be named by you; `/sereno:task` then records it as `check_hosts` in the spec. A malformed block is refused with `invalid_checks`. The checks are pinned with the rest of the spec, so editing them after a build is a `spec_changed`.
 
+### Review level
+
+Each spec has a `review` field in its front matter, set with `sereno.js spec --review full|light|none` (`/sereno:task` proposes a level, and `--review <level>` or plain words like "no review" override it). It is part of the spec, so changing it after a build is a `spec_changed`. A revision that omits `--review` keeps the earlier level; a spec with no `review` field (any written before 0.6.0) behaves as before.
+
+- `none`: no review. Tests still run; the attempt is recorded `skipped` with `skip: "spec"`, and `/sereno:merge` accepts it. Meant for assets, copy and generated files with no new logic, not config.
+- `light`: the light reviewer, whatever the kind or diff size.
+- `full`: the full red team.
+
+Safety floor: a spec of `none` or `light` still gets the full red team when the diff touches a path that always does (`**/migrations/**`, `supabase/**`, auth, permission, payment, delete, secret, and so on; the pipeline's own control files `.sereno/pipeline.json` (also `**/.sereno/pipeline.json`; specs, attempts, gates, briefs and cache under `.sereno/` are not on the list, so a repo that commits them still skips), `.github/**`, `.claude/**`, `package.json` and `CLAUDE.md` (`package.json` and `CLAUDE.md` at any depth); plus `roles.redTeam.light.never`; for a `none` or `light` spec also a touched test file with removed lines, since adding tests is fine and removing or rewriting them is not, and lockfiles `package-lock.json`, `yarn.lock` and `pnpm-lock.yaml` at any depth; light chosen by the config is unchanged by these two), or when the diff cannot be read, has no files, or ends at a commit that is not the tip of `task/<task>`. Browse checks always get the browse reviewer. `roles.redTeam.enabled: false` still turns the review off for the whole repo (`skip: "off"`). A spec with `none` or `light` also gets no spec review (`next` and `spec-review-needed` both read the level).
+
+`attempt --update --skip spec` is checked, not trusted: it needs `--base` and `--head`, re-runs the reviewer choice, and refuses with `skip_refused` unless that choice is `skip: true`. A spec skip never clears an open block: only an earlier attempt whose red team gate says `block` or `needs_context` counts (a failed test run has no gate and does not); then `reviewer` returns the full red team, `--skip spec` is refused, and `recovery` (as a backstop) returns `decide` and names it, and a revision of the spec keeps its earlier review level unless you ask for another.
+
 ### Spec review
 
 Before the first build, `/sereno:next` has the red team read the spec (not a diff, there is none yet) and answer `agree`, `revise` or `split`: is each criterion testable, are runnable `checks` present where they could be, is the scope one reviewable change. On `revise` or `split` it stops with the first point and `/sereno:task <task>`; a new spec revision is reviewed again. `/sereno:build <task>` never requires the review, so running it directly builds without one. The review is skipped when the spec's kind is in `roles.redTeam.light.kinds` or the red team is off. To turn it off, set `"roles": { "redTeam": { "specReview": false } }` in `pipeline.json`; the `lean` preset has it off. `sereno.js spec-review-needed --task <task>` shows the decision.
@@ -199,7 +215,7 @@ invalid file stops the pipeline and lists the errors.
 | `roles.redTeam.maxBlockedRuns` | `2` | Blocks in a row before the run asks you for a decision. |
 | `roles.redTeam.enabled` | `true` | `false` switches the review off. The gate is then `skipped`. |
 | `roles.redTeam.specReview` | `true` in `default`, `false` in `lean` | The red team reviews the spec before the first build (see Spec review). `false` switches it off. |
-| `roles.redTeam.light` | off in `default`; `kinds: ["mechanical"]` in `lean` | A lighter reviewer for small plain tasks: `{ kinds, maxDiffLines: 80, agent: "red-team-lean", never: [] }`. `sereno.js reviewer` picks it only when the spec kind is listed, the diff is at most `maxDiffLines` lines and no touched path matches a `never` glob. `**/migrations/**`, `supabase/**` and any path containing auth, permission, payment, delete or secret always get the full red team; `never` can only add globs. The gate still has to pass. |
+| `roles.redTeam.light` | off in `default`; `kinds: ["mechanical"]` in `lean` | A lighter reviewer for small plain tasks: `{ kinds, maxDiffLines: 80, agent: "red-team-lean", never: [] }`. `sereno.js reviewer` picks it only when the spec kind is listed, the diff is at most `maxDiffLines` lines and no touched path matches a `never` glob. A spec's own `review` field overrides `kinds` and `maxDiffLines` (see Review level); only the floor overrides the spec. `**/migrations/**`, `supabase/**` and any path containing auth, permission, payment, delete or secret always get the full red team; `never` can only add globs. The gate still has to pass. |
 | `recovery.repairs` | `1` | Repairs allowed for a defect. |
 | `recovery.infraRetries` | `2` | Retries allowed for an environment failure. |
 | `recovery.taskBudgetUsd` | `null` | Validated (null or a positive number). No plugin script enforces it yet. Listed under `inert` when set. |

@@ -11,7 +11,9 @@
  *                   holds no file contents.
  */
 
+const fs = require('node:fs');
 const gitlib = require('./git.js');
+const recovery = require('./recovery.js');
 const rec = require('./records.js');
 const testrun = require('./testrun.js');
 const speclib = require('./spec.js');
@@ -21,7 +23,12 @@ const { SerenoError } = require('./fsafe.js');
 const BROWSE_AGENT = 'red-team-browse';
 
 /** Always get the full red team. A repo's roles.redTeam.light.never adds to these and cannot remove them. */
-const DEFAULT_NEVER = ['**/migrations/**', 'supabase/**'];
+const DEFAULT_NEVER = ['**/migrations/**', 'supabase/**',
+  // The pipeline's own control files (plugin 0.6 follow-up): a change here can alter what gets reviewed or how code runs.
+  // Only pipeline.json: specs are pinned by hash, attempts, gates, briefs and cache are generated (a repo may commit them).
+  '.sereno/pipeline.json', '**/.sereno/pipeline.json', '.github/**', '.claude/**', '**/package.json', '**/CLAUDE.md'];
+/** Lockfiles: a spec-chosen none or light review still gets the full red team when one changes. */
+const LOCKFILE_GLOBS = ['**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml'];
 /** A touched path whose lowercased form contains any of these always gets the full red team. */
 const NEVER_WORDS = ['auth', 'permission', 'payment', 'delete', 'secret', 'password', 'credential', 'token', 'billing', 'rbac', 'acl'];
 /** Short words that would match inside ordinary names ("oracle"): they must be a whole path word. */
@@ -66,10 +73,22 @@ function neverRule(p, extra) {
 }
 
 /**
+ * Extra floor for a spec-chosen none or light review: lockfiles, and test files that lose lines
+ * (adding tests is fine, removing or rewriting them is not). @param {string} p @param {number} removed
+ * @returns {string | null}
+ */
+function specFloorRule(p, removed) {
+  const path_ = p.split('\\').join('/');
+  for (const g of LOCKFILE_GLOBS) if (globToRegExp(g).test(path_)) return g;
+  if (removed > 0 && TEST_PATH.test(path_)) return 'test file with removed lines';
+  return null;
+}
+
+/**
  * Lines changed and files touched by `git diff base...head`. null when git fails or the output is too
  * large to read (a diff that big is never "light").
  * @param {string} root @param {string} base @param {string} head
- * @returns {{ lines: number, files: string[] } | null}
+ * @returns {{ lines: number, files: string[], removed: Record<string, number> } | null}
  */
 function diffInfo(root, base, head) {
   const out = gitlib.git(root, ['-c', 'core.quotePath=false', 'diff', '--numstat', '--no-renames', '--end-of-options', base + '...' + head]);
@@ -77,20 +96,25 @@ function diffInfo(root, base, head) {
   let lines = 0;
   /** @type {string[]} */
   const files = [];
+  /** Removed lines per file (a binary file counts as BINARY_LINES). @type {Record<string, number>} */
+  const removed = {};
   for (const l of out.split(/\r?\n/)) {
     const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(l);
     if (!m) continue;
     lines += m[1] === '-' ? BINARY_LINES : parseInt(m[1], 10) + parseInt(m[2], 10);
     files[files.length] = m[3];
+    removed[m[3]] = m[2] === '-' ? BINARY_LINES : parseInt(m[2], 10);
   }
-  return { lines, files };
+  return { lines, files, removed };
 }
 
 /**
  * A spec with browse checks gets the browse red team (a full review, never light), whatever the
  * config says about light review; `a.browse` is the number of browse checks.
- * @param {{ root: string, config: any, kind: string | null, base: string, head: string, browse?: number }} a
- * @returns {{ agent: string, light: boolean, reason: string }}
+ * The spec's own `review` (plugin 0.6) is applied after the browse rule: `none` / `light` still go to the
+ * full red team when the diff touches a floor path (DEFAULT_NEVER, NEVER_WORDS, light.never) or cannot be read.
+ * @param {{ root: string, config: any, kind: string | null, base: string, head: string, browse?: number, review?: string | null, task?: string }} a
+ * @returns {{ agent: string | null, light: boolean, reason: string, skip?: boolean }}
  */
 function chooseReviewer(a) {
   const red = a.config.roles.redTeam;
@@ -100,6 +124,30 @@ function chooseReviewer(a) {
   const normal = (/** @type {string} */ reason) => ({ agent: red.agent, light: false, reason: safe(reason) });
   const kind = a.kind || 'unknown';
   if (a.browse && a.browse > 0) return { agent: BROWSE_AGENT, light: false, reason: safe('the spec has ' + a.browse + ' browse check' + (a.browse === 1 ? '' : 's') + '; full review with a browser') };
+  if (a.review === 'none' || a.review === 'light') {
+    const d0 = diffInfo(a.root, a.base, a.head);
+    if (!d0) return normal('the spec asks for ' + a.review + ' review, but the diff could not be read; full review');
+    // An empty diff, or a head that is not the task branch tip, is a range that proves nothing about what will merge.
+    if (!d0.files.length) return normal('the spec asks for ' + a.review + ' review, but the diff has no files; full review');
+    if (a.task) {
+      const tip = gitlib.resolveCommit(a.root, 'refs/heads/task/' + a.task);
+      if (!tip || tip !== a.head) return normal('the spec asks for ' + a.review + ' review, but head is not the tip of task/' + a.task + '; full review');
+    }
+    // Same rule as recovery: an earlier attempt the red team blocked keeps the full review until one passes.
+    if (a.task) {
+      let names = [];
+      try { names = fs.readdirSync(a.root + '/.sereno/attempts'); } catch (_e) { names = []; }
+      const open = recovery.openReviewBlock(recovery.readAttempts(a.root, a.task, names));
+      if (open) return normal('attempt ' + open.n + ' was blocked by the red team; full review until a review passes');
+    }
+    for (const f of d0.files) {
+      const rule = neverRule(f, light.never) || specFloorRule(f, d0.removed[f] || 0);
+      if (rule) return normal('the spec asks for ' + a.review + ' review, but ' + f + ' matches ' + rule + '; full review');
+    }
+    if (a.review === 'none') return { agent: null, light: false, skip: true, reason: safe('no review: chosen in the spec') };
+    return { agent: light.agent, light: true, reason: safe('the spec asks for light review; ' + d0.lines + ' lines, no sensitive path') };
+  }
+  if (a.review === 'full') return normal('the spec asks for full review');
   if (!light.kinds.length) return normal('light review is off (roles.redTeam.light.kinds is empty)');
   if (!light.kinds.includes(kind)) return normal('kind ' + kind + ' is not one of: ' + light.kinds.join(', '));
   const d = diffInfo(a.root, a.base, a.head);

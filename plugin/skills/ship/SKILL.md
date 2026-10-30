@@ -81,7 +81,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" attempt --task <task> --update <attem
 ## 2. Red team
 
 If `roles.redTeam.enabled` is false there is no review. Update the attempt with
-`--outcome skipped --diagnosis none --head <head> --ended-at now` (same command as above, plus `--head`, which records the tested commit), then go to
+`--outcome skipped --diagnosis none --head <head> --ended-at now --skip off` (same command as above, plus `--head`, which records the tested commit), then go to
 step 5. Otherwise make the run id:
 
 ```
@@ -94,7 +94,7 @@ Choose the reviewer. This is code, not your judgment: the gate always runs, only
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" reviewer --task <task> --base <base> --head <head>
 ```
 
-The result has `agent`, `light` and `reason`. Keep `reason` for the gate. Then write the review pack, a short map of the change for the reviewer:
+The result has `agent`, `light`, `reason` and, when the spec chose no review, `skip: true`. If `skip` is true there is no review and no gate: update the attempt with `--outcome skipped --skip spec --diagnosis none --head <head> --ended-at now --base <base>` (the same command as above, plus `--skip spec`, `--head` and `--base`; the command re-runs the reviewer choice and refuses the skip if it would not give `skip: true`), then go to step 5. If that command fails with `skip_refused`, do not stop: re-run `reviewer` and continue with its result as a normal review (the full red team, keeping its `reason` for the gate). Otherwise keep `reason` for the gate. Then write the review pack, a short map of the change for the reviewer:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" review-pack --task <task> --base <base> --head <head>
@@ -202,5 +202,5 @@ The result has `next`, `reason`, `repairsUsed` and `infraRetriesUsed`. Follow `n
 ## 6. Merge prompt
 
 Show a short summary: tests (passed, any failures that already fail at the base), gate
-outcome (or "skipped, the red team is switched off"), the number of findings, the
+outcome (or "skipped, the red team is switched off", or "skipped: no review chosen in the spec"), the number of findings, the
 attempt count and the head commit. Then say: "Ready. Run `/sereno:merge <task>` to merge `task/<task>` into `<base_branch>`." You never merge; only the user starting `/sereno:merge` does.
