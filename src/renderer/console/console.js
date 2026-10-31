@@ -1213,7 +1213,7 @@ function timelineText(m, t) {
 
 /** One activity line from the API's { at, kind, outcome }; '' for an unknown kind. */
 function activityText(e) {
-  const oc = e && e.outcome ? (OUTCOME_LABEL[e.outcome] || e.outcome) : '';
+  const oc = e && e.outcome ? (e.outcome === 'skipped' && e.skip === 'spec' ? 'No review (chosen)' : e.outcome === 'skipped' && e.skip === 'off' ? 'Review off' : (OUTCOME_LABEL[e.outcome] || e.outcome)) : '';
   if (!e) return '';
   if (e.kind === 'spec') return 'Spec written';
   if (e.kind === 'attempt-start') return 'Attempt started';
@@ -1267,7 +1267,7 @@ function panelHtml(row, ctx) {
     ? '<h4>Attempts</h4><ul class="plist2">' + attempts.map((a) => {
       const s = a && a.startedAt != null ? relTime(a.startedAt, nowMs) : '';
       const e = a && a.endedAt != null ? relTime(a.endedAt, nowMs) : '';
-      return '<li><span class="num">#' + esc(a && a.attempt != null ? a.attempt : '?') + '</span><span>' + esc(a && a.outcome ? (OUTCOME_LABEL[a.outcome] || a.outcome) : '—') + '</span>'
+      return '<li><span class="num">#' + esc(a && a.attempt != null ? a.attempt : '?') + '</span><span>' + esc(a && a.outcome ? (a.outcome === 'skipped' && a.skip === 'spec' ? 'No review (chosen)' : a.outcome === 'skipped' && a.skip === 'off' ? 'Review off' : (OUTCOME_LABEL[a.outcome] || a.outcome)) : '—') + '</span>'
         + '<span class="quiet-text">' + (s ? 'started ' + esc(s) : '') + (e ? ' · ended ' + esc(e) : '') + '</span>'
         + (a && sessionHash(a.sessionId) ? '<a class="xlink" href="' + esc(sessionHash(a.sessionId)) + '">Session</a>' : '') + '</li>';
     }).join('') + '</ul>' : '';

@@ -114,6 +114,7 @@ function taskParts(root, deps, m) {
   /** @type {string} */
   let state;
   if (s.step === 'build') state = 'no attempt yet';
+  else if (s.step === 'spec_review') state = 'awaiting spec review';
   else if (s.step === 'idle') state = 'waiting on ' + m.after;
   else if (s.step === 'retry') state = 'environment failure, retry next';
   else if (s.step === 'merge') state = /switched off/.test(s.reason) ? 'tests passed, gate off, ready to merge' : 'gate passed, ready to merge';

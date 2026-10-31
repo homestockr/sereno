@@ -11,13 +11,24 @@
  *                   holds no file contents.
  */
 
+const fs = require('node:fs');
 const gitlib = require('./git.js');
+const recovery = require('./recovery.js');
 const rec = require('./records.js');
 const testrun = require('./testrun.js');
+const speclib = require('./spec.js');
 const { SerenoError } = require('./fsafe.js');
 
+/** The red team that can open a page: chosen whenever the spec has a browse check. */
+const BROWSE_AGENT = 'red-team-browse';
+
 /** Always get the full red team. A repo's roles.redTeam.light.never adds to these and cannot remove them. */
-const DEFAULT_NEVER = ['**/migrations/**', 'supabase/**'];
+const DEFAULT_NEVER = ['**/migrations/**', 'supabase/**',
+  // The pipeline's own control files (plugin 0.6 follow-up): a change here can alter what gets reviewed or how code runs.
+  // Only pipeline.json: specs are pinned by hash, attempts, gates, briefs and cache are generated (a repo may commit them).
+  '.sereno/pipeline.json', '**/.sereno/pipeline.json', '.github/**', '.claude/**', '**/package.json', '**/CLAUDE.md'];
+/** Lockfiles: a spec-chosen none or light review still gets the full red team when one changes. */
+const LOCKFILE_GLOBS = ['**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml'];
 /** A touched path whose lowercased form contains any of these always gets the full red team. */
 const NEVER_WORDS = ['auth', 'permission', 'payment', 'delete', 'secret', 'password', 'credential', 'token', 'billing', 'rbac', 'acl'];
 /** Short words that would match inside ordinary names ("oracle"): they must be a whole path word. */
@@ -62,10 +73,22 @@ function neverRule(p, extra) {
 }
 
 /**
+ * Extra floor for a spec-chosen none or light review: lockfiles, and test files that lose lines
+ * (adding tests is fine, removing or rewriting them is not). @param {string} p @param {number} removed
+ * @returns {string | null}
+ */
+function specFloorRule(p, removed) {
+  const path_ = p.split('\\').join('/');
+  for (const g of LOCKFILE_GLOBS) if (globToRegExp(g).test(path_)) return g;
+  if (removed > 0 && TEST_PATH.test(path_)) return 'test file with removed lines';
+  return null;
+}
+
+/**
  * Lines changed and files touched by `git diff base...head`. null when git fails or the output is too
  * large to read (a diff that big is never "light").
  * @param {string} root @param {string} base @param {string} head
- * @returns {{ lines: number, files: string[] } | null}
+ * @returns {{ lines: number, files: string[], removed: Record<string, number> } | null}
  */
 function diffInfo(root, base, head) {
   const out = gitlib.git(root, ['-c', 'core.quotePath=false', 'diff', '--numstat', '--no-renames', '--end-of-options', base + '...' + head]);
@@ -73,18 +96,25 @@ function diffInfo(root, base, head) {
   let lines = 0;
   /** @type {string[]} */
   const files = [];
+  /** Removed lines per file (a binary file counts as BINARY_LINES). @type {Record<string, number>} */
+  const removed = {};
   for (const l of out.split(/\r?\n/)) {
     const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(l);
     if (!m) continue;
     lines += m[1] === '-' ? BINARY_LINES : parseInt(m[1], 10) + parseInt(m[2], 10);
     files[files.length] = m[3];
+    removed[m[3]] = m[2] === '-' ? BINARY_LINES : parseInt(m[2], 10);
   }
-  return { lines, files };
+  return { lines, files, removed };
 }
 
 /**
- * @param {{ root: string, config: any, kind: string | null, base: string, head: string }} a
- * @returns {{ agent: string, light: boolean, reason: string }}
+ * A spec with browse checks gets the browse red team (a full review, never light), whatever the
+ * config says about light review; `a.browse` is the number of browse checks.
+ * The spec's own `review` (plugin 0.6) is applied after the browse rule: `none` / `light` still go to the
+ * full red team when the diff touches a floor path (DEFAULT_NEVER, NEVER_WORDS, light.never) or cannot be read.
+ * @param {{ root: string, config: any, kind: string | null, base: string, head: string, browse?: number, review?: string | null, task?: string }} a
+ * @returns {{ agent: string | null, light: boolean, reason: string, skip?: boolean }}
  */
 function chooseReviewer(a) {
   const red = a.config.roles.redTeam;
@@ -93,6 +123,31 @@ function chooseReviewer(a) {
   const safe = (/** @type {string} */ t) => rec.cleanText(t, 200).replace(/["`$\\']/g, '');
   const normal = (/** @type {string} */ reason) => ({ agent: red.agent, light: false, reason: safe(reason) });
   const kind = a.kind || 'unknown';
+  if (a.browse && a.browse > 0) return { agent: BROWSE_AGENT, light: false, reason: safe('the spec has ' + a.browse + ' browse check' + (a.browse === 1 ? '' : 's') + '; full review with a browser') };
+  if (a.review === 'none' || a.review === 'light') {
+    const d0 = diffInfo(a.root, a.base, a.head);
+    if (!d0) return normal('the spec asks for ' + a.review + ' review, but the diff could not be read; full review');
+    // An empty diff, or a head that is not the task branch tip, is a range that proves nothing about what will merge.
+    if (!d0.files.length) return normal('the spec asks for ' + a.review + ' review, but the diff has no files; full review');
+    if (a.task) {
+      const tip = gitlib.resolveCommit(a.root, 'refs/heads/task/' + a.task);
+      if (!tip || tip !== a.head) return normal('the spec asks for ' + a.review + ' review, but head is not the tip of task/' + a.task + '; full review');
+    }
+    // Same rule as recovery: an earlier attempt the red team blocked keeps the full review until one passes.
+    if (a.task) {
+      let names = [];
+      try { names = fs.readdirSync(a.root + '/.sereno/attempts'); } catch (_e) { names = []; }
+      const open = recovery.openReviewBlock(recovery.readAttempts(a.root, a.task, names));
+      if (open) return normal('attempt ' + open.n + ' was blocked by the red team; full review until a review passes');
+    }
+    for (const f of d0.files) {
+      const rule = neverRule(f, light.never) || specFloorRule(f, d0.removed[f] || 0);
+      if (rule) return normal('the spec asks for ' + a.review + ' review, but ' + f + ' matches ' + rule + '; full review');
+    }
+    if (a.review === 'none') return { agent: null, light: false, skip: true, reason: safe('no review: chosen in the spec') };
+    return { agent: light.agent, light: true, reason: safe('the spec asks for light review; ' + d0.lines + ' lines, no sensitive path') };
+  }
+  if (a.review === 'full') return normal('the spec asks for full review');
   if (!light.kinds.length) return normal('light review is off (roles.redTeam.light.kinds is empty)');
   if (!light.kinds.includes(kind)) return normal('kind ' + kind + ' is not one of: ' + light.kinds.join(', '));
   const d = diffInfo(a.root, a.base, a.head);
@@ -193,6 +248,89 @@ function untested(files) {
   });
 }
 
+/* ---- stub markers (plugin 0.5 H3) ---- */
+
+const STUB_MAX = 50;
+const RE_TODO = /\b(?:TODO|FIXME|XXX)\b/;
+const RE_NOT_IMPL = /not implemented|NotImplementedError|NotImplementedException|UnsupportedOperationException|\btodo!\s*\(|\bunimplemented!\s*\(|panic\(\s*["'`]TODO/i;
+const RE_SKIP = /\.skip\s*\(|\bxit\s*\(|\bxdescribe\s*\(|\b(?:it|test)\.todo\s*\(|@pytest\.mark\.skip|@unittest\.skip|#\[ignore\b|\bt\.Skip(?:f|Now)?\s*\(/;
+// A function opener and its closing body on one line: `function x() {}`, `=> {}`, `name(args) { }`, `def f(): pass`.
+const RE_EMPTY_ONE = /^\s*def\s.{0,200}:\s*(?:pass|\.\.\.)\s*$|\bfunction\b[^{;]{0,200}\([^)]{0,200}\)\s*\{\s*\}|=>\s*\{\s*\}|(?:^|[\s.])(?!(?:if|for|while|switch|catch|with)\b)[A-Za-z_$][\w$]{0,100}\s*\([^)]{0,200}\)\s*\{\s*\}\s*;?\s*$/;
+// An opener that ends a line, for the two-line form (`function x() {` then `}`), and a Python def.
+const RE_OPEN = /(?:\bfunction\b[^{;]{0,200}\([^)]{0,200}\)|=>|(?:^|[\s.])(?!(?:if|for|while|switch|catch|with|else|try|do)\b)[A-Za-z_$][\w$]{0,100}\s*\([^)]{0,200}\))\s*\{\s*$/;
+const RE_PY_DEF = /^\s*(?:async\s+)?def\s+\w{1,100}\s*\(.{0,200}\)\s*(?:->\s*[^:]{1,100})?:\s*$/;
+const HEURISTIC_LINE_MAX = 1000; // longer added lines (minified code, data) skip the empty-body heuristics
+
+/**
+ * Stub markers on the ADDED lines of a unified diff (`git diff base head`, any context). Returns
+ * only path, new-file line number and kind, never the line text (the pack holds no file contents).
+ * Kinds: todo, not_implemented, empty_body, skipped_test. Binary hunks carry no `@@` lines and are
+ * skipped. Deliberately heuristic: expect some false positives (a `.skip(` on a stream, `XXX` in a
+ * placeholder string, a legitimately empty no-op callback) and some misses (multi-line signatures,
+ * bodies of only comments). The red team judges each entry against the acceptance criteria; this
+ * list is a map, not a verdict.
+ * @param {string} diffText @param {number} [max] cap on entries returned
+ * @returns {{ entries: { file: string, line: number, kind: string }[], total: number }}
+ */
+function stubMarkers(diffText, max) {
+  const cap = max === undefined ? STUB_MAX : max;
+  /** @type {{ file: string, line: number, kind: string }[]} */
+  const entries = [];
+  let total = 0;
+  let file = '', inHunk = false, line = 0;
+  let prevText = '', prevLine = -1;
+  /** @param {string} kind */
+  const hit = (kind) => { total++; if (entries.length < cap) add(entries, { file, line, kind }); };
+  for (const raw of diffText.split('\n')) {
+    const l = raw.replace(/\r$/, '');
+    if (l.startsWith('diff --git ')) { inHunk = false; file = ''; prevLine = -1; continue; }
+    if (!inHunk) {
+      if (l.startsWith('+++ ')) {
+        const p = l.slice(4).replace(/\t.*$/, '');
+        file = p === '/dev/null' ? '' : p.replace(/^b\//, '');
+        continue;
+      }
+      const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+      if (h) { inHunk = true; line = parseInt(h[1], 10); prevLine = -1; }
+      continue;
+    }
+    const h2 = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+    if (h2) { line = parseInt(h2[1], 10); prevLine = -1; continue; }
+    if (l.startsWith('+')) {
+      const t = l.slice(1);
+      if (file) {
+        if (RE_TODO.test(t)) hit('todo');
+        if (RE_NOT_IMPL.test(t) || /throw\s+new\s+\w*Error\(\s*["'`]TODO/.test(t)) hit('not_implemented');
+        const trimmed = t.trim();
+        const consecutive = prevLine === line - 1;
+        if (t.length <= HEURISTIC_LINE_MAX && prevText.length <= HEURISTIC_LINE_MAX
+          && (RE_EMPTY_ONE.test(t) || (consecutive && trimmed === '}' && RE_OPEN.test(prevText))
+          || (consecutive && RE_PY_DEF.test(prevText) && (trimmed === 'pass' || trimmed === '...')))) hit('empty_body');
+        if (RE_SKIP.test(t)) hit('skipped_test');
+      }
+      prevText = t; prevLine = line; line++;
+    } else if (l.startsWith('-') || l.startsWith('\\')) {
+      // removed lines and "\ No newline at end of file" do not advance the new-file counter
+    } else if (l.startsWith(' ')) {
+      line++; prevLine = -1;
+    }
+  }
+  return { entries, total };
+}
+
+/**
+ * The spec's browse checks, or null when its checks block cannot be parsed.
+ * @param {string} specText @returns {{ n: number, url: string, look: string }[] | null}
+ */
+function browseChecks(specText) {
+  try {
+    /** @type {{ n: number, url: string, look: string }[]} */
+    const out = [];
+    for (const c of speclib.parseChecks(specText)) if (c.kind === 'browse') out[out.length] = { n: c.n, url: c.url, look: c.look };
+    return out;
+  } catch (_e) { return null; }
+}
+
 /**
  * @param {{ root: string, fsafe: any, task: string, base: string, head: string, specText: string }} a
  * @returns {{ path: string, lines: number, files: number, truncated: boolean }}
@@ -221,9 +359,31 @@ function buildPack(a) {
   for (const f of d.files.slice(0, FILES_MAX)) add(out, '- ' + plain(f));
   if (d.files.length > FILES_MAX) add(out, '- ... and ' + (d.files.length - FILES_MAX) + ' more');
   add(out, '');
+  const diffText = gitlib.git(a.root, ['-c', 'core.quotePath=false', 'diff', '--unified=0', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--end-of-options', a.base + '...' + a.head]);
+  const stubs = diffText === null ? null : stubMarkers(diffText);
+  add(out, '## Stub markers added in this diff' + (stubs ? ' (' + stubs.total + ')' : ''));
+  if (!stubs) add(out, 'The diff could not be scanned (too large or unreadable).');
+  else if (!stubs.total) add(out, 'None found.');
+  else {
+    add(out, 'Path, new-file line and kind only. Check each against the acceptance criteria.');
+    for (const s of stubs.entries) add(out, '- ' + plain(s.file) + ':' + s.line + ' ' + s.kind);
+    if (stubs.total > stubs.entries.length) add(out, '- ... and ' + (stubs.total - stubs.entries.length) + ' more');
+  }
+  add(out, '');
   add(out, '## Tests');
   for (const l of testSummary(a.fsafe, a.head)) add(out, l);
   add(out, '');
+  const browse = browseChecks(a.specText);
+  if (browse === null || browse.length) {
+    add(out, '## Browse checks (not yet verifiable)');
+    if (browse === null) add(out, 'The spec\'s checks block could not be parsed; read it in .sereno/specs/' + a.task + '.md.');
+    else {
+      add(out, 'Nothing has checked these. Do not treat them as passed.');
+      for (const b of browse) { add(out, '- ' + plain(b.url)); add(out, '  look: ' + plain(b.look)); }
+      add(out, 'Check numbers for the verdict, in the order above: ' + browse.map((b) => b.n).join(', ') + '.');
+    }
+    add(out, '');
+  }
   const un = untested(d.files);
   add(out, '## Touched source files with no test change in the diff (' + un.length + ')');
   if (!un.length) add(out, 'None.');
@@ -236,4 +396,4 @@ function buildPack(a) {
   return { path: rel, lines: out.length, files: d.files.length, truncated };
 }
 
-module.exports = { chooseReviewer, buildPack, diffInfo, neverRule, globToRegExp, acceptanceLines, untested, DEFAULT_NEVER, NEVER_WORDS, PACK_MAX_LINES };
+module.exports = { chooseReviewer, browseChecks, BROWSE_AGENT, buildPack, stubMarkers, diffInfo, neverRule, globToRegExp, acceptanceLines, untested, DEFAULT_NEVER, NEVER_WORDS, PACK_MAX_LINES };

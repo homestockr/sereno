@@ -136,7 +136,7 @@ function parseJson(text) { try { return JSON.parse(text); } catch (_) { return u
 
 /** @param {Record<string, any>} r @param {string} task @param {number} n */
 function cleanAttempt(r, task, n) {
-  return {
+  const out = {
     project_id: str(r.project_id, 128),
     task_id: task,
     spec_revision: posInt(r.spec_revision),
@@ -154,6 +154,9 @@ function cleanAttempt(r, task, n) {
     spec_hash: sha(r.spec_hash),
     head_commit: hex(r.head_commit),
   };
+  // plugin 0.6: only a skipped attempt carries a skip value; older records keep their exact shape.
+  if (r.skip === 'off' || r.skip === 'spec') out.skip = r.skip;
+  return out;
 }
 
 /** @param {Record<string, any>} r @param {string} task @param {string} runId */
@@ -452,7 +455,7 @@ const SIGNAL_DAYS = 30;
 const WEEK_DAYS = 7;
 const ROLE_MAP = Object.freeze({
   'sereno:builder': 'builder', 'sereno:builder-haiku': 'builder', 'sereno:builder-opus': 'builder',
-  'sereno:red-team': 'red-team', 'sereno:red-team-lean': 'red-team',
+  'sereno:red-team': 'red-team', 'sereno:red-team-lean': 'red-team', 'sereno:red-team-browse': 'red-team',
   'sereno:scribe': 'scribe',
 });
 const AGENT_HEAD_BYTES = 4096;

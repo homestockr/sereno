@@ -46,6 +46,18 @@ repairs an earlier task, pass `--fixes <that-task-name>`.
 `--reason` is one plain sentence on why this Builder fits (for example "five named
 files, same edit in each"). It is recorded; the person reviewing it will read it.
 
+## Choose the review
+
+Every spec carries `--review full|light|none`, the review this task gets. Propose a level from this table; the spec is the only place it is set, so there is no extra stop at ship time.
+
+| Level | For |
+|---|---|
+| `none` | Assets, copy and generated files with no new logic, where the tests or checks cover the result. Example: add an icon and its mapping. Never for config or the pipeline's own files (`.sereno/`, `package.json`, `.github/`, `.claude/`, `CLAUDE.md`): code gives those the full red team anyway. |
+| `light` | Small, plain fixes and mechanical changes with logic in them. |
+| `full` | Features, new logic, data or schema, anything near sensitive paths (auth, permissions, payments, secrets, migrations), any Opus task. |
+
+If `$ARGUMENTS` has `--review <level>` or the user says plainly "no review", "light review" or "full review", use that; it always wins. Code still gives a sensitive path the full red team whatever the spec says. On a revision of an existing spec, omit `--review` unless `$ARGUMENTS` or the user asks for a level, so the earlier level is kept. For a new spec, always pass the level you chose (step 4).
+
 ## 3. Create the branch (new tasks only)
 
 If branch `task/<name>` does not exist yet, create it first from the current HEAD:
@@ -82,6 +94,29 @@ The file content is:
 - ...
 ```
 
+### Runnable checks (optional)
+
+Add a `checks` block under the acceptance criteria only for a criterion that can be checked by running something. Never invent a command, script, route or port the repo does not have: read `package.json`, the README and the code first, and if you cannot name the exact command, leave the check out and keep the criterion as prose.
+
+```checks
+- cmd: node scripts/lint.js
+  expect: exit 0
+- cmd: node bin/cli.js --version
+  expect: stdout contains 1.4.0
+- serve: node server.js
+  ready: http://localhost:3000/health
+- http: http://localhost:3000/api/items
+  expect: status 200
+- http: http://localhost:3000/
+  expect: body contains <h1>Items</h1>
+- browse: http://localhost:3000/items
+  look: the empty state says "No items yet"
+```
+
+- At most 20 items, at most one `serve`, each value on one line and at most 500 characters. Nothing else may appear in the block.
+- `cmd` expects `exit <n>` or `stdout contains <text>`. `http` is a GET only and expects `status <n>` or `body contains <text>`. `serve` starts a server for the `http` checks and is always stopped afterwards. Every `serve` needs a `ready` URL (a spec without one is refused), so the checks wait for the real bind. `browse` is not run; it is listed for the reviewer and for the person merging.
+- URLs are `http:` or `https:` and the host must be `localhost`, `127.0.0.1` or `[::1]`. For any other host, use it only when the user named that host in this conversation, and pass it with `--check-hosts <host>[,<host>]` (bare host names). Never add a host the user did not name. `spec` refuses a malformed block with `invalid_checks`: fix the block and run it again.
+
 Then run:
 
 ```
@@ -91,15 +126,15 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" spec --task <name> --builder <haiku|s
 Add `--base-branch <from_branch>` when you just created the branch (a spec revision keeps
 the earlier value when you omit it). Add `--fixes "<task>"` when it applies.
 
-Two optional arguments in `$ARGUMENTS` pass straight through to the same `spec` command:
+`--review <level>` (see Choose the review) is always passed for a new spec; on a revision pass it only when `$ARGUMENTS` or the user asks for a level. Two optional arguments in `$ARGUMENTS` pass straight through to the same `spec` command:
 `--after <task>` queues this task behind another (`/sereno:build` refuses it until that task is
 merged into the base; the branch is still created now, from the current HEAD) and
 `--hold "<one line>"` records a human step to do before merge, for example "Apply the migration to
 staging". A hold is printed, never run. Both are kept when you revise the spec without them;
-`--after none` and `--hold ""` clear them. The result is `{ ok, path, spec_revision, spec_hash }`.
+`--after none` and `--hold ""` clear them. `--check-hosts` is kept the same way (`--check-hosts ""` clears it). The result is `{ ok, path, spec_revision, spec_hash }`.
 
 ## 5. Report
 
-End with a few lines: spec path and revision, the Builder you chose and why, and the
+End with a few lines: spec path and revision, the Builder you chose and why, the review level and how to change it (run `/sereno:task <name> --review <level>` again before the build), and the
 branch. Tell the user to run `/sereno:build <name>` next. Do not start the Builder
 yourself, and do not switch branches.

@@ -31,6 +31,8 @@ function defaultPreset() {
       scribe: { agent: 'scribe' },
       redTeam: {
         agent: 'red-team', fallback: /** @type {string | null} */ ('red-team-lean'), onFallback: 'ask', maxBlockedRuns: 2, enabled: true,
+        // The red team reads the spec before any build (sereno.js spec-review-needed). On in default, off in lean.
+        specReview: true,
         // A lighter reviewer for small, plain tasks; off while kinds is empty. `never` holds only the
         // repo's EXTRA globs: review.js always applies its built-in ones on top.
         light: { kinds: /** @type {string[]} */ ([]), maxDiffLines: 80, agent: 'red-team-lean', never: /** @type {string[]} */ ([]) },
@@ -50,6 +52,7 @@ const PRESETS = {
     c.roles.redTeam.agent = 'red-team-lean';
     c.roles.redTeam.fallback = null;
     c.roles.redTeam.light.kinds = ['mechanical'];
+    c.roles.redTeam.specReview = false;
     return c;
   },
 };
@@ -136,6 +139,7 @@ function validate(c) {
     if (!ON_FALLBACK.includes(r.onFallback)) bad('roles.redTeam.onFallback: must be ask, auto or never');
     if (!posInt(r.maxBlockedRuns)) bad('roles.redTeam.maxBlockedRuns: must be a positive integer');
     if (typeof r.enabled !== 'boolean') bad('roles.redTeam.enabled: must be true or false');
+    if (typeof r.specReview !== 'boolean') bad('roles.redTeam.specReview: must be true or false');
     validateLight(r.light, bad, agent);
   }
   const rec = c.recovery;
