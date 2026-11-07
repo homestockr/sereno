@@ -73,14 +73,37 @@ function neverRule(p, extra) {
 }
 
 /**
- * Extra floor for a spec-chosen none or light review: lockfiles, and test files that lose lines
- * (adding tests is fine, removing or rewriting them is not). @param {string} p @param {number} removed
+ * Extra floor for every light or none review (spec-chosen or config-driven): lockfiles, and test files
+ * that lose lines (adding tests is fine, removing or rewriting them is not). A prose file (.md, .txt, ...)
+ * is a doc, not a test, only when it sits under a docs/ segment and has no tests/, test/, __tests__/ or
+ * .sereno/ segment (so golden files and doctests under tests/ still count). @param {string} p @param {number} removed
  * @returns {string | null}
  */
-function specFloorRule(p, removed) {
+function lightFloorRule(p, removed) {
   const path_ = p.split('\\').join('/');
   for (const g of LOCKFILE_GLOBS) if (globToRegExp(g).test(path_)) return g;
-  if (removed > 0 && TEST_PATH.test(path_)) return 'test file with removed lines';
+  if (removed > 0 && TEST_PATH.test(path_) && !isDocProse(path_)) return 'test file with removed lines';
+  return null;
+}
+
+const PROSE_EXT = /\.(?:md|mdx|txt|rst|adoc)$/i;
+const DOCS_SEGMENT = /(?:^|\/)docs\//i;
+const NOT_DOCS_SEGMENT = /(?:^|\/)(?:tests?|__tests__|\.sereno)\//i;
+/** @param {string} path_ forward slashes */
+function isDocProse(path_) { return PROSE_EXT.test(path_) && DOCS_SEGMENT.test(path_) && !NOT_DOCS_SEGMENT.test(path_); }
+
+/**
+ * Range guards shared by the spec-chosen and config-driven light paths: an empty diff, or a head that is
+ * not the tip of task/<task>, is a range that proves nothing about what will merge.
+ * @param {{ root: string, head: string, task?: string }} a @param {{ files: string[] }} d
+ * @returns {'empty' | 'tip' | null}
+ */
+function rangeGuard(a, d) {
+  if (!d.files.length) return 'empty';
+  if (a.task) {
+    const tip = gitlib.resolveCommit(a.root, 'refs/heads/task/' + a.task);
+    if (!tip || tip !== a.head) return 'tip';
+  }
   return null;
 }
 
@@ -123,25 +146,26 @@ function chooseReviewer(a) {
   const safe = (/** @type {string} */ t) => rec.cleanText(t, 200).replace(/["`$\\']/g, '');
   const normal = (/** @type {string} */ reason) => ({ agent: red.agent, light: false, reason: safe(reason) });
   const kind = a.kind || 'unknown';
+  const blockedReason = () => {
+    if (!a.task) return null;
+    let names = [];
+    try { names = fs.readdirSync(a.root + '/.sereno/attempts'); } catch (_e) { names = []; }
+    const open = recovery.openReviewBlock(recovery.readAttempts(a.root, a.task, names));
+    return open ? 'attempt ' + open.n + ' was blocked by the red team; full review for the rest of this task' : null;
+  };
   if (a.browse && a.browse > 0) return { agent: BROWSE_AGENT, light: false, reason: safe('the spec has ' + a.browse + ' browse check' + (a.browse === 1 ? '' : 's') + '; full review with a browser') };
   if (a.review === 'none' || a.review === 'light') {
     const d0 = diffInfo(a.root, a.base, a.head);
     if (!d0) return normal('the spec asks for ' + a.review + ' review, but the diff could not be read; full review');
     // An empty diff, or a head that is not the task branch tip, is a range that proves nothing about what will merge.
-    if (!d0.files.length) return normal('the spec asks for ' + a.review + ' review, but the diff has no files; full review');
-    if (a.task) {
-      const tip = gitlib.resolveCommit(a.root, 'refs/heads/task/' + a.task);
-      if (!tip || tip !== a.head) return normal('the spec asks for ' + a.review + ' review, but head is not the tip of task/' + a.task + '; full review');
-    }
-    // Same rule as recovery: an earlier attempt the red team blocked keeps the full review until one passes.
-    if (a.task) {
-      let names = [];
-      try { names = fs.readdirSync(a.root + '/.sereno/attempts'); } catch (_e) { names = []; }
-      const open = recovery.openReviewBlock(recovery.readAttempts(a.root, a.task, names));
-      if (open) return normal('attempt ' + open.n + ' was blocked by the red team; full review until a review passes');
-    }
+    const guard = rangeGuard(a, d0);
+    if (guard === 'empty') return normal('the spec asks for ' + a.review + ' review, but the diff has no files; full review');
+    if (guard === 'tip') return normal('the spec asks for ' + a.review + ' review, but head is not the tip of task/' + a.task + '; full review');
+    // Same rule as recovery: an earlier attempt the red team blocked keeps the full review for the rest of the task.
+    const blocked = blockedReason();
+    if (blocked) return normal(blocked);
     for (const f of d0.files) {
-      const rule = neverRule(f, light.never) || specFloorRule(f, d0.removed[f] || 0);
+      const rule = neverRule(f, light.never) || lightFloorRule(f, d0.removed[f] || 0);
       if (rule) return normal('the spec asks for ' + a.review + ' review, but ' + f + ' matches ' + rule + '; full review');
     }
     if (a.review === 'none') return { agent: null, light: false, skip: true, reason: safe('no review: chosen in the spec') };
@@ -153,10 +177,17 @@ function chooseReviewer(a) {
   const d = diffInfo(a.root, a.base, a.head);
   if (!d) return normal('the diff could not be read');
   if (d.lines > light.maxDiffLines) return normal('the diff is ' + d.lines + ' lines, over the limit of ' + light.maxDiffLines);
+  const guardCfg = rangeGuard(a, d);
+  if (guardCfg === 'empty') return normal('the diff has no files; full review');
+  if (guardCfg === 'tip') return normal('head is not the tip of task/' + a.task + '; full review');
   for (const f of d.files) {
     const rule = neverRule(f, light.never);
     if (rule) return normal(rule === f ? 'touches ' + f : 'touches ' + f + ' (' + rule + ')');
+    const floor = lightFloorRule(f, d.removed[f] || 0);
+    if (floor) return normal('light review floor: ' + f + ' matches ' + floor);
   }
+  const blockedCfg = blockedReason();
+  if (blockedCfg) return normal(blockedCfg);
   return { agent: light.agent, light: true, reason: safe('kind ' + kind + ', ' + d.lines + ' lines (limit ' + light.maxDiffLines + '), no sensitive path') };
 }
 

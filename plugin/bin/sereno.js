@@ -37,7 +37,10 @@
  *                           (never rules) forces the full red team whatever the spec says.
  *                           Without a spec `review`: Light only when the spec's kind is in
  *                           roles.redTeam.light.kinds, the diff is at most maxDiffLines, and no touched
- *                           path trips a `never` rule (the built-in ones always apply). Ship stores the
+ *                           path trips a `never` rule (the built-in ones always apply). Since 0.6.1 this
+ *                           path also gets the light floor (lockfiles, test files with removed lines), the
+ *                           red-team-block rule (a blocked attempt keeps the full review) and the range
+ *                           guards (empty diff, or head not the tip of task/<t>, goes full). Ship stores the
  *                           reason in the gate as reviewer_reason (gate --reviewer-reason).
  *   review-pack --task <t> --base <sha> --head <sha>
  *                           writes .sereno/cache/review-<t>.md (<= 200 lines): the spec's acceptance
