@@ -56,7 +56,7 @@ Working notes:
 
 ```sh
 npm install
-npm test            # GUI-free suite (785 tests, several minutes); CI runs it on every push/PR
+npm test            # GUI-free suite (about 1,150 tests, over 10 minutes); CI runs it on every push/PR
 npm start           # the widget
 npm run serve       # collector only, http://127.0.0.1:8787/
 npm run wire        # install hooks + statusline (merges, backs up first)
@@ -137,10 +137,11 @@ checks that list.
    `docs/plans/alpha6-projects-navigator-theme.md`. Known follow-up: the Pipeline tab layout (an
    empty main area, a cramped right panel that clips, paths that wrap mid-word). Fix it with
    alpha.7.
-6. **Sessions tab (planned, `2.0.0-alpha.7`).** Brief, concept and data decision (new
-   `session_events` table: tool names, permission waits, prompt counts, timings, never
-   inputs): `docs/plans/alpha7-sessions.md`.
-7. **Plugin 0.4.0 (planned).** `/sereno:next` runs build and ship in one turn and stops at the
+6. **alpha.7 (shipped `2.0.0-alpha.7`, 2026-11-07).** The Sessions tab (new `session_events`
+   table: tool names, permission waits, turn counts, timings, never inputs), Clear history, the
+   Pipeline layout fix, the widget jitter fix and Electron 44.9.1. Plan:
+   `docs/plans/alpha7-sessions.md`.
+7. **Plugin 0.4.0 (released 2026-10-26).** `/sereno:next` runs build and ship in one turn and stops at the
    first human gate. It adds holds, queued tasks (`--after`) and token-efficiency work:
    - a review sized to the task;
    - bookkeeping done in code;
@@ -148,15 +149,21 @@ checks that list.
    - a review pack for the red team;
    - cost shown in the app.
    Plan: `docs/plans/plugin-0.4-next.md`.
-8. **Plugin 0.5.0 (planned, after 0.4.0).** Lessons from Anthropic's harness-design article:
+8. **Plugin 0.5.0 (merged 2026-10-30).** Lessons from Anthropic's harness-design article:
    - runnable acceptance checks in specs (cmd, http, browse);
    - a spec review before larger builds;
    - stub detection in the review pack;
    - escaped-defect measurement per reviewer, in the app with alpha.8.
 
-   Plan: `docs/plans/plugin-0.5-harness.md`.
+   Plan: `docs/plans/plugin-0.5-harness.md`. `browse` checks have not been run end to end yet.
+9. **Plugin 0.6.0 (merged 2026-10-30).** The spec chooses the review (`review: full | light |
+   none`); a safety floor still forces the full red team on sensitive paths, and a task the red
+   team has blocked keeps the full review. Plan: `docs/plans/plugin-0.6-review-choice.md`. Two
+   lows open, both failing closed.
+10. **Next: alpha.8.** Escaped-defect measurement per reviewer in the app.
 
-Open: Dependabot #33 (`sprintf-js`, dev-only, no fix released yet). The v1.3.x draft release
+Open: Dependabot #54 (`minimatch`, dev-only, via electron-builder; the fix needs minimatch 11,
+which electron-builder doesn't accept yet). The v1.3.x draft release
 is undecided.
 
 ### Phase 1 notes
