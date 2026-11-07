@@ -9616,12 +9616,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['/sereno:next', '--after', '--hold', 'preflight', 'hook_failed', 'attempt --adopt', '/sereno:merge', 'after_not_merged']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes('`next`, `build`') || r.includes('`task`, `next`, `build`'));
     });
-    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.0', () => {
+    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.1', () => {
       const pj = JSON.parse(rd('.claude-plugin/plugin.json'));
       const mp = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
-      assert.strictEqual(pj.version, '0.6.0');
-      assert.strictEqual(mp.plugins[0].version, '0.6.0');
-      assert.ok(rd('README.md').includes('Version 0.6.0.'));
+      assert.strictEqual(pj.version, '0.6.1');
+      assert.strictEqual(mp.plugins[0].version, '0.6.1');
+      assert.ok(rd('README.md').includes('Version 0.6.1.'));
     });
     test('[plugin-0.5 P4] README has the lighter-setup section and the 0.5.0 notes', () => {
       const r = rd('README.md');
@@ -9839,7 +9839,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.strictEqual(reviewer(dir, 'own', own).light, false, 'the repo glob applies');
       const lock = mkTask(dir, 'lock', 'mechanical', { 'yarn.lock': 'a\n' });
       assert.strictEqual(reviewer(dir, 'lock', lock).light, false);
-      const nested = mkTask(dir, 'nested', 'mechanical', { 'sub/yarn.lock': 'a\n' });
+      const nested = mkTask(dir, 'nested', 'mechanical', { 'sub/other.lock': 'a\n' }); // not sub/yarn.lock: that is a lockfile and goes full by the 0.6.1 floor
       assert.strictEqual(reviewer(dir, 'nested', nested).light, true, '* stays inside one directory level');
       const mig = mkTask(dir, 'mig', 'mechanical', { 'db/migrations/1.sql': 'a\n' });
       assert.strictEqual(reviewer(dir, 'mig', mig).light, false, 'the defaults still apply with a repo list');
@@ -19432,16 +19432,16 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     // ---- R7 docs and version ----
-    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.0', () => {
+    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.1', () => {
       const r = rd('README.md');
       const i = r.indexOf('### Review level'), j = r.indexOf('### Spec review');
       assert.ok(i > 0 && j > i);
       const sec = r.slice(i, j);
       for (const k of ['--review', '`none`', '`light`', '`full`', 'Safety floor', 'skip: "spec"', 'spec_changed', 'roles.redTeam.enabled: false']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes("A spec's own `review` field overrides `kinds` and `maxDiffLines`"));
-      assert.ok(r.includes('New in 0.6.0') && r.includes('New in 0.5.0'));
-      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.0');
-      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.0');
+      assert.ok(r.includes('New in 0.6.1') && r.includes('New in 0.6.0') && r.includes('New in 0.5.0'));
+      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.1');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.1');
     });
 
     // ---- red-team follow-ups ----
@@ -19610,7 +19610,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           fs.writeFileSync(path.join(dir, '.sereno/attempts/a-2.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'running' })));
           const r = S(dir, ['reviewer', '--task', 'a', '--base', git(dir, 'rev-parse', 'main'), '--head', head]).out;
           assert.deepStrictEqual([r.agent, r.light, 'skip' in r], ['red-team', false, false], lvl + oc + JSON.stringify(r));
-          assert.strictEqual(r.reason, 'attempt 1 was blocked by the red team; full review until a review passes');
+          assert.strictEqual(r.reason, 'attempt 1 was blocked by the red team; full review for the rest of this task');
           const u = S(dir, ['attempt', '--task', 'a', '--update', '2', '--outcome', 'skipped', '--diagnosis', 'none', '--head', head, '--base', git(dir, 'rev-parse', 'main'), '--ended-at', 'now', '--skip', 'spec']).out;
           assert.deepStrictEqual([u.ok, u.code], [false, 'invalid_arg'], JSON.stringify(u));
           assert.match(u.error, /^skip_refused/);
@@ -19648,13 +19648,63 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.ok(rl.reason.includes(lock), rl.reason);
         }
       }
-      // config-driven light is unchanged: a test file with removed lines and a lockfile do not trip it
+      // config-driven light hits the same extra floor since 0.6.1 (see the [plugin-0.6.1] tests)
       const d2 = repo(LEAN);
       fs.mkdirSync(path.join(d2, 'tests'), { recursive: true });
       fs.writeFileSync(path.join(d2, 'tests', 'old.js'), 'one\ntwo\n');
       git(d2, 'add', '-f', '.'); git(d2, 'commit', '-q', '-m', 'tests');
       const t2 = mkTask(d2, 'm', 'mechanical', { 'tests/old.js': 'one\n', 'yarn.lock': 'x\n' });
-      assert.strictEqual(rv(d2, 'm', t2).light, true);
+      assert.strictEqual(rv(d2, 'm', t2).light, false);
+    });
+
+    // ---- plugin 0.6.1 ----
+    test('[plugin-0.6.1] floor: prose under tests/ or specs/ is not a test file; code and fixtures still are', () => {
+      const dir = repo();
+      for (const f of ['docs/specs/x.md', 'tests/a.test.js', 'tests/fixtures/a.json', 'docs/specs/y.txt']) {
+        fs.mkdirSync(path.join(dir, path.dirname(f)), { recursive: true });
+        fs.writeFileSync(path.join(dir, f), 'one\ntwo\n');
+      }
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'files');
+      const light = mkTask(dir, 'p1', 'feature', { 'docs/specs/x.md': 'one\n', 'docs/specs/y.txt': 'one\n' }, ['--review', 'light']);
+      const r1 = rv(dir, 'p1', light);
+      assert.strictEqual(r1.light, true, JSON.stringify(r1));
+      let i = 0;
+      for (const f of ['tests/a.test.js', 'tests/fixtures/a.json']) {
+        const task = 'p2' + (i++);
+        const r = rv(dir, task, mkTask(dir, task, 'feature', { [f]: 'one\n' }, ['--review', 'light']));
+        assert.deepStrictEqual([r.agent, r.light], ['red-team', false], f + JSON.stringify(r));
+        assert.ok(r.reason.includes(f) && r.reason.includes('removed lines'), r.reason);
+      }
+    });
+    test('[plugin-0.6.1] config light: lockfiles and test files with removed lines go full; added test lines stay light', () => {
+      const d = repo(LEAN);
+      fs.mkdirSync(path.join(d, 'tests'), { recursive: true });
+      fs.writeFileSync(path.join(d, 'tests', 'old.js'), 'one\ntwo\n');
+      git(d, 'add', '-f', '.'); git(d, 'commit', '-q', '-m', 'tests');
+      const agent = S(d, ['config']).out.config.roles.redTeam.agent;
+      const lock = rv(d, 'l', mkTask(d, 'l', 'mechanical', { 'package-lock.json': 'x\n' }));
+      assert.deepStrictEqual([lock.agent, lock.light], [agent, false], JSON.stringify(lock));
+      assert.ok(lock.reason.includes('package-lock.json') && /floor/.test(lock.reason), lock.reason);
+      const rm = rv(d, 'r', mkTask(d, 'r', 'mechanical', { 'tests/old.js': 'one\n' }));
+      assert.deepStrictEqual([rm.agent, rm.light], [agent, false], JSON.stringify(rm));
+      assert.ok(rm.reason.includes('tests/old.js') && rm.reason.includes('test file with removed lines'), rm.reason);
+      const add = rv(d, 'ad', mkTask(d, 'ad', 'mechanical', { 'tests/new.test.js': 'x\n' }));
+      assert.strictEqual(add.light, true, JSON.stringify(add));
+    });
+    test('[plugin-0.6.1] config light: an earlier red team block keeps the full review', () => {
+      const d = repo(LEAN);
+      const t = mkTask(d, 'b', 'mechanical', { 'assets/i.svg': '<svg/>\n' });
+      assert.strictEqual(rv(d, 'b', t).light, true, 'control: light before any block');
+      git(d, 'switch', '-q', 'task/b');
+      assert.strictEqual(S(d, ['attempt', '--task', 'b', '--builder', 'sonnet', '--kind', 'mechanical', '--outcome', 'running', '--started-at', '2020-01-01T00:00:00Z', '--spec', '.sereno/specs/b.md']).out.ok, true);
+      git(d, 'switch', '-q', 'main');
+      const a1 = readJ(d, '.sereno/attempts/b-1.json');
+      fs.mkdirSync(path.join(d, '.sereno/gates'), { recursive: true });
+      fs.writeFileSync(path.join(d, '.sereno/gates/rr_20260101T000000Z_abcdef1.json'), JSON.stringify({ outcome: 'block', task_id: 'b' }));
+      fs.writeFileSync(path.join(d, '.sereno/attempts/b-1.json'), JSON.stringify(Object.assign({}, a1, { outcome: 'block', review_run_id: 'rr_20260101T000000Z_abcdef1' })));
+      const r = rv(d, 'b', t);
+      assert.deepStrictEqual([r.agent, r.light], [S(d, ['config']).out.config.roles.redTeam.agent, false], JSON.stringify(r));
+      assert.strictEqual(r.reason, 'attempt 1 was blocked by the red team; full review for the rest of this task');
     });
     test('[plugin-0.6 rt2] docs: ship skill continues on skip_refused, README lists the narrowed floor and the gate-only open block', () => {
       const s = rd('skills/ship/SKILL.md');

@@ -145,7 +145,7 @@ function decide(a) {
     // skip: "spec" (plugin 0.6) means the spec chose no review; any other skipped attempt needs the red team off.
     const bySpec = last.rec.skip === 'spec';
     if (red.enabled && !bySpec) return out('decide', 'attempt is marked skipped but the red team is enabled');
-    // A review the spec skips must not close an open block: an earlier gate block or needs_context stands until a review passes.
+    // A review the spec skips must not close an open block: an earlier gate block or needs_context stands for the rest of the task.
     if (bySpec) {
       const open = openReviewBlock(before);
       if (open) return out('decide', 'attempt ' + open.n + ' was blocked by the red team (gate ' + open.gate.outcome + '); a spec that chose no review does not clear it');
