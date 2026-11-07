@@ -19706,6 +19706,47 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual([r.agent, r.light], [S(d, ['config']).out.config.roles.redTeam.agent, false], JSON.stringify(r));
       assert.strictEqual(r.reason, 'attempt 1 was blocked by the red team; full review for the rest of this task');
     });
+    test('[plugin-0.6.1] floor: prose exempt only under docs/ without a tests segment; goldens, doctests and .sereno specs are tests', () => {
+      const files = ['tests/golden/expected.txt', 'tests/doctests/api.rst', 'tests/cases.TXT', 'test/fixtures/sample.md', '.sereno/specs/B.md', 'docs/tests/x.md', 'docs/specs/x.md', 'docs/guide.md'];
+      const setup = (cfg) => {
+        const dir = repo(cfg);
+        for (const f of files) { fs.mkdirSync(path.join(dir, path.dirname(f)), { recursive: true }); fs.writeFileSync(path.join(dir, f), 'one\ntwo\n'); }
+        git(dir, 'add', '-f', '.'); git(dir, 'commit', '-q', '-m', 'files');
+        return dir;
+      };
+      const full = ['tests/golden/expected.txt', 'tests/doctests/api.rst', 'tests/cases.TXT', 'test/fixtures/sample.md', '.sereno/specs/B.md', 'docs/tests/x.md'];
+      const keep = ['docs/specs/x.md', 'docs/guide.md'];
+      for (const mode of ['spec', 'config']) {
+        const dir = setup(mode === 'config' ? LEAN : null);
+        let i = 0;
+        for (const f of full) {
+          const task = 'q' + mode[0] + (i++);
+          const r = rv(dir, task, mkTask(dir, task, 'mechanical', { [f]: 'one\n' }, mode === 'spec' ? ['--review', 'light'] : []));
+          assert.strictEqual(r.light, false, mode + ' ' + f + ' ' + JSON.stringify(r));
+          assert.ok(r.reason.includes(f) && r.reason.includes('removed lines'), mode + ' ' + r.reason);
+        }
+        for (const f of keep) {
+          const task = 'k' + mode[0] + (i++);
+          const r = rv(dir, task, mkTask(dir, task, 'mechanical', { [f]: 'one\n' }, mode === 'spec' ? ['--review', 'light'] : []));
+          assert.strictEqual(r.light, true, mode + ' ' + f + ' ' + JSON.stringify(r));
+        }
+      }
+    });
+    test('[plugin-0.6.1] config light: an empty diff, or a head that is not the task branch tip, goes full', () => {
+      const d = repo(LEAN);
+      const agent = S(d, ['config']).out.config.roles.redTeam.agent;
+      const t = mkTask(d, 'g', 'mechanical', { 'assets/i.svg': '<svg/>\n' });
+      assert.strictEqual(rv(d, 'g', t).light, true, 'control');
+      const e = rv(d, 'g', { base: t.head, head: t.head });
+      assert.deepStrictEqual([e.agent, e.light, e.reason], [agent, false, 'the diff has no files; full review'], JSON.stringify(e));
+      git(d, 'switch', '-q', 'task/g');
+      fs.writeFileSync(path.join(d, 'assets', 'j.svg'), '<svg/>\n'); git(d, 'add', 'assets'); git(d, 'commit', '-q', '-m', 'more');
+      const tip = git(d, 'rev-parse', 'HEAD');
+      git(d, 'switch', '-q', 'main');
+      const o = rv(d, 'g', t);
+      assert.deepStrictEqual([o.agent, o.light, o.reason], [agent, false, 'head is not the tip of task/g; full review'], JSON.stringify(o));
+      assert.strictEqual(rv(d, 'g', { base: t.base, head: tip }).light, true, 'the real tip stays light');
+    });
     test('[plugin-0.6 rt2] docs: ship skill continues on skip_refused, README lists the narrowed floor and the gate-only open block', () => {
       const s = rd('skills/ship/SKILL.md');
       assert.ok(s.includes('skip_refused') && s.includes('re-run `reviewer`') && s.includes('as a normal review'));

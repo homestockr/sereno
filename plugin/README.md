@@ -10,7 +10,7 @@ It works without the Sereno app. It needs only Node and git. The Sereno app (Win
 can observe the files it writes. Version 0.6.1. Windows is the first
 platform; other systems are not yet tested.
 
-New in 0.6.1: three stricter reviewer choices. Prose files (.md, .txt and so on) under a tests or specs directory no longer count as test files in the floor, so removing lines from a doc stays light. Light review chosen by the config now gets the same extra floor as a spec-chosen one (lockfiles, test files with removed lines). A task the red team has blocked keeps the full review on the config path too, as the README always said.
+New in 0.6.1: reviewer choice fixes. Light review chosen by the config (no spec `review`) now gets the same floor as a spec-chosen one: lockfiles, test files with removed lines, an earlier red team block (the README always said so), and the range guards (an empty diff, or a head that is not the tip of the task branch, gets the full review). Prose files (.md, .txt and so on) now count as docs, not tests, only under a `docs/` directory with no `tests/`, `test/`, `__tests__/` or `.sereno/` directory in the path; golden files and doctests under `tests/` still count as tests.
 
 New in 0.6.0: the review is chosen per task. A spec carries `review: full | light | none` (set with
 `/sereno:task --review`), the safety floor still forces the full red team on sensitive paths, and a
@@ -126,7 +126,7 @@ A spec can carry one `checks` fenced block under its acceptance criteria. `/sere
 
 ### Review level
 
-Each spec has a `review` field in its front matter, set with `sereno.js spec --review full|light|none` (`/sereno:task` proposes a level, and `--review <level>` or plain words like "no review" override it). It is part of the spec, so changing it after a build is a `spec_changed`. A revision that omits `--review` keeps the earlier level; a spec with no `review` field (any written before 0.6.0) behaves as before.
+Each spec has a `review` field in its front matter, set with `sereno.js spec --review full|light|none` (`/sereno:task` proposes a level, and `--review <level>` or plain words like "no review" override it). It is part of the spec, so changing it after a build is a `spec_changed`. A revision that omits `--review` keeps the earlier level; a spec with no `review` field (any written before 0.6.0) behaves as before, plus the 0.6.1 floor (lockfiles, test rewrites, an earlier red team block, the range guards).
 
 - `none`: no review. Tests still run; the attempt is recorded `skipped` with `skip: "spec"`, and `/sereno:merge` accepts it. Meant for assets, copy and generated files with no new logic, not config.
 - `light`: the light reviewer, whatever the kind or diff size.

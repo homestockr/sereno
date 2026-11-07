@@ -100,3 +100,9 @@ rule. No field also means the current rule.
 - A choice at ship time.
 - Changing the floor list.
 - Removing `roles.redTeam.light.kinds`. It stays the default for specs with no `review` field.
+
+## Addendum: 0.6.1 (2026-11-07)
+
+- "A spec with no `review` field behaves exactly as today" no longer holds.
+- The no-`review` (config-driven) light path now also gets the light floor (lockfiles, test files with removed lines), the red-team block rule and the range guards (empty diff; head not the tip of `task/<task>`).
+- Prose under `docs/` is not a test. A prose file (.md, .txt, .rst, .adoc) is exempt from the test rule only with a `docs/` segment and no `tests/`, `test/`, `__tests__/` or `.sereno/` segment.
