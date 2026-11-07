@@ -163,6 +163,14 @@ the agent id.
   growth. If the rate is far above about 1,000 rows per hour, revisit coalescing before
   release. It was moved after S1 because measuring first would need a throwaway collector
   counter.
+  - **Measured 2026-10-31** on the installed alpha.7 build, from 10-26 to 10-31:
+    - 4,683 rows over 6 sessions: 3,997 tool rows, 344 turns, 332 stops, 8 compacts and 2 waits.
+    - The busiest clock hour had 526 rows, against a limit of about 1,000. Averaged over each
+      session's lifetime it is about 16 rows per hour, because sessions stay open while idle.
+    - About 69% of rows come from subagents.
+    - The table and its indexes take 1.25 MB, about 270 bytes a row. A heavy day of about
+      4,000 rows adds about 1 MB.
+    - Verdict: no coalescing needed. Ship as is.
 - **S1, ledger V2.** The migration adds:
   - `session_events` with the allowlisted columns above, and indexes `(session_id, ts)` and
     `(session_id, tool_use_id)`;

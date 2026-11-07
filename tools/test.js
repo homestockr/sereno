@@ -1356,6 +1356,54 @@ test('the window can grow from its minimum height', () => {
   assert.strictEqual(measure([117, 130], 1450, 2), 1699);
 });
 
+// ---------- [widget-jitter] ----------
+
+test('[widget-jitter] the session list reserves its scrollbar gutter and meta uses tabular numerals', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.css'), 'utf8');
+  const rule = (sel) => {
+    const out = [];
+    for (const m of css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^}]*)\}/g)) if (m[1].trim() === sel) out.push(m[2]);
+    return out.join('; ');
+  };
+  assert.ok(/scrollbar-gutter:\s*stable/.test(rule('.rows')), '.rows must reserve the scrollbar gutter');
+  assert.ok(/font-variant-numeric:\s*tabular-nums/.test(rule('.meta')), '.meta numbers must be tabular');
+  assert.ok(/font-variant-numeric:\s*tabular-nums/.test(rule('.state')), '.state must be tabular');
+  assert.ok(/font-variant-numeric:\s*tabular-nums/.test(rule('.agent-timer')), '.agent-timer must be tabular');
+  assert.ok(/white-space:\s*nowrap/.test(rule('.meta > span:last-child')), 'the spend figure must not re-wrap');
+});
+
+test('[widget-jitter] reportHeight does not repeat itself or ping-pong between two heights', () => {
+  const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+  const consts = app.match(/let lastHeight = 0;[\s\S]*?const SETTLE_MS = \d+;/)[0];
+  const fn = app.match(/function reportHeight[\s\S]*?\n}/)[0];
+  const reports = [];
+  let scroll = 1000;
+  let nowMs = 100000;
+  const ui = {
+    grip: {},
+    rows: { hidden: false, scrollHeight: 0, offsetHeight: 0 },
+    window: { children: [], offsetHeight: 2, clientHeight: 0 },
+  };
+  ui.window.children = [ui.rows];
+  Object.defineProperty(ui.rows, 'scrollHeight', { get: () => scroll });
+  const api = { reportHeight: (h) => reports.push(h) };
+  const make = new Function('ui', 'api', 'Date', consts + '\n' + fn + '\nreturn reportHeight;');
+  const reportHeight = make(ui, api, { now: () => nowMs });
+
+  reportHeight(); reportHeight();
+  assert.deepStrictEqual(reports, [1002], 'same height is reported once');
+
+  // A scrollbar flapping the layout by a few px, every 100 ms (inside the 1.5 s settle window), must not be chased.
+  for (let i = 0; i < 10; i++) { scroll = i % 2 ? 1000 : 1004; nowMs += 100; reportHeight(); }
+  assert.deepStrictEqual(reports, [1002], 'a few-px flip right after a report is ignored');
+
+  // Real growth still gets through, immediately when large and after the window when small.
+  scroll = 1300; nowMs += 100; reportHeight();
+  assert.deepStrictEqual(reports, [1002, 1302]);
+  scroll = 1305; nowMs += 2000; reportHeight();
+  assert.deepStrictEqual(reports, [1002, 1302, 1307]);
+});
+
 test('only the session list scrolls', () => {
   // The alert, the promoted request and the allowances are the parts you opened
   // the widget to look at; they must not scroll away with the list.
@@ -2232,12 +2280,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(e instanceof Error); assert.strictEqual(e.code, 'LEDGER_UNAVAILABLE');
     });
 
-    test('ledger: WAL mode and user_version 1 on a file db', () => {
+    test('ledger: WAL mode and user_version 2 on a file db', () => {
       const f = tmpFile();
       try {
         const l = openLedger({ file: f });
         assert.strictEqual(l._db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
-        assert.strictEqual(l._db.prepare('PRAGMA user_version').get().user_version, 1);
+        assert.strictEqual(l._db.prepare('PRAGMA user_version').get().user_version, 2);
         l.close();
       } finally { rmDir(f); }
     });
@@ -2494,7 +2542,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('ledger: schema has no prompt/response/command/tool_input/email columns', () => {
       const l = mem();
       const tables = l._db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
-      assert.deepStrictEqual(tables.sort(), ['agents', 'requests', 'sessions', 'spans', 'status']);
+      assert.deepStrictEqual(tables.sort(), ['agents', 'requests', 'session_events', 'sessions', 'spans', 'status']);
       for (const t of tables) {
         for (const c of l._db.prepare('PRAGMA table_info(' + t + ')').all()) {
           assert.ok(c.name === 'prompt_id' || !/prompt|response|command|tool_input|email/i.test(c.name), t + '.' + c.name);
@@ -3537,7 +3585,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         checkKeys(tp, ['status', 'enabled', 'asOf', 'range', 'rows'], 'top-prompts');
         assert.strictEqual(tp.range, 'month'); assert.strictEqual(tp.rows.length, 3);
         for (const r of tp.rows) {
-          checkKeys(r, ['ts', 'project', 'sessionShort', 'costMicros', 'models', 'attribution'], 'top-prompts row');
+          checkKeys(r, ['ts', 'project', 'sessionShort', 'sessionId', 'costMicros', 'models', 'attribution'], 'top-prompts row');
           assert.strictEqual(r.sessionShort.length, 8);
         }
         assert.strictEqual(tp.rows[0].costMicros, 7000);
@@ -3974,7 +4022,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(html, /src="\/console\/console\.js"/);
       assert.match(html, /LOCAL WORKSPACE/);
       assert.match(html, /Local only/);
-      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 3);
+      assert.strictEqual((html.match(/class="nav-item/g) || []).length, 4);   // [alpha7 S3] Sessions joined
       assert.ok(html.indexOf('data-route="projects"') < html.indexOf('data-route="spend"'));
       assert.ok(html.indexOf('data-route="spend"') < html.indexOf('data-route="pipeline"'));
       for (const v of ['--src-main', '--src-subagent', '--src-auxiliary', '--src-unattributed', '--src-hatch']) {
@@ -4279,7 +4327,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const W = new Function(['estMoney', 'spendMode'].map((n) => lf(appSrc, n)).join('\n') + '\nreturn { estMoney, spendMode };')();
     const CN = ['estMoney', 'esc', 'largestRemainder', 'niceTicks', 'tickLabel', 'segmentsOf', 'barGeometry',
       'attributionSplit', 'formatTime', 'projectLabel', 'sparkPoints', 'sparkSvg', 'sw', 'dayLabel', 'chartSvg', 'legendHtml', 'chartTitle',
-      'chartBlock', 'modelName', 'pillText', 'ringIcon', 'pillHtml', 'nz', 'spendHash', 'spendRows', 'wherePreview', 'modelsHtml', 'fmtTokens', 'mixBar',
+      'chartBlock', 'modelName', 'pillText', 'ringIcon', 'pillHtml', 'nz', 'sessionHash', 'spendHash', 'spendRows', 'wherePreview', 'modelsHtml', 'fmtTokens', 'mixBar',
       'spendHeaderHtml', 'spendTabsHtml', 'wherePreviewHtml', 'turnsTableHtml', 'projectsTableHtml', 'cacheCardHtml', 'spendCacheHtml',
       'spendSideHtml', 'spendPageHtml'];
     const mkCon = () => new Function("const RANGES = ['24h', '7d', '30d'];\n"
@@ -4331,7 +4379,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     // every key that may appear in an /api/spend/* body at any depth (the Step 1 documented shapes)
     const ALLOWED = new Set(['status', 'enabled', 'hasTelemetry', 'asOf', 'day', 'costMicros', 'requests', 'bySource', 'byAttribution',
       'unattributedN', 'range', 'buckets', 'key', 'since', 'until', 'rows', 'unattributed', 'project', 'trend', 'ts',
-      'sessionShort', 'models', 'attribution']);
+      'sessionShort', 'sessionId', 'models', 'attribution']);
     const LEAF_MAPS = { bySource: ['main', 'subagent', 'auxiliary'], byAttribution: ['explicit', 'unknown'] };
     const walkKeys = (o, where) => {
       if (Array.isArray(o)) { o.forEach((x, i) => walkKeys(x, where + '[' + i + ']')); return; }
@@ -10747,7 +10795,11 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
     test('[4a-heredoc] gate and spec read a bash heredoc body', () => {
       const probe = spawnSync('bash', ['-c', 'true'], { encoding: 'utf8' });
-      if (probe.error || probe.status !== 0) return; // no bash on this machine
+      if (probe.error || probe.status !== 0) { console.log('  skip [4a-heredoc] no bash on this machine'); return; }
+      if (process.platform === 'win32') {   // PATH may hold WSL's bash (Linux), which cannot run the Windows node path
+        const un = spawnSync('bash', ['-c', 'uname -s'], { encoding: 'utf8' });
+        if (un.error || !/MINGW|MSYS|CYGWIN/i.test(String(un.stdout))) { console.log('  skip [4a-heredoc] bash is not MSYS/MinGW/Cygwin'); return; }
+      }
       const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p4hd-')));
       try {
         const g = (...a) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -10763,8 +10815,8 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.match(fs.readFileSync(path.join(dir, '.sereno', 'specs', 'hd.md'), 'utf8'), /change a/);
         const gt = sh(node + ' gate --stdin --task hd --base ' + head + ' --head ' + head + " --branch main --tests-passed true <<'SERENO_VERDICT'\n{\"outcome\":\"pass\",\"findings\":[]}\nSERENO_VERDICT");
         assert.strictEqual(gt.outcome, 'pass');
-        fs.rmSync(home, { recursive: true, force: true });
-      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+        fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+      } finally { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* a lingering child holds it; cleanup must not fail the test */ } }
     });
   }
 
@@ -12397,8 +12449,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin'],
       project: ['id', 'name', 'tasks', 'idle'],
       task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt'],
-      attempt: ['attempt', 'outcome', 'startedAt', 'endedAt'], activity: ['at', 'kind', 'outcome'],
-      gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model'],
+      attempt: ['attempt', 'outcome', 'startedAt', 'endedAt', 'sessionId'], activity: ['at', 'kind', 'outcome'],
+      gate: ['review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'sessionId'],
       finding: ['severity', 'kind', 'file', 'line', 'summary'],
       signals: ['days', 'projects', 'outcomes', 'seq', 'rework', 'runsThisWeek'],
       sigProject: ['id', 'gate'], sigGate: ['outcome', 'task', 'ageMs'],
@@ -12448,6 +12500,39 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.deepStrictEqual(b.routing.projects.find((p) => p.id === 'p2').redTeam, { agent: 'red-team-lean', fallback: null, onFallback: 'never' });
         assert.strictEqual(b.routing.projects.find((p) => p.id === 'p4').redTeam, null);
       } finally { await haltP(c); l.close(); }
+    });
+
+    await atest('[alpha7 S4] /api/pipeline: a review and an attempt link to the ledger session they ran in; no ledger or no match means null', async () => {
+      const l = openLedger({ file: ':memory:' });
+      l.recordHook('SessionStart', { session_id: 'sess-rev', cwd: 'C:\\w\\one' });
+      l.recordHook('SessionStart', { session_id: 'sess-build', cwd: 'C:\\w\\one' });
+      l.recordHook('SubagentStart', { session_id: 'sess-build', agent_id: 'a-fix', agent_type: 'sereno:builder' });
+      const snap = () => ({ p1: { pipeline: { tasks: [
+        tview('t-link', 'builder', {
+          gate: gate('t-link', 'block', NOW - DAY, { session_id: 'sess-rev', agent_id: 'a-rev' }),
+          attempts: [
+            { attempt: 2, outcome: 'pass', agent_id: 'a-fix', started_at: iso(NOW - 3600000), ended_at: iso(NOW - 1800000) },
+            { attempt: 1, outcome: 'block', agent_id: 'a-gone', started_at: iso(NOW - DAY), ended_at: iso(NOW - DAY + 1000) },
+          ],
+        }),
+        tview('t-nomatch', 'builder', { gate: gate('t-nomatch', 'block', NOW - DAY, { session_id: 'sess-unknown', agent_id: 'a-unknown' }) }),
+        tview('t-hostile', 'builder', { gate: gate('t-hostile', 'block', NOW - DAY, { session_id: 'bad id/<x>', agent_id: null }) }),
+      ], skipped: 0, error: false, redTeam: null, hasData: true } } });
+      const withL = await bootP({ projects: reg(), repos: { snapshot: snap }, ledger: l });
+      const without = await bootP({ projects: reg(), repos: { snapshot: snap } });
+      try {
+        const b = JSON.parse((await getP(withL.port, '/api/pipeline')).text);
+        const t = (n) => b.projects[0].tasks.find((x) => x.task === n);
+        assert.strictEqual(t('t-link').gate.sessionId, 'sess-rev', 'the review links to the session named in its record');
+        assert.strictEqual(t('t-link').attempts.find((a) => a.attempt === 2).sessionId, 'sess-build', 'an attempt links through its agent');
+        assert.strictEqual(t('t-link').attempts.find((a) => a.attempt === 1).sessionId, null, 'an agent the ledger never saw gives no link');
+        assert.strictEqual(t('t-nomatch').gate.sessionId, null, 'a session id the ledger does not hold is not offered');
+        assert.strictEqual(t('t-hostile').gate.sessionId, null, 'an id outside the alphabet is not offered');
+        const w = JSON.parse((await getP(without.port, '/api/pipeline')).text);
+        assert.strictEqual(w.projects[0].tasks[0].gate.sessionId, null, 'no ledger, no link');
+        assert.ok(w.projects[0].tasks[0].attempts.every((a) => a.sessionId === null));
+        checkBody(b); checkBody(w);
+      } finally { await haltP(withL); await haltP(without); l.close(); }
     });
 
     await atest('[4b-api] /api/pipeline: no command, prompt, spec body, path, hash or id text even when records carry extra fields', async () => {
@@ -12523,7 +12608,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const a = b.projects[0].tasks[0].attempts;
         assert.strictEqual(a.length, 10);
         assert.deepStrictEqual(a.map((x) => x.attempt), [14, 13, 12, 11, 10, 9, 8, 7, 6, 5]);
-        assert.deepStrictEqual(a[0], { attempt: 14, outcome: 'running', startedAt: NOW - 14 * 3600000, endedAt: null });
+        assert.deepStrictEqual(a[0], { attempt: 14, outcome: 'running', startedAt: NOW - 14 * 3600000, endedAt: null, sessionId: null });
         assert.strictEqual(a[1].startedAt, null);
         assert.strictEqual(a[2].endedAt, NOW - 12 * 3600000 + 60000);
         assert.ok(!/a14|agent_id/.test(JSON.stringify(a)));
@@ -12976,7 +13061,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
       'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'cmdRow', 'installHtml', 'pipelineHasData',
       'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
-      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts'];
+      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'sessionHash', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts', 'pathBreak', 'selectedCtx'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
     const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -13022,10 +13107,108 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(tabs, /<a class="spill" href="#pipeline">Work<\/a><a class="spill on" href="#pipeline\/signals" aria-current="page">Signals<\/a><a class="spill" href="#pipeline\/routing">Routing<\/a>/);
     });
 
+    // ---- Pipeline Signals and Routing: one scroller under a fixed header ----
+    test('[alpha7 pipe-scroll] Signals and Routing content sits in one #pscroll element; Work is not wrapped', () => {
+      const b = body([task('builder')]);
+      for (const sub of ['signals', 'routing']) {
+        const h = T.pipelineBody(b, [], { sub }, NOW);
+        assert.strictEqual((h.match(/class="pscroll"/g) || []).length, 1, sub);
+        assert.ok(h.indexOf('class="spills"') < h.indexOf('class="pscroll"'), 'the sub-tabs stay above the scroller');
+        assert.ok(h.indexOf('class="summary"') < h.indexOf('class="spills"'));
+        assert.ok(h.indexOf('class="pscroll"') < h.indexOf('class="sig"'), 'content is inside the scroller');
+        assert.ok(h.trim().endsWith('</div>'));
+      }
+      assert.ok(!/pscroll/.test(T.pipelineBody(b, [], { sub: 'work' }, NOW)), 'Work keeps its own one-screen layout');
+      assert.match(T.pipelineBody(b, [], { sub: 'routing' }, NOW), /<thead>/);
+    });
+
+    test('[alpha7 pipe-scroll] css: .pscroll is the only scroller, tables get sticky heads, narrow widths scroll the page', () => {
+      const rules = (sel) => [...css.matchAll(new RegExp('(^|\\n)' + sel.replace(/\./g, '\\.') + ' \\{([^}]*)\\}', 'g'))].map((m) => m[2]).join(' ');
+      const sc = rules('.pscroll');
+      assert.match(sc, /overflow-y: auto/);
+      assert.match(sc, /min-height: \d+px/);
+      assert.match(sc, /height: calc\(100vh - \d+px\)/);
+      assert.match(rules('.body.pipe .main'), /min-height: 0/);
+      const th = rules('.pscroll thead th');
+      assert.match(th, /position: sticky/);
+      assert.match(th, /top: 0/);
+      assert.match(th, /background: var\(--bg\)/);
+      assert.match(rules('.pscroll .table-wrap'), /overflow: visible/, 'a table-wrap scroller would capture the sticky head');
+      assert.match(css, /@media \(max-width: 900px\) \{ \.pscroll \{ height: auto; min-height: 0; overflow: visible; \} \}/);
+      assert.match(cj, /querySelector\('#pscroll'\)/, 'scroll position survives a refresh');
+    });
+
+    // ---- S6: Pipeline Work layout (the table fills the main area; the selected task sits in the right column) ----
+    test('[alpha7 S6] pathBreak escapes first, then puts a <wbr> after each slash', () => {
+      assert.strictEqual(T.pathBreak('task/fix-it'), 'task/<wbr>fix-it');
+      assert.strictEqual(T.pathBreak('src/renderer/console.js'), 'src/<wbr>renderer/<wbr>console.js');
+      const evil = '<img src=x onerror=alert(1)>/<script>';
+      const out = T.pathBreak(evil);
+      assert.ok(!/<img|<script/.test(out), out);
+      assert.strictEqual(out.replace(/<wbr>/g, ''), T.esc(evil));
+      assert.strictEqual(T.pathBreak(null), '');
+      assert.strictEqual((T.pathBreak('a&b/c').match(/<wbr>/g) || []).length, 1);
+    });
+
+    test('[alpha7 S6] paths and branches in the Pipeline tab break at slashes', () => {
+      const t = task('builder', { task: 'fix-x', findings: [{ severity: 'high', kind: 'bug', file: 'src/a/b.js', line: 3, summary: 's' }] });
+      assert.match(T.rowHtml(row(t), null), /task\/<wbr>fix-x/);
+      assert.match(T.panelHtml(row(t), { nowMs: NOW }), /<span class="mono">task\/<wbr>fix-x<\/span>/);
+      assert.match(T.panelHtml(row(t), { nowMs: NOW }), /src\/<wbr>a\/<wbr>b\.js:3/);
+    });
+
+    test('[S6] Work markup: the table fills a scroller, the panel stays in the right column, no layout toggle', () => {
+      const b = body([task('builder', { task: 'b1', findings: [{ severity: 'low', kind: 'k', file: 'x/y.js', line: null, summary: 's' }] })]);
+      const h = T.pipelineBody(b, [], WORK, NOW);
+      assert.match(h, /<div class="pwork"><div class="pfilters">/);
+      assert.match(h, /<div class="ptscroll" id="ptscroll"><div class="ptable" role="grid"/);
+      assert.ok(h.indexOf('class="ptscroll"') < h.indexOf('class="pstrip"'));
+      assert.ok(!/pdetail|pwork-/.test(h));
+      assert.ok(!/style=/.test(h), 'CSP: no inline styles');
+      assert.ok(!('layout' in T.pipeUi({ layout: 'b' }, null)));
+      const st = T.attentionState({ sessions: [] });
+      const parts = T.pipelineSideParts(st, b, WORK, { sessions: [], projectsList: [], opts: { review: true }, nowMs: NOW });
+      assert.match(parts.panel, /<section class="ppanel/);
+      assert.match(parts.panel, /Latest findings/);
+      assert.ok(!('detail' in parts));
+    });
+
+    test('[S6] console.js: no pipe= query parsing, no pdetail, #ptscroll scroll survives a refresh, privacy canary', () => {
+      assert.ok(!/location\.search|pipe=|pdetail|pipeLayoutOf|PIPE_LAYOUT|pipe-la|pipe-lb|pwork-b|detailHtml|S6 TEMP/.test(cj));
+      assert.match(cj, /const tsTop = \(view\.querySelector\('#ptscroll'\)/);
+      assert.match(cj, /const newTs = view\.querySelector\('#ptscroll'\);\s*if \(newTs && tsTop\) newTs\.scrollTop = tsTop;/);
+      assert.match(cj, /e\.target\.closest\('\.ptable'\)\)\) return;/);
+      assert.ok(!/\.text\b|\{[^}]*\btext\b[^}]*\}\s*=/.test(cj.slice(cj.indexOf('function panelHtml'), cj.indexOf('function selectedCtx'))));
+    });
+
+    test('[S6] css: right column clamp and contained overflow, fixed-height Work column, sticky table head, narrow widths flow', () => {
+      const rules = (sel) => [...css.matchAll(new RegExp('(^|\\n)' + sel.replace(/[.*>]/g, '\\$&') + ' \\{([^}]*)\\}', 'g'))].map((m) => m[2]).join(' ');
+      const col = rules('.body.pipe .attn-col');
+      assert.match(col, /width: clamp\(360px, 30vw, 520px\)/);
+      assert.match(col, /min-width: 0/);
+      assert.match(col, /overflow-x: hidden/);
+      assert.match(col, /overflow-y: auto/);
+      assert.match(col, /max-height: calc\(100vh - \d+px\)/);
+      assert.match(col, /overflow-wrap: anywhere/);
+      const pw = rules('.pwork');
+      assert.match(pw, /display: flex/); assert.match(pw, /flex-direction: column/); assert.match(pw, /height: calc\(100vh - \d+px\)/); assert.match(pw, /min-width: 0/);
+      const ts = rules('.ptscroll');
+      assert.match(ts, /overflow-y: auto/); assert.match(ts, /min-height: 0/); assert.match(ts, /min-width: 0/); assert.match(ts, /flex: 1 1 auto/);
+      const th = rules('.ptscroll .phead-row');
+      assert.match(th, /position: sticky/); assert.match(th, /top: 0/); assert.match(th, /background: var\(--bg\)/);
+      assert.match(rules('.ppanel-sub > *, .pfind .floc'), /min-width: 0; overflow-wrap: anywhere/);
+      assert.match(css, /@media \(max-width: 900px\) \{\s*\.pwork \{ height: auto; min-height: 0; \}\s*\.ptscroll \{ flex: none; max-height: none; overflow: visible; \}\s*\.body\.pipe \.attn-col \{ max-height: none; overflow: visible; \}/);
+      assert.match(css, /@media \(max-width: 1359px\) \{ \.body\.pipe \.attn-col \{ width: auto; max-height: none; overflow: visible; \} \}/);
+      assert.ok(css.indexOf('.body.pipe .attn-col { width: clamp') < css.indexOf('@media (max-width: 1359px) { .body.pipe .attn-col'), 'the narrow override comes after the clamp');
+      assert.ok(!/pdetail|pipe-la|pipe-lb|pwork-b/.test(css));
+      const block = css.slice(css.indexOf('.body.pipe .attn-col'), css.indexOf('/* Spend tab'));
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(block), 'tokens only, no hex colours');
+    });
+
     test('[4b-tab] nav order is Projects, Spend, Pipeline and the tab is registered', () => {
       const order = [...html.matchAll(/data-route="(\w+)"/g)].map((m) => m[1]);
-      assert.deepStrictEqual(order, ['projects', 'spend', 'pipeline']);
-      assert.match(cj, /const TABS = \{ projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline' \}/);
+      assert.deepStrictEqual(order, ['projects', 'spend', 'pipeline', 'sessions']);   // [alpha7 S3] Sessions joined, after Pipeline
+      assert.match(cj, /const TABS = \{ projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline', sessions: 'Sessions' \}/);
       assert.match(cj, /getJson\('\/api\/pipeline'\)/);
     });
 
@@ -13243,7 +13426,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const text = strip(h).replace(/\s+/g, ' ');
       assert.match(h, /<h2 class="mono">demo<\/h2>/);
       assert.match(h, /<span class="pill-neutral">Fixing 2 findings<\/span>/);
-      assert.match(text, /alpha task\/demo/);
+      assert.match(text, /alpha task\/ demo/);   // [S6] a <wbr> follows the slash, so the tag strip leaves a space
       assert.match(text, /Plan · Architect Spec written 25 min ago/);
       assert.match(text, /Build · Builder Fixing 2 20 min ago/);
       assert.match(text, /Review · Red team Review: Block/);
@@ -13255,7 +13438,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(h, /<dd title="claude-sonnet-x">Sonnet<\/dd>/);
       assert.match(text, /Brief Updated 5 min ago/);
       assert.match(h, /<details class="pfind" open>/);
-      assert.match(text, /src\/a\.js:12/);
+      assert.match(text, /src\/ a\.js:12/);
       assert.match(text, /#1 Block started 20 min ago · ended 12 min ago/);
       assert.match(text, /#2 Running started 3 min ago|#2 running started 3 min ago/);
       assert.match(text, /Attempt started 3 min ago/);
@@ -13364,7 +13547,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const h = T.pipelineBody(body([task('builder')]), [], WORK, NOW);
       const head = strip(h.match(/<div class="phead-row"[\s\S]*?<\/div><\/div>/)[0]).replace(/\s+/g, ' ');
       assert.match(head, /Task Branch Plan Architect Build Builder Review Red team Merge Cost/);
-      assert.match(h, /<div class="pcell-branch mono" role="gridcell">task\/demo<\/div>/);
+      assert.match(h, /<div class="pcell-branch mono" role="gridcell">task\/<wbr>demo<\/div>/);
       assert.strictEqual((h.match(/class="tcell tc-/g) || []).length, 4);
     });
 
@@ -13961,7 +14144,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const b = JSON.parse(text);
         const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin', 'versions',
           'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt', 'endedAt', 'at',
-          'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'severity', 'kind', 'file', 'line', 'summary',
+          'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'sessionId', 'severity', 'kind', 'file', 'line', 'summary',
           'days', 'outcomes', 'seq', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
           'enabled', 'roles', 'builder', 'red-team', 'scribe', 'unattributed', 'explicit', 'inferred', 'mean',
           'models', 'agent', 'role', 'redTeam', 'fallback', 'onFallback', 'installed', 'detected', 'version']);
@@ -14128,7 +14311,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const fnNames = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
       'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'parseRoute', 'initialRoute', 'parseProjectSel', 'navCounts', 'navFilter',
       'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navMove', 'navBranches', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
-      'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
+      'navControlsHtml', 'sessionsProjectHash', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
       'navManageHtml', 'navPage'];
     const lifted = fnNames.map((n) => {
       const m = cjs.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'));
@@ -14361,7 +14544,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         const detail = html.slice(html.indexOf('id="ndetail"') >= 0 ? html.indexOf('id="ndetail"') : 0);
         for (const m of detail.matchAll(/data-act="([a-z-]+)"/g)) assert.ok(['review', 'copy'].includes(m[1]), 'unexpected action ' + m[1]);
         for (const m of detail.matchAll(/<button\b[^>]*>/g)) assert.match(m[0], /data-act="(review|copy)"|data-ntab=/, m[0]);
-        assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin)"/.test(detail));
+        assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin)"/.test(detail.replace(/<a class="xlink" href="#sessions\?p=[A-Za-z0-9_-]{1,64}">Recent sessions<\/a>/, '')), 'alpha7 S4: the Recent sessions link is the only anchor');
       }
     });
 
@@ -14623,7 +14806,7 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(t.rows.length, 14, 'twelve base turns, the subagent turn, the pr-a turn');
         const sub = t.rows.find((r) => r.costMicros === 500 && r.project === 'p01');
         assert.strictEqual(sub.attribution, 'unknown');
-        for (const r of t.rows) assert.deepStrictEqual(Object.keys(r).sort(), ['attribution', 'costMicros', 'models', 'project', 'sessionShort', 'ts']);
+        for (const r of t.rows) assert.deepStrictEqual(Object.keys(r).sort(), ['attribution', 'costMicros', 'models', 'project', 'sessionId', 'sessionShort', 'ts']);
         for (let i = 1; i < t.rows.length; i++) assert.ok(t.rows[i - 1].costMicros >= t.rows[i].costMicros);
       });
     });
@@ -14690,7 +14873,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       await withApi(async (port) => {
         const KEYS = new Set(['enabled', 'asOf', 'range', 'since', 'until', 'day', 'today', 'month', 'costMicros', 'requests', 'unattributedMicros',
           'unattributedN', 'rows', 'other', 'total', 'unattributed', 'project', 'count', 'bySource', 'byAttribution', 'byAttributionN', 'trend',
-          'cacheReadTokens', 'cacheCreationTokens', 'inputTokens', 'cacheReadSharePct', 'ts', 'sessionShort', 'models', 'attribution',
+          'cacheReadTokens', 'cacheCreationTokens', 'inputTokens', 'cacheReadSharePct', 'ts', 'sessionShort', 'sessionId', 'models', 'attribution',
           'hasTelemetry', 'buckets', 'key']);
         const LEAF = { bySource: ['main', 'subagent', 'auxiliary'], byAttribution: ['explicit', 'inferred', 'unknown'], byAttributionN: ['explicit', 'inferred', 'unknown'] };
         const walk = (o, where) => {
@@ -14711,7 +14894,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           const b = JSON.parse(res.body);
           assert.strictEqual(b.enabled, true, r);
           walk(b, r);
-          assert.ok(!/long-session-id|cwd|prompt_id|promptId|prompt_text|request_key|work/i.test(res.body), r + ' leaks an identifier');
+          assert.ok(!/long-session-id|cwd|prompt_id|promptId|prompt_text|request_key|work/i.test(res.body.replace(/"sessionId":("[A-Za-z0-9._:-]{1,128}"|null)/g, '"sessionId":null')), r + ' leaks an identifier');   // alpha7 S4: the one session id a Turns row links to
           for (const row of b.rows || []) if ('sessionShort' in row) assert.ok(row.sessionShort.length <= 8);
         }
         // the only string leaves in the where body are project names and the range
@@ -14773,7 +14956,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const conSrc = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.js'), 'utf8');
     const conCss = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'console', 'console.css'), 'utf8');
     const lf = (src, n) => src.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n}'))[0];
-    const SP_NAMES = ['parseRoute', 'initialRoute', 'parseSpendHash', 'spendHash', 'projectIdFor', 'spendResolveSel', 'spendRows', 'navMove',
+    const SP_NAMES = ['sessionHash', 'parseRoute', 'initialRoute', 'parseSpendHash', 'spendHash', 'projectIdFor', 'spendResolveSel', 'spendRows', 'navMove',
       'nz', 'esc', 'estMoney', 'modelName', 'modelsHtml', 'projectLabel', 'formatTime', 'largestRemainder', 'attributionSplit', 'sparkPoints', 'sparkSvg',
       'fmtTokens', 'mixBar', 'wherePreview', 'wherePreviewHtml', 'turnsTableHtml', 'projectsTableHtml', 'cacheCardHtml', 'spendCacheHtml',
       'spendSideHtml', 'spendHeaderHtml', 'spendTabsHtml', 'spendPageHtml', 'pillText', 'ringIcon', 'pillHtml', 'chartBlock', 'chartTitle', 'legendHtml', 'sw'];
@@ -14945,7 +15128,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(PAGES[2][1], /<span class="mdl" title="claude-haiku-4-5-20251001">Haiku<\/span>, <span class="mdl" title="claude-sonnet-5">Sonnet<\/span>/);
     });
 
-    test('[alpha6-spend] no session links anywhere; session ids are plain text; no Open session history', () => {
+    test('[alpha6-spend] no session links unless a row carries a session id (alpha7 S4 links those); ids are plain text otherwise; no Open session history', () => {
       for (const [name, html] of PAGES.concat([['side', SIDE]])) {
         for (const a of html.match(/<a [^>]*>/g) || []) assert.ok(!/session/i.test(a), name + ': ' + a);
         assert.ok(!/Open session|session history/i.test(html), name);
@@ -15171,7 +15354,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const names = ['esc', 'estMoney', 'sparkPoints', 'relTime', 'staleDaysOf', 'freshnessChip', 'topSessions', 'isLiveSession', 'liveState', 'liveShape',
       'visibleProjects', 'gitLine', 'sparkSvg', 'ringIcon', 'reviewControl', 'liveSessionId', 'navCounts', 'navFilter', 'navBranches',
       'navSearch', 'navSort', 'navGroups', 'navResolveSel', 'navStatus', 'navSummary', 'pinIcon', 'navRowHtml', 'navVisibleIds', 'navListHtml',
-      'navControlsHtml', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
+      'navControlsHtml', 'sessionsProjectHash', 'cmdRow', 'navBriefHtml', 'navSpendHtml', 'navBranchesHtml', 'navActivityText', 'navActivityHtml', 'navGitHtml', 'navLiveStrip', 'navDetailHtml',
       'navManageHtml', 'navPage'];
     const consts = ["const OUTCOME_LABEL = { pass: 'Pass', block: 'Block', needs_context: 'Needs context', error: 'Error', skipped: 'Skipped' };",
       "const INSTALL_CMDS = ['/plugin marketplace add homestockr/sereno', '/plugin install sereno@sereno'];"].concat(cjs.match(/^const NAV_\w+ = .*;$/gm));
@@ -15342,7 +15525,7 @@ test('missing rate_limits degrades instead of throwing', () => {
               const d = detail(pageOf(r, { sel, sessions: ses, ui: UI({ filter: 'all', tab }) }));
               for (const m of d.matchAll(/data-act="([a-z-]+)"/g)) assert.ok(['review', 'copy'].includes(m[1]), 'unexpected action ' + m[1]);
               for (const m of d.matchAll(/<button\b[^>]*>/g)) assert.match(m[0], /data-act="(review|copy)"|data-ntab=/, m[0]);
-              assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin|resume|kill|stop)"/.test(d));
+              assert.ok(!/<a\b|<form|data-act="(open|view|run|hide|pin|resume|kill|stop)"/.test(d.replace(/<a class="xlink" href="#sessions\?p=[A-Za-z0-9_-]{1,64}">Recent sessions<\/a>/, '')), 'alpha7 S4: the Recent sessions link is the only anchor');
               if (ses.length === 0 || sel === 'pq') assert.ok(!/data-act="review"/.test(d));
             }
           }
@@ -15377,7 +15560,9 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[alpha6 exit 6] amber appears only in needs-you and decision contexts, across console and widget', () => {
       const rulesOf = (css) => [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] }));
       const users = (css) => rulesOf(css).filter((r) => /--amber/.test(r.body) && r.sel !== ':root').map((r) => r.sel);
-      assert.deepStrictEqual(users(ccss).sort(), ['.attn-amber .attn-head', '.btn-review', '.mk-dec', '.pill-amber', '.pshape-need', '.prow.decision', '.prow.sel.decision'].sort());
+      assert.deepStrictEqual(users(ccss).sort(), ['.attn-amber .attn-head', '.btn-review', '.mk-dec', '.pill-amber', '.pshape-need', '.prow.decision', '.prow.sel.decision',
+        // [alpha7 S3] Sessions: the waiting pill, the held-up wait line and the wait band, its top rule, its label and its legend swatch
+        '.xpill-waiting', '.xheld-wait', '.tl-wait-band', '.tl-wait-top', '.tl-wait-label', '.tl-sw-wait'].sort());
       assert.deepStrictEqual(users(wcss).sort(), ['.alert #banner', '.blocked .state-symbol', '.timer'].sort());
       assert.ok(!/amber/i.test(fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8').replace(/\/\/.*$/gm, '')), 'the widget script never names amber');
       // the console renders those classes only for a blocked session or a pending decision
@@ -15395,6 +15580,2086 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('[alpha6 exit] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
+  /* ---- alpha7 S1: ledger V2 (session_events, branch, ended_at) ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const { branchForCwd } = require('../src/repos.js');
+    const tmpFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-a7s1-')), 'sereno.db');
+    const rmDir = f => fs.rmSync(path.dirname(f), { recursive: true, force: true });
+    const T0 = Date.now();
+    // a ledger on a fake clock; ev() moves the clock and stamps receivedAt with it
+    const mk = (extra) => {
+      const clk = { t: T0 };
+      const l = openLedger(Object.assign({ file: ':memory:', now: () => clk.t, retentionDays: 36500 }, extra || {}));
+      const ev = (event, payload, t) => { clk.t = t; l.recordHook(event, payload, t); };
+      return { l, clk, ev };
+    };
+    const rows = (l, where) => l._db.prepare('SELECT * FROM session_events' + (where ? ' WHERE ' + where : '') + ' ORDER BY id').all();
+    const S = 'sess-a7';
+
+    test('[alpha7 S1] migration: a V1 database migrates in place and keeps its rows', () => {
+      const f = tmpFile();
+      try {
+        const sqlite = require('node:sqlite');
+        const v1 = new sqlite.DatabaseSync(f);
+        v1.exec(`CREATE TABLE requests (request_key TEXT PRIMARY KEY, request_id TEXT, session_id TEXT, prompt_id TEXT,
+          ts INTEGER NOT NULL, model TEXT, query_source TEXT, source TEXT, agent_name TEXT, agent_id TEXT, attribution TEXT NOT NULL,
+          input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cost_micros INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER NOT NULL DEFAULT 0);
+          CREATE INDEX requests_session_ts ON requests(session_id, ts);
+          CREATE INDEX requests_ts ON requests(ts);
+          CREATE INDEX requests_request_id ON requests(request_id);
+          CREATE TABLE spans (request_id TEXT PRIMARY KEY, session_id TEXT, agent_id TEXT, ts INTEGER NOT NULL);
+          CREATE TABLE sessions (session_id TEXT PRIMARY KEY, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, cwd TEXT, project TEXT, model TEXT);
+          CREATE TABLE agents (session_id TEXT NOT NULL, agent_id TEXT NOT NULL, agent_type TEXT, started INTEGER, stopped INTEGER, PRIMARY KEY (session_id, agent_id));
+          CREATE TABLE status (session_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, cost_micros INTEGER NOT NULL);
+          PRAGMA user_version=1;`);
+        v1.prepare('INSERT INTO sessions (session_id, first_seen, last_seen, cwd, project) VALUES (?,?,?,?,?)').run('old', T0, T0, 'C:\\w\\p', 'p');
+        v1.prepare(`INSERT INTO requests (request_key, request_id, session_id, ts, source, attribution, cost_micros) VALUES ('k','r','old',?,'main','explicit',500)`).run(T0);
+        v1.close();
+        const l = openLedger({ file: f, retentionDays: 36500 });
+        assert.strictEqual(l._db.prepare('PRAGMA user_version').get().user_version, 2);
+        const cols = l._db.prepare('PRAGMA table_info(sessions)').all().map(c => c.name);
+        assert.ok(cols.includes('branch') && cols.includes('ended_at'));
+        assert.deepStrictEqual(l._db.prepare('PRAGMA table_info(session_events)').all().map(c => c.name),
+          ['id', 'session_id', 'ts', 'kind', 'tool_name', 'tool_use_id', 'agent_id', 'ended', 'duration_ms', 'outcome', 'prompt_id']);
+        const idx = l._db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='session_events'").all().map(r => r.name);
+        assert.strictEqual(idx.length, 2);
+        assert.strictEqual(l.totals().costMicros, 500);
+        assert.strictEqual(l._db.prepare('SELECT project, branch, ended_at FROM sessions').get().project, 'p');
+        l.close();
+        const l2 = openLedger({ file: f, retentionDays: 36500 });   // re-open: no second migration
+        assert.strictEqual(l2._db.prepare('PRAGMA user_version').get().user_version, 2);
+        l2.close();
+      } finally { rmDir(f); }
+    });
+
+    test('[alpha7 S1] pairing: PostToolUse closes the open row by tool_use_id; duration from the payload when finite', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'tu1' }, T0 + 1000);
+      ev('PreToolUse', { session_id: S, tool_name: 'Read', tool_use_id: 'tu2' }, T0 + 1100);
+      ev('PostToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'tu1', duration_ms: 1234 }, T0 + 3000);
+      ev('PostToolUse', { session_id: S, tool_name: 'Read', tool_use_id: 'tu2', duration_ms: 'soon' }, T0 + 1600);
+      const [a, b] = rows(l, "kind='tool'");
+      assert.deepStrictEqual([a.tool_name, a.ts, a.ended, a.duration_ms, a.outcome], ['Bash', T0 + 1000, T0 + 3000, 1234, 'ok']);
+      assert.deepStrictEqual([b.ended, b.duration_ms, b.outcome], [T0 + 1600, 500, 'ok']);
+      ev('PostToolUse', { session_id: 'other', tool_use_id: 'tu1' }, T0 + 4000);   // other session: no match
+      ev('PostToolUse', { session_id: S, tool_use_id: 'nope' }, T0 + 4000);          // never started: nothing invented
+      assert.strictEqual(rows(l).length, 2);
+      l.close();
+    });
+
+    test('[alpha7 S1] a denied tool gets no PostToolUse and closes as unfinished at Stop', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'den' }, T0 + 100);
+      ev('Stop', { session_id: S }, T0 + 5100);
+      const t = rows(l, "kind='tool'")[0];
+      assert.deepStrictEqual([t.ended, t.duration_ms, t.outcome], [T0 + 5100, 5000, 'unfinished']);
+      const st = rows(l, "kind='stop'");
+      assert.strictEqual(st.length, 1); assert.strictEqual(st[0].ts, T0 + 5100);
+      ev('StopFailure', { session_id: S }, T0 + 6000);
+      assert.strictEqual(rows(l, "kind='stop'").length, 2);
+      l.close();
+    });
+
+    test('[alpha7 S1] a late PostToolUse repairs a row Stop closed as unfinished (background agents outlive Stop)', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Edit', tool_use_id: 'bg', agent_id: 'ag1' }, T0 + 100);
+      ev('Stop', { session_id: S }, T0 + 1000);
+      ev('PostToolUse', { session_id: S, tool_name: 'Edit', tool_use_id: 'bg', agent_id: 'ag1', duration_ms: 2000 }, T0 + 2100);
+      const t = rows(l, "kind='tool'")[0];
+      assert.deepStrictEqual([t.agent_id, t.ended, t.duration_ms, t.outcome], ['ag1', T0 + 2100, 2000, 'ok']);
+      l.close();
+    });
+
+    test('[alpha7 S1] subagent tool rows keep the agent_id as given', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Grep', tool_use_id: 'x1', agent_id: 'agent-9' }, T0 + 10);
+      ev('PreToolUse', { session_id: S, tool_name: 'Grep', tool_use_id: 'x2' }, T0 + 20);
+      assert.deepStrictEqual(rows(l, "kind='tool'").map(r => r.agent_id), ['agent-9', null]);
+      l.close();
+    });
+
+    test('[alpha7 S1] Agent rows: PostToolUse leaves the row open, SubagentStop closes the oldest open one, Stop closes the rest', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Agent', tool_use_id: 'a1' }, T0 + 100);
+      ev('SubagentStart', { session_id: S, agent_id: 'sub1', agent_type: 'builder' }, T0 + 150);
+      ev('PostToolUse', { session_id: S, tool_name: 'Agent', tool_use_id: 'a1', duration_ms: 40 }, T0 + 200);
+      let a = rows(l, "tool_name='Agent'")[0];
+      assert.strictEqual(a.ended, null); assert.strictEqual(a.outcome, null);
+      ev('PreToolUse', { session_id: S, tool_name: 'Agent', tool_use_id: 'a2' }, T0 + 300);
+      ev('SubagentStop', { session_id: S, agent_id: 'sub1', agent_type: 'builder' }, T0 + 4300);
+      const [r1, r2] = rows(l, "tool_name='Agent'");
+      assert.deepStrictEqual([r1.ended, r1.duration_ms, r1.outcome], [T0 + 4300, 4200, 'ok']);
+      assert.strictEqual(r2.ended, null);
+      assert.strictEqual(l._db.prepare('SELECT stopped FROM agents WHERE agent_id=?').get('sub1').stopped, T0 + 4300);   // existing behaviour kept
+      ev('SessionEnd', { session_id: S }, T0 + 9000);
+      assert.deepStrictEqual([rows(l, "tool_use_id='a2'")[0].outcome, rows(l, "tool_use_id='a2'")[0].ended], ['unfinished', T0 + 9000]);
+      l.close();
+    });
+
+    test('[alpha7 S1] a wait starts at the open tool, copies its tool_use_id, and PostToolUse closes it as answered', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'w1' }, T0 + 1000);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt', message: 'x' }, T0 + 4000);   // lags the tool
+      const w = rows(l, "kind='wait'")[0];
+      assert.deepStrictEqual([w.ts, w.tool_use_id, w.ended, w.agent_id], [T0 + 1000, 'w1', null, null]);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt' }, T0 + 4500);   // repeat for the same tool
+      assert.strictEqual(rows(l, "kind='wait'").length, 1);
+      ev('PostToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'w1', duration_ms: 9000 }, T0 + 12000);
+      const w2 = rows(l, "kind='wait'")[0];
+      assert.deepStrictEqual([w2.ended, w2.duration_ms, w2.outcome], [T0 + 12000, 11000, 'answered']);
+      l.close();
+    });
+
+    test('[alpha7 S1] an unanswered wait closes as unfinished at Stop', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Write', tool_use_id: 'w2' }, T0 + 1000);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt' }, T0 + 2000);
+      ev('Stop', { session_id: S }, T0 + 7000);
+      const w = rows(l, "kind='wait'")[0];
+      assert.deepStrictEqual([w.ts, w.ended, w.duration_ms, w.outcome], [T0 + 1000, T0 + 7000, 6000, 'unfinished']);
+      l.close();
+    });
+
+    test('[alpha7 S1] wait thread selection: agent_id match first, else the main thread, else the notification time', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'm1' }, T0 + 100);
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 's1', agent_id: 'ag' }, T0 + 500);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt', agent_id: 'ag' }, T0 + 900);
+      ev('Notification', { session_id: S, notification_type: 'permission_prompt' }, T0 + 950);
+      const w = rows(l, "kind='wait'");
+      assert.deepStrictEqual(w.map(r => [r.ts, r.tool_use_id, r.agent_id]), [[T0 + 500, 's1', 'ag'], [T0 + 100, 'm1', null]]);
+      ev('Notification', { session_id: 'empty', notification_type: 'permission_prompt' }, T0 + 2000);
+      const e = rows(l, "session_id='empty'")[0];
+      assert.deepStrictEqual([e.kind, e.ts, e.tool_use_id], ['wait', T0 + 2000, null]);
+      l.close();
+    });
+
+    test('[alpha7 S1] non-permission notifications are ignored', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'n1' }, T0 + 100);
+      for (const t of ['idle_prompt', 'auth_success', 'elicitation_dialog', '', undefined, 7]) {
+        ev('Notification', { session_id: S, notification_type: t }, T0 + 200);
+      }
+      ev('Notification', { session_id: S }, T0 + 200);
+      assert.strictEqual(rows(l, "kind='wait'").length, 0);
+      l.close();
+    });
+
+    test('[alpha7 S1] turns store ts and prompt_id only; PreCompact adds a compact row', () => {
+      const { l, ev } = mk();
+      ev('UserPromptSubmit', { session_id: S, prompt_id: 'p-1', prompt: 'hello world' }, T0 + 10);
+      ev('UserPromptSubmit', { session_id: S, prompt: '<task-notification>x' }, T0 + 20);
+      ev('PreCompact', { session_id: S, trigger: 'auto' }, T0 + 30);
+      const r = rows(l);
+      assert.deepStrictEqual(r.map(x => [x.kind, x.ts, x.prompt_id, x.tool_name, x.tool_use_id]),
+        [['turn', T0 + 10, 'p-1', null, null], ['turn', T0 + 20, null, null, null], ['compact', T0 + 30, null, null, null]]);
+      l.close();
+    });
+
+    test('[alpha7 S1] receivedAt is used within 5 s of the collector clock, otherwise Date.now()', () => {
+      const { l, clk } = mk();
+      clk.t = T0 + 100000;
+      const hit = (r) => { l.recordHook('PreCompact', { session_id: S }, r); return rows(l).pop().ts; };
+      assert.strictEqual(hit(clk.t - 4000), clk.t - 4000);
+      assert.strictEqual(hit(clk.t + 4999), clk.t + 4999);
+      assert.strictEqual(hit(clk.t - 6000), clk.t);
+      assert.strictEqual(hit(clk.t + 6000), clk.t);
+      assert.strictEqual(hit(NaN), clk.t);
+      assert.strictEqual(hit(Infinity), clk.t);
+      assert.strictEqual(hit('123'), clk.t);
+      assert.strictEqual(hit(undefined), clk.t);
+      l.close();
+    });
+
+    test('[alpha7 S1] SessionEnd closes open rows and sets ended_at; a new SessionStart clears it', () => {
+      const { l, ev } = mk();
+      ev('SessionStart', { session_id: S, cwd: 'C:\\w\\p' }, T0);
+      ev('PreToolUse', { session_id: S, tool_name: 'Bash', tool_use_id: 'e1' }, T0 + 100);
+      ev('SessionEnd', { session_id: S }, T0 + 900);
+      assert.strictEqual(l._db.prepare('SELECT ended_at FROM sessions WHERE session_id=?').get(S).ended_at, T0 + 900);
+      assert.strictEqual(rows(l, "kind='tool'")[0].outcome, 'unfinished');
+      assert.strictEqual(rows(l, "kind='stop'").length, 0);
+      ev('SessionEnd', { session_id: 'never-started' }, T0 + 950);   // still gets a row to carry ended_at
+      assert.strictEqual(l._db.prepare('SELECT ended_at FROM sessions WHERE session_id=?').get('never-started').ended_at, T0 + 950);
+      ev('SessionStart', { session_id: S, cwd: 'C:\\w\\p' }, T0 + 2000);
+      assert.strictEqual(l._db.prepare('SELECT ended_at FROM sessions WHERE session_id=?').get(S).ended_at, null);
+      l.close();
+    });
+
+    test('[alpha7 S1] tool_name and ids are capped; events without a session_id are dropped', () => {
+      const { l, ev } = mk();
+      ev('PreToolUse', { session_id: S, tool_name: 'mcp__' + 'x'.repeat(400), tool_use_id: 'u'.repeat(400) }, T0 + 1);
+      ev('PreToolUse', { tool_name: 'Bash', tool_use_id: 'z' }, T0 + 2);
+      const r = rows(l);
+      assert.strictEqual(r.length, 1);
+      assert.strictEqual(r[0].tool_name.length, 128); assert.strictEqual(r[0].tool_use_id.length, 128);
+      l.close();
+    });
+
+    test('[alpha7 S1] setBranch fills a null branch and never overwrites', () => {
+      const { l, ev } = mk();
+      ev('SessionStart', { session_id: S, cwd: 'C:\\w\\p' }, T0);
+      assert.strictEqual(l.setBranch(S, 'main'), true);
+      assert.strictEqual(l.setBranch(S, 'other'), false);
+      assert.strictEqual(l.setBranch('missing', 'main'), false);
+      assert.strictEqual(l._db.prepare('SELECT branch FROM sessions WHERE session_id=?').get(S).branch, 'main');
+      l.close();
+    });
+
+    test('[alpha7 S1] branchForCwd: longest worktree prefix, case-insensitive on Windows paths, separators normalised', () => {
+      const snap = {
+        r1: { worktrees: [{ path: 'C:\\Work\\Repo', branch: 'main' }, { path: 'C:\\Work\\Repo\\wt\\feat', branch: 'feat/x' }, { path: 'C:\\Work\\Repo\\wt\\det', branch: null }] },
+        r2: { worktrees: [{ path: 'C:\\Work\\Repo2', branch: 'dev' }] },
+      };
+      assert.strictEqual(branchForCwd(snap, 'c:/work/repo'), 'main');
+      assert.strictEqual(branchForCwd(snap, 'C:\\WORK\\REPO\\src\\deep'), 'main');
+      assert.strictEqual(branchForCwd(snap, 'C:\\Work\\Repo\\wt\\feat\\src'), 'feat/x');
+      assert.strictEqual(branchForCwd(snap, 'C:\\Work\\Repo\\wt\\det\\src'), null);   // detached HEAD, never falls back to a shorter prefix
+      assert.strictEqual(branchForCwd(snap, 'C:\\Work\\Repo2\\a'), 'dev');
+      assert.strictEqual(branchForCwd(snap, 'C:\\Work\\RepoX'), null);   // a sibling that shares a string prefix
+      assert.strictEqual(branchForCwd(snap, 'D:\\elsewhere'), null);
+      assert.strictEqual(branchForCwd(snap, ''), null);
+      assert.strictEqual(branchForCwd({}, 'C:\\Work\\Repo'), null);
+    });
+
+    await atest('[alpha7 S1] collector: receivedAt is plumbed through; branch backfills once resolvable, at most once a minute, never overwritten', async () => {
+      const http = require('node:http');
+      const { Store } = require('../src/store.js');
+      const clk = { t: Date.now() };
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      let snap = {};
+      const repos = { snapshot: () => snap };
+      const c = createCollector(new Store(), 0, { ledger: l, repos, now: () => clk.t });
+      let port = 0;
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (port = a.port, res()))));
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const send = (event, payload, extra) => new Promise((res) => {
+        const body = JSON.stringify(Object.assign({ event, payload }, extra || {}));
+        const r = http.request({ host: '127.0.0.1', port, path: '/hook', method: 'POST', agent: false, headers: { 'content-type': 'application/json' } }, (x) => { x.resume(); x.on('end', res); });
+        r.on('error', res); r.end(body);
+      });
+      const branch = () => (l._db.prepare('SELECT branch FROM sessions WHERE session_id=?').get('cs1') || {}).branch;
+      try {
+        const recv = Date.now() - 2000;
+        await send('PreCompact', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' }, { receivedAt: recv });
+        await sleep(60);
+        assert.strictEqual(rows(l, "kind='compact'")[0].ts, recv, 'the shim receivedAt reaches the ledger');
+        await send('SessionStart', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' }, { receivedAt: Date.now() });
+        await sleep(60);
+        assert.strictEqual(branch() ?? null, null, 'repo not known yet');
+        snap = { r1: { worktrees: [{ path: 'C:\\Work\\Repo', branch: 'main' }] } };
+        await send('UserPromptSubmit', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' });
+        await sleep(60);
+        assert.strictEqual(branch() ?? null, null, 'throttled: no second attempt inside a minute');
+        clk.t += 61000;
+        await send('UserPromptSubmit', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' });
+        await sleep(60);
+        assert.strictEqual(branch(), 'main');
+        snap = { r1: { worktrees: [{ path: 'C:\\Work\\Repo', branch: 'other' }] } };
+        clk.t += 61000;
+        await send('UserPromptSubmit', { session_id: 'cs1', cwd: 'C:\\Work\\Repo\\src' });
+        await sleep(60);
+        assert.strictEqual(branch(), 'main', 'a set branch is never overwritten');
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+
+    test('[alpha7 S1] prune covers session_events by ts', () => {
+      const { l, ev } = mk();
+      const old = T0 - 100 * 86400000;
+      l._db.prepare("INSERT INTO session_events (session_id, ts, kind) VALUES ('s', ?, 'turn')").run(old);
+      ev('UserPromptSubmit', { session_id: 's' }, T0);
+      assert.strictEqual(rows(l).length, 2);
+      l.prune(90);
+      assert.deepStrictEqual(rows(l).map(r => r.ts), [T0]);
+      l.close();
+    });
+
+    await atest('[alpha7 S1] prune also runs on a daily timer that is unref\'d and cleared on close', async () => {
+      const clk = { t: T0 };
+      const l = openLedger({ file: ':memory:', now: () => clk.t, retentionDays: 90, pruneEveryMs: 25 });
+      assert.strictEqual(l._pruneTimer.hasRef(), false, 'never keeps the process alive');
+      l._db.prepare("INSERT INTO session_events (session_id, ts, kind) VALUES ('s', ?, 'turn')").run(T0 + 10 * 86400000);
+      assert.strictEqual(rows(l).length, 1);
+      clk.t = T0 + 200 * 86400000;   // the row is now older than retention; only the timer can notice
+      await new Promise(r => setTimeout(r, 120));
+      assert.strictEqual(rows(l).length, 0, 'the timer pruned');
+      l.close();
+      assert.doesNotThrow(() => l._pruneTimer.close());   // already cleared: closing again is harmless
+      const def = openLedger({ file: ':memory:' });
+      assert.strictEqual(def._pruneTimer._idleTimeout, 86400000, 'daily by default');
+      def.close();
+    });
+
+    test('[alpha7 S1] privacy canary: prompt, tool_input, tool_response and command text reach no table or file byte', () => {
+      const f = tmpFile();
+      try {
+        const m = (n) => 'SERENO-A7-CANARY-' + n + '-71c4';
+        const markers = ['pre', 'post', 'prompt', 'cmd', 'note', 'resp', 'path', 'sub', 'stop', 'start', 'compact'].map(m);
+        const forbidden = (n) => ({ prompt: m(n), command: m(n), tool_input: { command: m(n), file_path: m(n), nested: [m(n)] },
+          tool_response: { stdout: m(n), agentId: m(n) }, message: m(n), transcript_path: m(n), last_assistant_message: m(n), custom_instructions: m(n) });
+        const l = openLedger({ file: f, retentionDays: 36500 });
+        const hook = (e, p, n) => l.recordHook(e, Object.assign({ session_id: 'canary-s' }, p, forbidden(n)), Date.now());
+        hook('SessionStart', { cwd: 'C:\\w\\p', model: 'm' }, 'start');
+        hook('PreToolUse', { tool_name: 'Bash', tool_use_id: 'c1' }, 'pre');
+        hook('Notification', { notification_type: 'permission_prompt' }, 'note');
+        hook('PostToolUse', { tool_name: 'Bash', tool_use_id: 'c1', duration_ms: 5 }, 'post');
+        hook('PreToolUse', { tool_name: 'Agent', tool_use_id: 'c2' }, 'sub');
+        hook('UserPromptSubmit', { prompt_id: 'pid-1' }, 'prompt');
+        hook('PreCompact', {}, 'compact');
+        hook('Stop', {}, 'stop');
+        hook('SessionEnd', {}, 'cmd');
+        assert.ok(rows(l).length >= 6, 'events were recorded');
+        // table dump: every table, every column
+        const dump = [];
+        for (const t of l._db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
+          dump.push(JSON.stringify(l._db.prepare('SELECT * FROM ' + t.name).all()));
+        }
+        const all = dump.join('\n');
+        for (const mk2 of markers) assert.ok(!all.includes(mk2), 'marker in table dump: ' + mk2);
+        l.close();
+        for (const p of [f, f + '-wal', f + '-shm']) {
+          if (!fs.existsSync(p)) continue;
+          const bytes = fs.readFileSync(p);
+          for (const mk2 of markers) assert.ok(!bytes.includes(mk2), 'marker in ' + path.basename(p) + ': ' + mk2);
+        }
+      } finally { rmDir(f); }
+    });
+  }
+
+  /* ---- alpha7 S2: the sessions API ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const Hh = 3600000, Dd = 86400000;
+    const d0 = new Date(); const NOWX = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate(), 12, 0, 0).getTime();   // pinned local noon: ranges never straddle midnight
+    const CWD = 'C:\\w\\proj';
+    const iso = (t) => new Date(t).toISOString();
+    const ids = { ended: 'sess-ended', live: 'sess-live', wait: 'sess-wait', idle: 'sess-idle', stale: 'sess-stale', yday: 'sess-yday', old: 'sess-old', ancient: 'sess-ancient' };
+
+    const build = () => {
+      const l = openLedger({ file: ':memory:', retentionDays: 36500 });
+      const addSess = (id, o) => l._db.prepare('INSERT INTO sessions (session_id, first_seen, last_seen, cwd, project, model, branch, ended_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(id, o.first, o.last, o.cwd === undefined ? CWD : o.cwd, o.project || 'proj', o.model || 'claude-opus-5-5', o.branch === undefined ? null : o.branch, o.ended === undefined ? null : o.ended);
+      addSess(ids.ended, { first: NOWX - 3 * Hh, last: NOWX - 2 * Hh, ended: NOWX - 2 * Hh, branch: 'feat/x' });
+      addSess(ids.live, { first: NOWX - 10 * 60000, last: NOWX - 60000 });
+      addSess(ids.wait, { first: NOWX - 20 * 60000, last: NOWX - 60000 });
+      addSess(ids.idle, { first: NOWX - 30 * 60000, last: NOWX - 60000 });
+      addSess(ids.stale, { first: NOWX - Hh, last: NOWX - 20 * 60000 });
+      addSess(ids.yday, { first: NOWX - 21 * Hh, last: NOWX - 20 * Hh });
+      addSess(ids.old, { first: NOWX - 20 * Dd - Hh, last: NOWX - 20 * Dd, cwd: 'C:\\elsewhere\\x', project: 'x' });
+      addSess(ids.ancient, { first: NOWX - 40 * Dd - Hh, last: NOWX - 40 * Dd });
+      const E = ids.ended;
+      const rq = (o) => Object.assign({ requestKey: 'k', requestId: 'r', sessionId: E, promptId: null, ts: NOWX - 150 * 60000, model: 'claude-sonnet-5-5', querySource: null, source: 'subagent',
+        agentName: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 100000, durationMs: 0 }, o);
+      l.ingestRequests([
+        rq({ requestKey: '1', requestId: 'r1', source: 'main', model: 'claude-opus-5-5', costMicros: 1234567, ts: NOWX - 170 * 60000 }),
+        rq({ requestKey: '2', requestId: 'r2', source: 'main', model: 'claude-opus-5-5', costMicros: 2000000, ts: NOWX - 160 * 60000 }),
+        rq({ requestKey: '3', requestId: 'r3', costMicros: 500000 }),
+        rq({ requestKey: '4', requestId: 'r4', model: 'claude-fable-5-1', costMicros: 300000 }),
+        rq({ requestKey: '5', requestId: 'r5', model: 'claude-fable-5-1' }),   // no agents join, Fable: inferred
+        rq({ requestKey: '6', requestId: 'r6' }),                                // no agents join, Sonnet: unattributed
+      ]);
+      l.ingestSpans([{ requestId: 'r3', sessionId: E, agentId: 'ag-b1', ts: NOWX }, { requestId: 'r4', sessionId: E, agentId: 'ag-r', ts: NOWX }]);
+      const addAg = (aid, type, a, b) => l._db.prepare('INSERT INTO agents (session_id, agent_id, agent_type, started, stopped) VALUES (?,?,?,?,?)').run(E, aid, type, a, b);
+      addAg('ag-b1', 'sereno:builder', NOWX - 170 * 60000, NOWX - 140 * 60000);
+      addAg('ag-r', 'sereno:red-team', NOWX - 135 * 60000, NOWX - 130 * 60000);
+      addAg('ag-b2', 'sereno:builder', NOWX - 125 * 60000, NOWX - 121 * 60000);
+      addAg('ag-x', 'Explore', NOWX - 120 * 60000, null);
+      const ev = (sid, ts, kind, o) => { o = o || {}; l._db.prepare('INSERT INTO session_events (session_id, ts, kind, tool_name, tool_use_id, agent_id, ended, duration_ms, outcome, prompt_id) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(sid, ts, kind, o.tool || null, o.tuid || null, o.agent || null, o.ended === undefined ? null : o.ended, o.dur === undefined ? null : o.dur, o.outcome || null, null); };
+      for (let i = 0; i < 3; i++) ev(E, NOWX - (175 - i) * 60000, 'turn');
+      ev(E, NOWX - 170 * 60000, 'tool', { tool: 'Bash', tuid: 'TUSECRET-1', ended: NOWX - 170 * 60000 + 900, dur: 900, outcome: 'ok' });
+      ev(E, NOWX - 165 * 60000, 'tool', { tool: 'mcp__srv__lookup', tuid: 'TUSECRET-2', agent: 'ag-b1', ended: NOWX - 165 * 60000 + 50, dur: 50, outcome: 'error' });
+      [1000, 90000, 30000, 5000, 7000, 2000, 60000].forEach((dur, i) => ev(E, NOWX - (160 - i) * 60000, 'wait', { tuid: 'TUSECRET-' + (3 + i), ended: NOWX - (160 - i) * 60000 + dur, dur, outcome: 'answered' }));
+      l.recordStatus(E, 4.234567, NOWX - 2 * Hh);
+      l.recordStatus(ids.stale, 1, NOWX - 30 * 60000);
+      return { l };
+    };
+
+    const finding = { severity: 'high', kind: 'bug', file: 'a.js', line: 1, summary: 'SECRET-SUMMARY' };
+    const snapshot = () => ({
+      p1: {
+        worktrees: [{ path: CWD, branch: 'main' }],
+        pipeline: { tasks: [{
+          task: 'demo', stage: 'ready',
+          gates: [
+            { review_run_id: 'g1', outcome: 'block', findings: [finding, finding], reviewed_at: iso(NOWX - 150 * 60000), session_id: null, agent_id: 'ag-r', prompt: 'SECRET-PROMPT' },
+            { review_run_id: 'g3', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 15 * Dd), session_id: null },
+          ],
+          attempts: [{ attempt: 1, agent_id: 'ag-b1', outcome: 'block' }, { attempt: 2, agent_id: 'ag-b2', outcome: 'built' }],
+        }, {
+          // once a task's gates name a session, none of its gates is guessed by time (this task's names are all explicit)
+          task: 'demo', stage: 'ready',
+          gates: [
+            { review_run_id: 'g2', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 140 * 60000), session_id: ids.ended },
+            { review_run_id: 'g4', outcome: 'block', findings: [finding], reviewed_at: iso(NOWX - 150 * 60000), session_id: 'someone-else' },
+            { review_run_id: 'g5', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 60 * 60000), session_id: ids.ended },
+            { review_run_id: 'g6', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 200 * 60000), session_id: ids.ended },
+            { review_run_id: 'g7', outcome: 'pass', findings: [], reviewed_at: iso(NOWX - 60000), session_id: ids.live },
+            { review_run_id: 'g8', outcome: 'pass', findings: [], reviewed_at: iso(NOWX + 3600000), session_id: ids.live },
+          ],
+          attempts: [],
+        }] },
+      },
+    });
+
+    let snapOver = null;   // a test may swap the repo snapshot
+    const boot7 = async (l) => {
+      const store = new Store();
+      store.applyHook('SessionStart', { session_id: ids.idle, cwd: CWD });
+      store.applyHook('SessionStart', { session_id: ids.live, cwd: CWD });
+      store.applyHook('PreToolUse', { session_id: ids.live, tool_name: 'Bash', tool_use_id: 'tl', tool_input: { command: 'x' } });
+      store.applyHook('SessionStart', { session_id: ids.wait, cwd: CWD });
+      store.applyHook('PreToolUse', { session_id: ids.wait, tool_name: 'Bash', tool_use_id: 'tw', tool_input: { command: 'x' } });
+      store.applyHook('Notification', { session_id: ids.wait, notification_type: 'permission_prompt' });
+      const c = createCollector(store, 0, { now: () => NOWX, ledger: l, pluginStatus: () => ({ installed: false, detected: false }),
+        projects: { list: () => [{ id: 'p1', name: 'demo-proj', repoPath: CWD, hidden: false }] }, repos: { snapshot: () => snapOver || snapshot() } });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      return c;
+    };
+    const halt7 = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
+    const get7 = (port, p, headers) => new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port, path: p, agent: false, headers }, (r) => {
+        let t = ''; r.setEncoding('utf8'); r.on('data', (x) => { t += x; });
+        r.on('end', () => resolve({ status: r.statusCode, text: t, body: /json/.test(String(r.headers['content-type'])) ? JSON.parse(t) : null }));
+      }).on('error', reject);
+    });
+
+    await atest('[alpha7 S2] list: ranges, newest first, default 7d, and the row shape', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const idsOf = async (q) => (await get7(c.port, '/api/sessions' + q)).body.sessions.map((s) => s.session_id);
+        assert.deepStrictEqual(await idsOf('?range=today'), ['sess-live', 'sess-wait', 'sess-idle', 'sess-stale', 'sess-ended']);
+        assert.deepStrictEqual(await idsOf('?range=7d'), ['sess-live', 'sess-wait', 'sess-idle', 'sess-stale', 'sess-ended', 'sess-yday']);
+        assert.deepStrictEqual(await idsOf(''), await idsOf('?range=7d'), 'default is 7d');
+        assert.deepStrictEqual(await idsOf('?range=30d'), ['sess-live', 'sess-wait', 'sess-idle', 'sess-stale', 'sess-ended', 'sess-yday', 'sess-old']);
+        const r = (await get7(c.port, '/api/sessions?range=30d')).body;
+        assert.strictEqual(r.range, '30d');
+        const by = Object.fromEntries(r.sessions.map((s) => [s.session_id, s]));
+        assert.deepStrictEqual(Object.keys(by['sess-ended']).sort(), ['branch', 'cost_est', 'duration_ms', 'ended', 'has_events', 'project', 'project_id', 'session_id', 'started', 'state', 'turns']);
+        assert.deepStrictEqual([by['sess-ended'].project, by['sess-ended'].project_id, by['sess-ended'].branch], ['demo-proj', 'p1', 'feat/x']);
+        assert.deepStrictEqual([by['sess-old'].project, by['sess-old'].project_id, by['sess-old'].branch], ['x', null, null], 'a project the registry does not know');
+        assert.strictEqual(by['sess-live'].branch, 'main', 'a null branch is backfilled from the poller snapshot, read-only');
+        assert.strictEqual((await get7(c.port, '/api/sessions?range=year')).status, 400);
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] branch: only a live session borrows the poller branch; an ended one with none stored shows null; has_events tells old sessions apart', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const by = Object.fromEntries((await get7(c.port, '/api/sessions?range=30d')).body.sessions.map((s) => [s.session_id, s]));
+        assert.strictEqual(by['sess-live'].branch, 'main');
+        assert.strictEqual(by['sess-wait'].branch, 'main');
+        assert.strictEqual(by['sess-stale'].branch, null, 'ended and nothing stored: no guess from the worktree as it is today');
+        assert.strictEqual(by['sess-yday'].branch, null);
+        assert.strictEqual(by['sess-ended'].branch, 'feat/x', 'a stored branch always stands');
+        assert.strictEqual((await get7(c.port, '/api/sessions/sess-yday')).body.branch, null);
+        assert.strictEqual((await get7(c.port, '/api/sessions/sess-live')).body.branch, 'main');
+        assert.strictEqual(by['sess-ended'].has_events, true);
+        assert.strictEqual(by['sess-yday'].has_events, false, 'recorded before Sessions: no session_events rows');
+        assert.strictEqual((await get7(c.port, '/api/sessions/sess-yday')).body.has_events, false);
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] list: state live vs ended, ended time, duration, cost to cents, turns', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const by = Object.fromEntries((await get7(c.port, '/api/sessions?range=30d')).body.sessions.map((s) => [s.session_id, s]));
+        assert.deepStrictEqual([by['sess-live'].state, by['sess-wait'].state, by['sess-idle'].state], ['running', 'waiting', 'idle']);
+        assert.strictEqual(by['sess-live'].ended, null);
+        assert.strictEqual(by['sess-live'].duration_ms, 10 * 60000, 'a live session runs to now');
+        assert.strictEqual(by['sess-ended'].state, 'ended');
+        assert.strictEqual(by['sess-ended'].ended, NOWX - 2 * Hh);
+        assert.strictEqual(by['sess-ended'].duration_ms, Hh);
+        assert.strictEqual(by['sess-stale'].state, 'ended', 'in the ledger but not in the store: ended');
+        assert.strictEqual(by['sess-stale'].ended, NOWX - 20 * 60000, 'a stale session ends at last_seen');
+        assert.strictEqual(by['sess-ended'].cost_est, 4.23, '4.234567 rounds to cents');
+        assert.strictEqual(by['sess-ended'].turns, 3);
+        assert.strictEqual(by['sess-live'].cost_est, 0);
+        assert.strictEqual(by['sess-live'].turns, 0);
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] detail: header, lanes (order, labels, roles, models), reconciliation', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const r = await get7(c.port, '/api/sessions/sess-ended');
+        assert.strictEqual(r.status, 200);
+        const d = r.body;
+        assert.deepStrictEqual([d.session_id, d.state, d.turns, d.cost_est, d.project_id], ['sess-ended', 'ended', 3, 4.23, 'p1']);
+        assert.deepStrictEqual(d.lanes.map((x) => x.label), ['Main session', 'sereno:builder', 'sereno:red-team', 'sereno:builder', 'Explore']);
+        assert.deepStrictEqual(d.lanes.map((x) => x.role), ['main', 'builder', 'red-team', 'builder', 'other']);
+        assert.deepStrictEqual(d.lanes.map((x) => x.id), ['main', 'ag-b1', 'ag-r', 'ag-b2', 'ag-x']);
+        assert.ok(d.lanes.every((x) => x.attribution === 'explicit'));
+        assert.deepStrictEqual(d.lanes.map((x) => x.model), ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', null, null]);
+        assert.deepStrictEqual(d.lanes.map((x) => x.subtitle), [null, null, null, 'Repair', null], 'a builder run after a block reads Repair');
+        assert.deepStrictEqual([d.lanes[0].started, d.lanes[0].stopped, d.lanes[4].stopped], [NOWX - 3 * Hh, NOWX - 2 * Hh, null]);
+        assert.deepStrictEqual(d.reconciliation, { ok: true, statusline: 4.2346, ledger: 4.2346, diff: 0 });
+        const live = (await get7(c.port, '/api/sessions/sess-live')).body;
+        assert.strictEqual(live.reconciliation, null, 'no statusline row: null');
+        assert.deepStrictEqual(live.lanes.map((x) => x.label), ['Main session']);
+        const st = (await get7(c.port, '/api/sessions/sess-stale')).body;
+        assert.deepStrictEqual([st.reconciliation.ok, st.reconciliation.diff], [false, -100]);
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] detail: tools, waits, held_up, attribution counts', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const d = (await get7(c.port, '/api/sessions/sess-ended')).body;
+        assert.deepStrictEqual(d.tools.map((t) => [t.tool_name, t.agent_id, t.outcome, t.duration_ms]), [['Bash', null, 'ok', 900], ['mcp__srv__lookup', 'ag-b1', 'error', 50]]);
+        assert.deepStrictEqual(Object.keys(d.tools[0]).sort(), ['agent_id', 'duration_ms', 'ended', 'outcome', 'tool_name', 'ts']);
+        assert.strictEqual(d.truncated, false);
+        assert.strictEqual(d.waits.length, 7);
+        assert.deepStrictEqual(Object.keys(d.waits[0]).sort(), ['agent_id', 'duration_ms', 'ended', 'outcome', 'ts']);
+        assert.deepStrictEqual(d.held_up.map((w) => w.duration_ms), [90000, 60000, 30000, 7000, 5000], 'top five by duration');
+        assert.deepStrictEqual(d.attribution, { explicit: 4, inferred: 1, unattributed: 1 });
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] detail: reviews join the repo records by session id or time window, outcome and findings count only', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const d = (await get7(c.port, '/api/sessions/sess-ended')).body;
+        assert.deepStrictEqual(d.reviews.map((x) => [x.task, x.outcome, x.findings]), [['demo', 'block', 2], ['demo', 'pass', 0]]);
+        assert.deepStrictEqual(Object.keys(d.reviews[0]).sort(), ['at', 'findings', 'matched', 'outcome', 'task']);
+        assert.deepStrictEqual(d.reviews.map((x) => x.matched), ['time', 'session'], 'alpha7 fix: the unnamed review says it was matched by time');
+        assert.deepStrictEqual((await get7(c.port, '/api/sessions/sess-yday')).body.reviews, [], 'no review in its window');
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S3] detail: reviews outside the session window are dropped, even when they name its id; a running session runs to now', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const d = (await get7(c.port, '/api/sessions/sess-ended')).body;
+        assert.strictEqual(d.reviews.length, 2, 'g5 (after the end) and g6 (before the start) are not this session');
+        assert.ok(d.reviews.every((x) => x.at >= d.started - 60000 && x.at <= d.ended + 60000));
+        const live = (await get7(c.port, '/api/sessions/sess-live')).body;
+        assert.deepStrictEqual(live.reviews.map((x) => x.at), [NOWX - 60000], 'a running session stops at now: the future review is out');
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] detail: the cost series is cumulative and downsampled to at most 200 points; tools cap at 2000 with a flag', async () => {
+      const { l } = build();
+      const S = ids.yday;
+      const rows = [];
+      for (let i = 0; i < 450; i++) rows.push({ requestKey: 'bulk' + i, requestId: 'rb' + i, sessionId: S, promptId: null, ts: NOWX - 21 * Hh + i * 1000, model: 'claude-sonnet-5-5', querySource: null, source: 'main',
+        agentName: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 10000, durationMs: 0 });
+      l.ingestRequests(rows);
+      const ins = l._db.prepare("INSERT INTO session_events (session_id, ts, kind, tool_name, ended, duration_ms, outcome) VALUES (?,?,'tool','Read',?,1,'ok')");
+      l._db.exec('BEGIN'); for (let i = 0; i < 2005; i++) ins.run(S, NOWX - 21 * Hh + i, NOWX - 21 * Hh + i + 1); l._db.exec('COMMIT');
+      const c = await boot7(l);
+      try {
+        const d = (await get7(c.port, '/api/sessions/' + S)).body;
+        assert.ok(d.cost_series.length <= 200 && d.cost_series.length > 100, 'got ' + d.cost_series.length);
+        assert.strictEqual(d.cost_series[0].ts, NOWX - 21 * Hh);
+        assert.strictEqual(d.cost_series[d.cost_series.length - 1].ts, NOWX - 21 * Hh + 449 * 1000);
+        assert.strictEqual(d.cost_series[d.cost_series.length - 1].cost_est, 4.5, 'the last point is the whole session');
+        assert.ok(d.cost_series.every((p, i, a) => i === 0 || (p.ts >= a[i - 1].ts && p.cost_est >= a[i - 1].cost_est)), 'cumulative and in order');
+        assert.strictEqual(d.tools.length, 2000);
+        assert.strictEqual(d.truncated, true);
+        assert.strictEqual(d.tools[0].ts, NOWX - 21 * Hh + 5, 'the newest 2000 are kept');
+        assert.strictEqual(d.tools[1999].ts, NOWX - 21 * Hh + 2004);
+        const small = (await get7(c.port, '/api/sessions/sess-ended')).body.cost_series;
+        assert.strictEqual(small.length, 6, 'a short series is returned whole');
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] an unknown id is 404, a malformed id 400, no ledger is enabled:false', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        assert.strictEqual((await get7(c.port, '/api/sessions/no-such-session')).status, 404);
+        for (const bad of ['bad%20id', 'a%2Fb', 'x'.repeat(129), '..%5C..']) assert.strictEqual((await get7(c.port, '/api/sessions/' + bad)).status, 400, bad);
+        assert.strictEqual((await get7(c.port, '/api/sessions/sess-ended/extra')).status, 404);
+      } finally { await halt7(c); l.close(); }
+      const c2 = await boot7(null);
+      try {
+        assert.deepStrictEqual((await get7(c2.port, '/api/sessions')).body, { enabled: false });
+        assert.deepStrictEqual((await get7(c2.port, '/api/sessions/sess-ended')).body, { enabled: false });
+      } finally { await halt7(c2); }
+    });
+
+    await atest('[alpha7 S2] a foreign Host or Origin is refused on both routes', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        for (const p of ['/api/sessions', '/api/sessions/sess-ended']) {
+          assert.strictEqual((await get7(c.port, p, { host: 'evil.example' })).status, 403, 'host ' + p);
+          assert.strictEqual((await get7(c.port, p, { origin: 'https://evil.example' })).status, 403, 'origin ' + p);
+          assert.strictEqual((await get7(c.port, p, { origin: 'http://127.0.0.1:' + c.port })).status, 200, 'own origin ' + p);
+        }
+      } finally { await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 fix] reviews: a task whose gates name a session never matches an unnamed gate by time; matched says how', async () => {
+      const { l } = build(); const c = await boot7(l);
+      const mkT = (name, gates) => ({ task: name, stage: 'ready', gates, attempts: [] });
+      const within = iso(NOWX - 150 * 60000);
+      snapOver = { p1: { worktrees: [{ path: CWD, branch: 'main' }], pipeline: { tasks: [
+        mkT('mixed', [{ review_run_id: 'm1', outcome: 'block', findings: [], reviewed_at: within, session_id: null }, { review_run_id: 'm2', outcome: 'pass', findings: [], reviewed_at: within, session_id: 'someone-else' }]),
+        mkT('plain', [{ review_run_id: 'p1', outcome: 'pass', findings: [], reviewed_at: within, session_id: null }]),
+        mkT('named', [{ review_run_id: 'n1', outcome: 'pass', findings: [], reviewed_at: within, session_id: ids.ended }]),
+      ] } } };
+      try {
+        const d = (await get7(c.port, '/api/sessions/sess-ended')).body;
+        assert.deepStrictEqual(d.reviews.map((x) => [x.task, x.matched]).sort(), [['named', 'session'], ['plain', 'time']], 'mixed: m1 is not guessed');
+      } finally { snapOver = null; await halt7(c); l.close(); }
+    });
+
+    await atest('[alpha7 S2] privacy: the JSON holds no key outside the allowlist and no id, path or finding text', async () => {
+      const { l } = build(); const c = await boot7(l);
+      try {
+        const ALLOWED = new Set(['range', 'sessions', 'session_id', 'project', 'project_id', 'branch', 'state', 'started', 'ended', 'duration_ms', 'cost_est', 'turns',
+          'reconciliation', 'ok', 'statusline', 'ledger', 'diff', 'lanes', 'id', 'kind', 'label', 'agent_type', 'role', 'model', 'attribution', 'stopped', 'subtitle',
+          'tools', 'tool_name', 'agent_id', 'outcome', 'ts', 'waits', 'truncated', 'cost_series', 'reviews', 'task', 'findings', 'at',
+          'explicit', 'inferred', 'unattributed', 'held_up', 'has_events', 'matched']);
+        const strays = []; let texts = '';
+        for (const p of ['/api/sessions?range=30d', '/api/sessions/sess-ended', '/api/sessions/sess-live', '/api/sessions/sess-stale', '/api/sessions/sess-old']) {
+          const r = await get7(c.port, p);
+          assert.strictEqual(r.status, 200, p);
+          texts += r.text;
+          const walk = (v, at) => {
+            if (Array.isArray(v)) v.forEach((x, i) => walk(x, at + '[' + i + ']'));
+            else if (v && typeof v === 'object') for (const k of Object.keys(v)) { if (!ALLOWED.has(k)) strays.push(p + ' ' + at + '.' + k); walk(v[k], at + '.' + k); }
+          };
+          walk(r.body, '$');
+        }
+        assert.deepStrictEqual(strays, []);
+        assert.ok(!/SECRET|tool_use_id|TUSECRET|C:\\\\w|elsewhere|cwd|prompt/.test(texts), 'no tool_use_id, path, cwd or free text');
+        assert.ok(/mcp__srv__lookup/.test(texts), 'tool names are the one thing that is kept');
+      } finally { await halt7(c); l.close(); }
+    });
+  }
+
+  /* ---- alpha7 S3: the Sessions tab (pure helpers, timeline geometry, markup, source rules) ---- */
+  {
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cj = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const css = fs.readFileSync(path.join(cdir, 'console.css'), 'utf8');
+    const names = ['fmtDay', 'tlActivity', 'tlAxis', 'laneRole', 'esc', 'projectLabel', 'modelName', 'outcomeShape', 'visibleProjects', 'navSort', 'navResolveSel', 'navMove', 'parseRoute', 'initialRoute',
+      'parseSessionSel', 'fmtDur', 'costEst', 'fmtClock', 'sessTimeRange', 'turnsLabel', 'sessState', 'sessIsLive', 'sessPillHtml', 'sessFilter', 'sessCounts', 'sessSearch',
+      'sessDayKey', 'sessDayLabel', 'sessGroups', 'sessVisible', 'sessResolveSel', 'sessVisibleIds', 'sessRowHtml', 'sessListHtml', 'sessControlsHtml', 'sessTitleHtml',
+      'sessReconHtml', 'tlSpan', 'tlX', 'tlTicks', 'tlTickLabel', 'tlLanes', 'tlLaneText', 'tlAttribution', 'tlWaitBands', 'tlCostPoints', 'tlReviews', 'tlWindowReviews', 'findingsLabel',
+      'tlHasEvents', 'tlShape', 'tlSvg', 'tlSvgParts', 'tlWrapHtml', 'tlReviewLabel', 'tlReviewMarkers', 'tlAxisTexts', 'tlBreakLabels', 'tlBreakShort', 'tlHasBreaks', 'tlUseClock', 'tlClockLabel', 'tlLegendHtml', 'sessHeldUp', 'sessFacts', 'sessHeldUpHtml', 'sessFactsHtml', 'sessTimelineHtml', 'sessRequestsHtml',
+      'sessReviewsHtml', 'sessDetailHtml', 'sessProjectChipHtml', 'sessPage'];
+    const consts = cj.match(/^const (SESS_\w+|TL|TL_STEPS|TL_OUTCOME_RANK|OUTCOME_LABEL|ROLE_LABEL) = .*;$/gm);
+    assert.strictEqual(consts.length, 10, 'the single-line constants the helpers need');
+    const lifted = names.map((n) => {
+      const m = cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'));
+      assert.ok(m, 'console.js has ' + n);
+      return m[0];
+    });
+    const X = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + names.join(', ') + ' };')();
+    const TLC = { mergePx: 30, laneH: 36 };   // TL.mergePx and TL.laneH, as console.js sets it
+
+    const MIN = 60000;
+    const NOW = new Date(2026, 9, 25, 15, 0, 0).getTime();   // local time, so day grouping holds in any zone
+    const at = (daysAgo, h, m) => new Date(2026, 9, 25 - daysAgo, h, m, 0).getTime();
+    const row = (id, over) => Object.assign({ session_id: id, project: 'alpha', project_id: 'p-alpha', branch: 'feat/x', state: 'ended', started: at(0, 9, 0), ended: at(0, 9, 47),
+      duration_ms: 47 * MIN, cost_est: 6.82, turns: 5 }, over || {});
+    const LIST = [
+      row('a-old', { project: 'beta', branch: 'main', started: at(3, 10, 0), ended: at(3, 10, 30), duration_ms: 30 * MIN, cost_est: 1.1 }),
+      row('a-yday', { project: 'alpha', branch: 'fix/y', started: at(1, 16, 0), ended: at(1, 16, 20), duration_ms: 20 * MIN }),
+      row('a-early', { started: at(0, 8, 0), ended: at(0, 8, 30) }),
+      row('a-live', { state: 'running', started: at(0, 14, 0), ended: null, duration_ms: 60 * MIN }),
+      row('a-wait', { state: 'waiting', project: 'gamma', branch: 'wip', started: at(0, 13, 0), ended: null, duration_ms: 120 * MIN }),
+    ];
+
+    test('[alpha7 S3] route: Sessions is a tab with #sessions and #sessions/<id>; hostile hashes fall back', () => {
+      assert.strictEqual(X.parseRoute('#sessions'), 'sessions');
+      assert.strictEqual(X.parseRoute('#/Sessions'), 'sessions');
+      assert.strictEqual(X.parseRoute('#sessions/abc-123_x.y:z'), 'sessions');
+      for (const bad of ['#sessions/', '#sessions/a b', '#sessions/<script>', '#sessions/a/b', '#sessions/' + 'x'.repeat(129), '#sessionsx']) assert.notStrictEqual(X.parseRoute(bad), 'sessions', bad);
+      assert.strictEqual(X.parseSessionSel('#sessions/AbC-1'), 'AbC-1', 'the id keeps its case');
+      for (const bad of ['#sessions', '#sessions/', '#sessions/a b', '#sessions/<b>', '#projects/x', null, undefined, '#sessions/' + 'x'.repeat(129)]) assert.strictEqual(X.parseSessionSel(bad), null, String(bad));
+      assert.strictEqual(X.initialRoute('', 'sessions'), 'sessions');
+      assert.strictEqual(X.initialRoute('#spend', 'sessions'), 'spend');
+      assert.strictEqual(X.initialRoute('', 'bogus'), 'projects');
+      assert.match(cj, /const TABS = \{ projects: 'Projects', spend: 'Spend', pipeline: 'Pipeline', sessions: 'Sessions' \}/);
+      const html = fs.readFileSync(path.join(cdir, 'index.html'), 'utf8');
+      assert.ok(html.indexOf('data-route="pipeline"') < html.indexOf('data-route="sessions"'));
+      assert.match(html, /href="#sessions"/);
+    });
+
+    test('[alpha7 S3] formatting: durations, turns, time range, every dollar figure says est.', () => {
+      assert.deepStrictEqual([0, 340, 5000, 72000, 245000, 3600000 + 5 * 60000].map(X.fmtDur), ['0s', '<1s', '5s', '1m 12s', '4m 05s', '1h 05m']);
+      for (const bad of [null, undefined, -1, NaN, 'x']) assert.strictEqual(X.fmtDur(bad), '', String(bad));
+      assert.strictEqual(X.costEst(6.824), '$6.82 est.');
+      for (const bad of [null, undefined, -3, NaN, 'x']) assert.strictEqual(X.costEst(bad), '$0.00 est.', String(bad));
+      assert.strictEqual(X.turnsLabel(5), '5 turns');
+      assert.strictEqual(X.turnsLabel(1), '1 turn');
+      assert.strictEqual(X.turnsLabel(0), '0 turns');
+      assert.strictEqual(X.turnsLabel(null), '0 turns');
+      assert.strictEqual(X.sessTimeRange({ started: at(0, 9, 0), ended: at(0, 9, 47) }), '09:00–09:47');
+      assert.strictEqual(X.sessTimeRange({ started: at(0, 9, 0), ended: null }), '09:00–now');
+      assert.strictEqual(X.sessTimeRange({}), '');
+    });
+
+    test('[alpha7 S3] list: grouped by day, newest first, labelled Today / Yesterday / a date', () => {
+      const g = X.sessGroups(LIST, NOW);
+      assert.deepStrictEqual(g.map((x) => x.label), ['Today', 'Yesterday', 'Thu Oct 22']);
+      assert.deepStrictEqual(g[0].rows.map((r) => r.session_id), ['a-live', 'a-wait', 'a-early']);
+      // within a day: newest first (live 14:00, waiting 13:00, then the 09:00 row, then the 08:00 row)
+      const ids = X.sessGroups(LIST.concat([row('a-nine')]), NOW)[0].rows.map((r) => r.session_id);
+      assert.deepStrictEqual(ids, ['a-live', 'a-wait', 'a-nine', 'a-early']);
+      assert.deepStrictEqual(X.sessGroups([], NOW), []);
+      assert.deepStrictEqual(X.sessGroups(null, NOW), []);
+      assert.deepStrictEqual(X.sessVisibleIds(LIST, { filter: 'all', q: '', nowMs: NOW }), ['a-live', 'a-wait', 'a-early', 'a-yday', 'a-old']);
+    });
+
+    test('[alpha7 S3] list: filters All / Running / Ended and search over project and branch', () => {
+      assert.deepStrictEqual(X.sessCounts(LIST), { all: 5, running: 2, ended: 3 });
+      assert.deepStrictEqual(X.sessFilter(LIST, 'running').map((r) => r.session_id), ['a-live', 'a-wait']);
+      assert.deepStrictEqual(X.sessFilter(LIST, 'ended').map((r) => r.session_id), ['a-old', 'a-yday', 'a-early']);
+      assert.strictEqual(X.sessFilter(LIST, 'bogus').length, 5);
+      assert.strictEqual(X.sessFilter(null, 'all').length, 0);
+      assert.deepStrictEqual(X.sessSearch(LIST, 'GAMMA').map((r) => r.session_id), ['a-wait']);
+      assert.deepStrictEqual(X.sessSearch(LIST, 'fix/').map((r) => r.session_id), ['a-yday']);
+      assert.deepStrictEqual(X.sessSearch(LIST, '  ').length, 5);
+      assert.strictEqual(X.sessSearch(LIST, 'zzz').length, 0);
+      assert.deepStrictEqual(X.sessSearch([{ session_id: 'n', project: null, branch: null }], 'x'), []);
+      assert.deepStrictEqual(X.sessVisible(LIST, { filter: 'running', q: 'wip' }).map((r) => r.session_id), ['a-wait']);
+    });
+
+    test('[alpha7 S3] state pill: the four states, unknown reads as ended, only waiting is amber', () => {
+      for (const [st, text] of [['running', 'Running'], ['waiting', 'Waiting'], ['idle', 'Idle'], ['ended', 'Ended']]) {
+        assert.match(X.sessPillHtml({ state: st }), new RegExp('class="xpill xpill-' + st + '">' + text + '</span>'));
+      }
+      for (const bad of ['blocked', '', null, undefined, '<img>', 'RUNNING']) {
+        assert.match(X.sessPillHtml({ state: bad }), /xpill-ended">Ended</, String(bad));
+        assert.strictEqual(X.sessIsLive({ state: bad }), false);
+      }
+      assert.deepStrictEqual(['running', 'waiting', 'idle', 'ended'].map((s) => X.sessIsLive({ state: s })), [true, true, true, false]);
+    });
+
+    test('[alpha7 S3] selection: the route id if on screen, else the newest running session, else the newest; keys move through the shown ids', () => {
+      assert.strictEqual(X.sessResolveSel(LIST, 'a-yday'), 'a-yday');
+      assert.strictEqual(X.sessResolveSel(LIST, 'gone'), 'a-live');
+      assert.strictEqual(X.sessResolveSel(LIST, null), 'a-live');
+      assert.strictEqual(X.sessResolveSel(LIST.filter((r) => r.state === 'ended'), 'gone'), 'a-early');
+      assert.strictEqual(X.sessResolveSel([], 'x'), null);
+      const ids = X.sessVisibleIds(LIST, { filter: 'all', q: '', nowMs: NOW });
+      assert.strictEqual(X.navMove(ids, 'a-live', 'ArrowDown'), 'a-wait');
+      assert.strictEqual(X.navMove(ids, 'a-live', 'ArrowUp'), 'a-live');
+      assert.strictEqual(X.navMove(ids, 'a-wait', 'End'), 'a-old');
+      assert.strictEqual(X.navMove(ids, 'a-old', 'Home'), 'a-live');
+      assert.strictEqual(X.navMove([], 'x', 'ArrowDown'), null);
+    });
+
+    test('[alpha7 S3] list markup: project, pill, branch, range, duration, cost est.; hostile strings are escaped', () => {
+      const evil = '<img src=x onerror=alert(1)>"\'&';
+      const h = X.sessListHtml([row('s1', { project: evil, branch: evil })], { filter: 'all', q: '', sel: 's1', nowMs: NOW });
+      assert.ok(!h.includes('<img'), 'no raw tag');
+      assert.ok(!/onerror=alert\(1\)>/.test(h.replace(/&lt;img src=x onerror=alert\(1\)&gt;/g, '')), 'only the escaped form');
+      assert.match(h, /&lt;img src=x onerror=alert\(1\)&gt;&quot;&#39;&amp;/);
+      assert.match(h, /09:00–09:47 · 47m 00s/);
+      assert.match(h, /\$6\.82 est\./);
+      assert.match(h, /class="xrow sel" role="row" tabindex="0" data-xsel="s1" aria-selected="true"/);
+      assert.match(h, />Today <span>1<\/span><\/h3>/);
+      const odd = X.sessListHtml([row('"><b>', { branch: null, project: null })], { filter: 'all', q: '', sel: null, nowMs: NOW });
+      assert.ok(!odd.includes('<b>') && /data-xsel="&quot;&gt;&lt;b&gt;"/.test(odd));
+      assert.ok(!/nstatus mono/.test(odd), 'no branch, no branch line');
+      assert.match(odd, /Unknown project/);
+      assert.match(X.sessListHtml([], { filter: 'all', q: '', sel: null, nowMs: NOW }), /No sessions in this range\./);
+      assert.match(X.sessListHtml(LIST, { filter: 'all', q: 'zzz', sel: null, nowMs: NOW }), /No sessions match\./);
+      const c = X.sessControlsHtml(X.sessCounts(LIST), { filter: 'running', q: '"x' });
+      assert.match(c, /data-xfilter="running" aria-pressed="true">Running <span class="num">2<\/span>/);
+      assert.match(c, /value="&quot;x"/);
+      const t = X.sessTitleHtml('7d');
+      assert.match(t, /data-xrange="today" class="" aria-pressed="false">Today/);
+      assert.match(t, /data-xrange="7d" class="on" aria-pressed="true">7d/);
+      assert.match(t, /data-xrange="30d"[^>]*>30d/);
+    });
+
+    // A detail with two lanes, three tools, two waits, two reviews. All values synthetic.
+    const T0 = at(0, 9, 0);
+    const detail = (over) => Object.assign({
+      session_id: 'sess-1', project: 'alpha', project_id: 'p-alpha', branch: 'feat/barcode', state: 'ended', started: T0, ended: T0 + 47 * MIN, duration_ms: 47 * MIN, cost_est: 6.82, turns: 5,
+      reconciliation: { ok: true, statusline: 6.82, ledger: 6.82, diff: 0 },
+      lanes: [
+        { id: 'main', kind: 'main', label: 'Main session', agent_type: null, role: 'main', model: 'claude-opus-4-5', attribution: 'explicit', started: T0, stopped: T0 + 47 * MIN, cost_est: 2.5, subtitle: null },
+        { id: 'ag-1', kind: 'agent', label: 'builder', agent_type: 'builder', role: 'builder', model: 'claude-sonnet-4-5', attribution: 'explicit', started: T0 + 2 * MIN, stopped: T0 + 10 * MIN, cost_est: 3, subtitle: null },
+        { id: 'ag-2', kind: 'agent', label: 'builder', agent_type: 'builder', role: 'builder', model: 'claude-sonnet-4-5', attribution: 'inferred', started: T0 + 12 * MIN, stopped: T0 + 24 * MIN, cost_est: 1.32, subtitle: 'Repair' },
+        { id: 'ag-3', kind: 'agent', label: 'red-team', agent_type: 'red-team', role: 'red-team', model: 'claude-fable-1', attribution: 'unattributed', started: T0 + 44 * MIN, stopped: T0 + 46 * MIN, cost_est: 0, subtitle: null },
+      ],
+      tools: [
+        { ts: T0 + 1 * MIN, ended: T0 + 1 * MIN + 2000, duration_ms: 2000, tool_name: 'Read', agent_id: null, outcome: 'done' },
+        { ts: T0 + 5 * MIN, ended: T0 + 6 * MIN, duration_ms: MIN, tool_name: 'Bash', agent_id: 'ag-1', outcome: 'done' },
+        { ts: T0 + 13 * MIN, ended: null, duration_ms: null, tool_name: 'mcp__srv__lookup', agent_id: 'ag-2', outcome: 'unfinished' },
+      ],
+      waits: [{ ts: T0 + 10 * MIN, ended: T0 + 10 * MIN + 72000, duration_ms: 72000, outcome: 'allowed', agent_id: null }, { ts: T0 + 24 * MIN, ended: T0 + 28 * MIN + 5000, duration_ms: 245000, outcome: null, agent_id: null }],
+      truncated: false,
+      cost_series: [{ ts: T0 + 1 * MIN, cost_est: 0.5 }, { ts: T0 + 20 * MIN, cost_est: 3 }, { ts: T0 + 46 * MIN, cost_est: 6.82 }],
+      reviews: [{ task: 'barcode', outcome: 'block', findings: 2, at: T0 + 12 * MIN }, { task: 'barcode', outcome: 'pass', findings: 0, at: T0 + 46 * MIN }],
+      attribution: { explicit: 40, inferred: 3, unattributed: 2 },
+      held_up: [{ ts: T0 + 24 * MIN, duration_ms: 245000, outcome: null, agent_id: null }, { ts: T0 + 10 * MIN, duration_ms: 72000, outcome: 'allowed', agent_id: null }],
+    }, over || {});
+
+    test('[alpha7 S3] geometry: the shared axis maps time to x, clamped; a running session ends at now', () => {
+      const d = detail();
+      const span = X.tlSpan(d, NOW);
+      assert.deepStrictEqual([span.t0, span.t1], [T0, T0 + 47 * MIN]);
+      assert.strictEqual(X.tlX(T0, span, 100, 1100), 100);
+      assert.strictEqual(X.tlX(T0 + 47 * MIN, span, 100, 1100), 1100);
+      assert.strictEqual(Math.round(X.tlX(T0 + 23.5 * MIN, span, 100, 1100)), 600);
+      assert.strictEqual(X.tlX(T0 - 5 * MIN, span, 100, 1100), 100, 'before the start clamps');
+      assert.strictEqual(X.tlX(T0 + 99 * MIN, span, 100, 1100), 1100, 'after the end clamps');
+      assert.strictEqual(X.tlX(NaN, span, 100, 1100), 100);
+      const live = X.tlSpan(detail({ state: 'running', ended: null }), T0 + 60 * MIN);
+      assert.strictEqual(live.t1, T0 + 60 * MIN);
+      const none = X.tlSpan({ started: T0, ended: T0, lanes: [], tools: [], waits: [], cost_series: [] }, NOW);
+      assert.strictEqual(none.t1 - none.t0, 1000, 'never a zero-width axis');
+      const wide = X.tlSpan(detail({ ended: T0 + 10 * MIN, tools: [{ ts: T0 + 30 * MIN, duration_ms: 1000, tool_name: 'x', agent_id: null }] }), NOW);
+      assert.ok(wide.t1 >= T0 + 30 * MIN, 'an event past the recorded end stretches the axis');
+    });
+
+    test('[alpha7 S3] geometry: a review outside an ended session window neither extends nor marks the axis', () => {
+      const far = [{ task: 'x', outcome: 'pass', findings: 0, at: T0 + 24 * 60 * MIN }, { task: 'x', outcome: 'pass', findings: 0, at: T0 - 60 * MIN }];
+      const d = detail({ reviews: far.concat(detail().reviews) });
+      const span = X.tlSpan(d, NOW);
+      assert.deepStrictEqual([span.t0, span.t1], [T0, T0 + 47 * MIN]);
+      assert.strictEqual(X.tlWindowReviews(d).length, 2, 'only the two inside the window');
+      assert.deepStrictEqual(X.tlActivity(d, span), X.tlActivity(detail(), span), 'no extra activity from the stray reviews');
+      assert.strictEqual(X.tlAxis(d, span, 100, 1100).segs.filter((s) => s.kind === 'gap').length, X.tlAxis(detail(), span, 100, 1100).segs.filter((s) => s.kind === 'gap').length);
+      assert.strictEqual(X.tlWindowReviews(detail({ ended: null, reviews: far })).length, 2, 'a running session keeps what the API sent');
+      assert.strictEqual(X.tlWindowReviews(detail({ reviews: [{ task: 'u', outcome: 'pass', findings: 0, at: null }] })).length, 1, 'untimed stay');
+    });
+
+    test('[alpha7 S3] geometry: ticks scale to the span (never more than 10 intervals) and read as round durations', () => {
+      for (const spanMs of [1000, 45000, 47 * MIN, 3 * 3600000, 26 * 3600000, 3 * 864e5, 40 * 864e5, 400 * 864e5]) {
+        const tk = X.tlTicks(spanMs);
+        assert.ok(tk.ticks.length >= 1 && tk.ticks.length <= 11, spanMs + ' -> ' + tk.ticks.length);
+        assert.strictEqual(tk.ticks[0], 0);
+        assert.ok(tk.ticks[tk.ticks.length - 1] <= spanMs);
+        assert.ok(tk.ticks.every((t, i) => i === 0 || t - tk.ticks[i - 1] === tk.step));
+      }
+      assert.strictEqual(X.tlTicks(47 * MIN).step, 5 * MIN);
+      assert.strictEqual(X.tlTicks(3 * 3600000).step, 18e5);
+      assert.deepStrictEqual([0, 30000, 5 * MIN, 90 * MIN, 150 * MIN, 30 * 3600000, 3 * 864e5].map(X.tlTickLabel), ['0', '30s', '5m', '1h 30m', '2h 30m', '1d 6h', '3d']);
+    });
+
+    test('[alpha7 fix] lanes: agent ids named like Object.prototype members render, one lane each, and never throw', () => {
+      const evil = ['constructor', '__proto__', 'toString', 'hasOwnProperty'];
+      const d = detail({ tools: evil.map((id, i) => ({ ts: T0 + (i + 1) * MIN, ended: T0 + (i + 1) * MIN + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: id, outcome: 'ok' })) });
+      const lanes = X.tlLanes(d);
+      assert.deepStrictEqual(lanes.slice(4).map((l) => l.id), evil);
+      assert.deepStrictEqual(lanes.slice(4).map((l) => l.tools.length), [1, 1, 1, 1]);
+      const withLane = detail({ lanes: d.lanes.concat(evil.map((id) => ({ id, kind: 'agent', label: id, agent_type: null, role: 'other', model: null, attribution: 'explicit', started: T0, stopped: T0 + MIN, cost_est: 0, subtitle: null }))), tools: d.tools });
+      assert.deepStrictEqual(X.tlLanes(withLane).slice(4).map((l) => l.tools.length), [1, 1, 1, 1]);
+      assert.ok(X.tlSvg(withLane, 900, NOW).includes('<svg'), 'the waterfall renders');
+      assert.ok(X.sessDetailHtml(withLane, { tab: 'timeline', width: 900, nowMs: NOW }).length > 100, 'the detail renders');
+    });
+
+    test('[alpha7 fix] reviews matched by time say so in the Reviews list and in the marker title; named ones do not', () => {
+      const d = detail({ reviews: [{ task: 't', outcome: 'block', findings: 1, at: T0 + 12 * MIN, matched: 'time' }, { task: 't', outcome: 'pass', findings: 0, at: T0 + 46 * MIN, matched: 'session' }] });
+      const html = X.sessReviewsHtml(d);
+      assert.strictEqual((html.match(/matched by time/g) || []).length, 1);
+      assert.match(html, /<span class="quiet-text">matched by time<\/span>/);
+      const svg = X.tlSvg(d, 900, NOW);
+      assert.strictEqual((svg.match(/\(matched by time\)/g) || []).length, 1, 'only the time-matched marker title');
+      assert.ok(!/matched by time/.test(X.sessReviewsHtml(detail())), 'no marker on rows without it');
+    });
+
+    test('[alpha7 S3] geometry: lanes put Main session first, agents after, and give every tool a lane', () => {
+      const lanes = X.tlLanes(detail());
+      assert.deepStrictEqual(lanes.map((l) => l.id), ['main', 'ag-1', 'ag-2', 'ag-3']);
+      assert.deepStrictEqual(lanes.map((l) => l.tools.length), [1, 1, 1, 0]);
+      assert.strictEqual(X.tlLaneText(lanes[0]).label, 'Main session');
+      assert.deepStrictEqual(X.tlLaneText(lanes[1]), { label: 'Builder', sub: 'Sonnet' });
+      assert.deepStrictEqual(X.tlLaneText(lanes[2]), { label: 'Builder', sub: 'Sonnet · Repair' });
+      assert.deepStrictEqual(X.tlLaneText(lanes[3]), { label: 'Red team', sub: 'Fable' });
+      const orphan = X.tlLanes(detail({ tools: [{ ts: T0, duration_ms: 1, tool_name: 'Read', agent_id: 'ag-missing' }] }));
+      assert.strictEqual(orphan.length, 5);
+      assert.strictEqual(orphan[4].id, 'ag-missing');
+      assert.strictEqual(X.tlAttribution(orphan[4]), 'unattributed');
+      const noMain = X.tlLanes({ started: T0, ended: T0 + MIN, lanes: [], tools: [{ ts: T0, duration_ms: 1, tool_name: 'Read', agent_id: null }] });
+      assert.deepStrictEqual(noMain.map((l) => [l.kind, l.tools.length]), [['main', 1]]);
+      // attribution: the main session is always explicit; only a subagent lane can be inferred
+      assert.strictEqual(X.tlAttribution({ kind: 'main', attribution: 'inferred' }), 'explicit');
+      assert.deepStrictEqual(lanes.map(X.tlAttribution), ['explicit', 'explicit', 'inferred', 'unattributed']);
+      assert.strictEqual(X.tlAttribution({ kind: 'agent', attribution: 'weird' }), 'explicit');
+    });
+
+    test('[alpha7 S3] geometry: wait bands sit at the wait, labelled with its duration; an open wait runs to the end', () => {
+      const d = detail();
+      const span = X.tlSpan(d, NOW);
+      const b = X.tlWaitBands(d.waits, span, 100, 1100);
+      assert.deepStrictEqual(b.map((x) => x.label), ['Wait 1m 12s', 'Wait 4m 05s']);
+      assert.strictEqual(Math.round(b[0].x), Math.round(100 + (10 / 47) * 1000));
+      assert.strictEqual(Math.round(b[0].w), Math.round((72 / (47 * 60)) * 1000));
+      const open = X.tlWaitBands([{ ts: T0 + 40 * MIN, ended: null, duration_ms: null }], span, 100, 1100)[0];
+      assert.strictEqual(Math.round(open.x + open.w), 1100);
+      assert.strictEqual(open.label, 'Wait 7m 00s');
+      assert.ok(X.tlWaitBands([{ ts: T0, ended: T0, duration_ms: 0 }], span, 100, 1100)[0].w >= 2, 'a zero wait is still visible');
+      assert.deepStrictEqual(X.tlWaitBands([null, { ts: 'x' }], span, 100, 1100), []);
+      assert.deepStrictEqual(X.tlWaitBands(null, span, 100, 1100), []);
+    });
+
+    test('[alpha7 S3] geometry: the cost line starts at zero, rises left to right, ends at the top; none without a series', () => {
+      const d = detail();
+      const span = X.tlSpan(d, NOW);
+      const c = X.tlCostPoints(d.cost_series, span, 100, 1100, 20, 60);
+      assert.strictEqual(c.max, 6.82);
+      assert.deepStrictEqual(c.pts[0], [100, 60]);
+      assert.strictEqual(c.pts.length, 4);
+      assert.strictEqual(c.pts[3][1], 20, 'the last point is the top');
+      for (let i = 1; i < c.pts.length; i++) { assert.ok(c.pts[i][0] >= c.pts[i - 1][0]); assert.ok(c.pts[i][1] <= c.pts[i - 1][1]); }
+      assert.deepStrictEqual(X.tlCostPoints([], span, 100, 1100, 20, 60), { pts: [], max: 0 });
+      assert.deepStrictEqual(X.tlCostPoints(null, span, 100, 1100, 20, 60), { pts: [], max: 0 });
+      const flat = X.tlCostPoints([{ ts: T0, cost_est: 0 }], span, 100, 1100, 20, 60);
+      assert.ok(flat.pts.every((p) => Number.isFinite(p[0]) && Number.isFinite(p[1])), 'a zero series never gives NaN');
+      const rv = X.tlReviews(d.reviews.concat([{ task: 't', outcome: 'pass', findings: 0, at: null }]), span, 100, 1100);
+      assert.deepStrictEqual(rv.map((r) => [r.outcome, r.findings]), [['block', 2], ['pass', 0]], 'a review with no time has no marker');
+    });
+
+    test('[alpha7 S3] waterfall markup: Main session first, tool names in <title>, amber bands with durations, review shapes with counts', () => {
+      const svg = X.tlSvg(detail(), 1000, NOW);
+      assert.match(svg, /^<svg class="tl-svg" width="1000"/);
+      assert.ok(svg.indexOf('>Main session<') >= 0);
+      assert.ok(svg.indexOf('>Main session<') < svg.indexOf('>Builder<'), 'Main session leads');
+      assert.match(svg, /<title>Read · 2s<\/title>/);
+      assert.match(svg, /<title>Bash · 1m 00s<\/title>/);
+      assert.match(svg, /<title>mcp__srv__lookup<\/title>/);
+      assert.match(svg, /class="tl-wait-label"[^>]*>Wait 1m 12s</);
+      assert.match(svg, /class="tl-wait-label"[^>]*>Wait 4m 05s</);
+      assert.strictEqual((svg.match(/class="tl-wait-band"/g) || []).length, 2);
+      assert.match(svg, />Block · 2 findings</);
+      assert.match(svg, />Pass</);
+      assert.match(svg, /class="oshape oshape-block"/);
+      assert.match(svg, /class="oshape oshape-pass"/);
+      assert.match(svg, />Cumulative cost \(est\.\)</);
+      assert.match(svg, /\$6\.82 est\./);
+      assert.match(svg, />Sonnet · Repair</);
+      assert.ok(!/style=/.test(svg), 'no inline style attributes');
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(svg), 'no hard-coded colours');
+    });
+
+    test('[alpha7 S3] waterfall markup: lane colour follows that lane\'s attribution; hatching and orange only for inferred', () => {
+      const svg = X.tlSvg(detail(), 1000, NOW);
+      const tracks = [...svg.matchAll(/<rect class="tl-track(?: tl-track-solo)? tl-attr-(\w+)"([^>]*)>/g)];
+      assert.deepStrictEqual(tracks.map((t) => t[1]), ['explicit', 'explicit', 'inferred', 'unattributed'], 'main, builder (agents join), repair builder (inferred), red team (unattributed)');
+      assert.ok(!/fill=/.test(tracks[0][2]) && !/fill=/.test(tracks[1][2]), 'explicit lanes are solid, including the agent lane');
+      assert.match(tracks[2][2], /fill="url\(#tl-inferred\)"/);
+      assert.ok(!/fill=/.test(tracks[3][2]), 'unattributed is solid grey, not hatched');
+      assert.ok(!/tl-bar/.test(svg), 'no outlined lane boxes');
+      // tool bars carry their lane's attribution
+      const tools = [...svg.matchAll(/<rect class="tl-tool tl-attr-(\w+)"([^>]*)>/g)];
+      assert.deepStrictEqual(tools.map((t) => t[1]), ['explicit', 'explicit', 'inferred']);
+      assert.match(tools[2][2], /fill="url\(#tl-inferred\)"/);
+      // a main lane the API calls inferred is still explicit
+      const d = detail();
+      d.lanes[0].attribution = 'inferred';
+      assert.match(X.tlSvg(d, 1000, NOW), /<rect class="tl-track tl-attr-explicit"/);
+      // CSS: explicit is the explicit colour, unattributed is grey, and orange (--src-subagent) is only the inferred hatch
+      assert.match(css, /\.tl-attr-explicit \{ fill: var\(--src-main\); \}/);
+      assert.match(css, /\.tl-attr-unattributed \{ fill: var\(--src-unattributed\); \}/);
+      const sec = css.slice(css.indexOf('Sessions tab (alpha.7 S3)'), css.indexOf('Pipeline tab: one-screen layout'));
+      const orange = [...sec.matchAll(/([^{}]+)\{([^}]*--src-subagent[^}]*)\}/g)].map((m) => m[1].trim());
+      assert.deepStrictEqual(orange, ['.tl-hat-base', '.tl-sw-inferred']);
+      const lg = X.tlLegendHtml();
+      assert.match(lg, />Explicit</);
+      assert.match(lg, />Inferred</);
+      assert.match(lg, />Unattributed</);
+    });
+
+    test('[alpha7 S3] tool bars: a faint track per lane, solid bars with a 1 px gap, 2 px minimum, name in <title>', () => {
+      const svg = X.tlSvg(detail(), 1000, NOW);
+      assert.strictEqual((svg.match(/<rect class="tl-track /g) || []).length, 4, 'one track per lane');
+      assert.strictEqual((svg.match(/<rect class="tl-tool /g) || []).length, 3, 'one bar per tool call');
+      assert.ok(!/<rect class="tl-(tool|track)[^>]*(stroke|fill="none")/.test(svg), 'no outline-only boxes');
+      assert.match(css, /\.tl-track \{ fill-opacity: \.\d+; \}/);
+      assert.ok(!/\.tl-(tool|track)[^{]*\{[^}]*stroke/.test(css));
+      for (const m of svg.matchAll(/<rect class="tl-tool [^>]*width="([\d.]+)"/g)) assert.ok(Number(m[1]) >= 2, 'min width ' + m[1]);
+      // adjacent calls on the main lane stay separate bars with exactly 1 px between them
+      const MINUTE = 60000;
+      const d = detail({ tools: [0, 1, 2].map((i) => ({ ts: T0 + i * MINUTE, ended: T0 + (i + 1) * MINUTE, duration_ms: MINUTE, tool_name: 'Call' + i, agent_id: null, outcome: 'done' })),
+        waits: [], reviews: [], lanes: [], cost_series: [], held_up: [], started: T0, ended: T0 + 3 * MINUTE });
+      const bars = [...X.tlSvg(d, 1000, NOW).matchAll(/<rect class="tl-tool [^>]*x="([\d.]+)" y="[\d.]+" width="([\d.]+)" height="\d+"><title>(Call\d)/g)].map((m) => [Number(m[1]), Number(m[2]), m[3]]);
+      assert.deepStrictEqual(bars.map((b) => b[2]), ['Call0', 'Call1', 'Call2']);
+      for (let i = 1; i < bars.length; i++) assert.ok(Math.abs(bars[i][0] - (bars[i - 1][0] + bars[i - 1][1]) - 1) < 0.25, 'gap between ' + i + ': ' + (bars[i][0] - bars[i - 1][0] - bars[i - 1][1]));
+    });
+
+    test('[alpha7 S3] axis: idle stretches over 10 minutes become fixed 24 px breaks; active spans stay linear', () => {
+      const D = 864e5;
+      const call = (ts) => ({ ts, ended: ts + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: null });
+      const d = { started: T0, ended: T0 + 6 * D, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + 5 * MIN), call(T0 + 3 * D), call(T0 + 3 * D + 5 * MIN), call(T0 + 6 * D - 1000)] };
+      const span = X.tlSpan(d, NOW);
+      const ax = X.tlAxis(d, span, 100, 1100);
+      const gaps = ax.segs.filter((s) => s.kind === 'gap');
+      const runs = ax.segs.filter((s) => s.kind === 'run');
+      assert.strictEqual(gaps.length, 2);
+      assert.deepStrictEqual(gaps.map((g) => Math.round(g.x1 - g.x0)), [24, 24]);
+      assert.strictEqual(ax.segs[0].x0, 100);
+      assert.strictEqual(ax.segs[ax.segs.length - 1].x1, 1100);
+      for (let i = 1; i < ax.segs.length; i++) assert.ok(Math.abs(ax.segs[i].x0 - ax.segs[i - 1].x1) < 1e-6, 'segments touch');
+      assert.ok(runs.every((s) => s.x1 - s.x0 >= TLC.mergePx - 1e-6), 'every active run keeps its minimum width');
+      // the 5-minute calls sit apart on the axis, not in a one-pixel sliver
+      assert.ok(X.tlX(T0 + 5 * MIN, ax, 100, 1100) - X.tlX(T0, ax, 100, 1100) > 5, 'five active minutes are visible');
+      let prev = -1;
+      for (let k = 0; k <= 60; k++) { const x = X.tlX(T0 + (k / 60) * 6 * D, ax, 100, 1100); assert.ok(x >= prev - 1e-9 && x >= 100 && x <= 1100); prev = x; }
+      // inside a break, time moves across the 24 px
+      const g0 = gaps[0];
+      assert.ok(X.tlX((g0.t0 + g0.t1) / 2, ax, 100, 1100) > g0.x0 && X.tlX((g0.t0 + g0.t1) / 2, ax, 100, 1100) < g0.x1);
+      // no gaps: the plain linear scale
+      const calm = { started: T0, ended: T0 + 8 * MIN, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + 4 * MIN), call(T0 + 8 * MIN - 1000)] };
+      const cs = X.tlSpan(calm, NOW);
+      const cax = X.tlAxis(calm, cs, 100, 1100);
+      assert.strictEqual(cax.segs.length, 1);
+      assert.strictEqual(X.tlX(T0 + 4 * MIN, cax, 100, 1100), X.tlX(T0 + 4 * MIN, cs, 100, 1100));
+      // 10 minutes is the line: a 9m59s hole stays linear, an 11 minute one is a break
+      const edge = (hole) => { const e = { started: T0, ended: T0 + hole + 2000, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + hole)] }; return X.tlAxis(e, X.tlSpan(e, NOW), 100, 1100).segs.filter((s) => s.kind === 'gap').length; };
+      assert.strictEqual(edge(10 * MIN), 0);
+      assert.strictEqual(edge(11 * MIN), 1);
+      // a long permission wait is activity, not idle
+      const w = { started: T0, ended: T0 + 3 * 3600000, lanes: [], tools: [call(T0)], cost_series: [], reviews: [], waits: [{ ts: T0 + 1000, ended: T0 + 3 * 3600000, duration_ms: 3 * 3600000 - 1000 }] };
+      assert.strictEqual(X.tlAxis(w, X.tlSpan(w, NOW), 100, 1100).segs.filter((s) => s.kind === 'gap').length, 0);
+      // a running session that has gone quiet gets a trailing break
+      const quiet = { started: T0, ended: null, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + MIN)] };
+      const qa = X.tlAxis(quiet, X.tlSpan(quiet, T0 + 2 * 3600000), 100, 1100);
+      assert.strictEqual(qa.segs[qa.segs.length - 1].kind, 'gap');
+      // many idle stretches never take more than 40% of the width
+      const many = { started: T0, ended: T0 + 40 * 3600000, lanes: [], waits: [], cost_series: [], reviews: [], tools: Array.from({ length: 41 }, (_, i) => call(T0 + i * 3600000)) };
+      const ma = X.tlAxis(many, X.tlSpan(many, NOW), 100, 1100);
+      const mg = ma.segs.filter((s) => s.kind === 'gap');
+      assert.strictEqual(mg.length, 40, 'no gap is dropped');
+      assert.ok(mg.every((g) => Math.abs(g.x1 - g.x0 - 10) < 1e-6), 'breaks shrink to fit 40% of the width, not below 8 px');
+      assert.ok(mg.reduce((a, g) => a + g.x1 - g.x0, 0) <= 0.4 * 1000 + 1e-6);
+      assert.strictEqual(ma.segs[ma.segs.length - 1].x1, 1100);
+      assert.ok(ma.segs.every((s) => Number.isFinite(s.x0) && Number.isFinite(s.x1) && s.x1 >= s.x0));
+      // an empty session has one segment and no NaN
+      const e = X.tlAxis({ started: T0, ended: T0 }, X.tlSpan({ started: T0, ended: T0 }, NOW), 100, 1100);
+      assert.ok(e.segs.length >= 1 && e.segs.every((s) => Number.isFinite(s.x1)));
+    });
+
+    test('[alpha7 S3] axis: a session open for days shows break markers and ticks per active stretch', () => {
+      const D = 864e5;
+      const call = (ts, agent) => ({ ts, ended: ts + 5000, duration_ms: 5000, tool_name: 'Edit', agent_id: agent || null, outcome: 'done' });
+      const d = detail({ started: T0, ended: T0 + 6 * D, duration_ms: 6 * D, waits: [], reviews: [], held_up: [], lanes: [],
+        cost_series: [{ ts: T0 + MIN, cost_est: 1 }, { ts: T0 + 3 * D, cost_est: 4 }, { ts: T0 + 6 * D - 1000, cost_est: 9 }],
+        tools: [call(T0), call(T0 + 2 * MIN), call(T0 + 3 * D), call(T0 + 3 * D + 8 * MIN), call(T0 + 6 * D - 10000)] });
+      const svg = X.tlSvg(d, 1000, NOW);
+      assert.strictEqual((svg.match(/<g class="tl-break">/g) || []).length, 2);
+      assert.ok(!/⋯/.test(svg));
+      assert.match(svg, /<title>7\dh \d\dm idle, compressed<\/title>/);
+      const ticks = (svg.match(/<text class="tl-text" x="[\d.]+" y="96" text-anchor="[a-z]+">/g) || []).length;
+      assert.ok(ticks >= 3 && ticks <= 30, 'ticks: ' + ticks);
+      // the two active edges of the session are not the same sliver any more: the 8-minute stretch is wider than a few pixels
+      const ax = X.tlAxis(d, X.tlSpan(d, NOW), 176, 984);
+      assert.ok(X.tlX(T0 + 3 * D + 8 * MIN, ax, 176, 984) - X.tlX(T0 + 3 * D, ax, 176, 984) > 8);
+      assert.ok(!/NaN|undefined|Infinity/.test(svg));
+      assert.match(css, /\.tl-break-band \{ fill: var\(--panel2\); \}/);
+    });
+
+    test('[alpha7 S3] roles: builder, builder-haiku, builder-opus, red-team, red-team-lean and scribe are recognised with or without the sereno: prefix', () => {
+      const want = { builder: 'builder', 'builder-haiku': 'builder', 'builder-opus': 'builder', 'red-team': 'red-team', 'red-team-lean': 'red-team', scribe: 'scribe' };
+      for (const [name, role] of Object.entries(want)) {
+        for (const t of [name, 'sereno:' + name]) assert.strictEqual(X.laneRole({ kind: 'agent', agent_type: t, role: 'other' }), role, t);
+      }
+      for (const t of ['general-purpose', 'builder-evil', 'xbuilder', 'sereno:', '', null]) assert.strictEqual(X.laneRole({ kind: 'agent', agent_type: t, role: 'other' }), 'other', String(t));
+      assert.strictEqual(X.laneRole({ kind: 'agent', agent_type: 'weird', role: 'builder' }), 'builder', 'the API role wins when it has one');
+      assert.strictEqual(X.laneRole(null), 'other');
+      // the facts and the labels use it: an agent the API left as "other" still counts as a Builder run
+      const lane = (id, type, started, stopped) => ({ id, kind: 'agent', label: type, agent_type: type, role: 'other', model: 'claude-sonnet-4-5', attribution: 'explicit', started, stopped, cost_est: 0, subtitle: null });
+      const d = detail({ lanes: [detail().lanes[0], lane('b1', 'builder', T0, T0 + 5 * MIN), lane('b2', 'sereno:builder-opus', T0 + 6 * MIN, T0 + 9 * MIN), lane('r1', 'red-team-lean', T0 + 10 * MIN, T0 + 11 * MIN)], tools: [] });
+      const f = X.sessFacts(d, NOW);
+      assert.strictEqual(f.builderRuns, 2);
+      assert.strictEqual(f.builderMs, 8 * MIN);
+      assert.match(X.sessFactsHtml(d, NOW), /Builder active time<\/dt><dd>8m 00s over 2 runs</);
+      assert.deepStrictEqual(X.tlLanes(d).map((l) => X.tlLaneText(l).label), ['Main session', 'Builder', 'Builder', 'Red team']);
+    });
+
+    test('[alpha7 S3] time ranges: dates when a session spans days, in the list row and the header; under a second reads <1s', () => {
+      const multi = { started: at(5, 13, 20), ended: at(0, 15, 18) };
+      assert.strictEqual(X.sessTimeRange(multi, NOW), 'Oct 20 13:20 – Oct 25 15:18');
+      assert.strictEqual(X.sessTimeRange({ started: at(1, 22, 0), ended: null }, NOW), 'Oct 24 22:00 – now');
+      assert.strictEqual(X.sessTimeRange({ started: at(0, 9, 0), ended: null }, NOW), '09:00–now');
+      assert.strictEqual(X.sessTimeRange({ started: at(0, 9, 0), ended: at(0, 9, 47) }, NOW), '09:00–09:47');
+      assert.strictEqual(X.sessTimeRange({ started: at(1, 23, 30), ended: at(0, 0, 20) }, NOW), 'Oct 24 23:30 – Oct 25 00:20', 'across midnight');
+      assert.match(X.sessListHtml([row('m1', multi)], { filter: 'all', q: '', sel: 'm1', nowMs: NOW }), /Oct 20 13:20 – Oct 25 15:18/);
+      assert.match(X.sessDetailHtml(detail(multi), { tab: 'timeline', width: 900, nowMs: NOW }), /Oct 20 13:20 – Oct 25 15:18/);
+      assert.deepStrictEqual([1, 400, 999].map(X.fmtDur), ['<1s', '<1s', '<1s']);
+      assert.strictEqual(X.fmtDur(0), '0s');
+      assert.ok(!/ ms/.test(X.tlSvg(detail({ tools: [{ ts: T0 + MIN, ended: T0 + MIN + 300, duration_ms: 300, tool_name: 'Fast', agent_id: null }] }), 900, NOW)));
+    });
+
+    test('[alpha7 S3] sessions recorded before V2: turns read "—", the timeline says why and keeps the cost line', () => {
+      const old = detail({ has_events: false, tools: [], waits: [], reviews: [], held_up: [], turns: 0 });
+      const h = X.sessDetailHtml(old, { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.ok(!/turns?\b/.test(h.slice(0, h.indexOf('role="tablist"'))), 'no turns figure in the header (neither a dash nor 0)');
+      assert.ok(!/0 turns/.test(h));
+      assert.match(h, /No tool calls or waits: this session was recorded before Sessions existed\. Runs and cost come from the ledger\./);
+      assert.ok(!/No timeline:/.test(h));
+      assert.match(h, /<svg class="tl-svg"/, 'requests exist, so the cost line stays');
+      assert.match(h, /Cumulative cost \(est\.\)/);
+      const noReq = X.sessDetailHtml(detail({ has_events: false, tools: [], waits: [], reviews: [], held_up: [], cost_series: [] }), { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(noReq, /No tool calls or waits: this session was recorded before Sessions existed\./);
+      assert.ok(!/come from the ledger/.test(noReq), 'no chart, so no claim that one is drawn');
+      assert.ok(!/<svg class="tl-svg"/.test(noReq));
+      // a current session with events, or an API without the flag, is unchanged
+      for (const flag of [true, undefined]) {
+        const cur = X.sessDetailHtml(detail({ has_events: flag }), { tab: 'timeline', width: 900, nowMs: NOW });
+        assert.match(cur, /5 turns/);
+        assert.ok(!/recorded before Sessions existed/.test(cur));
+      }
+      // a recorded session with no tool calls yet still says "0 turns", not a dash
+      assert.match(X.sessDetailHtml(detail({ has_events: true, turns: 0, tools: [], waits: [], cost_series: [] }), { tab: 'timeline', width: 900, nowMs: NOW }), /0 turns/);
+    });
+
+    test('[alpha7 S3] waterfall: API strings are escaped, and no Task description can reach a lane label', () => {
+      const evil = '<script>alert(1)</script>';
+      const d = detail();
+      d.lanes[1] = Object.assign({}, d.lanes[1], { role: 'other', label: evil, agent_type: evil, description: 'SECRET-TASK-DESCRIPTION', prompt: 'SECRET-PROMPT' });
+      d.tools.push({ ts: T0 + 3 * MIN, ended: T0 + 4 * MIN, duration_ms: MIN, tool_name: evil, agent_id: 'ag-1', outcome: 'done' });
+      d.reviews.push({ task: evil, outcome: evil, findings: 1, at: T0 + 30 * MIN });
+      const svg = X.tlSvg(d, 1000, NOW);
+      assert.ok(!svg.includes('<script>'));
+      assert.ok(svg.includes('&lt;script&gt;'));
+      assert.ok(!/SECRET/.test(svg + X.sessDetailHtml(d, { tab: 'timeline', width: 1000, nowMs: NOW }) + X.sessDetailHtml(d, { tab: 'requests', width: 1000, nowMs: NOW }) + X.sessDetailHtml(d, { tab: 'reviews', width: 1000, nowMs: NOW })), 'no description or prompt text');
+      assert.ok(!/<script>/.test(X.sessDetailHtml(d, { tab: 'reviews', width: 1000, nowMs: NOW })));
+    });
+
+    test('[alpha7 S3] waterfall: an empty session shows an empty state; many lanes grow the SVG inside a scroll box; a very long session keeps few ticks', () => {
+      const empty = detail({ tools: [], waits: [], cost_series: [], reviews: [], held_up: [] });
+      const h = X.sessDetailHtml(empty, { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(h, /No events were recorded for this session/);
+      assert.ok(!/<svg class="tl-svg"/.test(h));
+      const many = detail();
+      for (let i = 0; i < 40; i++) many.lanes.push({ id: 'x' + i, kind: 'agent', label: 'agent', role: 'other', model: null, attribution: 'explicit', started: T0, stopped: T0 + MIN, cost_est: 0, subtitle: null });
+      const hMany = X.sessDetailHtml(many, { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(hMany, /<div class="tl-wrap" id="tl-host"><div class="tl-head"><svg class="tl-svg" [^>]*>.*?<\/svg><\/div><svg class="tl-svg tl-svg-body"/);
+      const hOf = (svg) => Number(/ height="(\d+)"/.exec(svg)[1]);
+      const bodyH = (dd) => hOf(X.tlSvgParts(dd, 900, NOW).body);
+      assert.ok(bodyH(many) > bodyH(detail()) + 40 * 30, 'many lanes grow the body, in the page flow');
+      assert.ok(!/tl-scroll/.test(css + cj), 'no inner scroll box');
+      const long = detail({ ended: T0 + 40 * 864e5, duration_ms: 40 * 864e5, tools: [{ ts: T0 + 39 * 864e5, duration_ms: 5000, tool_name: 'Read', agent_id: null }], waits: [], cost_series: [], reviews: [] });
+      const ticks = (X.tlSvg(long, 900, NOW).match(/<text class="tl-text" x="[\d.]+" y="96" text-anchor="[a-z]+">/g) || []).length;
+      assert.ok(ticks >= 2 && ticks <= 11, 'ticks: ' + ticks);
+      assert.ok(Number.isFinite(bodyH(empty)));
+      assert.ok(!/NaN|undefined|Infinity/.test(X.tlSvg(empty, 900, NOW)));
+      assert.ok(!/NaN|undefined|Infinity/.test(X.tlSvg(detail({ tools: [{ ts: 'x', duration_ms: 'y', tool_name: null, agent_id: null }], waits: [{ ts: null }], cost_series: [{ ts: 1, cost_est: 'z' }], reviews: [{ at: 'q' }] }), 900, NOW)));
+    });
+
+    test('[alpha7 S3] detail header: project, state, branch, duration, cost est., turns, time range, reconciliation chip, View project', () => {
+      const h = X.sessDetailHtml(detail(), { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(h, /<h2>alpha<\/h2>/);
+      assert.match(h, /xpill-ended">Ended</);
+      assert.match(h, /feat\/barcode/);
+      assert.match(h, /47m 00s/);
+      assert.match(h, /\$6\.82 est\./);
+      assert.match(h, /5 turns/);
+      assert.match(h, /09:00–09:47/);
+      assert.match(h, /Ledger matches statusline/);
+      assert.match(h, /<a class="xlink" href="#projects\/p-alpha">View project<\/a>/);
+      assert.match(h, /data-xtab="timeline"[^>]*>Timeline</);
+      assert.match(h, /data-xtab="requests"[^>]*>Requests</);
+      assert.match(h, /data-xtab="reviews"[^>]*>Reviews \(2\)</);
+      assert.ok(!/prompts?\b/i.test(h.replace(/prompt-?(?:free)?/gi, '')) || !/\d+ prompts/.test(h), 'the count is turns, not prompts');
+      // the chip: a difference as a percentage, or nothing
+      assert.match(X.sessReconHtml({ ok: false, diff: -3.46 }), /Ledger differs from statusline by 3\.5%/);
+      assert.match(X.sessReconHtml({ ok: false, diff: 12 }), /by 12%/);
+      assert.match(X.sessReconHtml({ ok: false, diff: null }), /Ledger differs from statusline</);
+      assert.strictEqual(X.sessReconHtml(null), '');
+      assert.strictEqual(X.sessReconHtml(undefined), '');
+      assert.ok(!/chip/.test(X.sessDetailHtml(detail({ reconciliation: null }), { tab: 'timeline', width: 900, nowMs: NOW })));
+      // no project id, no link; a hostile id is encoded
+      assert.ok(!/View project/.test(X.sessDetailHtml(detail({ project_id: null }), { tab: 'timeline', width: 900, nowMs: NOW })));
+      assert.match(X.sessDetailHtml(detail({ project_id: '"><x' }), { tab: 'timeline', width: 900, nowMs: NOW }), /href="#projects\/%22%3E%3Cx"/);
+      assert.match(X.sessDetailHtml(null, { missing: true }), /no longer in the ledger/);
+      assert.match(X.sessDetailHtml(null, { loading: true }), /Loading session/);
+      assert.match(X.sessDetailHtml(null, {}), /Select a session\./);
+      // an unknown tab reads as Timeline
+      assert.match(X.sessDetailHtml(detail(), { tab: '<x>', width: 900, nowMs: NOW }), /ntab on" data-xtab="timeline"/);
+    });
+
+    test('[alpha7 S3] below the timeline: what held it up (elapsed + event) and session facts', () => {
+      const d = detail();
+      const held = X.sessHeldUp(d);
+      assert.deepStrictEqual(held.map((x) => [x.at / MIN, x.what]), [
+        [10, 'Permission wait · 1m 12s'], [12, 'Review blocked · 2 findings'], [24, 'Permission wait · 4m 05s'], [46, 'Review passed'],
+      ]);
+      const hh = X.sessHeldUpHtml(d);
+      assert.match(hh, /<span class="num quiet-text">\+10m 00s<\/span><span class="xheld-wait">Permission wait · 1m 12s<\/span>/);
+      assert.match(hh, /<span class="">Review blocked · 2 findings<\/span>/);
+      assert.match(X.sessHeldUpHtml(detail({ held_up: [], reviews: [] })), /Nothing held this session up\./);
+      assert.ok(!/xheld-wait/.test(X.sessHeldUpHtml(detail({ held_up: [] }))), 'no amber without a wait');
+      const f = X.sessFacts(d, NOW);
+      assert.strictEqual(f.waitCount, 2);
+      assert.strictEqual(f.waitMs, 72000 + 245000);
+      assert.strictEqual(f.builderRuns, 2);
+      assert.strictEqual(f.builderMs, 8 * MIN + 12 * MIN);
+      assert.deepStrictEqual(f.path, ['Block', 'Repair', 'Pass']);
+      assert.deepStrictEqual(f.attribution, { explicit: 40, inferred: 3, unattributed: 2 });
+      const fh = X.sessFactsHtml(d, NOW);
+      assert.match(fh, /Permission waits<\/dt><dd>2 waits · 5m 17s</);
+      assert.match(fh, /Builder active time<\/dt><dd>20m 00s over 2 runs</);
+      assert.match(fh, /Review path<\/dt><dd>Block → Repair → Pass</);
+      assert.match(fh, /40 explicit · 3 inferred · 2 unattributed requests/);
+      const bare = X.sessFactsHtml(detail({ waits: [], lanes: [], reviews: [], attribution: {} }), NOW);
+      assert.match(bare, /Permission waits<\/dt><dd>None</);
+      assert.match(bare, /No Builder runs/);
+      assert.match(bare, /No reviews/);
+    });
+
+    test('[alpha7 S3] Requests and Reviews sub-tabs use only fields the API gives', () => {
+      const r = X.sessDetailHtml(detail(), { tab: 'requests', width: 900, nowMs: NOW });
+      assert.match(r, /<th scope="row">Main session<\/th><td>Opus<\/td><td>Explicit<\/td><td class="num">\$2\.50 est\.<\/td>/);
+      assert.match(r, /<th scope="row">Builder <span class="quiet-text">Repair<\/span><\/th><td>Sonnet<\/td><td>Inferred<\/td><td class="num">\$1\.32 est\.<\/td>/);
+      assert.match(r, /Cost \(est\.\)/);
+      assert.match(r, /40 explicit · 3 inferred · 2 unattributed/);
+      assert.ok(!/<svg class="tl-svg"/.test(r));
+      const v = X.sessDetailHtml(detail(), { tab: 'reviews', width: 900, nowMs: NOW });
+      assert.strictEqual((v.match(/<a class="xlink" href="#pipeline\/work">/g) || []).length, 2);
+      assert.match(v, /<strong>Block<\/strong> · 2 findings · 09:12/);
+      assert.match(v, /<strong>Pass<\/strong> · 0 findings/);
+      assert.match(v, /Pipeline task barcode</);
+      assert.match(X.sessDetailHtml(detail({ reviews: [] }), { tab: 'reviews', width: 900, nowMs: NOW }), /No reviews in this session\./);
+    });
+
+    test('[alpha7 S3] every dollar figure in the Sessions markup carries est.; the count says turns, never prompts', () => {
+      const d = detail();
+      const all = [X.sessListHtml(LIST, { filter: 'all', q: '', sel: 'a-live', nowMs: NOW })]
+        .concat(['timeline', 'requests', 'reviews'].map((tab) => X.sessDetailHtml(d, { tab, width: 900, nowMs: NOW })))
+        .concat([X.tlSvg(d, 900, NOW)]).join('\n');
+      const dollars = all.match(/\$\d[\d,.]*/g) || [];
+      assert.ok(dollars.length >= 8, 'figures were found: ' + dollars.length);
+      for (const m of all.matchAll(/\$\d[\d,.]*/g)) assert.ok(all.slice(m.index + m[0].length, m.index + m[0].length + 5) === ' est.', 'missing est. after ' + m[0]);
+      assert.match(all, /5 turns/);
+      assert.ok(!/\bprompts?\b/i.test(all), 'the word prompt never appears');
+    });
+
+    test('[alpha7 S3] page: the Projects grid, list and detail panes, no pagination, no menu', () => {
+      const ctx = { list: LIST, ui: { filter: 'all', q: '', tab: 'timeline' }, sel: 'a-live', detail: detail({ session_id: 'a-live' }), detailFor: 'a-live', missing: false, width: 900, nowMs: NOW };
+      const h = X.sessPage(ctx);
+      assert.match(h, /<div class="pnav">/);
+      assert.match(h, /<div class="nlist" id="xlist">/);
+      assert.match(h, /<section class="ndetail" id="xdetail"/);
+      assert.match(h, /5 sessions · 2 running/);
+      assert.match(h, /class="xrow sel"[^>]*data-xsel="a-live"/);
+      const hit = /page \d|next page|\bolder\b|load more|⋯|&hellip;|\.\.\./i.exec(h.slice(0, h.indexOf('id="xdetail"')));   // the list side; idle breaks are not a menu
+      assert.ok(!hit, 'no pagination or menu: ' + (hit && h.slice(Math.max(0, hit.index - 40), hit.index + 40)));
+      // the detail of another session is not shown under this selection
+      assert.match(X.sessPage(Object.assign({}, ctx, { detailFor: 'someone-else' })), /Loading session/);
+      assert.match(X.sessPage(Object.assign({}, ctx, { list: [], sel: null, detail: null, detailFor: null })), /No sessions in this range\./);
+      assert.match(X.sessTitleHtml('7d'), /<h1>Sessions<\/h1>/);
+    });
+
+    test('[alpha7 S3] amber only on a permission wait: calm markup has none, a waiting session and a wait band do', () => {
+      const calmRows = LIST.filter((r) => r.state === 'ended' || r.state === 'running');
+      const calm = X.sessPage({ list: calmRows, ui: { filter: 'all', q: '', tab: 'timeline' }, sel: 'a-live', detail: detail({ session_id: 'a-live', waits: [], held_up: [], state: 'running', ended: null }), detailFor: 'a-live', width: 900, nowMs: NOW });
+      assert.ok(!/amber|waiting|tl-wait|xheld-wait/i.test(calm), 'no amber hook in a calm session');
+      assert.match(X.sessListHtml(LIST, { filter: 'all', q: '', sel: null, nowMs: NOW }), /xpill-waiting">Waiting</);
+      assert.match(X.tlSvg(detail(), 900, NOW), /tl-wait-band/);
+      const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] }));
+      const users = rules.filter((r) => /--amber/.test(r.body) && r.sel !== ':root' && /^\.(xpill|xheld|tl-)/.test(r.sel)).map((r) => r.sel).sort();
+      assert.deepStrictEqual(users, ['.tl-sw-wait', '.tl-wait-band', '.tl-wait-label', '.tl-wait-top', '.xheld-wait', '.xpill-waiting']);
+      // every JS line that names a wait class is a wait context
+      for (const m of cj.matchAll(/^.*(?:xpill-waiting|xheld-wait|tl-wait).*$/gm)) assert.ok(/wait/i.test(m[0]), m[0].slice(0, 100));
+    });
+
+    test('[alpha7 S3] breaks: labels never overlap; one that does not fit shrinks to the marker with the full text in <title>', () => {
+      const H = 3600000;
+      const call = (ts) => ({ ts, ended: ts + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: null });
+      const dense = (a, b) => { const o = []; for (let t = a; t <= b; t += 5 * MIN) o.push(call(t)); return o; };
+      const burst = (ts) => dense(ts, ts + 10 * MIN);   // a 10 minute active stretch
+      const t = [T0, T0 + 24 * H, T0 + 26 * H, T0 + 31 * H, T0 + 34 * H];
+      const tools = t.slice(0, 4).flatMap(burst).concat(dense(t[4], t[4] + 120 * MIN));
+      const d = { started: T0, ended: t[4] + 120 * MIN + 1000, lanes: [], waits: [], cost_series: [], reviews: [], tools };
+      const ax = X.tlAxis(d, X.tlSpan(d, NOW), 176, 984);
+      const gaps = ax.segs.filter((s) => s.kind === 'gap');
+      assert.strictEqual(gaps.length, 4, 'four breaks, each more than 30 px apart');
+      const svg = X.tlSvgParts(d, 1000, NOW);
+      assert.strictEqual((svg.head.match(/<g class="tl-break">/g) || []).length, 4);
+      assert.ok(!/⋯|idle<\/text>/.test(svg.head + svg.body), 'no break text on the axis');
+      const lb = X.tlBreakLabels(ax, 400);
+      assert.strictEqual(lb.length, 4);
+      for (const l of lb) {
+        assert.match(l.label, /^(\d+h( \d+m)?|\d+m|\d+s) idle$/);
+        assert.match(l.full, /^(\d+h \d\dm|\d+m \d\ds) idle, compressed$/);
+        assert.strictEqual(l.show, l.seg.x1 - l.seg.x0 >= 14);
+        assert.ok(svg.body.includes('<title>' + l.full + '</title>'), 'full text in the body band title: ' + l.full);
+        assert.ok(svg.head.includes('<title>' + l.full + '</title>'), 'and in the head band title');
+      }
+      assert.deepStrictEqual(X.tlBreakLabels(null, 400), []);
+    });
+
+    /* ---- alpha7 S3 follow-up: week-long sessions (axis compression, label collisions, review clusters, two-SVG waterfall) ---- */
+
+    // 15 bursts over about 7 days, separated by gaps from 20 minutes to 40 hours; one burst is a single zero-length call
+    const weekSession = () => {
+      const H = 3600000;
+      const call = (ts, dur) => ({ ts, ended: ts + dur, duration_ms: dur, tool_name: 'Edit', agent_id: null, outcome: 'done' });
+      const gapsH = [1 / 3, 1, 40, 3, 5 / 12, 12, 8, 0.5, 38, 2, 15, 6, 22, 24];
+      const tools = [];
+      let t = at(7, 13, 0);
+      const T = t;
+      for (let i = 0; i < 15; i++) {
+        if (i === 6) tools.push(call(t, 0));   // a point: no length at all
+        else { tools.push(call(t, 4 * MIN)); tools.push(call(t + 4 * MIN, 3 * MIN)); }
+        t += (i === 6 ? 0 : 7 * MIN);
+        if (i < 14) t += gapsH[i] * H;
+      }
+      return { started: T, ended: t + MIN, lanes: [], waits: [], cost_series: [{ ts: T + MIN, cost_est: 1 }, { ts: t, cost_est: 9 }], reviews: [], tools };
+    };
+
+    test('[alpha7 S3] week axis: every gap over 10 minutes is a break, none merged, no activity inside a break, every run keeps its minimum width', () => {
+      const d = weekSession();
+      const span = X.tlSpan(d, NOW);
+      assert.ok(span.t1 - span.t0 > 160 * 3600000, 'about a week: ' + (span.t1 - span.t0) / 3600000 + ' h');
+      const ax = X.tlAxis(d, span, 176, 984);
+      const gaps = ax.segs.filter((s) => s.kind === 'gap');
+      const runs = ax.segs.filter((s) => s.kind === 'run');
+      const act = X.tlActivity(d, span);
+      assert.strictEqual(act.length, 16, 'fifteen bursts and the span end, a minute after the last');
+      assert.strictEqual(gaps.length, 14, 'one break per gap: none dropped, none merged');
+      assert.strictEqual(runs.length, 15);
+      for (const g of gaps) assert.strictEqual(g.idleMs, g.t1 - g.t0, 'idle time is the break itself');
+      assert.ok(gaps.reduce((a, g) => a + g.idleMs, 0) <= span.t1 - span.t0, 'idle never exceeds the session');
+      assert.ok(Math.max.apply(null, gaps.map((g) => g.idleMs)) < span.t1 - span.t0);
+      for (const [a, b] of act) {
+        const inRun = runs.some((r) => a >= r.t0 && b <= r.t1);
+        assert.ok(inRun, 'activity ' + a + '..' + b + ' sits inside one run');
+        assert.ok(!gaps.some((g) => a < g.t1 && b > g.t0), 'and overlaps no break');
+        for (const t of [a, b]) {
+          const x = X.tlX(t, ax, 176, 984);
+          assert.ok(runs.some((r) => x >= r.x0 - 1e-6 && x <= r.x1 + 1e-6), 'x of an activity edge is on a run');
+        }
+      }
+      for (const r of runs) assert.ok(r.x1 - r.x0 >= TLC.mergePx - 1e-6, 'run width ' + (r.x1 - r.x0));
+      assert.ok(runs.some((r) => r.t1 === r.t0), 'the point run exists');
+      assert.strictEqual(ax.segs[0].x0, 176);
+      assert.strictEqual(ax.segs[ax.segs.length - 1].x1, 984);
+      for (let i = 1; i < ax.segs.length; i++) assert.ok(Math.abs(ax.segs[i].x0 - ax.segs[i - 1].x1) < 1e-6, 'segments touch');
+      assert.ok(gaps.reduce((a, g) => a + g.x1 - g.x0, 0) <= 0.4 * 808 + 1e-6, 'breaks take at most 40% of the width');
+      assert.ok(gaps.every((g) => g.x1 - g.x0 >= 8 - 1e-6), 'never narrower than 8 px');
+      // the longest idle label can never be longer than the session
+      const lb = X.tlBreakLabels(ax, 400);
+      assert.strictEqual(lb.length, 14);
+      const svg = X.tlSvgParts(d, 1000, NOW);
+      const re = /<title>((?:\d+h \d\dm|\d+m \d\ds)) idle, compressed<\/title>/g;
+      assert.strictEqual([...svg.head.matchAll(re)].length, 14);
+      assert.strictEqual([...svg.body.matchAll(re)].length, 14);
+    });
+
+    test('[alpha7 S3] axis: past 40 breaks at 8 px the longest stay compressed and the rest stay linear; nothing merges', () => {
+      const H = 3600000;
+      const call = (ts) => ({ ts, ended: ts + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: null });
+      const tools = []; let t = T0; const lens = [];
+      for (let i = 0; i < 100; i++) { tools.push(call(t)); const gap = (20 + (i * 37) % 200) * MIN; lens.push(gap); t += gap; }
+      const d = { started: T0, ended: t + 1000, lanes: [], waits: [], cost_series: [], reviews: [], tools };
+      const ax = X.tlAxis(d, X.tlSpan(d, NOW), 176, 984);
+      const gaps = ax.segs.filter((s) => s.kind === 'gap');
+      const runs = ax.segs.filter((s) => s.kind === 'run');
+      assert.strictEqual(gaps.length, 40, 'floor(40% of 808 / 8)');
+      assert.ok(gaps.every((g) => Math.abs(g.x1 - g.x0 - 8) < 1e-6));
+      const shortestKept = Math.min.apply(null, gaps.map((g) => g.idleMs));
+      const sorted = lens.slice().sort((a, b) => b - a);
+      assert.ok(shortestKept >= sorted[40] - 1500, 'the kept breaks are the longest ones');
+      for (const g of gaps) assert.strictEqual(g.idleMs, g.t1 - g.t0);
+      assert.strictEqual(ax.segs[ax.segs.length - 1].x1, 984);
+      for (const r of runs) assert.ok(r.x1 - r.x0 >= 808 * 0.6 / runs.length - 1e-6 && Number.isFinite(r.x1), 'runs share what is left');
+      for (let i = 1; i < ax.segs.length; i++) assert.ok(Math.abs(ax.segs[i].x0 - ax.segs[i - 1].x1) < 1e-6);
+    });
+
+    test('[alpha7 S3] axis labels: no two overlap (6 px apart), all inside the drawing, the right edge turns to end anchor, the left to start', () => {
+      const d = weekSession();
+      const span = X.tlSpan(d, NOW);
+      const W = 1000;
+      const ax = X.tlAxis(d, span, 176, W - 16);
+      const at1 = X.tlAxisTexts(ax, span, W, true);
+      assert.ok(at1.texts.length >= 8, 'labels: ' + at1.texts.length);
+      assert.ok(at1.grids.length >= at1.texts.length, 'gridlines stay for skipped labels');
+      for (let i = 0; i < at1.texts.length; i++) {
+        const t = at1.texts[i];
+        assert.ok(t.l >= 0 && t.r <= W, 'inside [0, W]: ' + t.label);
+        if (i) assert.ok(t.l >= at1.texts[i - 1].r + 6 - 1e-6, 'clear of the previous label: ' + at1.texts[i - 1].label + ' | ' + t.label);
+      }
+      assert.ok(/^[A-Z][a-z]{2} \d{1,2} \d\d:\d\d$/.test(at1.texts[0].label), 'the first label is dated');
+      // a run that ends at the very edge of a narrow drawing never clips: the label turns to end anchor
+      const edgeAxis = { t0: T0, t1: T0 + 60 * MIN, x0: 10, x1: 300, segs: [{ kind: 'run', t0: T0, t1: T0 + 60 * MIN, x0: 10, x1: 300 }] };
+      const edge = X.tlAxisTexts(edgeAxis, { t0: T0, t1: T0 + 60 * MIN }, 300, true);
+      const last = edge.texts[edge.texts.length - 1];
+      assert.strictEqual(last.anchor, 'end');
+      assert.ok(last.r <= 300 && last.l >= 0);
+      assert.strictEqual(edge.texts[0].anchor, 'start', 'the first label at x = 10 would clip on the left');
+      assert.ok(edge.texts[0].l >= 0);
+      // relative labels go through the same pass
+      const rel = X.tlAxisTexts({ t0: T0, t1: T0 + 8 * MIN, x0: 100, x1: 900, segs: [{ kind: 'run', t0: T0, t1: T0 + 8 * MIN, x0: 100, x1: 900 }] }, { t0: T0, t1: T0 + 8 * MIN }, 1000, false);
+      assert.ok(rel.texts.length >= 2 && rel.texts.every((t) => !t.label.includes(':')));
+      // an empty axis is fine
+      assert.deepStrictEqual(X.tlAxisTexts(null, { t0: 0, t1: 1 }, 100, true), { grids: [], texts: [] });
+    });
+
+    test('[alpha7 S3] axis labels: a label that would touch the previous one is skipped and the next shown label carries the date', () => {
+      const dayA = at(1, 23, 30), dayB = at(0, 0, 0);
+      const ax = { t0: dayA, t1: dayB + 60 * MIN, x0: 100, x1: 400, segs: [
+        { kind: 'run', t0: dayA, t1: dayA + 20 * MIN, x0: 100, x1: 160 },
+        { kind: 'run', t0: dayB, t1: dayB + 60 * MIN, x0: 160, x1: 400 }] };
+      const r = X.tlAxisTexts(ax, { t0: dayA, t1: dayB + 60 * MIN }, 500, true);
+      assert.deepStrictEqual(r.texts.map((t) => t.label), ['Oct 24 23:30', 'Oct 25 00:30', '01:00'], 'the 00:00 label (the day change) collides, so 00:30 takes the date');
+      assert.strictEqual(r.grids.length, 4, 'its gridline stays');
+    });
+
+    test('[alpha7 S3] axis labels in the SVG: a week-long session has no overlapping or clipped axis text', () => {
+      const d = weekSession();
+      for (const W of [700, 1000, 1400]) {
+        const { head } = X.tlSvgParts(d, W, NOW);
+        const ticks = [...head.matchAll(/<text class="tl-text" x="([\d.]+)" y="96" text-anchor="(\w+)">([^<]*)</g)].map((m) => {
+          const w = m[3].length * 6.4, x = Number(m[1]);
+          return m[2] === 'end' ? [x - w, x, m[3]] : m[2] === 'start' ? [x, x + w, m[3]] : [x - w / 2, x + w / 2, m[3]];
+        });
+        assert.ok(ticks.length >= 4, W + ': labels ' + ticks.length);
+        ticks.forEach((t, i) => {
+          assert.ok(t[0] >= 0 && t[1] <= W, W + ': inside ' + t[2]);
+          if (i) assert.ok(t[0] >= ticks[i - 1][1] + 6 - 0.5, W + ': ' + ticks[i - 1][2] + ' | ' + t[2]);
+        });
+      }
+    });
+
+    /* ---- alpha7 S3 follow-up: the axis says time, the bands say idle ---- */
+
+    // a short session with no idle break: relative labels
+    const contSession = () => {
+      const call = (ts) => ({ ts, ended: ts + 2000, duration_ms: 2000, tool_name: 'Read', agent_id: null, outcome: 'done' });
+      return { started: T0, ended: T0 + 8 * MIN, lanes: [], waits: [], cost_series: [], reviews: [], held_up: [], tools: [call(T0 + MIN), call(T0 + 4 * MIN), call(T0 + 7 * MIN)] };
+    };
+
+    test('[alpha7 S3] axis row is time only: no break text in the head; a caption names the scale', () => {
+      const head = X.tlSvgParts(weekSession(), 1000, NOW).head;
+      assert.ok(!/⋯|idle/.test(head.replace(/<title>[^<]*<\/title>/g, '')), 'no break text in the head');
+      assert.match(head, /<text class="tl-text" x="0" y="96">Local time<\/text>/);
+      const rel = X.tlSvgParts(contSession(), 1000, NOW).head;
+      assert.match(rel, /<text class="tl-text" x="0" y="96">Elapsed<\/text>/);
+      assert.ok(!/Local time/.test(rel));
+      assert.ok(!/Elapsed/.test(head));
+    });
+
+    test('[alpha7 S3] axis: each active run starts with its own clock label, left-aligned to the run start, none overlapping', () => {
+      const H3 = 3 * 3600000;
+      const ax = { t0: T0, t1: T0 + H3, x0: 100, x1: 900, segs: [
+        { kind: 'run', t0: T0, t1: T0 + 40 * MIN, x0: 100, x1: 400 },
+        { kind: 'gap', t0: T0 + 40 * MIN, t1: T0 + 2 * 3600000, x0: 400, x1: 424, idleMs: 80 * MIN },
+        { kind: 'run', t0: T0 + 2 * 3600000, t1: T0 + H3, x0: 424, x1: 900 }] };
+      const r = X.tlAxisTexts(ax, { t0: T0, t1: T0 + H3 }, 1000, true);
+      for (const run of ax.segs.filter((s) => s.kind === 'run')) {
+        const t = r.texts.find((q) => Math.abs(q.x - run.x0) < 1e-6);
+        assert.ok(t, 'a label at the run start x=' + run.x0);
+        assert.strictEqual(t.anchor, 'start');
+        assert.ok(Math.abs(t.l - run.x0) < 1e-6);
+      }
+      assert.ok(r.texts.length > 2, 'the wide run has inner ticks too');
+      r.texts.forEach((t, i) => { assert.ok(t.l >= 0 && t.r <= 1000); if (i) assert.ok(t.l >= r.texts[i - 1].r + 6 - 1e-6, t.label); });
+      // an inner tick never covers the next run's start label
+      const tight = { t0: T0, t1: T0 + H3, x0: 100, x1: 900, segs: [
+        { kind: 'run', t0: T0, t1: T0 + 60 * MIN, x0: 100, x1: 330 },
+        { kind: 'gap', t0: T0 + 60 * MIN, t1: T0 + 2 * 3600000, x0: 330, x1: 354, idleMs: 60 * MIN },
+        { kind: 'run', t0: T0 + 2 * 3600000, t1: T0 + H3, x0: 354, x1: 900 }] };
+      const tr = X.tlAxisTexts(tight, { t0: T0, t1: T0 + H3 }, 1000, true);
+      assert.ok(tr.texts.some((t) => Math.abs(t.x - 354) < 1e-6 && t.anchor === 'start'), 'the second run keeps its start label');
+      // a run start near the right edge turns to end anchor, and nothing leaves [0, W]
+      const edge = X.tlAxisTexts({ t0: T0, t1: T0 + 3600000 + MIN, x0: 10, x1: 296, segs: [
+        { kind: 'run', t0: T0, t1: T0 + 10 * MIN, x0: 10, x1: 100 }, { kind: 'gap', t0: T0 + 10 * MIN, t1: T0 + 3600000, x0: 100, x1: 124, idleMs: 50 * MIN },
+        { kind: 'run', t0: T0 + 3600000, t1: T0 + 3600000 + MIN, x0: 124, x1: 296 }] }, { t0: T0, t1: T0 + 3600000 + MIN }, 300, true);
+      assert.ok(edge.texts.every((t) => t.l >= 0 && t.r <= 300));
+      const lone = X.tlAxisTexts({ t0: T0, t1: T0 + MIN, x0: 10, x1: 296, segs: [{ kind: 'run', t0: T0, t1: T0 + MIN, x0: 290, x1: 296 }] }, { t0: T0, t1: T0 + MIN }, 300, true);
+      assert.strictEqual(lone.texts[0].anchor, 'end');
+    });
+
+    test('[alpha7 S3] break bands: wide ones carry a rotated "28m idle" label, narrow ones none, every band keeps its <title>', () => {
+      const d = Object.assign(weekSession(), { lanes: detail().lanes });   // four lanes: the body is tall enough for the text
+      const body = X.tlSvgParts(d, 1000, NOW).body;
+      const bands = [...body.matchAll(/<rect class="tl-break-band" x="([\d.]+)" y="0" width="([\d.]+)"[^>]*><title>([^<]*)<\/title>/g)];
+      assert.strictEqual(bands.length, X.tlAxis(d, X.tlSpan(d, NOW), 176, 984).segs.filter((q) => q.kind === 'gap').length, 'a title on every band');
+      assert.ok(bands.every((m) => / idle, compressed$/.test(m[3])));
+      const texts = [...body.matchAll(/<text class="tl-break-text" x="([\d.]+)" y="([\d.]+)" text-anchor="end" transform="rotate\(-90 ([\d.]+) ([\d.]+)\)">([^<]*)</g)];
+      const wide = bands.filter((m) => Number(m[2]) >= 14);
+      assert.ok(wide.length > 0 && texts.length > 0 && texts.length <= wide.length);
+      for (const t of texts) {
+        assert.strictEqual(t[1], t[3]);
+        assert.strictEqual(Number(t[2]), TLC.laneH + 6, 'starts below the main session lane');
+        assert.strictEqual(Number(t[4]), TLC.laneH + 6, 'rotation centre on the same y');
+        assert.match(t[5], /^(\d+h( \d+m)?|\d+m|\d+s) idle$/);
+        assert.ok(bands.some((m) => Number(t[1]) > Number(m[1]) && Number(t[1]) < Number(m[1]) + Number(m[2]) + 4), 'the label sits in a band');
+      }
+      assert.ok(!/style=/.test(body));
+      const mk = (w) => ({ kind: 'gap', t0: 0, t1: 28 * MIN + 5000, x0: 0, x1: w, idleMs: 28 * MIN + 5000 });
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(13.9)] }, 400)[0].show, false);
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(14)] }, 400)[0].show, true);
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 400)[0].label, '28m idle');
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 400)[0].full, '28m 05s idle, compressed');
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 40)[0].show, false, 'does not fit the body height');
+      // the fit check counts only the space below lane 0: 8 chars * 6.4 + 12 = 63.2
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 110, TLC.laneH + 6)[0].show, true);
+      assert.strictEqual(X.tlBreakLabels({ segs: [mk(24)] }, 110, TLC.laneH + 6 + 30)[0].show, false, 'fits the body but not below lane 0');
+      // one lane: no label, the band keeps its title
+      const one = X.tlSvgParts(Object.assign(weekSession(), { lanes: [] }), 1000, NOW).body;
+      assert.ok(!/tl-break-text/.test(one) && /idle, compressed<\/title>/.test(one));
+      assert.deepStrictEqual([45e3, 28 * MIN, 3 * 3600000, 3.5 * 3600000].map(X.tlBreakShort), ['45s', '28m', '3h', '3h 30m']);
+      // 40 breaks squeezed to 8 px: no text, the titles stay
+      const call = (ts) => ({ ts, ended: ts + 1000, duration_ms: 1000, tool_name: 'Read', agent_id: null });
+      const tools = []; let t = T0;
+      for (let i = 0; i < 100; i++) { tools.push(call(t)); t += (20 + (i * 37) % 200) * MIN; }
+      const nb = X.tlSvgParts({ started: T0, ended: t + 1000, lanes: [], waits: [], cost_series: [], reviews: [], tools }, 1000, NOW).body;
+      assert.ok(!/tl-break-text/.test(nb));
+      assert.strictEqual((nb.match(/idle, compressed<\/title>/g) || []).length, 40);
+    });
+
+    test('[alpha7 S3] legend: the compressed idle swatch shows only when the waterfall has a break', () => {
+      assert.ok(!/Idle time/.test(X.tlLegendHtml()));
+      assert.ok(!/Idle time/.test(X.tlLegendHtml(false)));
+      const lg = X.tlLegendHtml(true);
+      assert.match(lg, /<span class="item"><i class="swatch tl-sw-break"><\/i>Idle time \(compressed\)<\/span><\/div>$/);
+      assert.ok(lg.indexOf('Permission wait') < lg.indexOf('Idle time'), 'after the permission wait item');
+      assert.match(css, /\.tl-sw-break \{[^}]*background: var\(--panel2\);[^}]*border: 1px solid var\(--line\)/);
+      assert.match(css, /\.tl-break-text \{[^}]*font-size: 11px/);
+      assert.match(X.sessTimelineHtml(weekSession(), { width: 1000, nowMs: NOW }), /Idle time \(compressed\)/);
+      assert.ok(!/Idle time/.test(X.sessTimelineHtml(contSession(), { width: 1000, nowMs: NOW })));
+    });
+
+    test('[alpha7 S3] review markers: those within 18 px merge (worst outcome, "N reviews", list in the title); a label shows only when it fits', () => {
+      const R = (x, outcome, findings) => ({ x, outcome, findings: findings || 0 });
+      const seven = [R(960, 'pass'), R(964, 'block', 2), R(968, 'pass'), R(972, 'needs_context', 1), R(975, 'error'), R(980, 'pass'), R(984, 'pass')];
+      const m = X.tlReviewMarkers(seven, 1000);
+      assert.strictEqual(m.length, 1, 'seven close markers become one');
+      assert.strictEqual(m[0].outcome, 'block');
+      assert.strictEqual(m[0].count, 7);
+      assert.strictEqual(m[0].label, '7 reviews');
+      assert.match(m[0].title, /^7 reviews: /);
+      assert.match(m[0].title, /Block · 2 findings; Pass; /);
+      assert.match(m[0].title, /Needs context · 1 finding;/);
+      assert.strictEqual(m[0].showLabel, true);
+      assert.ok(m[0].anchor === 'end' && m[0].lx <= 1000, 'near the right edge the label ends at the marker');
+      // worst outcome order: block > needs_context > error > pass
+      const worst = (...o) => X.tlReviewMarkers(o.map((x, i) => R(100 + i * 3, x)), 1000)[0].outcome;
+      assert.strictEqual(worst('pass', 'error'), 'error');
+      assert.strictEqual(worst('error', 'needs_context', 'pass'), 'needs_context');
+      assert.strictEqual(worst('pass', 'needs_context', 'block', 'error'), 'block');
+      assert.strictEqual(worst('pass', 'pass'), 'pass');
+      assert.strictEqual(worst('mystery', 'pass'), 'pass');
+      // 19 px apart is two markers; 18 px apart is one
+      assert.strictEqual(X.tlReviewMarkers([R(100, 'pass'), R(119, 'pass')], 1000).length, 2);
+      assert.strictEqual(X.tlReviewMarkers([R(100, 'pass'), R(118, 'pass')], 1000).length, 1);
+      // a single marker keeps its own label
+      const one = X.tlReviewMarkers([R(300, 'block', 2)], 1000)[0];
+      assert.deepStrictEqual([one.label, one.title, one.showLabel, one.anchor], ['Block · 2 findings', 'Block · 2 findings', true, 'start']);
+      // markers 40 px apart with long labels: shown labels never overlap each other or another marker; the title always has the text
+      const near = X.tlReviewMarkers([R(300, 'block', 2), R(340, 'needs_context', 3), R(380, 'block', 12)], 1000);
+      assert.strictEqual(near.length, 3);
+      assert.ok(near.some((x) => !x.showLabel), 'not every label fits');
+      const ext = (x) => { const w = x.label.length * 6.4; return x.anchor === 'start' ? [x.lx, x.lx + w] : [x.lx - w, x.lx]; };
+      const shown = near.filter((x) => x.showLabel).map(ext);
+      shown.forEach((e, i) => { if (i) assert.ok(e[0] >= shown[i - 1][1] + 6 - 1e-6); });
+      for (const x of near) assert.ok(x.title.length > 0);
+      for (const x of near) for (const other of near) if (other !== x && x.showLabel) { const e = ext(x); assert.ok(!(e[0] < other.x + 10 && e[1] > other.x - 10), 'a label never covers another marker'); }
+      assert.deepStrictEqual(X.tlReviewMarkers(null, 1000), []);
+      assert.deepStrictEqual(X.tlReviewMarkers([{ x: NaN, outcome: 'pass' }], 1000), []);
+    });
+
+    test('[alpha7 S3] review markers in the SVG: a pile of reviews at the right edge is one marker and one readable label', () => {
+      const d = weekSession();
+      const e = d.ended;
+      d.reviews = [0, 1, 2, 3, 4, 5, 6].map((i) => ({ task: 't' + i, outcome: i === 2 ? 'block' : 'pass', findings: i === 2 ? 2 : 0, at: e - (6 - i) * 20000 }));
+      const { body } = X.tlSvgParts(d, 1000, NOW);
+      assert.strictEqual((body.match(/<g class="tl-review">/g) || []).length, 1);
+      assert.match(body, />7 reviews</);
+      assert.match(body, /<title>7 reviews: [^<]*Block · 2 findings[^<]*<\/title>/);
+      assert.strictEqual((body.match(/class="oshape oshape-block"/g) || []).length, 1, 'the shape of the worst outcome');
+      assert.ok(!/oshape-pass/.test(body.slice(body.indexOf('tl-review'))), 'no stack of pass shapes');
+    });
+
+    test('[alpha7 S3] waterfall in two SVGs: a head (cost, axis, break labels) and a body (lanes, bands, waits, reviews) with the same width and x geometry', () => {
+      const d = detail();
+      const p = X.tlSvgParts(d, 1000, NOW);
+      assert.strictEqual(X.tlSvg(d, 1000, NOW), p.head + p.body);
+      const dim = (s) => /<svg [^>]*width="(\d+)" height="(\d+)" viewBox="0 0 (\d+) (\d+)"/.exec(s).slice(1).map(Number);
+      const [hw, hh, hvw, hvh] = dim(p.head), [bw, bh, bvw, bvh] = dim(p.body);
+      assert.deepStrictEqual([hw, hvw, bw, bvw], [1000, 1000, 1000, 1000], 'same width');
+      assert.deepStrictEqual([hh, hvh], [100, 100]);
+      assert.strictEqual(bh, bvh);
+      assert.ok(bh > 0);
+      assert.match(p.head, />Cumulative cost \(est\.\)</);
+      assert.match(p.head, /class="tl-cost"/);
+      assert.ok(!/class="tl-(track|tool|wait-band|review)/.test(p.head), 'no lanes in the head');
+      assert.ok(!/Cumulative cost|class="tl-cost"/.test(p.body), 'no cost line in the body');
+      assert.ok(/class="tl-track/.test(p.body) && /class="tl-wait-band"/.test(p.body) && /class="oshape/.test(p.body));
+      assert.match(p.body, /^<svg class="tl-svg tl-svg-body"/);
+      // lanes start at the top of the body, so they sit right under the head
+      assert.match(p.body, /<text class="tl-text tl-strong" x="0" y="15">Main session</);
+      // idle breaks run through both: a band in the head and one in the body, at the same x
+      const wk = weekSession();
+      const w = X.tlSvgParts(wk, 1000, NOW);
+      const bands = (s) => [...s.matchAll(/<rect class="tl-break-band" x="([\d.]+)" y="(\d+|0)" width="([\d.]+)"/g)].map((m) => m[1] + '/' + m[3]);
+      assert.strictEqual(bands(w.head).length, 14);
+      assert.deepStrictEqual(bands(w.body), bands(w.head));
+      const grid = (s) => [...s.matchAll(/<line class="tl-grid" x1="([\d.]+)" x2="\1"/g)].map((m) => m[1]);
+      const hg = grid(w.head), bg = grid(w.body);
+      assert.ok(hg.length >= 10 && hg.every((x) => bg.includes(x)), 'every gridline of the axis continues down the body');
+      assert.ok(!/NaN|undefined|Infinity/.test(w.head + w.body));
+      assert.ok(!/style=/.test(p.head + p.body));
+      // the waterfall wrapper: head in a sticky box, then the body
+      const html = X.tlWrapHtml(d, { width: 1000, nowMs: NOW });
+      assert.match(html, /^<div class="tl-wrap" id="tl-host"><div class="tl-head"><svg class="tl-svg" /);
+      assert.ok(html.indexOf('</svg></div><svg class="tl-svg tl-svg-body"') > 0);
+    });
+
+    test('[alpha7 S3] the detail panel is the one vertical scroller; the head sticks inside it', () => {
+      const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}@]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] }));
+      const rule = (sel) => { const r = rules.find((x) => x.sel === sel); assert.ok(r, 'css has ' + sel); return r.body; };
+      assert.match(rule('.ndetail'), /overflow-y: auto/);
+      const head = rule('.tl-head');
+      assert.match(head, /position: sticky/);
+      assert.match(head, /top: 0/);
+      assert.match(head, /background: var\(--bg\)/, 'lanes pass under an opaque head');
+      assert.match(head, /z-index: \d/);
+      // sticky needs no scroll container between the head and .ndetail
+      for (const sel of ['.tl-wrap', '.tl-head', '.xsect', '.ntabpanel']) assert.ok(!/overflow/.test(rule(sel)), sel + ' must not scroll or clip');
+      assert.ok(!/max-height/.test(rule('.tl-wrap')));
+      assert.ok(!/tl-scroll/.test(css));
+      // the panel keeps its scroll position across a re-render (it is the host, not a child)
+      assert.match(cj, /const keep = host\.scrollTop \|\| 0;/);
+      assert.match(cj, /if \(keep\) host\.scrollTop = keep;/);
+    });
+
+    test('[alpha7 S3] sessions recorded before V2 that have a cost line: the note no longer says there is no timeline', () => {
+      const old = X.sessDetailHtml(detail({ has_events: false, tools: [], waits: [], reviews: [], held_up: [] }), { tab: 'timeline', width: 900, nowMs: NOW });
+      assert.match(old, /<p class="empty-note">No tool calls or waits: this session was recorded before Sessions existed. Runs and cost come from the ledger.<\/p>/);
+      assert.ok(old.indexOf('empty-note') < old.indexOf('class="legend"'), 'the note sits above the legend');
+      assert.match(old, /class="tl-wrap"/);
+      assert.ok(!/No timeline/.test(old));
+    });
+
+    test('[alpha7 S4] old session with no cost series: ended says no requests were recorded, running keeps the wait note', () => {
+      const mk = (state, ended) => X.sessDetailHtml(detail({ state, ended, has_events: false, tools: [], waits: [], reviews: [], held_up: [], cost_series: [] }), { tab: 'timeline', width: 900, nowMs: NOW });
+      const ended = mk('ended', T0 + MIN);
+      assert.match(ended, /<p class="empty-note">No tool calls or waits: this session was recorded before Sessions existed\. No requests were recorded\.<\/p>/);
+      assert.ok(!/will show once it has requests/.test(ended));
+      const live = mk('running', null);
+      assert.match(live, /recorded before Sessions existed\. Runs and cost will show once it has requests\./);
+      assert.ok(!/No requests were recorded/.test(live));
+    });
+
+    test('[alpha7 S3] ticks: clock times for sessions over 24 h or with a break, dated at each new day; short ones stay relative', () => {
+      const lab = X.tlClockLabel(at(0, 13, 20), '');
+      assert.deepStrictEqual([lab.lab, lab.day], ['Oct 25 13:20', X.sessDayKey(at(0, 13, 20))]);
+      assert.strictEqual(X.tlClockLabel(at(0, 13, 25), lab.day).lab, '13:25');
+      assert.strictEqual(X.tlClockLabel(at(-1, 0, 5), lab.day).lab, 'Oct 26 00:05');
+      const plain = (ms) => ({ t0: 0, t1: ms });
+      assert.strictEqual(X.tlUseClock(plain(25 * 3600000), null), true);
+      assert.strictEqual(X.tlUseClock(plain(2 * 3600000), { segs: [{ kind: 'run' }] }), false);
+      assert.strictEqual(X.tlUseClock(plain(3600000), { segs: [{ kind: 'run' }, { kind: 'gap' }, { kind: 'run' }] }), true);
+      const tickTexts = (svg) => [...svg.matchAll(/<text class="tl-text" x="[\d.]+" y="96" text-anchor="[a-z]+">([^<]*)</g)].map((m) => m[1]).filter((x) => !x.startsWith('\u22ef'));
+      // a six day session: every label is a clock time, the first of each day carries the date
+      const D = 864e5;
+      const call = (ts) => ({ ts, ended: ts + 60000, duration_ms: 60000, tool_name: 'Edit', agent_id: null });
+      const start = at(6, 22, 30);
+      const tools = []; for (let i = 0; i < 6; i++) for (let t = start + i * D; t <= start + i * D + 90 * MIN; t += 5 * MIN) tools.push(call(t));
+      const six = { started: start, ended: start + 5 * D + 100 * MIN, lanes: [], waits: [], cost_series: [], reviews: [], tools };
+      const texts = tickTexts(X.tlSvg(six, 1200, NOW));
+      assert.ok(texts.length >= 6, 'ticks: ' + texts.length);
+      for (const x of texts) assert.match(x, /^(?:[A-Z][a-z]{2} \d{1,2} )?\d\d:\d\d$/, x);
+      const dated = texts.filter((x) => /^[A-Z][a-z]{2} /.test(x));
+      assert.ok(dated.length >= 2, 'a date at each new day: ' + dated.join(', '));
+      assert.ok(/^[A-Z][a-z]{2} /.test(texts[0]), 'the first tick is dated');
+      // an 8 minute continuous session keeps relative labels
+      const calm = { started: T0, ended: T0 + 8 * MIN, lanes: [], waits: [], cost_series: [], reviews: [], tools: [call(T0), call(T0 + 4 * MIN), call(T0 + 7 * MIN)] };
+      const rel = tickTexts(X.tlSvg(calm, 900, NOW));
+      assert.ok(rel.length >= 2);
+      for (const x of rel) assert.ok(!x.includes(':') && /^(0|\d+s|\d+m( \d+s)?)$/.test(x), x);
+      // a clock tick never repeats a minute label inside one stretch
+      for (let i = 1; i < texts.length; i++) assert.notStrictEqual(texts[i], texts[i - 1]);
+    });
+
+    test('[alpha7 S3] contrast: bar fills reach 3:1 against every surface in both themes; tool bars are full colour, only the track is faint', () => {
+      const LIGHT = /@media \(prefers-color-scheme: light\) \{\s*:root \{([^}]*)\}\s*\}/;
+      const DARK = /^:root \{([^}]*)\}/m;
+      const decls = (b) => Object.fromEntries([...b.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]));
+      const dark = decls(css.match(DARK)[1]);
+      const themes = { dark, light: Object.assign({}, dark, decls(css.match(LIGHT)[1])) };
+      const lum = (hex) => { const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+      const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+      let checked = 0;
+      for (const [mode, t] of Object.entries(themes)) {
+        for (const fill of ['--src-main', '--src-unattributed', '--src-subagent']) {
+          for (const surf of fill === '--src-unattributed' ? ['--bg'] : ['--bg', '--panel']) {
+            assert.match(t[fill], /^#[0-9a-f]{6}$/i);
+            assert.ok(ratio(t[fill], t[surf]) >= 3, `${mode} ${fill} on ${surf}: ${ratio(t[fill], t[surf]).toFixed(2)}`);
+            checked++;
+          }
+        }
+      }
+      assert.strictEqual(checked, 10, 'three fills on the page background, two on the panel, in two themes');
+      assert.match(css, /\.tl-attr-explicit \{ fill: var\(--src-main\); \}/, 'explicit bars use the full --src-main');
+      assert.ok(!/\.tl-tool[^{]*\{[^}]*opacity/.test(css), 'tool bars carry no opacity');
+      assert.ok(!/\.tl-attr-[a-z]+ \{[^}]*opacity/.test(css), 'the lane colour carries no opacity');
+      assert.match(css, /\.tl-track \{ fill-opacity: \.\d+; \}/);
+      assert.match(css, /\.tl-track-solo \{ fill-opacity: 1; \}/, 'a lane with no tool bars of its own is drawn in full colour');
+      const svg = X.tlSvg(detail(), 1000, NOW);
+      assert.strictEqual((svg.match(/<rect class="tl-track tl-track-solo /g) || []).length, 1, 'only the lane without tool bars');
+      assert.ok(!/<rect class="tl-tool[^>]*opacity/.test(svg));
+    });
+
+    test('[alpha7 S3] a missing branch or turns count is left out of the list row and the header, not drawn as a dash', () => {
+      const r = X.sessListHtml([row('nb', { branch: null }), row('eb', { branch: '' }), row('wb', { branch: 'feat/x' })], { filter: 'all', q: '', sel: null, nowMs: NOW });
+      assert.strictEqual((r.match(/class="nstatus mono"/g) || []).length, 1, 'only the row with a branch has the branch line');
+      assert.ok(!/\u2014/.test(r));
+      const hd = (over) => { const h = X.sessDetailHtml(detail(over), { tab: 'timeline', width: 900, nowMs: NOW }); return h.slice(h.indexOf('<div class="xmeta">'), h.indexOf('role="tablist"')); };
+      const nb = hd({ branch: null });
+      assert.ok(!/class="mono"/.test(nb) && !/\u2014/.test(nb) && !/>–</.test(nb), 'no branch item, no dash');
+      assert.match(nb, /^<div class="xmeta"><span class="num">47m 00s<\/span>/, 'the duration leads');
+      assert.ok(!/class="mono"/.test(hd({ branch: '' })));
+      assert.match(hd({ branch: 'feat/x' }), /<span class="mono">feat\/x<\/span>/);
+      assert.ok(!/turn/.test(hd({ turns: null })), 'no turns item without a count');
+      assert.match(hd({ turns: 0 }), /0 turns/, 'a real zero stays');
+      assert.match(hd({}), /5 turns/);
+      assert.ok(!/no branch/.test(cj));
+    });
+
+    test('[alpha7 S3] source rules: no inline styles, one innerHTML write, privacy canary clean, tokens only, 11px minimum, polling cadence', () => {
+      const from = cj.indexOf('Sessions tab (alpha.7 S3): pure helpers');
+      const to = cj.indexOf('/* ---------- boot ---------- */');
+      assert.ok(from > 0 && to > from);
+      const sec = cj.slice(from, to);
+      assert.ok(sec.length > 15000);
+      assert.ok(!/\bstyle\s*=/.test(sec), 'no inline style');
+      assert.ok(!/\.innerHTML\s*=/.test(sec) && (cj.match(/\.innerHTML\s*=/g) || []).length === 1, 'setHtml is the only write');
+      assert.ok(!/\.prompt\b|\['prompt|prompt_text|promptText|\.text\b|\.body\.text|\{\s*text\s*[:,}]/.test(cj), 'privacy canary');
+      assert.ok(!/description|tool_input|tool_use_id|transcript/.test(sec.replace(/Task description/g, '')), 'no Task description or tool input in the section');
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(sec.replace(/href="#|'#sessions|"#sessions|#projects|#pipeline|\(#|'#|"#/g, '')), 'no colour literals');
+      const cs = css.slice(css.indexOf('Sessions tab (alpha.7 S3)'), css.indexOf('Pipeline tab: one-screen layout'));
+      assert.ok(cs.length > 2000);
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(cs), 'CSS tokens only');
+      for (const m of cs.matchAll(/font-size:\s*(\d+)px/g)) assert.ok(Number(m[1]) >= 11, m[0]);
+      assert.match(cj, /state\.route === 'sessions'\) refreshSessions\(false\); \}, 10000\)/);
+      assert.match(cj, /state\.route === 'sessions' && sessSelectedLive\(\)\) refreshSessDetail\(\); \}, 5000\)/);
+      assert.match(cj, /getJson\('\/api\/sessions\?range=' \+ encodeURIComponent\(s\.range\)\)/);
+      assert.match(cj, /getJson\('\/api\/sessions\/' \+ encodeURIComponent\(id\)\)/);
+      assert.match(cj, /history\.replaceState\(null, '', '#sessions\/' \+ encodeURIComponent\(id\)\)/);
+      assert.ok(!/postAction\([^)]*sessions/i.test(cj), 'Sessions posts nothing');
+      assert.ok(!/\r|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(cj + css), 'no CR or control bytes');
+    });
+  }
+
+  /* ---- alpha7 S4: cross-links into Sessions, and "Clear history" (Sereno's own ledger only) ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const life = require('../src/ledger-life.js');
+    const cdir = path.join(ROOT, 'src', 'renderer', 'console');
+    const cj = fs.readFileSync(path.join(cdir, 'console.js'), 'utf8');
+    const lift = (names) => names.map((n) => {
+      const m = cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'));
+      assert.ok(m, 'console.js has ' + n);
+      return m[0];
+    }).join('\n');
+
+    /* -- Part A: cross-links -- */
+    const X = new Function('esc', lift(['parseRoute', 'parseSessionProject', 'sessionsProjectHash', 'sessionHash', 'sessScope', 'sessProjectChipHtml'])
+      + '\nreturn { parseRoute, parseSessionProject, sessionsProjectHash, sessionHash, sessScope, sessProjectChipHtml };')(
+      (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+
+    test('[alpha7 S4] hash: #sessions?p=<project id> is parsed strictly; anything else is the plain tab', () => {
+      assert.strictEqual(X.parseSessionProject('#sessions?p=proj-1_A'), 'proj-1_A', 'the id keeps its case');
+      assert.strictEqual(X.parseSessionProject('#/sessions?p=abc'), 'abc');
+      assert.strictEqual(X.parseRoute('#sessions?p=abc'), 'sessions');
+      const bad = ['#sessions', '#sessions?p=', '#sessions?p=a b', '#sessions?p=a%20b', '#sessions?p=<b>', '#sessions?p=a&q=1', '#sessions?p=a&p=b', '#sessions?p=a/b', '#sessions/x?p=abc',
+        '#sessions?x=abc', '#sessions?p=a.b', '#sessions?p=a:b', '#sessions?p=' + 'x'.repeat(65), '#projects?p=abc', '#spend?p=abc', null, undefined, 42];
+      for (const h of bad) assert.strictEqual(X.parseSessionProject(h), null, String(h));
+      for (const h of ['#sessions?p=', '#sessions?p=a b', '#sessions?p=a&q=1', '#sessions?p=' + 'x'.repeat(65), '#sessions?x=abc', '#sessions?p=a/b']) assert.notStrictEqual(X.parseRoute(h), 'sessions', h);
+      assert.strictEqual(X.sessionsProjectHash('abc-1_Z'), '#sessions?p=abc-1_Z');
+      assert.strictEqual(X.parseSessionProject(X.sessionsProjectHash('abc-1_Z')), 'abc-1_Z', 'build and parse round-trip');
+      for (const b of ['', 'a b', 'a&p=b', 'x'.repeat(65), null, undefined, 7, '<i>']) assert.strictEqual(X.sessionsProjectHash(b), '#sessions', String(b));
+      assert.strictEqual(X.sessionHash('abc-1.2:x_y'), '#sessions/abc-1.2:x_y');
+      for (const b of ['', 'a b', 'a/b', '<x>', 'x'.repeat(129), null, undefined, 3]) assert.strictEqual(X.sessionHash(b), '', String(b));
+    });
+
+    test('[alpha7 S4] sessions list: the project filter keeps that project\'s rows; the chip names it, escapes it, and has a remove button', () => {
+      const list = [{ session_id: 'a', project_id: 'p1' }, { session_id: 'b', project_id: 'p2' }, { session_id: 'c', project_id: 'p1' }, { session_id: 'd', project_id: null }];
+      assert.deepStrictEqual(X.sessScope(list, 'p1').map((s) => s.session_id), ['a', 'c']);
+      assert.deepStrictEqual(X.sessScope(list, null).map((s) => s.session_id), ['a', 'b', 'c', 'd'], 'no filter, every row');
+      assert.deepStrictEqual(X.sessScope(list, 'nope'), [], 'a project with no sessions in range shows an empty list');
+      assert.deepStrictEqual(X.sessScope(null, 'p1'), []);
+      assert.strictEqual(X.sessProjectChipHtml(null, 'x'), '');
+      const chip = X.sessProjectChipHtml('p1', 'My <b>repo</b>');
+      assert.match(chip, /Project: My &lt;b&gt;repo&lt;\/b&gt;/);
+      assert.ok(!/<b>/.test(chip));
+      assert.match(chip, /<button type="button" class="nchip" data-xclearp aria-label="Remove the project filter">/);
+      assert.match(X.sessProjectChipHtml('p1', null), /Project: p1/, 'the id stands in when the name is unknown');
+      assert.ok(!/\bstyle\s*=/.test(chip));
+    });
+
+    test('[alpha7 S4] wiring: the route reads the filter, the chip clears it, the list and selection are scoped, Projects links in', () => {
+      assert.match(cj, /state\.sess\.project = parseSessionProject\(location\.hash\)/);
+      assert.ok((cj.match(/state\.sess\.project = parseSessionProject\(location\.hash\)/g) || []).length >= 2, 'applyRoute and hashchange');
+      assert.match(cj, /tgt\.closest\('\[data-xclearp\]'\)[\s\S]{0,120}state\.sess\.project = null/);
+      assert.match(cj, /list: sessScope\(s\.list, s\.project\)/);
+      assert.match(cj, /sessResolveSel\(sessVisible\(sessScope\(s\.list, s\.project\)/);
+      assert.match(cj, /href="' \+ esc\(sessionsProjectHash\(p\.id\)\) \+ '">Recent sessions<\/a>/, 'the project detail links to its recent sessions');
+      assert.match(cj, /sessionsProjectHash\(p\.id\)[^;]*\/\^\[A-Za-z0-9_-\]\{1,64\}\$\/\.test\(p\.id\)|\/\^\[A-Za-z0-9_-\]\{1,64\}\$\/\.test\(p\.id\)[^;]*sessionsProjectHash\(p\.id\)/, 'only for ids in the collector alphabet');
+      assert.match(cj, /View project<\/a>' : '';\s*return '<div class="ndetail-head">/, 'the session detail keeps its View project link');
+      assert.ok(!/postAction\([^)]*sessions/i.test(cj), 'cross-links post nothing');
+    });
+
+    test('[alpha7 S4] spend turns: the session cell links to the session when the row has an id; otherwise it is plain text', () => {
+      const fn = new Function('esc', 'estMoney', 'formatTime', 'projectLabel', 'modelsHtml', 'ATTR_LABEL', 'sessionHash', lift(['turnsTableHtml']) + '\nreturn turnsTableHtml;');
+      const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      const t = fn(esc, () => '$1.00 est.', () => '09:00', (p) => p || 'Unattributed', () => 'Opus', { explicit: 'Explicit' }, X.sessionHash);
+      const html = t([{ ts: 1, project: 'a', sessionShort: 'abcdefgh', sessionId: 'abcdefgh-1234', costMicros: 1, models: [], attribution: 'explicit' },
+        { ts: 2, project: 'b', sessionShort: 'zzzzzzzz', sessionId: null, costMicros: 1, models: [], attribution: 'explicit' },
+        { ts: 3, project: 'c', sessionShort: 'hostile1', sessionId: 'x"><script>', costMicros: 1, models: [], attribution: 'explicit' }], { limit: 10 });
+      assert.match(html, /<a class="xlink" href="#sessions\/abcdefgh-1234">abcdefgh<\/a>/);
+      assert.match(html, /<td class="mono">zzzzzzzz<\/td>/, 'no id, no link');
+      assert.match(html, /<td class="mono">hostile1<\/td>/, 'an id outside the alphabet is not linked');
+      assert.ok(!/<script>/.test(html));
+      const compact = t([{ ts: 1, project: 'a', sessionShort: 'abcdefgh', sessionId: 'abcdefgh-1234', costMicros: 1, models: [], attribution: 'explicit' }], { compact: true });
+      assert.ok(!/#sessions\//.test(compact), 'the compact preview has no session column');
+    });
+
+    test('[alpha7 S4] pipeline panel: links to the review session and to an attempt\'s session only when the API sent an id', () => {
+      assert.match(cj, /t\.gate && sessionHash\(t\.gate\.sessionId\) \? '<p class="plink"><a class="xlink" href="' \+ esc\(sessionHash\(t\.gate\.sessionId\)\)/);
+      assert.match(cj, /a && sessionHash\(a\.sessionId\) \? '<a class="xlink" href="' \+ esc\(sessionHash\(a\.sessionId\)\)/);
+      assert.match(cj, /tl \+ kv \+ revLink \+ review/);
+    });
+
+    test('[alpha7 S4] top-prompts rows carry the full session id (collector alphabet) beside sessionShort; the ledger returns it', () => {
+      const l = openLedger({ file: ':memory:' });
+      const T = Date.now();
+      l.ingestRequests([{ requestKey: 'k1', requestId: 'r1', sessionId: 'full-session-id-123', promptId: null, ts: T, model: 'm', querySource: null, source: 'main', agentName: null,
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 5, durationMs: 0 }]);
+      const r = l.topPrompts({ since: T - 1000, until: T + 1000, limit: 5 });
+      assert.strictEqual(r[0].sessionId, 'full-session-id-123');
+      assert.strictEqual(r[0].sessionShort, 'full-ses');
+      assert.strictEqual(l.hasSession('full-session-id-123'), true);
+      assert.strictEqual(l.hasSession('nope'), false);
+      l.recordHook('SubagentStart', { session_id: 'full-session-id-123', agent_id: 'ag1', agent_type: 'b' });
+      assert.strictEqual(l.sessionOfAgent('ag1'), 'full-session-id-123');
+      assert.strictEqual(l.sessionOfAgent('ag-none'), null);
+      l.close();
+    });
+
+    /* -- Part B: Clear history -- */
+    const tmpDbFile = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-clear-')), 'sereno.db');
+
+    test('[alpha7 S4] ledger.clearHistory empties every table (listed from sqlite_master) in the file, keeps the schema version, and the ledger still works', () => {
+      const file = tmpDbFile();
+      const l = openLedger({ file });
+      try {
+        const T = Date.now();
+        l.ingestRequests([{ requestKey: 'k1', requestId: 'r1', sessionId: 's1', promptId: 'p1', ts: T, model: 'm', querySource: null, source: 'subagent', agentName: null,
+          inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, costMicros: 1000, durationMs: 5 }]);
+        l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a1', ts: T }]);
+        l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+        l.recordHook('SubagentStart', { session_id: 's1', agent_id: 'a1', agent_type: 'builder' });
+        l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Bash', tool_use_id: 'tu1' });
+        l.recordHook('UserPromptSubmit', { session_id: 's1', prompt_id: 'p1' });
+        l.recordStatus('s1', 1.5, T);
+        const db = l._db;
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name);
+        for (const need of ['requests', 'spans', 'sessions', 'agents', 'status', 'session_events']) assert.ok(tables.includes(need), 'schema has ' + need);
+        const count = (t) => Number(db.prepare('SELECT COUNT(*) AS n FROM "' + t + '"').get().n);
+        for (const t of tables) assert.ok(count(t) > 0, 'fixture must put a row in ' + t + ' (a new table needs a fixture here)');
+        const ver = db.prepare('PRAGMA user_version').get().user_version;
+        const out = l.clearHistory();
+        assert.deepStrictEqual(out.tables.slice().sort(), tables.slice().sort(), 'every table was cleared, none by a hard-coded list');
+        for (const t of tables) assert.strictEqual(count(t), 0, t + ' is empty');
+        assert.deepStrictEqual(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map((r) => r.name).sort(), tables.slice().sort(), 'the schema stays');
+        assert.strictEqual(db.prepare('PRAGMA user_version').get().user_version, ver, 'the migration version stays');
+        assert.strictEqual(l.hasAny(), false);
+        assert.deepStrictEqual(l.sessionList(0), []);
+        // still usable, and a second clear on an empty ledger is harmless
+        l.recordHook('SessionStart', { session_id: 's2', cwd: 'C:\\w\\proj' });
+        assert.strictEqual(l.sessionList(0).length, 1);
+        l.clearHistory(); l.clearHistory();
+        assert.strictEqual(l.sessionList(0).length, 0);
+        // the WAL was folded back into the file
+        const wal = file + '-wal';
+        assert.ok(!fs.existsSync(wal) || fs.statSync(wal).size === 0, 'the write-ahead log is truncated');
+      } finally { try { l.close(); } catch (_) { /* closed */ } fs.rmSync(path.dirname(file), { recursive: true, force: true }); }
+    });
+
+    test('[alpha7 S4] ledger.clearHistory is one transaction: a failure part-way leaves every table as it was', () => {
+      const l = openLedger({ file: ':memory:' });
+      try {
+        l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+        l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Bash', tool_use_id: 'tu1' });
+        l._db.exec('CREATE TRIGGER block_delete BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, \'no\'); END');
+        assert.throws(() => l.clearHistory());
+        assert.strictEqual(Number(l._db.prepare('SELECT COUNT(*) AS n FROM session_events').get().n), 1, 'events survive a rolled-back clear');
+        assert.strictEqual(Number(l._db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n), 1);
+        l._db.exec('DROP TRIGGER block_delete');
+        l.clearHistory();
+        assert.strictEqual(Number(l._db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n), 0);
+      } finally { l.close(); }
+    });
+
+    test('[alpha7 S4] the confirmation dialog: exact text, Clear history / Cancel, and both Enter (default) and Escape (cancel) land on Cancel', () => {
+      const d = life.clearHistoryDialog();
+      assert.strictEqual(d.message, "Clear Sereno's history?");
+      assert.strictEqual(d.detail, "Deletes all recorded spend, sessions and timelines from Sereno's database. Claude Code and your projects are not touched. This can't be undone. A session that is running carries on; its timeline starts again from now.");
+      assert.deepStrictEqual(d.buttons, ['Clear history', 'Cancel']);
+      assert.strictEqual(d.buttons[d.defaultId], 'Cancel', 'Enter cancels');
+      assert.strictEqual(d.buttons[d.cancelId], 'Cancel', 'Escape cancels');
+      assert.strictEqual(d.noLink, true);
+      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const h = main.slice(main.indexOf("ipcMain.handle('sereno:clear-history'"), main.indexOf("ipcMain.handle('sereno:wiring-status'"));
+      assert.ok(h.length > 100, 'the handler exists');
+      assert.match(h, /dialog\.showMessageBox\(ledgerLife\.clearHistoryDialog\(\)\)/);
+      assert.match(h, /if \(response !== 0\) return \{ ok: true, cleared: false, reason: 'cancelled' \}/, 'only the first button clears');
+      assert.ok(h.indexOf('showMessageBox') < h.indexOf('ledger.clearHistory()'), 'the dialog comes before the delete');
+      assert.match(h, /if \(!ledger\) return \{ ok: true, cleared: false, reason: 'off' \}/);
+      assert.ok(!/liveStore|store\.|new Store/.test(h), 'live in-memory state is untouched');
+      const pre = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+      assert.match(pre, /clearHistory: \(\) => ipcRenderer\.invoke\('sereno:clear-history'\)/);
+      const app = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'app.js'), 'utf8');
+      assert.match(app, /api\.clearHistory\(\)/);
+      assert.match(app, /ui\.clearRow\.hidden = !\(api && api\.clearHistory\)/, 'hidden in a browser tab');
+      const html = fs.readFileSync(path.join(ROOT, 'src', 'renderer', 'index.html'), 'utf8');
+      assert.match(html, /id="clear-row"[\s\S]{0,400}id="clear-action"[^>]*>Clear history</);
+      assert.ok(!/\bstyle\s*=/.test(html.slice(html.indexOf('id="clear-row"'), html.indexOf('id="autolaunch-row"'))), 'no inline style');
+    });
+
+    test('[alpha7 S4] the collector cannot clear anything: no route or source mentions it, and POST / DELETE to likely paths change nothing', async () => {
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'collector.js'), 'utf8');
+      assert.ok(!/clearHistory|clear-history|clear_history/i.test(src), 'collector.js never calls or names it');
+      for (const m of src.matchAll(/(?:url|req\.url|p)\s*===?\s*'([^']*)'/g)) assert.ok(!/clear|erase|wipe|purge/i.test(m[1]), 'route ' + m[1]);
+      for (const m of src.matchAll(/req\.method\s*===\s*'(POST|DELETE|PUT|PATCH)'[^\n]*/g)) assert.ok(!/clear|erase|wipe|purge|history/i.test(m[0]), m[0]);
+      const l = openLedger({ file: ':memory:' });
+      l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+      const c = createCollector(new Store(), 0, { ledger: l });
+      await new Promise((res, rej) => c.listen((e, a) => (e ? rej(e) : (c.port = a.port, res()))));
+      try {
+        const send = (method, p) => new Promise((resolve) => {
+          const rq = http.request({ host: '127.0.0.1', port: c.port, path: p, method, agent: false, headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:' + c.port } }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode)); });
+          rq.on('error', () => resolve(0)); rq.end('{}');
+        });
+        for (const m of ['POST', 'DELETE', 'PUT']) {
+          for (const p of ['/api/history', '/api/history/clear', '/api/clear', '/api/clear-history', '/api/ledger', '/api/sessions', '/api/spend', '/api/spend/clear', '/clear', '/console/clear']) {
+            const st = await send(m, p);
+            assert.ok(st < 200 || st >= 300, m + ' ' + p + ' answered ' + st);
+          }
+        }
+        assert.strictEqual(l.sessionList(0).length, 1, 'the ledger is untouched');
+      } finally { await new Promise((res) => { c.server.close(() => res()); c.close(); }); l.close(); }
+    });
+
+    test('[alpha7 S4] README: the Settings action replaces the delete-the-file paragraph, which stays as a fallback; consoles hint where to clear', () => {
+      const rd = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+      assert.match(rd, /To erase all history, open the widget's settings \(the gear\) and choose \*\*Clear history\*\*, then confirm\./);
+      assert.match(rd, /touches nothing of Claude Code's or your projects'/);
+      assert.match(rd, /A session that is running carries on; its timeline starts again from now./);
+      assert.match(rd, /As a fallback, quit Sereno, then delete `sereno\.db`, `sereno\.db-wal` and `sereno\.db-shm`\./);
+      assert.ok(!/To erase all history, quit Sereno/.test(rd), 'the old lead-in is gone');
+      assert.ok((cj.match(/Clear history from the widget\\u2019s settings\./g) || []).length === 2, 'the one-line hint on Sessions and Spend');
+    });
+  }
+
+
+  /* ---- [alpha7 fix] red-team fixes: last_seen, orphan rows, clear history, index ---- */
+  {
+    const { openLedger } = require('../src/ledger.js');
+    const DAYMS = 86400000;
+    const mkL = (t) => { const clk = { t }; const l = openLedger({ file: ':memory:', retentionDays: 30, now: () => clk.t }); return { l, clk }; };
+    const row = (l, id) => l._db.prepare('SELECT * FROM sessions WHERE session_id=?').get(id);
+
+    test('[alpha7 fix] ledger: tools, waits, turns and stops after SessionStart move last_seen', () => {
+      const { l, clk } = mkL(1e12);
+      l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+      clk.t += 1000; l.recordHook('UserPromptSubmit', { session_id: 's1', prompt_id: 'p' });
+      assert.strictEqual(Number(row(l, 's1').last_seen), 1e12 + 1000);
+      clk.t += 1000; l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Read', tool_use_id: 'u1' });
+      clk.t += 1000; l.recordHook('PostToolUse', { session_id: 's1', tool_name: 'Read', tool_use_id: 'u1' });
+      clk.t += 1000; l.recordHook('Stop', { session_id: 's1' });
+      const r = row(l, 's1');
+      assert.strictEqual(Number(r.last_seen), 1e12 + 4000);
+      assert.strictEqual(Number(r.first_seen), 1e12);
+      assert.strictEqual(r.ended_at, null, 'a Stop is not an end');
+      l.close();
+    });
+
+    test('[alpha7 fix] ledger: a 10-day-old session with tools today is in the 7d list and shows its real span without a SessionEnd', () => {
+      const { l, clk } = mkL(1e12);
+      l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+      clk.t += 10 * DAYMS;
+      l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Read', tool_use_id: 'u1' });
+      const r = l.sessionRow('s1');
+      assert.strictEqual(r.lastSeen - r.firstSeen, 10 * DAYMS, 'the span is real');
+      assert.ok(l.sessionList(clk.t - 7 * DAYMS).some((x) => x.id === 's1'), 'in ?range=7d');
+      l.close();
+    });
+
+    test('[alpha7 fix] ledger: prune keeps a session that is still active, with its events', () => {
+      const { l, clk } = mkL(1e12);
+      l.recordHook('SessionStart', { session_id: 's1', cwd: 'C:\\w\\proj' });
+      l.recordHook('SessionStart', { session_id: 'idle', cwd: 'C:\\w\\proj' });
+      clk.t += 40 * DAYMS;
+      l.recordHook('PreToolUse', { session_id: 's1', tool_name: 'Read', tool_use_id: 'u1' });
+      l.prune(30);
+      assert.ok(row(l, 's1'), 'active session kept');
+      assert.strictEqual(row(l, 'idle'), undefined, 'the idle one is pruned');
+      assert.strictEqual(l._db.prepare("SELECT COUNT(*) AS n FROM session_events WHERE session_id='s1'").get().n, 1);
+      l.close();
+    });
+
+    test('[alpha7 fix] ledger: events with no SessionStart make a sessions row whose first_seen is the first event; a later end fills it in', () => {
+      const { l, clk } = mkL(2e12);
+      l.recordHook('PreToolUse', { session_id: 'o1', tool_name: 'Read', tool_use_id: 'u1' });
+      clk.t += 5000; l.recordHook('PostToolUse', { session_id: 'o1', tool_name: 'Read', tool_use_id: 'u1' });
+      let r = row(l, 'o1');
+      assert.ok(r, 'no orphan events');
+      assert.strictEqual(Number(r.first_seen), 2e12);
+      assert.strictEqual(Number(r.last_seen), 2e12 + 5000);
+      clk.t += 1000; l.recordHook('SessionEnd', { session_id: 'o1' });
+      r = row(l, 'o1');
+      assert.strictEqual(Number(r.first_seen), 2e12, 'the end does not move first_seen');
+      assert.strictEqual(Number(r.ended_at), 2e12 + 6000);
+      l.close();
+    });
+
+    test('[alpha7 fix] ledger: agents(agent_id) index exists, also on a V2 file opened again; lookups use prepared statements', () => {
+      const f = path.join(os.tmpdir(), 'sereno-idx-' + process.pid + '-' + Date.now() + '.db');
+      try {
+        let l = openLedger({ file: f });
+        l._db.exec('DROP INDEX agents_agent_id');   // a V2 file made before the index
+        l.close();
+        l = openLedger({ file: f });
+        assert.ok(l._db.prepare("SELECT 1 AS x FROM sqlite_master WHERE type='index' AND name='agents_agent_id'").get(), 'created at open');
+        l.recordHook('SubagentStart', { session_id: 's1', agent_id: 'a1', agent_type: 'x' });
+        assert.strictEqual(l.sessionOfAgent('a1'), 's1');
+        assert.strictEqual(l.hasSession('s1'), true);
+        l.close();
+      } finally { for (const x of [f, f + '-wal', f + '-shm']) { try { fs.rmSync(x, { force: true }); } catch (_) {} } }
+      const src = fs.readFileSync(path.join(ROOT, 'src', 'ledger.js'), 'utf8');
+      const fn = src.slice(src.indexOf('function hasSession('), src.indexOf('function sessionRow('));
+      assert.ok(fn.length > 50 && !/db\.prepare/.test(fn), 'no prepare per call');
+    });
+
+    test('[alpha7 fix] main.js: the ledger opens before the pending drain, drained records reach it, and clearing history refreshes the collector', () => {
+      const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
+      const drain = main.indexOf('config.drainPending()');
+      const open = main.indexOf('applyLedgerConfig();');
+      assert.ok(open > 0 && drain > open, 'applyLedgerConfig() runs before drainPending()');
+      const loop = main.slice(drain, main.indexOf('config.clearLaunchLock()'));
+      assert.match(loop, /store\.applyHook\(rec\.event, rec\.payload/);
+      assert.match(loop, /ledger\.recordHook\(rec\.event, rec\.payload, rec\.receivedAt\)/);
+      const h = main.slice(main.indexOf("ipcMain.handle('sereno:clear-history'"), main.indexOf("ipcMain.handle('sereno:wiring-status'"));
+      assert.ok(h.indexOf('ledger.clearHistory()') < h.indexOf('collector.afterHistoryCleared()'), 'the collector is refreshed after the clear');
+    });
+
+    test('[alpha7 fix] collector: afterHistoryCleared re-seeds live sessions, so later events do not orphan', () => {
+      const store = new Store();
+      store.applyHook('SessionStart', { session_id: 'live-1', cwd: 'C:\\w\\proj', model: 'claude-opus-5-5' });
+      const l = openLedger({ file: ':memory:' });
+      l.recordHook('SessionStart', { session_id: 'live-1', cwd: 'C:\\w\\proj' });
+      l.recordHook('SessionStart', { session_id: 'gone', cwd: 'C:\\w\\proj' });
+      const c = createCollector(store, 0, { ledger: l });
+      try {
+        l.clearHistory();
+        assert.strictEqual(l.sessionList(0).length, 0);
+        c.afterHistoryCleared();
+        const r = row(l, 'live-1');
+        assert.ok(r && r.cwd === 'C:\\w\\proj' && r.project === 'proj', 'live session re-seeded with cwd and project');
+        assert.strictEqual(row(l, 'gone'), undefined, 'only live sessions come back');
+      } finally { c.close(); l.close(); }
+    });
   }
 
   /* ---- [plugin-0.4 field] fixes from two real /sereno:next runs ---- */

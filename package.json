@@ -1,6 +1,6 @@
 {
   "name": "sereno",
-  "version": "2.0.0-alpha.6",
+  "version": "2.0.0-alpha.7",
   "private": true,
   "description": "Sereno - an always-on-top widget for live Claude Code sessions",
   "author": {
@@ -40,7 +40,7 @@
     "test:packaged": "node tools/test-packaged.js"
   },
   "devDependencies": {
-    "electron": "^44.3.0",
+    "electron": "^44.9.1",
     "electron-builder": "^26.15.3"
   },
   "allowScripts": {

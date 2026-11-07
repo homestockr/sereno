@@ -11,6 +11,18 @@ const OPT_IN_MESSAGE = 'Keep a local spend history?';
 const OPT_IN_DETAIL = 'Sereno will record request costs on this computer. No prompts or code are stored.';
 const OPT_IN_BUTTONS = ['Yes', 'Not now'];
 
+// "Clear history" confirmation. Cancel is both the default and the dismissal, so Enter and Escape never clear.
+const CLEAR_MESSAGE = "Clear Sereno's history?";
+const CLEAR_DETAIL = "Deletes all recorded spend, sessions and timelines from Sereno's database. Claude Code and your projects are not touched. This can't be undone. A session that is running carries on; its timeline starts again from now.";
+const CLEAR_BUTTONS = ['Clear history', 'Cancel'];
+const CLEAR_DEFAULT_ID = 1;
+const CLEAR_CANCEL_ID = 1;
+
+/** The dialog options for the confirmation (main.js passes them to dialog.showMessageBox). */
+function clearHistoryDialog() {
+  return { type: 'warning', message: CLEAR_MESSAGE, detail: CLEAR_DETAIL, buttons: CLEAR_BUTTONS.slice(), defaultId: CLEAR_DEFAULT_ID, cancelId: CLEAR_CANCEL_ID, noLink: true };
+}
+
 /**
  * Maps the dialog's button index to the value to store. Dismissal (Escape,
  * closing the window) is neither answer: it stays null so we ask again next time.
@@ -47,4 +59,4 @@ function startLedger(cfg, deps = {}) {
   }
 }
 
-module.exports = { OPT_IN_MESSAGE, OPT_IN_DETAIL, OPT_IN_BUTTONS, optInAnswer, startLedger };
+module.exports = { CLEAR_MESSAGE, CLEAR_DETAIL, CLEAR_BUTTONS, clearHistoryDialog, OPT_IN_MESSAGE, OPT_IN_DETAIL, OPT_IN_BUTTONS, optInAnswer, startLedger };

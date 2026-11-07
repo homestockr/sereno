@@ -260,7 +260,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .rows .session:first-child { border-top: 0; }
 
 .row-top { display: flex; align-items: center; justify-content: space-between; gap: 9px; }
-.state { display: flex; align-items: center; gap: 7px; color: var(--text2); font-size: 12px; white-space: nowrap; }
+.state { display: flex; align-items: center; gap: 7px; color: var(--text2); font-size: 12px; white-space: nowrap; flex: none; font-variant-numeric: tabular-nums; }
 
 /* One 12px slot, a different silhouette per state. */
 .state-symbol { display: inline-flex; gap: 2px; align-items: center; height: 12px; width: 12px; flex: none; }
@@ -294,6 +294,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   margin-top: 10px;
   font-variant-numeric: tabular-nums;
 }
+.meta > span:last-child { flex: none; white-space: nowrap; text-align: right; }
 .request .meta { margin-top: 11px; }
 
 .context { display: flex; align-items: center; gap: 6px; }
@@ -444,6 +445,7 @@ html, body { height: 100%; }
   flex: 1 1 auto;
   min-height: 0;            /* a flex child will not shrink below content without this */
   overflow-y: auto;
+  scrollbar-gutter: stable;   /* row width must not depend on whether the list scrolls */
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: var(--quiet) transparent;
@@ -582,3 +584,5 @@ html, body { height: 100%; }
 .plugin-cmds .review { flex: none; width: auto; margin: 0; padding: 4px 8px; }
 #brief-row { align-items: center; }
 #brief-row .review { flex: none; width: auto; margin: 0 0 0 auto; padding: 6px 10px; }
+#clear-row { align-items: center; }
+#clear-row .review { flex: none; width: auto; margin: 0 0 0 auto; padding: 6px 10px; }

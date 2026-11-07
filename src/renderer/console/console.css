@@ -237,10 +237,86 @@ td.proj { font-weight: 500; }
 .btn-copy { font: inherit; font-size: 12px; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 4px 10px; cursor: pointer; }
 .btn-copy:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
 
+/* Sessions tab (alpha.7 S3): list and detail on the Projects grid; the waterfall is inline SVG. Navy tokens only. Amber marks a permission wait and nothing else. */
+.body.mode-sessions .main { max-width: none; padding-top: 16px; }
+.body.mode-sessions .attn-col { display: none; }
+.body.mode-sessions .xsummary { margin-top: 6px; font-size: 12px; color: var(--quiet); }
+.xrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; padding: 6px 8px; min-height: 58px; border-bottom: 1px solid var(--grid); cursor: pointer; }
+.xrow:hover { background: var(--panel); }
+.xrow.sel { background: var(--selected); box-shadow: inset 2px 0 0 var(--accent); }
+.xrow:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.xmain { display: flex; flex-direction: column; min-width: 0; line-height: 16px; }
+.xtop { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.xcost { font-size: 12px; color: var(--text); white-space: nowrap; }
+.xpill { flex: none; font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); }
+.xpill-running { color: var(--accent); border-color: var(--accent); }
+.xpill-waiting { color: var(--amber); border-color: var(--amber); background: var(--amberbg); }
+.xmeta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; font-size: 13px; color: var(--muted); }
+.xlink { font-size: 12px; color: var(--accent); }
+.plink { margin: 8px 0 0; }
+.xlink:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.xsect { margin-top: 16px; }
+.xsect h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+/* The waterfall has no scroller of its own: the detail panel (.ndetail) scrolls, and the head (cost line, axis) sticks to its top. */
+.tl-wrap { margin-top: 8px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.tl-head { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); padding-top: 6px; }
+.tl-svg { display: block; }
+.tl-text { font-family: inherit; font-size: 11px; fill: var(--muted); }
+.tl-strong { fill: var(--text); }
+.tl-grid { stroke: var(--grid); stroke-width: 1; }
+.tl-cost { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+.tl-track { fill-opacity: .28; }
+.tl-track-solo { fill-opacity: 1; }
+.tl-attr-explicit { fill: var(--src-main); }
+.tl-attr-unattributed { fill: var(--src-unattributed); }
+.tl-break-band { fill: var(--panel2); }
+.tl-break-text { font-family: inherit; font-size: 11px; fill: var(--muted); }
+.tl-hat-base { fill: var(--src-subagent); }
+.tl-hat-line { fill: var(--src-hatch); }
+.tl-review .oshape { color: var(--text); }
+.tl-wait-band { fill: var(--amberbg); }
+.tl-wait-top { stroke: var(--amber); stroke-width: 2; }
+.tl-wait-label { font-family: inherit; font-size: 11px; fill: var(--amber); }
+.tl-sw-inferred { background: repeating-linear-gradient(135deg, transparent 0 3px, var(--src-hatch) 3px 4px), var(--src-subagent); }
+.tl-sw-unattr { background: var(--src-unattributed); }
+.tl-sw-break { background: var(--panel2); border: 1px solid var(--line); box-sizing: border-box; }
+.tl-sw-wait { background: var(--amberbg); border-top: 2px solid var(--amber); }
+.xheld, .xrev { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; font-size: 12px; }
+.xheld li { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--grid); }
+.xheld-wait { color: var(--amber); }
+.xrev li { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--grid); }
+.xrev-main { flex: 1; min-width: 0; }
+.xfacts { display: flex; flex-direction: column; margin: 0; font-size: 12px; }
+.xfact { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--grid); }
+.xfact dt { color: var(--quiet); }
+.xfact dd { margin: 0; overflow-wrap: anywhere; }
+.xtable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.xtable th, .xtable td { text-align: left; padding: 6px 8px 6px 0; border-bottom: 1px solid var(--grid); font-weight: 400; }
+.xtable thead th { font-size: 11px; letter-spacing: .6px; text-transform: uppercase; color: var(--quiet); border-bottom-color: var(--line); }
+.xtable .num { text-align: right; }
+
 /* Pipeline tab: one-screen layout (Phase 4b addendum). Shapes carry state; amber appears only on a pending decision. */
-.body.pipe .attn-col { width: 340px; }
+.body.pipe .attn-col { width: clamp(360px, 30vw, 520px); min-width: 0; max-height: calc(100vh - 110px); overflow-x: hidden; overflow-y: auto; overflow-wrap: anywhere; }
 .body.pipe .main { max-width: none; padding-top: 16px; }
-@media (max-width: 1359px) { .body.pipe .attn-col { width: auto; } }
+@media (max-width: 1359px) { .body.pipe .attn-col { width: auto; max-height: none; overflow: visible; } }
+/* Work: one fixed-height column (same idea as .pscroll). The table scrolls inside .ptscroll with a sticky head; the filters, idle row and run strip stay put. */
+.pwork { display: flex; flex-direction: column; min-width: 0; height: calc(100vh - 270px); min-height: 320px; }
+.pwork > .pfilters, .pwork > .pidle, .pwork > .pstrip { flex: none; }
+.ptscroll { flex: 1 1 auto; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+.ptscroll .phead-row { position: sticky; top: 0; z-index: 1; background: var(--bg); }
+/* Long values stay inside their panel: break at '/' (a <wbr> after each one), mid-word only for a single very long segment. */
+.ppanel-sub > *, .pfind .floc { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .pwork { height: auto; min-height: 0; }
+  .ptscroll { flex: none; max-height: none; overflow: visible; }
+  .body.pipe .attn-col { max-height: none; overflow: visible; }
+}
+/* Signals and Routing: the header, sub-tabs and right panel stay put; only .pscroll scrolls (same fixed-height idea as .pnav). */
+.body.pipe .main { min-height: 0; }
+.pscroll { margin-top: 10px; height: calc(100vh - 270px); min-height: 320px; min-width: 0; overflow-y: auto; padding-right: 4px; }
+.pscroll .table-wrap { overflow: visible; }
+.pscroll thead th { position: sticky; top: 0; z-index: 1; background: var(--bg); }
+@media (max-width: 900px) { .pscroll { height: auto; min-height: 0; overflow: visible; } }
 .pfilters { display: flex; gap: 18px; margin: 10px 0 6px; font-size: 12px; color: var(--quiet); }
 .pfilters select { font: inherit; font-size: 12px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; margin-left: 6px; }
 .pfilters select:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
