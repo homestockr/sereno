@@ -111,7 +111,7 @@ function grepNames(root, names) {
   const want = new Set(names);
   for (let i = 0; i < names.length; i += GREP_CHUNK) {
     const args = ['grep', '-h', '-o', '-w', '-F', '-I'];
-    for (const n of names.slice(i, i + GREP_CHUNK)) args.push('-e', n);
+    for (const n of names.slice(i, i + GREP_CHUNK)) { args[args.length] = '-e'; args[args.length] = n; }
     const r = spawnSync('git', gitlib.SAFE_ARGS.concat(args), { cwd: root, env: gitlib.safeEnv(), encoding: 'utf8', timeout: 20000, windowsHide: true, maxBuffer: LS_MAX_BYTES, stdio: ['ignore', 'pipe', 'ignore'] });
     if (r.error || r.status === null || (r.status !== 0 && r.status !== 1)) return null;
     if (r.status === 0) for (const line of String(r.stdout).split(/\r?\n/)) if (want.has(line)) found.add(line);
@@ -180,7 +180,7 @@ function check(o) {
       }
     } else {
       if (++greps > NAME_GREP_CAP) { checked--; continue; }
-      nameToks.push(t);
+      nameToks[nameToks.length] = t;
     }
   }
   if (nameToks.length) {
