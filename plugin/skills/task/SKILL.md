@@ -89,11 +89,12 @@ First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir`
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" refs --text-file <cacheDir>/spec-<name>.source.md
 ```
 
-It deletes that file and prints `{ ok, checked, missing: [{ ref, kind, why }], new: [{ ref, kind }] }`: the file paths and code names in the text that do not resolve in the repo. Items in `new` are described as new work and never stop you. If `ok` is false, show the `error` and stop.
+It deletes that file and prints `{ ok, checked, missing: [{ ref, kind, why }], warn: [{ ref, kind, why }], new: [{ ref, kind }] }`: the file paths and code names in the text that do not resolve in the repo. `missing` holds strong signals (a path with a directory, any path with a line number, a camelCase or UPPER_SNAKE name). `warn` holds weak ones (a bare file name such as `settings.json`, a PascalCase name such as `TypeScript`). Items in `new` are described as new work and never stop you; `warn` items never stop you either. If `ok` is false, show the `error` and stop.
 
 - When (a) and (b) both exist, check both (write and run the source file once for each). If (a) has `missing` items and (b) has none, use (b) and tell the user so, but only when (b) is a request for work and describes the same work as (a). Otherwise stop with (a)'s missing list. If the latest message is not a work request, there is no (b): this is case (c).
 - If the source you are using still has `missing` items, end the turn: list them, say the text may have been cut while pasting, and say to paste the task as a message and run `/sereno:task <name>` again. Do not write the spec, and do not wait for an answer.
 - `--refs-ok` in `$ARGUMENTS` skips this stop (still run `refs` if you like, but go on whatever it lists). It is not passed to any other command.
+- Keep the `warn` items of the source you are using for the step-5 report. They never stop the skill.
 
 Then write the acceptance criteria (markdown, no front matter) with the Write tool to
 `<cacheDir>/spec-<name>.md`. This is the only path you write to; never write the spec
@@ -156,5 +157,5 @@ staging". A hold is printed, never run. Both are kept when you revise the spec w
 ## 5. Report
 
 End with a few lines: the source of the goal ("from your message above" for (b), "from the command" for (a)), spec path and revision, the Builder you chose and why, the review level and how to change it (run `/sereno:task <name> --review <level>` again before the build), and the
-branch. Tell the user to run `/sereno:build <name>` next. Do not start the Builder
+branch. If `refs` listed `warn` items for the source you used, add one line, "Check these names, which aren't in the repo: <the refs>", so the user sees them before the build. Tell the user to run `/sereno:build <name>` next. Do not start the Builder
 yourself, and do not switch branches.

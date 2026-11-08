@@ -65,3 +65,20 @@ version becomes `0.6.2` in plugin.json and marketplace.json.
 
 Each step adds its own tests in `tools/test.js`. Run `refs` against a temp repo containing the garbled
 `paywall-prices` tokens. Test that a skill-text guard covers the source order and `--refs-ok`.
+
+## Addendum: second red-team block (stop and warn)
+
+- `refs` now returns `{ ok, checked, missing, warn, new }`. The `new` proximity rule applies first, as before.
+  - `missing` (stops the skill; `--refs-ok` skips the stop): a path with a directory part that doesn't resolve,
+    any path with `:line` (unresolved or out of range), a camelCase or UPPER_SNAKE name that isn't found.
+  - `warn` (listed only, never stops): a bare file name with no directory that doesn't resolve
+    (`planrs.ts`, `settings.json`, `Node.js`), a PascalCase name that isn't found (`TypeScript`, `GitHub`).
+  - The step-5 report lists `warn` items on one line: "Check these names, which aren't in the repo: ...".
+- `@` is no longer a path character, so `robe@x.md` is not a path.
+- A bare dotted token (`.eslintrc.json`) is a path only when tracked (or its name matches a tracked bare
+  name); otherwise it is ignored. Decided in `check`.
+- `git grep` runs with `--no-line-number --no-column --no-color`, so the user's `grep.*` and `color.*` config
+  can't change its output.
+- The on-disk (untracked) resolve compares `realpath` of the target with `realpath` of the root; a junction
+  or symlink out of the root doesn't resolve and is never read for a line count.
+- Accepted limit: a path truncated at its tail with no extension (`lib/billin`) is prose and isn't caught.
