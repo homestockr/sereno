@@ -559,7 +559,7 @@ const COMMANDS = {
     let cacheRel = null;
     if (a.stdin) body = readStdin();
     else {
-      const cf = cacheFileArg(root, /** @type {string} */ (a['body-file']), /^spec-([A-Za-z0-9._-]+)\.md$/);
+      const cf = cacheFileArg(root, /** @type {string} */ (a['body-file']), /^spec-(?![A-Za-z0-9._-]*\.source\.md$)([A-Za-z0-9._-]+)\.md$/);
       if (cf.m[1] !== task) throw new SerenoError('path_refused', 'spec file does not match --task');
       cacheRel = cf.rel;
       body = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
@@ -663,7 +663,7 @@ const COMMANDS = {
     const a = parseArgs(argv, { value: ['text-file'], bool: ['json'] });
     if (!a['text-file']) throw new SerenoError('usage', 'refs needs --text-file');
     const { root, fsafe } = needRepo();
-    const cf = cacheFileArg(root, /** @type {string} */ (a['text-file']), /^spec-([A-Za-z0-9._-]+).source.md$/);
+    const cf = cacheFileArg(root, /** @type {string} */ (a['text-file']), /^spec-([A-Za-z0-9._-]+)\.source\.md$/);
     rec.checkTask(cf.m[1]);
     let text;
     try { text = fsafe.readFile(cf.rel, CACHE_FILE_MAX).toString('utf8'); }

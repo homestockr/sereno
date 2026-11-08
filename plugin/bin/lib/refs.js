@@ -14,11 +14,13 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const gitlib = require('./git.js');
 
 const LIST_CAP = 50;
 const TOKEN_CAP = 200;
 const NAME_GREP_CAP = 120;
+const GREP_CHUNK = 40;
 const NEAR_WORDS = 8;
 const LS_MAX_BYTES = 32 * 1024 * 1024;
 const LINE_READ_MAX = 8 * 1024 * 1024;
@@ -61,10 +63,15 @@ function extract(text) {
   const addTok = (t) => { const k = t.kind + '\0' + t.ref + '\0' + t.idx; if (!seen.has(k)) { seen.add(k); tokens[tokens.length] = t; } };
   words.forEach((word, idx) => {
     for (const raw of word.split(/[`'"()[\]{}<>,;|]+/)) {
-      const part = strip(raw);
+      const part = strip(raw).replace(/[\\]/g, '/');
       if (!part) continue;
+      // Absolute paths, home paths and drive paths are not repo-relative: skipped whole.
+      if (/^[/~]/.test(part) || /^[A-Za-z]:\//.test(part)) continue;
       const m = /^([\w@./-]+?)(?::(\d+)(?:-(\d+))?)?$/.exec(part);
-      if (m && /[A-Za-z]/.test(m[1]) && (m[1].includes('/') || EXT_RE.test(m[1])) && !/^\.+$/.test(m[1])) {
+      // A path candidate ends in a known extension. Extensionless slash tokens (branches,
+      // dirs, routes, I/O) are prose. A bare fragment such as .md or .source.md is not a path.
+      if (m && /[A-Za-z]/.test(m[1]) && EXT_RE.test(m[1])) {
+        if (m[1].startsWith('.') && !m[1].includes('/')) continue;
         addTok({ ref: part, kind: 'path', path: m[1].replace(/^\.\//, ''), from: m[2] === undefined ? undefined : Number(m[2]), to: m[3] === undefined ? undefined : Number(m[3]), idx });
         continue;
       }
@@ -85,13 +92,31 @@ function nearNew(words, idx) {
 /** @param {string} file @returns {number | null} */
 function lineCount(file) {
   try {
-    const st = fs.statSync(file);
+    const st = fs.lstatSync(file);
     if (!st.isFile() || st.size > LINE_READ_MAX) return null;
     const s = fs.readFileSync(file, 'utf8');
     if (!s) return 0;
     const n = s.split('\n').length;
     return s.endsWith('\n') ? n - 1 : n;
   } catch (_e) { return null; }
+}
+
+/**
+ * One `git grep` per chunk of names. Exit 0 = matches, 1 = none, anything else (or a
+ * timeout) = failure, never "not found".
+ * @param {string} root @param {string[]} names @returns {Set<string> | null}
+ */
+function grepNames(root, names) {
+  const found = new Set();
+  const want = new Set(names);
+  for (let i = 0; i < names.length; i += GREP_CHUNK) {
+    const args = ['grep', '-h', '-o', '-w', '-F', '-I'];
+    for (const n of names.slice(i, i + GREP_CHUNK)) args.push('-e', n);
+    const r = spawnSync('git', gitlib.SAFE_ARGS.concat(args), { cwd: root, env: gitlib.safeEnv(), encoding: 'utf8', timeout: 20000, windowsHide: true, maxBuffer: LS_MAX_BYTES, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (r.error || r.status === null || (r.status !== 0 && r.status !== 1)) return null;
+    if (r.status === 0) for (const line of String(r.stdout).split(/\r?\n/)) if (want.has(line)) found.add(line);
+  }
+  return found;
 }
 
 /**
@@ -116,6 +141,7 @@ function check(o) {
   /** @type {{ ref: string, kind: string }[]} */ const added = [];
   const done = new Set();
   let checked = 0, greps = 0;
+  /** @type {Token[]} */ const nameToks = [];
   /** @param {Token} t @param {string} why */
   const unresolved = (t, why) => {
     const hasLine = t.kind === 'path' && t.from !== undefined;
@@ -131,20 +157,21 @@ function check(o) {
     if (t.kind === 'path') {
       const p = /** @type {string} */ (t.path);
       /** @type {string | null} */ let file = null;
-      let why = 'not a tracked file';
-      // Prose such as purchase/restore: lowercase letters only, no extension, no line number, no ./ or trailing /. Ignored, unless it names a tracked directory.
-      const prose = t.from === undefined && /^[a-z]+(?:\/[a-z]+)+$/.test(p) && !t.ref.startsWith('./');
-      if (prose && !tracked.has(p) && !files.some((f) => f.startsWith(p + '/'))) { checked--; continue; }
-      if (tracked.has(p)) file = p;
-      else if (!p.includes('/')) {
-        const hits = byName.get(p) || [];
+      let resolved = false;
+      if (tracked.has(p)) { file = p; resolved = true; }
+      else if (!p.includes('/') && (byName.get(p) || []).length >= 1) {
+        const hits = /** @type {string[]} */ (byName.get(p));
+        resolved = true; // more than one match is ambiguous, not garbled
         if (hits.length === 1) file = hits[0];
-        else if (hits.length > 1) why = 'matches ' + hits.length + ' tracked files, so it names none';
-      } else if (p.endsWith('/')) {
-        if (files.some((f) => f.startsWith(p))) continue;
-      } else if (files.some((f) => f.startsWith(p + '/'))) continue; // a tracked directory
-      if (file === null) { unresolved(t, why); continue; }
-      if (t.from !== undefined) {
+      } else {
+        // Untracked but present (.sereno/pipeline.json, a new local file): lstat, no following, inside root.
+        const abs = path.resolve(root, p);
+        if (abs.startsWith(path.resolve(root) + path.sep)) {
+          try { const st = fs.lstatSync(abs); resolved = true; if (st.isFile()) file = p; } catch (_e) { /* absent */ }
+        }
+      }
+      if (!resolved) { unresolved(t, 'not a tracked file'); continue; }
+      if (file !== null && t.from !== undefined) {
         const n = lineCount(path.join(root, file));
         const to = t.to === undefined ? t.from : t.to;
         if (n !== null && (t.from < 1 || to < t.from || to > n)) {
@@ -153,9 +180,13 @@ function check(o) {
       }
     } else {
       if (++greps > NAME_GREP_CAP) { checked--; continue; }
-      const hit = gitlib.git(root, ['grep', '-l', '-I', '-w', '-F', '-e', t.ref], 20000);
-      if (!hit) unresolved(t, 'not found in the tracked files');
+      nameToks.push(t);
     }
+  }
+  if (nameToks.length) {
+    const found = grepNames(root, [...new Set(nameToks.map((t) => t.ref))]);
+    if (found === null) return { ok: false, error: 'could not search the tracked files (git grep failed)', code: 'git_failed' };
+    for (const t of nameToks) if (!found.has(t.ref)) unresolved(t, 'not found in the tracked files');
   }
   return { ok: true, checked, missing, new: added };
 }

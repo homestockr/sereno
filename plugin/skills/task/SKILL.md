@@ -22,8 +22,8 @@ Arguments: `$ARGUMENTS`. The first word is the task name (letters, digits, `.`, 
 **Where the goal comes from**, in this order:
 
 - (a) the text after the name in `$ARGUMENTS`, flags excluded;
-- (b) otherwise, the task the user described in their latest message(s) before this command in this conversation;
-- (c) otherwise, end the turn with: "Describe the task in a message, then run `/sereno:task <name>`".
+- (b) otherwise, the task the user described in their latest message(s) before this command in this conversation, but only when that latest message is a request for work;
+- (c) otherwise, including when the latest message is not a work request (a question, thanks, a status update), end the turn with: "Describe the task in a message, then run `/sereno:task <name>`".
 
 A long command line can lose text when it is pasted, so a message followed by `/sereno:task <name>` is the safer way to give a long task. When the spec already exists and `$ARGUMENTS` holds only a name and flags, it is a flags-only revision: keep the earlier goal and do not read the conversation as a new goal, unless the user asked for a change. Remember which source you used, `(a)` or `(b)`: step 4 checks it and the report names it.
 
@@ -68,7 +68,7 @@ If `$ARGUMENTS` has `--review <level>` or the user says plainly "no review", "li
 
 ## 3. Create the branch (new tasks only)
 
-If branch `task/<name>` does not exist yet, first do the text check described at the start of step 4 (run `paths` for `cacheDir`, write the source file, run `refs`), so that a stop leaves no half-made task behind; then create the branch from the current HEAD:
+If branch `task/<name>` does not exist yet, first do the text check described at the start of step 4 (run `paths` for `cacheDir`, write the source file, run `refs`), so that a stop leaves no half-made task behind. This is the one run of the check for this invocation: step 4 does not run it again. Then create the branch from the current HEAD:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" branch --task <name>
@@ -83,7 +83,7 @@ the spec: skip this step.
 ## 4. Write the spec
 
 First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (an absolute path spelled like your working directory). Use it exactly as given, for both Write and the file argument below: never rebuild it from `repo_root`, and never change its letter case.
-**Check the text for damage first (new task, or a revision with a new goal; skip it for a flags-only revision).** Write the goal text verbatim, exactly as the user gave it, with the Write tool to `<cacheDir>/spec-<name>.source.md` (the same rules as the spec file below: this path only, never a heredoc), then run:
+**Check the text for damage first (new task, or a revision with a new goal; skip it for a flags-only revision). Run it once per invocation: for a new task step 3 already did, so go on to writing the spec.** Write the goal text verbatim, exactly as the user gave it, with the Write tool to `<cacheDir>/spec-<name>.source.md` (the same rules as the spec file below: this path only, never a heredoc), then run:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" refs --text-file <cacheDir>/spec-<name>.source.md
@@ -91,7 +91,7 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" refs --text-file <cacheDir>/spec-<nam
 
 It deletes that file and prints `{ ok, checked, missing: [{ ref, kind, why }], new: [{ ref, kind }] }`: the file paths and code names in the text that do not resolve in the repo. Items in `new` are described as new work and never stop you. If `ok` is false, show the `error` and stop.
 
-- When (a) and (b) both exist, check both (write and run the source file once for each). If (a) has `missing` items and (b) has none, use (b) and tell the user so.
+- When (a) and (b) both exist, check both (write and run the source file once for each). If (a) has `missing` items and (b) has none, use (b) and tell the user so, but only when (b) is a request for work and describes the same work as (a). Otherwise stop with (a)'s missing list. If the latest message is not a work request, there is no (b): this is case (c).
 - If the source you are using still has `missing` items, end the turn: list them, say the text may have been cut while pasting, and say to paste the task as a message and run `/sereno:task <name>` again. Do not write the spec, and do not wait for an answer.
 - `--refs-ok` in `$ARGUMENTS` skips this stop (still run `refs` if you like, but go on whatever it lists). It is not passed to any other command.
 

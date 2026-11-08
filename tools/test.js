@@ -19804,11 +19804,11 @@ test('missing rate_limits degrades instead of throwing', () => {
     test('[plugin-0.6.2 G1] refs: the garbled paywall-prices tokens are missing, the intact ones resolve', () => {
       const r = refsOfText('Fix planrs.ts and the cap in MATCHEg.ts:148 and ONE_TIME_PRIavingPercent, and billing is lib/billing.ts:999.\nKeep lib/billing.ts:148 and billing.ts using resolvePackage and PLAN_PRICES, plus ONE_TIME_PRICE, parsePriceNumber, planSavingPercent and screens/PaywallScreen.tsx.\n');
       assert.strictEqual(r.ok, true);
-      assert.deepStrictEqual(names(r.missing), ['planrs.ts', 'MATCHEg.ts:148', 'ONE_TIME_PRIavingPercent', 'lib/billing.ts:999']);
+      assert.deepStrictEqual(names(r.missing), ['planrs.ts', 'MATCHEg.ts:148', 'lib/billing.ts:999', 'ONE_TIME_PRIavingPercent']);
       assert.deepStrictEqual(r.new, []);
       assert.ok(r.checked >= 11, 'checked ' + r.checked);
       assert.ok(r.missing.every((m) => m.why), 'each missing item says why');
-      assert.match(r.missing[3].why, /outside/);
+      assert.match(r.missing[2].why, /outside/);
     });
     test('[plugin-0.6.2 G1] refs: lines at the end of the file resolve, a range past it does not, punctuation is stripped', () => {
       const r = refsOfText('See (`lib/billing.ts:163`), lib/billing.ts:150-163, "lib/billing.ts:1-3". And lib/billing.ts:164 and lib/billing.ts:160-170.');
@@ -19829,27 +19829,39 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual(names(r.missing), ['lib/paywallPlans.ts:12', 'lib/billing.ts:999']);
       assert.deepStrictEqual(r.new, []);
     });
-    test('[plugin-0.6.2 G1] refs: two tracked files with one bare name resolve neither; a unique bare name resolves', () => {
-      const d = paywallRepo({ 'a/util.ts': 'export const x = 1;\n', 'b/util.ts': 'export const y = 1;\n', 'a/only.ts': 'x\n' });
-      const r = refsOf(d, 'Look at util.ts and only.ts and billing.ts, plus a/util.ts.').out;
-      assert.deepStrictEqual(names(r.missing), ['util.ts']);
-      assert.match(r.missing[0].why, /2 tracked files/);
+    test('[plugin-0.6.2 G1] refs: two tracked files with one bare name resolve (ambiguous is not garbled); a unique bare name resolves; a missing one does not', () => {
+      const d = paywallRepo({ 'a/util.ts': 'export const x = 1;', 'b/util.ts': 'export const y = 1;', 'a/only.ts': 'x' });
+      const r = refsOf(d, 'Look at util.ts and only.ts and billing.ts, plus a/util.ts and nothere.ts.').out;
+      assert.deepStrictEqual(names(r.missing), ['nothere.ts']);
     });
     test('[plugin-0.6.2 G1] refs: directories resolve; plain words with a slash, versions and URLs are not paths', () => {
       const r = refsOfText('The lib/ and screens/ folders, and/or either 24/7 or https://example.com/some/path.html at v1.2.3, e.g. w/o it, ci/cd and i/o. Also the lib/billing code.');
       assert.deepStrictEqual(r.missing, []);
       assert.deepStrictEqual(r.new, []);
     });
-    test('[plugin-0.6.2 G1] refs: lowercase slash prose is ignored; tracked dirs still resolve; real paths stay paths', () => {
-      const d = paywallRepo({ 'src/Foo/bar.ts': 'x\n', '__tests__/x.ts': 'y\n' });
-      const r = refsOf(d, 'The purchase/restore flow, yearly/owned and monthly/annual/lifetime plans, a new purchase/other thing. See lib/billing and lib/ and screens. Also planrs.ts and MATCHEg.ts:148 and lib/paywall.ts and src/Foo/bar and __tests__/x and src/foo/bar:3.').out;
-      assert.deepStrictEqual(names(r.missing), ['planrs.ts', 'MATCHEg.ts:148', 'lib/paywall.ts', 'src/Foo/bar', '__tests__/x', 'src/foo/bar:3']);
-      assert.deepStrictEqual(r.new, []);
-      const prose = refsOfText('purchase/restore yearly/owned monthly/annual/lifetime');
+    test('[plugin-0.6.2 G1] refs: extensionless slash tokens are prose; only tokens with a known extension are paths', () => {
+      const d = paywallRepo();
+      const prose = refsOf(d, 'Branch feat/plugin-0.6.2 and task/foo, dirs tests/ and .sereno/ and src/Foo/bar, routes /status and /api/, pairs I/O Host/Origin HTTP/2 purchase/restore yearly/owned monthly/annual/lifetime, lib/billing and src/foo/bar:3.').out;
       assert.deepStrictEqual([prose.checked, prose.missing.length, prose.new.length], [0, 0, 0], 'ignored entirely');
-      const dd = paywallRepo({ 'purchase/restore/a.js': 'z\n' });
-      assert.deepStrictEqual(refsOf(dd, 'purchase/restore and purchase/other').out.missing, [], 'a tracked directory resolves; prose is ignored');
-      assert.strictEqual(refsOf(dd, 'purchase/restore').out.checked, 1, 'a tracked dir is checked, not ignored');
+      const r = refsOf(d, 'Also planrs.ts and MATCHEg.ts:148 and lib/paywall.ts.').out;
+      assert.deepStrictEqual(names(r.missing), ['planrs.ts', 'MATCHEg.ts:148', 'lib/paywall.ts']);
+    });
+    test('[plugin-0.6.2 G1] refs: absolute, home and drive paths and bare extension fragments are skipped', () => {
+      const r = refsOfText('See /etc/gone.js, ~/.sereno/gone.json, C:/Users/x/gone.ts, C:\\Users\\x\\gone2.ts, and the .source.md and .md fragments.');
+      assert.deepStrictEqual(r.missing, []);
+      assert.strictEqual(r.checked, 0);
+    });
+    test('[plugin-0.6.2 G1] refs: a backslash path is normalised and checked', () => {
+      const r = refsOfText('Fix src\\MATCHEg.ts and lib\\billing.ts:148 and lib\\billing.ts:999.');
+      assert.deepStrictEqual(names(r.missing), ['src/MATCHEg.ts', 'lib/billing.ts:999']);
+    });
+    test('[plugin-0.6.2 G1] refs: an untracked file that exists on disk resolves (lstat, inside the root); a symlink-free absent one does not', () => {
+      const d = paywallRepo();
+      fs.mkdirSync(path.join(d, '.sereno', 'specs'), { recursive: true });
+      fs.writeFileSync(path.join(d, '.sereno', 'pipeline.json'), '{}');
+      fs.writeFileSync(path.join(d, '.sereno', 'specs', 'x.md'), 'a' + String.fromCharCode(10) + 'b' + String.fromCharCode(10));
+      const r = refsOf(d, 'Read .sereno/pipeline.json and .sereno/specs/x.md:2 and .sereno/specs/x.md:9 and ../outside.md and .sereno/specs/none.md.').out;
+      assert.deepStrictEqual(names(r.missing), ['.sereno/specs/x.md:9', '../outside.md', '.sereno/specs/none.md']);
     });
     test('[plugin-0.6.2 G1] refs: code-name shapes (camelCase, PascalCase, UPPER_SNAKE) are checked; plain words and short names are not', () => {
       assert.ok(refsLib.isName('resolvePackage') && refsLib.isName('PaywallScreen') && refsLib.isName('PLAN_PRICES') && refsLib.isName('ONE_TIME_PRIavingPercent'));
@@ -19891,6 +19903,18 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual([b.out.ok, b.out.code], [false, 'path_refused']);
       assert.ok(!fs.existsSync(big), 'task text does not stay behind after a refused read');
     });
+    test('[plugin-0.6.2 G1] cache names: refs needs a literal .source.md; spec --body-file refuses *.source.md', () => {
+      const d = paywallRepo();
+      const c = cacheOf(d);
+      const odd = path.join(c, 'spec-pwXsource.md');
+      fs.writeFileSync(odd, 'x');
+      assert.strictEqual(R(d, ['refs', '--text-file', odd]).out.code, 'path_refused', 'the dot before source is literal');
+      const src = path.join(c, 'spec-pw.source.md');
+      fs.writeFileSync(src, 'Use the goal.');
+      const b = R(d, ['spec', '--task', 'pw', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', src]);
+      assert.deepStrictEqual([b.out.ok, b.out.code], [false, 'path_refused'], 'a source file is never a spec body');
+      assert.ok(fs.existsSync(src), 'and it is left alone');
+    });
     test('[plugin-0.6.2 G1] refs: a git failure is ok:false with git_failed', () => {
       const d = paywallRepo();
       const r = refsLib.check({ root: path.join(d, 'no-such-dir'), text: 'lib/billing.ts' });
@@ -19920,6 +19944,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(a >= 0 && b > a && c > b, 'a then b then c');
       assert.match(sec.slice(a, b), /text after the name in `\$ARGUMENTS`, flags excluded/);
       assert.match(sec.slice(b, c), /latest message\(s\) before this command/);
+      assert.match(sec.slice(b, c), /only when that latest message is a request for work/);
+      assert.match(sec.slice(c), /including when the latest message is not a work request/);
       assert.ok(sec.includes('Describe the task in a message, then run `/sereno:task <name>`'));
       assert.match(t, /^argument-hint: <name> \[goal, or describe it in a message first\]$/m);
     });
@@ -19942,6 +19968,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(sec, /If \(a\) has `missing` items and \(b\) has none, use \(b\)/);
       assert.match(sec, /still has `missing` items, end the turn: list them, say the text may have been cut while pasting, and say to paste the task as a message and run `\/sereno:task <name>` again/);
       assert.match(sec, /`--refs-ok` in `\$ARGUMENTS` skips this stop/);
+      assert.match(sec, /only when \(b\) is a request for work and describes the same work as \(a\)\. Otherwise stop with \(a\)'s missing list/);
+      assert.ok(sec.includes('Run it once per invocation') && t.includes('the one run of the check for this invocation'), 'the guard runs once');
       assert.ok(t.includes('`--refs-ok`') && t.indexOf('`--refs-ok`') < t.indexOf('## 1.'), 'the flag is described where $ARGUMENTS is');
       assert.ok(t.indexOf('text check described at the start of step 4') > t.indexOf('## 3.'), 'a new task is checked before its branch exists');
     });
