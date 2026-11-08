@@ -50,14 +50,14 @@ function safeEnv(base) {
 }
 
 /**
- * @param {string} cwd @param {string[]} args @param {number} [timeoutMs]
+ * @param {string} cwd @param {string[]} args @param {number} [timeoutMs] @param {number} [maxBytes] output cap, default 1 MB
  * @returns {string | null} trimmed stdout, or null when git fails
  */
-function git(cwd, args, timeoutMs) {
+function git(cwd, args, timeoutMs, maxBytes) {
   try {
     return String(execImpl('git', SAFE_ARGS.concat(args), {
       cwd, env: safeEnv(), encoding: 'utf8', timeout: timeoutMs || GIT_TIMEOUT_MS, windowsHide: true,
-      maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: maxBytes || 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
     })).trim();
   } catch (_e) { return null; }
 }

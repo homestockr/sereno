@@ -1,7 +1,7 @@
 ---
 name: task
 description: Write a task spec and create its task branch. Use to start a piece of work for the Sereno pipeline.
-argument-hint: <name> [one-line goal]
+argument-hint: <name> [goal, or describe it in a message first]
 disable-model-invocation: true
 model: sonnet
 allowed-tools: Bash, Read, Grep, Glob, Edit(.sereno/cache/spec-*.md)
@@ -17,13 +17,21 @@ You are the architect. You plan; you do not write the feature code. Turn the req
 into a spec a Builder can follow with no other context, then create its branch.
 
 Arguments: `$ARGUMENTS`. The first word is the task name (letters, digits, `.`, `_`,
-`-`; up to 64 characters). The rest is the goal. If the name is missing, stop and show the usage `/sereno:task <name> <goal>`.
+`-`; up to 64 characters). Words that start with `--` are flags (`--review`, `--after`, `--hold`, `--check-hosts`, `--refs-ok`); the rest is the goal. If the name is missing, stop and show the usage `/sereno:task <name> [goal]`.
+
+**Where the goal comes from**, in this order:
+
+- (a) the text after the name in `$ARGUMENTS`, flags excluded;
+- (b) otherwise, the task the user described in their latest message(s) before this command in this conversation;
+- (c) otherwise, end the turn with: "Describe the task in a message, then run `/sereno:task <name>`".
+
+A long command line can lose text when it is pasted, so a message followed by `/sereno:task <name>` is the safer way to give a long task. When the spec already exists and `$ARGUMENTS` holds only a name and flags, it is a flags-only revision: keep the earlier goal and do not read the conversation as a new goal, unless the user asked for a change. Remember which source you used, `(a)` or `(b)`: step 4 checks it and the report names it.
 
 This skill is the process for this run. Don't invoke other plugins' skills (planning, worktrees, code review, branch finishing) while it runs. The Sereno agents it names, such as the red team, are part of the process.
 
 ## 1. Understand the work
 
-Read what you need in the repo (CLAUDE.md or README, the files involved). Decide the
+Work from the goal you found above. Read what you need in the repo (CLAUDE.md or README, the files involved). Decide the
 acceptance criteria: observable outcomes a reviewer can check, the files or areas in
 scope, what is out of scope, and the tests that must exist. Keep it short and concrete.
 
@@ -60,7 +68,7 @@ If `$ARGUMENTS` has `--review <level>` or the user says plainly "no review", "li
 
 ## 3. Create the branch (new tasks only)
 
-If branch `task/<name>` does not exist yet, create it first from the current HEAD:
+If branch `task/<name>` does not exist yet, first do the text check described at the start of step 4 (run `paths` for `cacheDir`, write the source file, run `refs`), so that a stop leaves no half-made task behind; then create the branch from the current HEAD:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" branch --task <name>
@@ -75,7 +83,19 @@ the spec: skip this step.
 ## 4. Write the spec
 
 First run `node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" paths` and take `cacheDir` (an absolute path spelled like your working directory). Use it exactly as given, for both Write and the file argument below: never rebuild it from `repo_root`, and never change its letter case.
-Write the acceptance criteria (markdown, no front matter) with the Write tool to
+**Check the text for damage first (new task, or a revision with a new goal; skip it for a flags-only revision).** Write the goal text verbatim, exactly as the user gave it, with the Write tool to `<cacheDir>/spec-<name>.source.md` (the same rules as the spec file below: this path only, never a heredoc), then run:
+
+```
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" refs --text-file <cacheDir>/spec-<name>.source.md
+```
+
+It deletes that file and prints `{ ok, checked, missing: [{ ref, kind, why }], new: [{ ref, kind }] }`: the file paths and code names in the text that do not resolve in the repo. Items in `new` are described as new work and never stop you. If `ok` is false, show the `error` and stop.
+
+- When (a) and (b) both exist, check both (write and run the source file once for each). If (a) has `missing` items and (b) has none, use (b) and tell the user so.
+- If the source you are using still has `missing` items, end the turn: list them, say the text may have been cut while pasting, and say to paste the task as a message and run `/sereno:task <name>` again. Do not write the spec, and do not wait for an answer.
+- `--refs-ok` in `$ARGUMENTS` skips this stop (still run `refs` if you like, but go on whatever it lists). It is not passed to any other command.
+
+Then write the acceptance criteria (markdown, no front matter) with the Write tool to
 `<cacheDir>/spec-<name>.md`. This is the only path you write to; never write the spec
 file under `.sereno/specs/` by hand, and never pipe or heredoc the text into a command. The
 command below reads that file, deletes it, and writes the real spec with its front matter
@@ -135,6 +155,6 @@ staging". A hold is printed, never run. Both are kept when you revise the spec w
 
 ## 5. Report
 
-End with a few lines: spec path and revision, the Builder you chose and why, the review level and how to change it (run `/sereno:task <name> --review <level>` again before the build), and the
+End with a few lines: the source of the goal ("from your message above" for (b), "from the command" for (a)), spec path and revision, the Builder you chose and why, the review level and how to change it (run `/sereno:task <name> --review <level>` again before the build), and the
 branch. Tell the user to run `/sereno:build <name>` next. Do not start the Builder
 yourself, and do not switch branches.
