@@ -9616,12 +9616,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['/sereno:next', '--after', '--hold', 'preflight', 'hook_failed', 'attempt --adopt', '/sereno:merge', 'after_not_merged']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes('`next`, `build`') || r.includes('`task`, `next`, `build`'));
     });
-    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.1', () => {
+    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.2', () => {
       const pj = JSON.parse(rd('.claude-plugin/plugin.json'));
       const mp = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
-      assert.strictEqual(pj.version, '0.6.1');
-      assert.strictEqual(mp.plugins[0].version, '0.6.1');
-      assert.ok(rd('README.md').includes('Version 0.6.1.'));
+      assert.strictEqual(pj.version, '0.6.2');
+      assert.strictEqual(mp.plugins[0].version, '0.6.2');
+      assert.ok(rd('README.md').includes('Version 0.6.2.'));
     });
     test('[plugin-0.5 P4] README has the lighter-setup section and the 0.5.0 notes', () => {
       const r = rd('README.md');
@@ -19432,7 +19432,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     // ---- R7 docs and version ----
-    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.1', () => {
+    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.2', () => {
       const r = rd('README.md');
       const i = r.indexOf('### Review level'), j = r.indexOf('### Spec review');
       assert.ok(i > 0 && j > i);
@@ -19440,8 +19440,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['--review', '`none`', '`light`', '`full`', 'Safety floor', 'skip: "spec"', 'spec_changed', 'roles.redTeam.enabled: false']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes("A spec's own `review` field overrides `kinds` and `maxDiffLines`"));
       assert.ok(r.includes('New in 0.6.1') && r.includes('New in 0.6.0') && r.includes('New in 0.5.0'));
-      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.1');
-      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.1');
+      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.2');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.2');
     });
 
     // ---- red-team follow-ups ----
@@ -19756,6 +19756,323 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('[plugin-0.6] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+  /* ---- [plugin-0.6.2] task text without the long paste (G1 to G3) ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const refsLib = require('../plugin/bin/lib/refs.js');
+    const gitLib = require('../plugin/bin/lib/git.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p062-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const R = (cwd, args) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const rd = (p) => fs.readFileSync(path.join(PLUGIN, p), 'utf8').replace(/\r\n/g, '\n');
+    /** A repo shaped like the paywall-prices one: synthetic files only. */
+    function paywallRepo(extra) {
+      const dir = mk();
+      git(dir, 'init', '-q', '-b', 'main');
+      git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+      fs.mkdirSync(path.join(dir, 'lib')); fs.mkdirSync(path.join(dir, 'screens'));
+      const lines = [];
+      for (let i = 1; i <= 160; i++) lines.push('// line ' + i);
+      lines.push('export const PLAN_PRICES = { monthly: 1 };', 'export const ONE_TIME_PRICE = 2;', 'export function resolvePackage(offering) { return offering; }');
+      fs.writeFileSync(path.join(dir, 'lib', 'billing.ts'), lines.join('\n') + '\n');
+      fs.writeFileSync(path.join(dir, 'lib', 'paywallTiers.ts'), 'export function parsePriceNumber(s) { return Number(s); }\nexport function planSavingPercent(a, b) { return a - b; }\n');
+      fs.writeFileSync(path.join(dir, 'screens', 'PaywallScreen.tsx'), 'export const PaywallScreen = () => null;\n');
+      for (const [f, c] of Object.entries(extra || {})) { fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true }); fs.writeFileSync(path.join(dir, f), c); }
+      git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+      return dir;
+    }
+    const cacheOf = (dir) => { const c = path.join(dir, '.sereno', 'cache'); fs.mkdirSync(c, { recursive: true }); return c; };
+    /** Run `refs` on text through the CLI; the text file lives in the cache dir. */
+    function refsOf(dir, text, name) {
+      const f = path.join(cacheOf(dir), 'spec-' + (name || 'pw') + '.source.md');
+      fs.writeFileSync(f, text);
+      const r = R(dir, ['refs', '--text-file', f]);
+      return Object.assign({ file: f }, r);
+    }
+    const refsOfText = (text) => { const d = paywallRepo(); return refsOf(d, text).out; };
+    const names = (list) => list.map((x) => x.ref);
+
+    // ---- G1 the refs command ----
+    test('[plugin-0.6.2 G1] refs: the garbled paywall-prices tokens are missing, the intact ones resolve', () => {
+      const r = refsOfText('Fix planrs.ts and the cap in MATCHEg.ts:148 and ONE_TIME_PRIavingPercent, and billing is lib/billing.ts:999.\nKeep lib/billing.ts:148 and billing.ts using resolvePackage and PLAN_PRICES, plus ONE_TIME_PRICE, parsePriceNumber, planSavingPercent and screens/PaywallScreen.tsx.\n');
+      assert.strictEqual(r.ok, true);
+      assert.deepStrictEqual(names(r.missing), ['MATCHEg.ts:148', 'lib/billing.ts:999', 'ONE_TIME_PRIavingPercent']);
+      assert.deepStrictEqual(names(r.warn), ['planrs.ts'], 'a bare file name that does not resolve only warns');
+      assert.deepStrictEqual(r.new, []);
+      assert.ok(r.checked >= 11, 'checked ' + r.checked);
+      assert.ok(r.missing.every((m) => m.why), 'each missing item says why');
+      assert.match(r.missing[1].why, /outside/);
+    });
+    test('[plugin-0.6.2 G1] refs: lines at the end of the file resolve, a range past it does not, punctuation is stripped', () => {
+      const r = refsOfText('See (`lib/billing.ts:163`), lib/billing.ts:150-163, "lib/billing.ts:1-3". And lib/billing.ts:164 and lib/billing.ts:160-170.');
+      assert.deepStrictEqual(names(r.missing), ['lib/billing.ts:164', 'lib/billing.ts:160-170']);
+    });
+    test('[plugin-0.6.2 G1] refs: a name or path described as new is `new`, not missing', () => {
+      const r = refsOfText('Put PURE plansFromOffering(offering) in a new lib module lib/paywallPlans.ts and keep resolvePackage.');
+      assert.deepStrictEqual(r.missing, []);
+      assert.deepStrictEqual(names(r.new).sort(), ['lib/paywallPlans.ts', 'plansFromOffering']);
+      const r2 = refsOfText('Extract the table into a new lib module lib/paywallPlans.ts and PURE plansFromOffering(offering) in a new lib module.');
+      assert.deepStrictEqual(r2.missing, []);
+      assert.deepStrictEqual(names(r2.new).sort(), ['lib/paywallPlans.ts', 'plansFromOffering']);
+      const far = refsOfText('We create things. ' + 'word '.repeat(12) + 'planrs.ts');
+      assert.deepStrictEqual(names(far.warn), ['planrs.ts'], 'more than 8 words away is not "new"');
+      assert.deepStrictEqual(far.new, []);
+    });
+    test('[plugin-0.6.2 G1] refs: a token with a line number is never new, even next to "new"', () => {
+      const r = refsOfText('Add a new helper in lib/paywallPlans.ts:12 and a new test in lib/billing.ts:999, create it.');
+      assert.deepStrictEqual(names(r.missing), ['lib/paywallPlans.ts:12', 'lib/billing.ts:999']);
+      assert.deepStrictEqual(r.new, []);
+    });
+    test('[plugin-0.6.2 G1] refs: two tracked files with one bare name resolve (ambiguous is not garbled); a unique bare name resolves; a missing one does not', () => {
+      const d = paywallRepo({ 'a/util.ts': 'export const x = 1;', 'b/util.ts': 'export const y = 1;', 'a/only.ts': 'x' });
+      const r = refsOf(d, 'Look at util.ts and only.ts and billing.ts, plus a/util.ts and nothere.ts.').out;
+      assert.deepStrictEqual(r.missing, []);
+      assert.deepStrictEqual(names(r.warn), ['nothere.ts']);
+    });
+    test('[plugin-0.6.2 G1] refs: directories resolve; plain words with a slash, versions and URLs are not paths', () => {
+      const r = refsOfText('The lib/ and screens/ folders, and/or either 24/7 or https://example.com/some/path.html at v1.2.3, e.g. w/o it, ci/cd and i/o. Also the lib/billing code.');
+      assert.deepStrictEqual(r.missing, []);
+      assert.deepStrictEqual(r.new, []);
+    });
+    test('[plugin-0.6.2 G1] refs: extensionless slash tokens are prose; only tokens with a known extension are paths', () => {
+      const d = paywallRepo();
+      const prose = refsOf(d, 'Branch feat/plugin-0.6.2 and task/foo, dirs tests/ and .sereno/ and src/Foo/bar, routes /status and /api/, pairs I/O Host/Origin HTTP/2 purchase/restore yearly/owned monthly/annual/lifetime, lib/billing and src/foo/bar:3.').out;
+      assert.deepStrictEqual([prose.checked, prose.missing.length, prose.new.length], [0, 0, 0], 'ignored entirely');
+      const r = refsOf(d, 'Also planrs.ts and MATCHEg.ts:148 and lib/paywall.ts.').out;
+      assert.deepStrictEqual(names(r.missing), ['MATCHEg.ts:148', 'lib/paywall.ts']);
+      assert.deepStrictEqual(names(r.warn), ['planrs.ts']);
+    });
+    test('[plugin-0.6.2 G1] refs: absolute, home and drive paths and bare extension fragments are skipped', () => {
+      const r = refsOfText('See /etc/gone.js, ~/.sereno/gone.json, C:/Users/x/gone.ts, C:\\Users\\x\\gone2.ts, and the .source.md and .md fragments.');
+      assert.deepStrictEqual(r.missing, []);
+      assert.strictEqual(r.checked, 0);
+    });
+    test('[plugin-0.6.2 G1] refs: a backslash path is normalised and checked', () => {
+      const r = refsOfText('Fix src\\MATCHEg.ts and lib\\billing.ts:148 and lib\\billing.ts:999.');
+      assert.deepStrictEqual(names(r.missing), ['src/MATCHEg.ts', 'lib/billing.ts:999']);
+    });
+    test('[plugin-0.6.2 G1] refs: an untracked file that exists on disk resolves (lstat, inside the root); a symlink-free absent one does not', () => {
+      const d = paywallRepo();
+      fs.mkdirSync(path.join(d, '.sereno', 'specs'), { recursive: true });
+      fs.writeFileSync(path.join(d, '.sereno', 'pipeline.json'), '{}');
+      fs.writeFileSync(path.join(d, '.sereno', 'specs', 'x.md'), 'a' + String.fromCharCode(10) + 'b' + String.fromCharCode(10));
+      const r = refsOf(d, 'Read .sereno/pipeline.json and .sereno/specs/x.md:2 and .sereno/specs/x.md:9 and ../outside.md and .sereno/specs/none.md.').out;
+      assert.deepStrictEqual(names(r.missing), ['.sereno/specs/x.md:9', '../outside.md', '.sereno/specs/none.md']);
+    });
+    test('[plugin-0.6.2 G1] refs: code-name shapes (camelCase, PascalCase, UPPER_SNAKE) are checked; plain words and short names are not', () => {
+      assert.ok(refsLib.isName('resolvePackage') && refsLib.isName('PaywallScreen') && refsLib.isName('PLAN_PRICES') && refsLib.isName('ONE_TIME_PRIavingPercent'));
+      assert.ok(!refsLib.isName('billing') && !refsLib.isName('Paywall') && !refsLib.isName('URL') && !refsLib.isName('aB') && !refsLib.isName('snake_case_name') && !refsLib.isName('x'.repeat(81)));
+      const r = refsOfText('Use the billing code, Paywall, snake_case_name and fooBarBaz.');
+      assert.deepStrictEqual(names(r.missing), ['fooBarBaz']);
+    });
+    test('[plugin-0.6.2 G1] refs: each list is capped at 50', () => {
+      const many = Array.from({ length: 70 }, (_, i) => 'src/gone' + i + '.ts').join(' ');
+      assert.strictEqual(refsOfText(many).missing.length, 50);
+      const bare = Array.from({ length: 70 }, (_, i) => 'gone' + i + '.ts').join(' ');
+      const rb = refsOfText(bare);
+      assert.deepStrictEqual([rb.missing.length, rb.warn.length], [0, 50]);
+      const newMany = 'a new ' + Array.from({ length: 70 }, (_, i) => 'fresh' + i + '.ts').join(' new ');
+      assert.strictEqual(refsOfText(newMany).new.length, 50);
+    });
+    test('[plugin-0.6.2 G1] refs: the text file must be a spec-<task>.source.md inside the cache dir, and it is deleted after the read', () => {
+      const d = paywallRepo();
+      const c = cacheOf(d);
+      const ok = refsOf(d, 'planrs.ts');
+      assert.strictEqual(ok.status, 0);
+      assert.ok(!fs.existsSync(ok.file), 'deleted after a good run');
+      const elsewhere = path.join(d, 'spec-pw.source.md');
+      fs.writeFileSync(elsewhere, 'planrs.ts');
+      const a = R(d, ['refs', '--text-file', elsewhere]);
+      assert.deepStrictEqual([a.out.ok, a.out.code, a.status], [false, 'path_refused', 6]);
+      assert.ok(fs.existsSync(elsewhere), 'a refused file is left alone');
+      fs.mkdirSync(path.join(c, 'sub'));
+      fs.writeFileSync(path.join(c, 'sub', 'spec-pw.source.md'), 'x');
+      assert.strictEqual(R(d, ['refs', '--text-file', path.join(c, 'sub', 'spec-pw.source.md')]).out.code, 'path_refused');
+      const bad = path.join(c, 'notes.md');
+      fs.writeFileSync(bad, 'x');
+      assert.strictEqual(R(d, ['refs', '--text-file', bad]).out.code, 'path_refused');
+      const wrongKind = path.join(c, 'spec-pw.md');
+      fs.writeFileSync(wrongKind, 'x');
+      assert.strictEqual(R(d, ['refs', '--text-file', wrongKind]).out.code, 'path_refused', 'the spec body file is not a source file');
+      assert.strictEqual(R(d, ['refs']).out.code, 'usage');
+      assert.strictEqual(R(d, ['refs', '--text-file', path.join(c, 'spec-none.source.md')]).out.code, 'not_found');
+      const big = path.join(c, 'spec-big.source.md');
+      fs.writeFileSync(big, 'a'.repeat(70 * 1024));
+      const b = R(d, ['refs', '--text-file', big]);
+      assert.deepStrictEqual([b.out.ok, b.out.code], [false, 'path_refused']);
+      assert.ok(!fs.existsSync(big), 'task text does not stay behind after a refused read');
+    });
+    test('[plugin-0.6.2 G1] cache names: refs needs a literal .source.md; spec --body-file refuses *.source.md', () => {
+      const d = paywallRepo();
+      const c = cacheOf(d);
+      const odd = path.join(c, 'spec-pwXsource.md');
+      fs.writeFileSync(odd, 'x');
+      assert.strictEqual(R(d, ['refs', '--text-file', odd]).out.code, 'path_refused', 'the dot before source is literal');
+      const src = path.join(c, 'spec-pw.source.md');
+      fs.writeFileSync(src, 'Use the goal.');
+      const b = R(d, ['spec', '--task', 'pw', '--builder', 'sonnet', '--kind', 'feature', '--reason', 'r', '--body-file', src]);
+      assert.deepStrictEqual([b.out.ok, b.out.code], [false, 'path_refused'], 'a source file is never a spec body');
+      assert.ok(fs.existsSync(src), 'and it is left alone');
+    });
+    test('[plugin-0.6.2 G1] refs: a git failure is ok:false with git_failed', () => {
+      const d = paywallRepo();
+      const r = refsLib.check({ root: path.join(d, 'no-such-dir'), text: 'lib/billing.ts' });
+      assert.deepStrictEqual([r.ok, r.code], [false, 'git_failed']);
+      gitLib.setExec(() => { throw new Error('boom'); });
+      try {
+        const r2 = refsLib.check({ root: d, text: 'resolvePackage' });
+        assert.deepStrictEqual([r2.ok, r2.code], [false, 'git_failed']);
+      } finally { gitLib.setExec(null); }
+      assert.strictEqual(refsLib.check({ root: d, text: 'resolvePackage' }).ok, true, 'real git again');
+    });
+    test('[plugin-0.6.2 G1] refs: not a git repo is not_a_repo; refs.js stays out of the app bundle list', () => {
+      const outside = mk();
+      assert.strictEqual(R(outside, ['refs', '--text-file', path.join(outside, '.sereno', 'cache', 'spec-a.source.md')]).out.code, 'not_a_repo');
+      const bundled = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files.filter((f) => /plugin\/bin\/lib\//.test(f));
+      assert.strictEqual(bundled.length, 4);
+      assert.ok(!bundled.some((f) => /refs\.js/.test(f)));
+    });
+
+    // ---- G1b strong and weak signals, git config, junctions, dotfiles ----
+    test('[plugin-0.6.2 G1] refs: the real garbled text splits into missing (strong) and warn (weak)', () => {
+      const d = paywallRepo();
+      const r = refsOf(d, 'SHARED PACKAGE MATCHEg.ts:148) parsePriceNumber and planrs.ts): unaready and whengetOfferings; PLAN_PRICES, ONE_TIME_PRIavingPercent resolvePackage lib/billing.ts:148 feat/plugin-0.6.2 purchase/restore').out;
+      assert.deepStrictEqual(names(r.missing), ['MATCHEg.ts:148', 'whengetOfferings', 'ONE_TIME_PRIavingPercent']);
+      assert.deepStrictEqual(names(r.warn), ['planrs.ts']);
+      assert.ok(r.warn.every((w) => w.why));
+    });
+    test('[plugin-0.6.2 G1] refs: product names, bare files and an email address do not stop the skill', () => {
+      const r = refsOfText('wire into settings.json using Node.js 24 and TypeScript on GitHub, mail robe@x.md or see google.rs and MyThing and fooBarBaz.');
+      assert.deepStrictEqual(names(r.missing), ['fooBarBaz']);
+      assert.deepStrictEqual(names(r.warn).sort(), ['GitHub', 'MyThing', 'Node.js', 'TypeScript', 'google.rs', 'settings.json'].sort());
+      assert.ok(!names(r.warn).concat(names(r.missing)).some((x) => /robe|x\.md/.test(x)), 'the address is not a path');
+      const n = refsOfText('Create a new TypeScript wrapper and a new helper.ts file.');
+      assert.deepStrictEqual([n.missing.length, n.warn.length], [0, 0], '"new" applies before the warn list');
+    });
+    test('[plugin-0.6.2 G1] refs: user git config (grep.lineNumber, grep.column, color.ui, color.grep) does not hide names', () => {
+      const d = paywallRepo();
+      git(d, 'config', 'grep.lineNumber', 'true'); git(d, 'config', 'grep.column', 'true'); git(d, 'config', 'color.ui', 'always'); git(d, 'config', 'color.grep', 'always');
+      const r = refsOf(d, 'Use resolvePackage and PLAN_PRICES and gonePackageName here.').out;
+      assert.strictEqual(r.ok, true);
+      assert.deepStrictEqual(names(r.missing), ['gonePackageName']);
+    });
+    test('[plugin-0.6.2 G1] refs: a grep that fails is git_failed, not "not found"', () => {
+      const d = paywallRepo();
+      git(d, 'config', 'grep.patternType', 'bogus');
+      const r = refsLib.check({ root: d, text: 'resolvePackage' });
+      assert.deepStrictEqual([r.ok, r.code], [false, 'git_failed']);
+    });
+    test('[plugin-0.6.2 G1] refs: a junction out of the root does not resolve and its files are never read', () => {
+      const d = paywallRepo();
+      const outside = mk();
+      fs.writeFileSync(path.join(outside, 'secret.md'), 'a\nb\nc\nd\ne\n');
+      fs.symlinkSync(outside, path.join(d, 'linked'), 'junction');
+      const r = refsOf(d, 'Read linked/secret.md and linked/secret.md:2 and linked/secret.md:99.').out;
+      assert.deepStrictEqual(names(r.missing), ['linked/secret.md', 'linked/secret.md:2', 'linked/secret.md:99']);
+      assert.ok(r.missing.every((m) => m.why === 'not a tracked file'), 'no line count was read: ' + JSON.stringify(r.missing));
+    });
+    test('[plugin-0.6.2 G1] refs: a dotfile is a path only when tracked; an untracked one is ignored', () => {
+      const d = paywallRepo({ '.eslintrc.json': '{}', 'cfg/.prettierrc.json': '{}' });
+      const r = refsOf(d, 'Edit .eslintrc.json and .prettierrc.json but not .eslitrc.json or .source.md.').out;
+      assert.deepStrictEqual([r.missing.length, r.warn.length, r.new.length], [0, 0, 0]);
+      assert.strictEqual(r.checked, 2, 'only the two tracked dotfiles were checked');
+    });
+    test('[plugin-0.6.2 G1] refs: one-letter-prefix brands and OS names are weak; real camelCase stays strong', () => {
+      const r = refsOfText('Use iPhone, iPad, macOS, tvOS, iCloud, jQuery and eBay with whengetOfferings and resolvePackage.');
+      assert.deepStrictEqual(names(r.warn), ['iPhone', 'iPad', 'macOS', 'tvOS', 'iCloud', 'jQuery', 'eBay']);
+      assert.deepStrictEqual(names(r.missing), ['whengetOfferings']);
+    });
+    test('[plugin-0.6.2 G1] refs: markdown emphasis (_Note_, __Bold_Text__) is skipped', () => {
+      const r = refsOfText('_Note_ the rule. _Important_: __Bold_Text__ and (_Aside_).');
+      assert.deepStrictEqual([r.missing.length, r.warn.length, r.new.length, r.checked], [0, 0, 0, 0]);
+    });
+    test('[plugin-0.6.2 G1] refs: no names from a URL or an @handle', () => {
+      const r = refsOfText('See https://example.com/docs/fooBarBaz?x=GoneThing and (http://host/otherGoneName) from @someUser and (@scope/pkgName) or @MyHandle.');
+      assert.deepStrictEqual([r.missing.length, r.warn.length, r.new.length, r.checked], [0, 0, 0, 0]);
+    });
+    test('[plugin-0.6.2 G1] refs: all-caps UPPER_SNAKE is weak, a mixed-case snake name stays strong', () => {
+      const r = refsOfText('Set NODE_ENV and CI_COMMIT_SHA, read $HOME_DIR, fix ONE_TIME_PRIavingPercent.');
+      assert.deepStrictEqual(names(r.warn), ['NODE_ENV', 'CI_COMMIT_SHA', 'HOME_DIR']);
+      assert.deepStrictEqual(names(r.missing), ['ONE_TIME_PRIavingPercent']);
+    });
+    test('[plugin-0.6.2 G1] refs: a bare dotted token with a :line resolves on disk or is missing, never ignored', () => {
+      const d = paywallRepo({ '.eslintrc.json': 'a\nb\nc\n' });
+      fs.writeFileSync(path.join(d, '.env.local'), 'A=1\nB=2\nC=3\n'); // untracked, present
+      const r = refsOf(d, 'Check .env.local:3 and .env.local:9 and .env.gone:2 and .eslintrc.json:3 and .eslintrc.json:8, but not .env.local or .env.gone.').out;
+      assert.deepStrictEqual(names(r.missing), ['.env.local:9', '.env.gone:2', '.eslintrc.json:8']);
+      assert.deepStrictEqual([r.warn.length, r.new.length], [0, 0]);
+      assert.strictEqual(r.checked, 5, 'the two line-less dotfiles are ignored');
+    });
+
+    // ---- G2 the task skill ----
+    test('[plugin-0.6.2 G2] task skill: goal source order (a) command, (b) message above, (c) ask', () => {
+      const t = rd('skills/task/SKILL.md');
+      const i = t.indexOf('**Where the goal comes from**'), j = t.indexOf('## 1. Understand the work');
+      assert.ok(i > 0 && j > i);
+      const sec = t.slice(i, j);
+      const a = sec.indexOf('- (a)'), b = sec.indexOf('- (b)'), c = sec.indexOf('- (c)');
+      assert.ok(a >= 0 && b > a && c > b, 'a then b then c');
+      assert.match(sec.slice(a, b), /text after the name in `\$ARGUMENTS`, flags excluded/);
+      assert.match(sec.slice(b, c), /latest message\(s\) before this command/);
+      assert.match(sec.slice(b, c), /only when that latest message is a request for work/);
+      assert.match(sec.slice(c), /including when the latest message is not a work request/);
+      assert.ok(sec.includes('Describe the task in a message, then run `/sereno:task <name>`'));
+      assert.match(t, /^argument-hint: <name> \[goal, or describe it in a message first\]$/m);
+    });
+    test('[plugin-0.6.2 G2] task skill: a name plus flags on an existing spec is a flags-only revision', () => {
+      const t = rd('skills/task/SKILL.md');
+      assert.match(t, /spec already exists and `\$ARGUMENTS` holds only a name and flags, it is a flags-only revision/);
+      assert.match(t, /do not read the conversation as a new goal, unless the user asked for a change/);
+      assert.ok(t.includes('skip it for a flags-only revision'));
+    });
+    test('[plugin-0.6.2 G2] task skill: the guard writes the source file, runs refs, handles both sources, and --refs-ok skips the stop', () => {
+      const t = rd('skills/task/SKILL.md');
+      const i = t.indexOf('## 4. Write the spec'), j = t.indexOf('### Runnable checks');
+      assert.ok(i > 0 && j > i);
+      const sec = t.slice(i, j);
+      assert.ok(sec.indexOf('spec-<name>.source.md') < sec.indexOf('<cacheDir>/spec-<name>.md`.'), 'source file before the spec file');
+      assert.ok(/Write tool to `<cacheDir>\/spec-<name>\.source\.md`/.test(sec));
+      assert.match(sec, /sereno\.js" refs --text-file <cacheDir>\/spec-<name>\.source\.md/);
+      assert.ok(sec.includes('`new`') && sec.includes('never stop you'));
+      assert.match(sec, /When \(a\) and \(b\) both exist, check both/);
+      assert.match(sec, /If \(a\) has `missing` items and \(b\) has none, use \(b\)/);
+      assert.match(sec, /still has `missing` items, end the turn: list them, say the text may have been cut while pasting, and say to paste the task as a message and run `\/sereno:task <name>` again/);
+      assert.match(sec, /`--refs-ok` in `\$ARGUMENTS` skips this stop/);
+      assert.ok(sec.includes('`warn` items never stop you'), 'warn never stops');
+      assert.ok(t.slice(t.indexOf('## 5. Report')).includes("Check these names, which aren't in the repo:"), 'the report lists the warn items');
+      assert.match(sec, /only when \(b\) is a request for work and describes the same work as \(a\)\. Otherwise stop with \(a\)'s missing list/);
+      assert.ok(sec.includes('Run it once per invocation') && t.includes('the one run of the check for this invocation'), 'the guard runs once');
+      assert.ok(t.includes('`--refs-ok`') && t.indexOf('`--refs-ok`') < t.indexOf('## 1.'), 'the flag is described where $ARGUMENTS is');
+      assert.ok(t.indexOf('text check described at the start of step 4') > t.indexOf('## 3.'), 'a new task is checked before its branch exists');
+    });
+    test('[plugin-0.6.2 G2] task skill: the report names the source; the old rules stand (Bash only, no background, never waits, narrow Edit)', () => {
+      const t = rd('skills/task/SKILL.md');
+      const rep = t.slice(t.indexOf('## 5. Report'));
+      assert.ok(rep.includes('"from your message above"') && rep.includes('"from the command"'));
+      assert.match(t, /^allowed-tools: Bash, Read, Grep, Glob, Edit\(\.sereno\/cache\/spec-\*\.md\)$/m);
+      assert.ok(t.includes('never waits for an answer') && t.includes('Never use `run_in_background`') && t.includes('never PowerShell or cmd'));
+    });
+
+    // ---- G3 docs and version ----
+    test('[plugin-0.6.2 G3] README: New in 0.6.2 and the refs command; manifests say 0.6.2', () => {
+      const r = rd('README.md');
+      assert.ok(r.includes('Version 0.6.2.') && r.includes('New in 0.6.2') && r.includes('New in 0.6.1'));
+      assert.ok(r.indexOf('New in 0.6.2') < r.indexOf('New in 0.6.1'));
+      for (const k of ['sereno.js refs --text-file', '--refs-ok', 'latest message', 'flags-only revision', '`{ ok, checked, missing, warn, new }`', '`warn`', 'known extension']) assert.ok(r.includes(k), k);
+      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.2');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.2');
+      assert.ok(fs.readFileSync(SERENO, 'utf8').includes('spec-review, refs.'), 'the command list in sereno.js names refs');
+    });
+
+    await atest('[plugin-0.6.2] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

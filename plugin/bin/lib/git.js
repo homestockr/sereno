@@ -10,7 +10,7 @@
  * spec.js, testrun.js, doctor.js, sereno.js):
  *   diff (--numstat, --stat: review.js), rev-parse, symbolic-ref, status (the clean-tree check, `cleanFiles`), merge-base (also
  *   `--is-ancestor`, `isAncestor`: is a task merged into its base)
- *   (skills), `merge --ff-only` and `branch -f` (next.js refreshQueuedBranch: only task/<name>), ls-tree, show, show-ref (spec.js: does the branch exist), branch (spec.js:
+ *   (skills), `merge --ff-only` and `branch -f` (next.js refreshQueuedBranch: only task/<name>), ls-tree, ls-files and grep (refs.js: tracked files, code names), show, show-ref (spec.js: does the branch exist), branch (spec.js:
  *   create task/<name>), worktree add / list / remove / prune (the base-suite checkout
  *   and the stale sweep), and --version (doctor).
  * Every revision is validated first and follows --end-of-options.
@@ -50,14 +50,14 @@ function safeEnv(base) {
 }
 
 /**
- * @param {string} cwd @param {string[]} args @param {number} [timeoutMs]
+ * @param {string} cwd @param {string[]} args @param {number} [timeoutMs] @param {number} [maxBytes] output cap, default 1 MB
  * @returns {string | null} trimmed stdout, or null when git fails
  */
-function git(cwd, args, timeoutMs) {
+function git(cwd, args, timeoutMs, maxBytes) {
   try {
     return String(execImpl('git', SAFE_ARGS.concat(args), {
       cwd, env: safeEnv(), encoding: 'utf8', timeout: timeoutMs || GIT_TIMEOUT_MS, windowsHide: true,
-      maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: maxBytes || 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
     })).trim();
   } catch (_e) { return null; }
 }

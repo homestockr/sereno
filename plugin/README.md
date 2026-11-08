@@ -7,8 +7,10 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.6.1. Windows is the first
+can observe the files it writes. Version 0.6.2. Windows is the first
 platform; other systems are not yet tested.
+
+New in 0.6.2: task text without the long paste. `/sereno:task <name>` with no goal now takes the task from your latest message(s) before the command, so you can paste a long task as a message and then run the short command (a long command line can lose chunks when pasted, and a spec built from damaged text sends the Builder wrong). Before it writes a spec, the skill checks the file paths and code names in the task text against the repo with the new `sereno.js refs` command; anything that does not resolve and is not described as new work stops the skill with a list. `--refs-ok` skips that stop. The report says whether the goal came from your message or from the command.
 
 New in 0.6.1: reviewer choice fixes. Light review chosen by the config (no spec `review`) now gets the same floor as a spec-chosen one: lockfiles, test files with removed lines, an earlier red team block (the README always said so), and the range guards (an empty diff, or a head that is not the tip of the task branch, gets the full review). Prose files (.md, .txt and so on) now count as docs, not tests, only under a `docs/` directory with no `tests/`, `test/`, `__tests__/` or `.sereno/` directory in the path; golden files and doctests under `tests/` still count as tests.
 
@@ -78,6 +80,8 @@ spec holds the acceptance criteria, what is out of scope, the tests required, an
 Builder chosen with its reason. It creates the branch `task/<name>` from your current
 branch and records that branch as the merge target. Run it again on the same name to
 revise the spec.
+
+Give a long task as a message first, then run `/sereno:task <name>` with no goal: the skill takes the task from your latest message(s) (the order is the text after the name, then your message, then it asks you to describe the task). Run again with only a name and flags and it stays a flags-only revision. The text is checked with `sereno.js refs --text-file <cacheDir>/spec-<name>.source.md`, which reads the file, deletes it and prints `{ ok, checked, missing, warn, new }`: file paths and code names (`lib/billing.ts:148`, `resolvePackage`, `PLAN_PRICES`) that do not resolve in the tracked files. A path is a token with a known extension (`ts`, `js`, `json`, `md`, `py`, and so on); extensionless slash words such as branches, routes and `I/O` are prose. A bare file name resolves when any tracked file has that name; a dotfile such as `.eslintrc.json` counts only when tracked. A line number past the end of a file is missing. An unresolved item with `new`, `create`, `add`, `introduce` or `extract` within 8 words is `new`, never a stop, unless it carries a line number. The rest split in two. `missing` holds strong signals: a path with a directory part, any path with a line number, a camelCase or UPPER_SNAKE name. `warn` holds weak ones: a bare file name (`settings.json`, `Node.js`) and a PascalCase name (`TypeScript`). If `missing` is not empty the skill stops and lists it; `--refs-ok` goes on anyway. `warn` items never stop it; the report lists them ("Check these names, which aren't in the repo") before you build. The text is never stored.
 
 **`/sereno:build <name>`** switches to `task/<name>` and runs the Builder the spec names.
 The Builder implements only the spec, adds its tests, and commits. The attempt is

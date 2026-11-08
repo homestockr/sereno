@@ -13,8 +13,14 @@
  * writes are under <repo>/.sereno/, through lib/fsafe.js.
  *
  * Subcommands: config, run-id, gate, attempt, paths, test, spec, branch, clean, context, recovery, brief, doctor,
- * next, after-check, preflight, reviewer, review-pack, serve, spec-review-needed, spec-review.
+ * next, after-check, preflight, reviewer, review-pack, serve, spec-review-needed, spec-review, refs.
  *
+ *   refs --text-file <cacheDir>/spec-<t>.source.md
+ *                           the garble guard of /sereno:task (0.6.2): reads the task text, deletes the file, checks the file
+ *                           paths and code names in it against the tracked files: { checked, missing: [{ref, kind, why}],
+ *                           new: [{ref, kind}] } (each capped at 50). A token that does not resolve is `new` when new/create/
+ *                           add/introduce/extract is within 8 words, `missing` otherwise (always missing with a line number).
+ *                           A git failure is { ok: false, code: git_failed }. Read-only; never stores the text.
  *   spec-review-needed --task <t>
  *                           read-only: { needed, reason }. The red team reads a spec before the first build unless
  *                           roles.redTeam.specReview is false, the red team is off, or the spec's kind is in
@@ -110,6 +116,7 @@ const nextLib = require('./lib/next.js');
 const reviewLib = require('./lib/review.js');
 const serveLib = require('./lib/serve.js');
 const specReviewLib = require('./lib/specreview.js');
+const refsLib = require('./lib/refs.js');
 const preflightLib = require('./lib/preflight.js');
 const { projectId } = require('./lib/projectid.js');
 
@@ -552,7 +559,7 @@ const COMMANDS = {
     let cacheRel = null;
     if (a.stdin) body = readStdin();
     else {
-      const cf = cacheFileArg(root, /** @type {string} */ (a['body-file']), /^spec-([A-Za-z0-9._-]+)\.md$/);
+      const cf = cacheFileArg(root, /** @type {string} */ (a['body-file']), /^spec-(?![A-Za-z0-9._-]*\.source\.md$)([A-Za-z0-9._-]+)\.md$/);
       if (cf.m[1] !== task) throw new SerenoError('path_refused', 'spec file does not match --task');
       cacheRel = cf.rel;
       body = fsafe.readFile(cacheRel, CACHE_FILE_MAX).toString('utf8');
@@ -650,6 +657,18 @@ const COMMANDS = {
     const task = rec.checkTask(str(a, 'task'));
     const { root } = needRepo();
     return reviewerChoice(root, task, str(a, 'base') || '', str(a, 'head') || '');
+  },
+
+  refs(/** @type {string[]} */ argv) {
+    const a = parseArgs(argv, { value: ['text-file'], bool: ['json'] });
+    if (!a['text-file']) throw new SerenoError('usage', 'refs needs --text-file');
+    const { root, fsafe } = needRepo();
+    const cf = cacheFileArg(root, /** @type {string} */ (a['text-file']), /^spec-([A-Za-z0-9._-]+)\.source\.md$/);
+    rec.checkTask(cf.m[1]);
+    let text;
+    try { text = fsafe.readFile(cf.rel, CACHE_FILE_MAX).toString('utf8'); }
+    finally { try { fsafe.removeFile(cf.rel); } catch (_e) { /* a refused delete must not hide the read error */ } }
+    return refsLib.check({ root, text });
   },
 
   'spec-review-needed'(/** @type {string[]} */ argv) {
