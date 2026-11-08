@@ -82,3 +82,16 @@ Each step adds its own tests in `tools/test.js`. Run `refs` against a temp repo 
 - The on-disk (untracked) resolve compares `realpath` of the target with `realpath` of the root; a junction
   or symlink out of the root doesn't resolve and is never read for a line count.
 - Accepted limit: a path truncated at its tail with no extension (`lib/billin`) is prose and isn't caught.
+
+## Addendum: prose that must not stop the skill
+
+- Weak (warn, never stop): a one-letter-prefix brand (`iPhone`, `iPad`, `iCloud`, `jQuery`, `eBay`), a lowercase prefix
+  plus `OS` (`macOS`, `tvOS`), and an all-caps UPPER_SNAKE name (`NODE_ENV`, `CI_COMMIT_SHA`, `$HOME_DIR` with the `$`
+  stripped). A mixed-case snake name (`ONE_TIME_PRIavingPercent`) and other camelCase names
+  (`whengetOfferings`, `resolvePackage`) stay strong.
+- Skipped: markdown emphasis (a token that starts and ends with `_`), a word containing `://`, and a word starting with `@`.
+- A bare dotted token with a `:line` (`.env.local:3`) is never ignored. It resolves if the file exists inside the root
+  with the line in range; otherwise it is `missing`.
+- Accepted limits, these garbles don't stop the skill: PascalCase garbles (`PaywallScren`) and all-caps env-style
+  names only warn; lowercase-collapsed garbles (`resolvepackage`, `planrsts`) aren't caught.
+- `git grep --no-column` needs git 2.19 or newer.

@@ -52,10 +52,15 @@ function isName(s) {
   return lower && caps >= 2; // PascalCase
 }
 
-/** PascalCase only (not UPPER_SNAKE, not camelCase): a product or language name is as likely as a symbol.
+/** Weak: PascalCase (a product or language name is as likely as a symbol), an all-caps
+ * UPPER_SNAKE (NODE_ENV, an env var), a one-letter-prefix brand (iPhone, jQuery, eBay) or
+ * a lowercase prefix plus OS (macOS, tvOS). A mixed-case snake name (a damaged one) and
+ * other camelCase names are strong.
  * @param {string} s */
 function isWeakName(s) {
+  if (/^[A-Z0-9]+(_[A-Z0-9]+)+$/.test(s)) return true;
   if (s.includes('_') && /[A-Z]/.test(s)) return false;
+  if (/^[a-z][A-Z]/.test(s) || /^[a-z]+OS$/.test(s)) return true;
   return !(/^[a-z_$]/.test(s) && /[a-z0-9_$][A-Z]/.test(s));
 }
 
@@ -72,21 +77,30 @@ function extract(text) {
   /** @param {Token} t */
   const addTok = (t) => { const k = t.kind + '\0' + t.ref + '\0' + t.idx; if (!seen.has(k)) { seen.add(k); tokens[tokens.length] = t; } };
   words.forEach((word, idx) => {
+    // Names come from code-looking tokens: not from a URL, not from an @handle.
+    if (word.includes('://') || strip(word).startsWith('@')) return;
     for (const raw of word.split(/[`'"()[\]{}<>,;|]+/)) {
       const part = strip(raw).replace(/[\\]/g, '/');
-      if (!part) continue;
+      if (!part || part.startsWith('@')) continue;
+      // _Note_ and __Bold_Text__ are markdown emphasis.
+      if (/^_.*_$/.test(part)) continue;
       // Absolute paths, home paths and drive paths are not repo-relative: skipped whole.
       if (/^[/~]/.test(part) || /^[A-Za-z]:\//.test(part)) continue;
       const m = /^([\w./-]+?)(?::(\d+)(?:-(\d+))?)?$/.exec(part);
       // A path candidate ends in a known extension. Extensionless slash tokens (branches,
       // dirs, routes, I/O) are prose. A bare fragment such as .md or .source.md is not a path.
-      if (m && /[A-Za-z]/.test(m[1]) && EXT_RE.test(m[1])) {
+      // A bare dotted token with a :line (.env.local:3) is a path candidate whatever its extension.
+      const dotLine = m !== null && m[2] !== undefined && /^\.[\w-]+(?:\.[\w-]+)*$/.test(m[1]);
+      if (m && /[A-Za-z]/.test(m[1]) && (EXT_RE.test(m[1]) || dotLine)) {
         // A bare dotted token (.eslintrc.json) is decided in check(): a path only when tracked.
         const dot = m[1].startsWith('.') && !m[1].includes('/');
         addTok({ ref: part, kind: 'path', dot, path: m[1].replace(/^\.\//, ''), from: m[2] === undefined ? undefined : Number(m[2]), to: m[3] === undefined ? undefined : Number(m[3]), idx });
         continue;
       }
-      for (const id of part.split(/[^A-Za-z0-9_$]+/)) if (isName(id)) addTok({ ref: id, kind: 'name', weak: isWeakName(id), idx });
+      for (const id0 of part.split(/[^A-Za-z0-9_$]+/)) {
+        const id = id0.replace(/^\$+/, ''); // $HOME_DIR -> HOME_DIR
+        if (isName(id)) addTok({ ref: id, kind: 'name', weak: isWeakName(id), idx });
+      }
     }
   });
   return { tokens, words };
@@ -188,8 +202,9 @@ function check(o) {
         const hits = /** @type {string[]} */ (byName.get(p));
         resolved = true; // more than one match is ambiguous, not garbled
         if (hits.length === 1) file = hits[0];
-      } else if (t.dot) {
+      } else if (t.dot && t.from === undefined) {
         checked--; // an untracked bare dotfile name is prose or a typo, not a reference
+        // (with a :line it is a reference: it falls through to the on-disk check, and a miss is strong)
         continue;
       } else {
         // Untracked but present (.sereno/pipeline.json, a new local file): lstat, inside root,

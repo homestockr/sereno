@@ -19985,6 +19985,32 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual([r.missing.length, r.warn.length, r.new.length], [0, 0, 0]);
       assert.strictEqual(r.checked, 2, 'only the two tracked dotfiles were checked');
     });
+    test('[plugin-0.6.2 G1] refs: one-letter-prefix brands and OS names are weak; real camelCase stays strong', () => {
+      const r = refsOfText('Use iPhone, iPad, macOS, tvOS, iCloud, jQuery and eBay with whengetOfferings and resolvePackage.');
+      assert.deepStrictEqual(names(r.warn), ['iPhone', 'iPad', 'macOS', 'tvOS', 'iCloud', 'jQuery', 'eBay']);
+      assert.deepStrictEqual(names(r.missing), ['whengetOfferings']);
+    });
+    test('[plugin-0.6.2 G1] refs: markdown emphasis (_Note_, __Bold_Text__) is skipped', () => {
+      const r = refsOfText('_Note_ the rule. _Important_: __Bold_Text__ and (_Aside_).');
+      assert.deepStrictEqual([r.missing.length, r.warn.length, r.new.length, r.checked], [0, 0, 0, 0]);
+    });
+    test('[plugin-0.6.2 G1] refs: no names from a URL or an @handle', () => {
+      const r = refsOfText('See https://example.com/docs/fooBarBaz?x=GoneThing and (http://host/otherGoneName) from @someUser and (@scope/pkgName) or @MyHandle.');
+      assert.deepStrictEqual([r.missing.length, r.warn.length, r.new.length, r.checked], [0, 0, 0, 0]);
+    });
+    test('[plugin-0.6.2 G1] refs: all-caps UPPER_SNAKE is weak, a mixed-case snake name stays strong', () => {
+      const r = refsOfText('Set NODE_ENV and CI_COMMIT_SHA, read $HOME_DIR, fix ONE_TIME_PRIavingPercent.');
+      assert.deepStrictEqual(names(r.warn), ['NODE_ENV', 'CI_COMMIT_SHA', 'HOME_DIR']);
+      assert.deepStrictEqual(names(r.missing), ['ONE_TIME_PRIavingPercent']);
+    });
+    test('[plugin-0.6.2 G1] refs: a bare dotted token with a :line resolves on disk or is missing, never ignored', () => {
+      const d = paywallRepo({ '.eslintrc.json': 'a\nb\nc\n' });
+      fs.writeFileSync(path.join(d, '.env.local'), 'A=1\nB=2\nC=3\n'); // untracked, present
+      const r = refsOf(d, 'Check .env.local:3 and .env.local:9 and .env.gone:2 and .eslintrc.json:3 and .eslintrc.json:8, but not .env.local or .env.gone.').out;
+      assert.deepStrictEqual(names(r.missing), ['.env.local:9', '.env.gone:2', '.eslintrc.json:8']);
+      assert.deepStrictEqual([r.warn.length, r.new.length], [0, 0]);
+      assert.strictEqual(r.checked, 5, 'the two line-less dotfiles are ignored');
+    });
 
     // ---- G2 the task skill ----
     test('[plugin-0.6.2 G2] task skill: goal source order (a) command, (b) message above, (c) ask', () => {
