@@ -159,8 +159,12 @@ checks that list.
 9. **Plugin 0.6.0 (merged 2026-10-30).** The spec chooses the review (`review: full | light |
    none`); a safety floor still forces the full red team on sensitive paths, and a task the red
    team has blocked keeps the full review. Plan: `docs/plans/plugin-0.6-review-choice.md`. Two
-   lows open, both failing closed.
-10. **Next: alpha.8.** Escaped-defect measurement per reviewer in the app.
+   lows open, both failing closed. Then 0.6.1 (the lows fixed, merged 2026-11-07) and 0.6.2
+   (task goal from the conversation, `refs` garble guard, merged 2026-11-08).
+10. **alpha.8 (in progress on `feat/alpha8`).** Escaped defects per reviewer: Pipeline > Signals
+    card, 90 days, grouped by reviewer and review size. It ships with plugin 0.6.3, where the gate
+    records `reviewer: { agent, light }`. Tasks merged without a review now show as merged.
+    Plan: `docs/plans/alpha8-escaped-defects.md`.
 
 Open: Dependabot #54 (`minimatch`, dev-only, via electron-builder; the fix needs minimatch 11,
 which electron-builder doesn't accept yet). The v1.3.x draft release

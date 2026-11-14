@@ -247,9 +247,10 @@ Every component of the pipeline encodes an assumption about what the model canno
 Those assumptions go stale, so remove one piece at a time and see what you lose. Turn
 `roles.redTeam.light.kinds` on for more kinds, turn `roles.redTeam.specReview` off, or try the
 `lean` preset for a week. Then compare follow-up fixes (`/sereno:task --fixes <task>` records
-one) and cost per merge (an estimate) against the week before. The Sereno app will show escaped
-defects per reviewer in a later release (alpha.8). Nothing switches automatically: you change
-the config and you decide whether to keep it.
+one) and cost per merge (an estimate) against the week before. From alpha.8 the Sereno app shows
+this on Pipeline > Signals, "Escaped defects": merges, follow-up fixes and red-team cost per
+merge (est.) for each reviewer and review size. Nothing switches automatically: you change the
+config and you decide whether to keep it.
 
 ## Recovery
 
