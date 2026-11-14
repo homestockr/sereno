@@ -12619,7 +12619,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     // Expected key sets, walked recursively against the real body.
     const KEYS = {
-      body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin'],
+      body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'escapes', 'routing', 'plugin'],
       project: ['id', 'name', 'tasks', 'idle'],
       task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt'],
       attempt: ['attempt', 'outcome', 'startedAt', 'endedAt', 'sessionId'], activity: ['at', 'kind', 'outcome'],
@@ -12749,6 +12749,87 @@ test('missing rate_limits degrades instead of throwing', () => {
         for (const k of ROLES) assert.deepStrictEqual(b.roleSpend.roles[k], { costUsd: 0, explicit: 0, inferred: 0, unattributed: 0 });
         assert.deepStrictEqual(b.redTeamPerMerge, { mean: null, n: 0, excluded: 2 });
       } finally { await haltP(c); }
+    });
+
+    // alpha8 A3: escapes in the /api/pipeline body.
+    const escSnap = (hiddenToo) => {
+      const fr = (extra) => Object.assign({ kind: 'gate', agent: 'red-team', light: false, at: iso(NOW - 2 * DAY), agentId: 'a-esc', sessionId: 's1', model: 'claude-fable-5-1' }, extra || {});
+      const o = { p1: { pipeline: { tasks: [
+        tview('t-m1', 'merged', { finalReview: fr() }),
+        tview('t-m2', 'merged', { finalReview: fr({ agent: 'red-team-lean', light: true, agentId: 'a-none' }) }),
+        tview('t-fix', 'builder', { fixes: 't-m1', specBody: 'SECRET-BODY' }),
+      ], skipped: 0, error: false, redTeam: null, hasData: true } } };
+      if (hiddenToo) o.ph = { pipeline: { tasks: [tview('t-h', 'merged', { finalReview: fr() })], skipped: 0, error: false, redTeam: null, hasData: true } };
+      return o;
+    };
+    const escGrp = (b, k) => b.escapes.groups.find((g) => g.key === k);
+
+    await atest('[alpha8 A3] /api/pipeline: escapes body shape, a merged task with a follow-up fix lands in its reviewer group', async () => {
+      const l = openLedger({ file: ':memory:' });
+      l.ingestRequests([rqL({ requestKey: '1', requestId: 'r1', costMicros: 3000000 })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a-esc', ts: NOW }]);
+      const c = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(true) }, ledger: l });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        same(b.escapes, ['days', 'merges', 'unmatched', 'groups'], 'escapes');
+        assert.strictEqual(b.escapes.days, 90);
+        assert.strictEqual(b.escapes.merges, 2, 'the hidden project is not counted');
+        assert.strictEqual(b.escapes.unmatched, 0);
+        for (const g of b.escapes.groups) { same(g, ['key', 'label', 'merges', 'escaped', 'fixes', 'ratePct', 'redTeamPerMerge'], 'group'); same(g.redTeamPerMerge, ['mean', 'n', 'excluded'], 'group rpm'); }
+        const full = escGrp(b, 'red-team|full');
+        assert.strictEqual(full.merges, 1); assert.strictEqual(full.escaped, 1); assert.strictEqual(full.fixes, 1);
+        assert.strictEqual(full.ratePct, null, 'under 5 merges gives no rate');
+        assert.strictEqual(full.label, 'red-team \u00b7 full');
+        assert.deepStrictEqual(full.redTeamPerMerge, { mean: 3, n: 1, excluded: 0 });
+        const lite = escGrp(b, 'red-team-lean|light');
+        assert.strictEqual(lite.merges, 1); assert.strictEqual(lite.escaped, 0);
+        assert.strictEqual(lite.redTeamPerMerge.mean, null);
+      } finally { await haltP(c); l.close(); }
+    });
+
+    await atest('[alpha8 A3] /api/pipeline: with no ledger every escapes red-team $/merge is null', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(false) } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        assert.ok(b.escapes.groups.length >= 1);
+        for (const g of b.escapes.groups) assert.strictEqual(g.redTeamPerMerge.mean, null);
+        assert.strictEqual(escGrp(b, 'red-team|full').redTeamPerMerge.excluded, 1);
+      } finally { await haltP(c); }
+    });
+
+    await atest('[alpha8 A3] /api/pipeline: an escapes() throw gives the empty shape and the rest of the body survives', async () => {
+      const orig = pl.escapes;
+      pl.escapes = () => { throw new Error('boom'); };
+      const c = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(false) } });
+      try {
+        const r = await getP(c.port, '/api/pipeline');
+        assert.strictEqual(r.status, 200);
+        const b = JSON.parse(r.text);
+        checkBody(b);
+        assert.deepStrictEqual(b.escapes, { days: 90, merges: 0, unmatched: 0, groups: [] });
+      } finally { pl.escapes = orig; await haltP(c); }
+    });
+
+    await atest('[alpha8 A3] /api/pipeline: groups are capped at 20 and no spec text, finding text or path appears in escapes', async () => {
+      const orig = pl.escapes;
+      pl.escapes = () => ({ days: 90, merges: 25, unmatched: 0, groups: Array.from({ length: 30 }, (_, i) => ({
+        key: 'k' + i + 'x'.repeat(200), label: 'L' + i + '\n', merges: 1, escaped: 0, fixes: 0, ratePct: null, command: 'SECRET-CMD', specBody: 'SECRET-BODY',
+        redTeamPerMerge: { mean: NaN, n: 0, excluded: 1, prompt: 'SECRET-PROMPT' } })) });
+      const c = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(false) } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        assert.strictEqual(b.escapes.groups.length, 20);
+        assert.ok(b.escapes.groups.every((g) => g.key.length <= 80 && !/[\x00-\x1f]/.test(g.label) && g.redTeamPerMerge.mean === null));
+        assert.ok(!JSON.stringify(b.escapes).includes('SECRET'));
+      } finally { pl.escapes = orig; await haltP(c); }
+      const c2 = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(false) } });
+      try {
+        const e = JSON.stringify(JSON.parse((await getP(c2.port, '/api/pipeline')).text).escapes);
+        for (const bad of ['SECRET', 'C:\\\\secret', '.sereno/specs', 'src/a.js', 'findings', 'specBody']) assert.ok(!e.includes(bad), 'leaked ' + bad);
+      } finally { await haltP(c2); }
     });
 
     await atest('[4b-layout-api] builderModel maps the spec builder to its agent model; unknown or missing is null', async () => {
@@ -14315,7 +14396,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       try {
         const text = await getText(c.port);
         const b = JSON.parse(text);
-        const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin', 'versions',
+        const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'escapes', 'groups', 'key', 'label', 'merges', 'unmatched', 'escaped', 'fixes', 'ratePct', 'routing', 'plugin', 'versions',
           'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt', 'endedAt', 'at',
           'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'sessionId', 'severity', 'kind', 'file', 'line', 'summary',
           'days', 'outcomes', 'seq', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',

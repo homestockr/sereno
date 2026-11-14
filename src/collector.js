@@ -720,6 +720,7 @@ function createCollector(store, port, opts) {
     const outProjects = [];
     const sigIn = [];
     const routingProjects = [];
+    const escIn = [];
     for (const p of reg) {
       if (p.hidden) continue;
       const st = snap[p.id];
@@ -742,6 +743,7 @@ function createCollector(store, port, opts) {
       }
       outProjects.push({ id: p.id, name: p.name, tasks: active.map((t) => pipeTask(t, models)), idle });
       sigIn.push({ id: p.id, tasks: all.map((t) => ({ task: t.task, stage: t.stage, gates: Array.isArray(t.gates) ? t.gates : [] })) });
+      escIn.push({ id: p.id, tasks: all.map((t) => ({ task: t.task, stage: t.stage, fixes: t.fixes, finalReview: t.finalReview })) });
       routingProjects.push({ id: p.id, redTeam: pipeRedTeam(rt) });
     }
     const sg = pipelineLib.signals(sigIn, asOf);
@@ -765,11 +767,22 @@ function createCollector(store, port, opts) {
     }
     let rpm;
     try { rpm = pipelineLib.redTeamPerMerge(sigIn, ledger && rs ? ledger.spendForAgent : null); } catch (_) { rpm = { mean: null, n: 0, excluded: 0 }; }
+    let esc;
+    try { esc = pipelineLib.escapes(escIn, asOf, models, ledger && rs ? ledger.spendForAgent : null); } catch (_) { esc = { days: 90, merges: 0, unmatched: 0, groups: [] }; }
+    const escNum = (v) => pNum(v) || 0;
+    const escapes = {
+      days: escNum(esc && esc.days), merges: escNum(esc && esc.merges), unmatched: escNum(esc && esc.unmatched),
+      groups: (esc && Array.isArray(esc.groups) ? esc.groups : []).slice(0, 20).map((g) => ({
+        key: pStr(g.key, 80), label: pStr(g.label, 100), merges: escNum(g.merges), escaped: escNum(g.escaped), fixes: escNum(g.fixes), ratePct: pNum(g.ratePct),
+        redTeamPerMerge: { mean: pNum(g.redTeamPerMerge && g.redTeamPerMerge.mean), n: escNum(g.redTeamPerMerge && g.redTeamPerMerge.n), excluded: escNum(g.redTeamPerMerge && g.redTeamPerMerge.excluded) },
+      })),
+    };
     return {
       projects: outProjects,
       signals,
       roleSpend: { enabled: !!rs, days: PIPE_DAYS, roles },
       redTeamPerMerge: { mean: pNum(rpm.mean), n: rpm.n, excluded: rpm.excluded },
+      escapes,
       routing: {
         models: models.map((m) => ({ agent: m.agent, role: m.role, model: m.model })),
         projects: routingProjects,
