@@ -409,7 +409,9 @@ const COMMANDS = {
     // 0.6.3: who reviewed and how big. light is null unless the flag is exactly true or false; the whole
     // field is left out when both are null, so older readers see the older shape.
     const lightRaw = str(a, 'light');
-    const reviewerAgent = agentName === undefined ? null : matchId(agentName, '--agent-name', id);
+    // The app's rule: drop a leading "sereno:", keep only [a-z0-9-]{1,64}, else null. Never an error here.
+    const reviewerAgentRaw = agentName === undefined ? '' : agentName.replace(/^sereno:/, '');
+    const reviewerAgent = /^[a-z0-9-]{1,64}$/.test(reviewerAgentRaw) ? reviewerAgentRaw : null;
     const reviewerLight = lightRaw === 'true' ? true : (lightRaw === 'false' ? false : null);
     if (reviewerAgent !== null || reviewerLight !== null) /** @type {any} */ (gate).reviewer = { agent: reviewerAgent, light: reviewerLight };
     if (checks.length) /** @type {any} */ (gate).checks = checks;

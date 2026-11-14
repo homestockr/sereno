@@ -914,7 +914,9 @@ function escapesHtml(ex) {
   const days = cnt(ex.days) || 90;
   const title = '<h3>Escaped defects (' + days + ' days)</h3>';
   const groups = Array.isArray(ex.groups) ? ex.groups.filter((g) => g && typeof g === 'object') : [];
-  if (!groups.length || !cnt(ex.merges)) return '<div class="sig">' + title + '<p class="empty-note">No merges in the last ' + days + ' days.</p></div>';
+  const un = cnt(ex.unmatched);
+  const note = un ? '<p class="quiet-text">' + un + (un === 1 ? ' fix names a task that isn’t a merge here.' : ' fixes name a task that isn’t a merge here.') + '</p>' : '';
+  if (!groups.length || !cnt(ex.merges)) return '<div class="sig">' + title + '<p class="empty-note">No merges in the last ' + days + ' days.</p>' + note + '</div>';
   const rows = groups.map((g) => {
     const label = String(g.label == null ? '' : g.label);
     const at = label.indexOf(' · ');
@@ -932,8 +934,6 @@ function escapesHtml(ex) {
   }).join('');
   const table = '<div class="table-wrap"><table class="xtable" aria-label="Escaped defects by reviewer"><thead><tr><th>Reviewer</th><th>Size</th>'
     + '<th class="num">Merges</th><th class="num">Fixed later</th><th class="num">Fixes</th><th class="num">Red team per merge</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
-  const un = cnt(ex.unmatched);
-  const note = un ? '<p class="quiet-text">' + un + (un === 1 ? ' fix names a task that isn’t a merge here.' : ' fixes name a task that isn’t a merge here.') + '</p>' : '';
   const hint = groups.every((g) => !cnt(g.fixes)) ? '<p class="quiet-text">' + esc('No follow-up fixes recorded yet. Mark one with /sereno:task <name> --fixes <merged task>.') + '</p>' : '';
   return '<div class="sig">' + title + table + note + hint + '</div>';
 }

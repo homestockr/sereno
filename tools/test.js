@@ -11988,7 +11988,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(v.step, 'Spec written');
           assert.strictEqual(v.reviewRuns, 0);
           assert.strictEqual(v.expired, false);
-          assert.deepStrictEqual(Object.keys(v).sort(), ['attempt', 'expired', 'findings', 'fixes', 'gate', 'reason', 'reviewRuns', 'stage', 'startedAt', 'step', 'task', 'updatedAt']);
+          assert.deepStrictEqual(Object.keys(v).sort(), ['attempt', 'createdAt', 'expired', 'findings', 'fixes', 'gate', 'reason', 'reviewRuns', 'stage', 'startedAt', 'step', 'task', 'updatedAt']);
         });
 
         await atest('[4b-stage] builder: an environment error is retried', async () => {
@@ -12124,6 +12124,27 @@ test('missing rate_limits degrades instead of throwing', () => {
             assert.deepStrictEqual(v.finalReview, { kind: 'skip', agent: null, light: null, skip, model: null, at: '2026-10-15T10:07:00.000Z', sessionId: null, agentId: null });
           });
         }
+
+        await atest('[alpha8 fix] a re-opened task whose latest attempt is skipped: a head not in base is not merged despite a stale merged gate; in base it is merged as a skip; createdAt is the spec created_at', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          assert.strictEqual((await viewOf(r, 'demo')).stage, 'merged');
+          g(r, 'checkout', '-q', 'task/demo'); g(r, 'commit', '-q', '--allow-empty', '-m', 'again'); const tip2 = g(r, 'rev-parse', 'HEAD'); g(r, 'checkout', '-q', 'main');
+          putAtt(r, 'demo', 2, { outcome: 'skipped', skip: 'spec', head_commit: tip2, review_run_id: null, ended_at: '2026-10-15T10:30:00.000Z' });
+          const v = await viewOf(r, 'demo');
+          assert.notStrictEqual(v.stage, 'merged', 'the stale gate must not label it merged');
+          assert.ok(!('finalReview' in v));
+          assert.strictEqual(v.createdAt, Date.parse('2026-10-15T09:00:00.000Z'));
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge again', 'task/demo');
+          const w = await viewOf(r, 'demo');
+          assert.strictEqual(w.stage, 'merged');
+          assert.strictEqual(w.finalReview.kind, 'skip');
+          // an old record with no head_commit keeps the gate fallthrough
+          const r2 = mkrepo(); passTask(r2, 'demo');
+          g(r2, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          putAtt(r2, 'demo', 2, { outcome: 'skipped', skip: 'off', head_commit: null, review_run_id: null });
+          assert.strictEqual((await viewOf(r2, 'demo')).stage, 'merged');
+        });
 
         await atest('[alpha8 A2] skipped merge: a pruned head (git 128) is not merged, and any other git failure is stage unknown', async () => {
           const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
@@ -12460,12 +12481,12 @@ test('missing rate_limits degrades instead of throwing', () => {
     const MODELS = [
       { agent: 'sereno:red-team', role: 'red-team', model: 'fable' },
       { agent: 'sereno:red-team-lean', role: 'red-team', model: 'opus' },
-      { agent: 'sereno:red-team-browse', role: 'red-team', model: 'opus' },
+      { agent: 'sereno:red-team-browse', role: 'red-team', model: 'fable' },   // as shipped: red-team and red-team-browse share fable
       { agent: 'sereno:builder', role: 'builder', model: 'sonnet' },
     ];
     const FR = (extra) => Object.assign({ kind: 'gate', agent: 'red-team', light: false, skip: null, model: 'claude-fable-5', at: new Date(NOW - 5 * D).toISOString(), sessionId: 's1', agentId: null }, extra || {});
     const M = (task, fr) => ({ task, stage: 'merged', fixes: null, finalReview: fr || FR() });
-    const FX = (task, fixes) => ({ task, stage: 'builder', fixes, finalReview: undefined });
+    const FX = (task, fixes, createdAt) => ({ task, stage: 'builder', fixes, finalReview: undefined, createdAt: createdAt === undefined ? NOW - D : createdAt });
     const grp = (e, key) => e.groups.find((x) => x.key === key);
 
     test('[alpha8 A2] escapes: empty and junk input give the empty shape', () => {
@@ -12513,15 +12534,15 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     test('[alpha8 A2] escapes: an old gate (no reviewer) names its agent by a model family only one red-team agent uses, size unknown', () => {
       const old = (model) => FR({ agent: null, light: null, model });
-      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-fable-5')), M('b', old('fable'))] }], NOW, MODELS);
-      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges]), [['red-team|unknown', 'red-team · size unknown', 2]]);
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-opus-5')), M('b', old('opus'))] }], NOW, MODELS);
+      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges]), [['red-team-lean|unknown', 'red-team-lean · size unknown', 2]]);
     });
 
     test('[alpha8 A2] escapes: an old gate whose family two reviewers share, an unknown model, or no models at all is Unknown', () => {
       const old = (model) => FR({ agent: null, light: null, model });
-      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-opus-5')), M('b', old('mystery-1')), M('c', old(null))] }], NOW, MODELS);
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-fable-5')), M('b', old('mystery-1')), M('c', old(null))] }], NOW, MODELS);
       assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges]), [['unknown', 'Unknown', 3]]);
-      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a', old('fable'))] }], NOW).groups[0].key, 'unknown');
+      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a', old('opus'))] }], NOW).groups[0].key, 'unknown');
       // a builder on the same family is not a reviewer
       assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a', old('sonnet'))] }], NOW, MODELS).groups[0].key, 'unknown');
     });
@@ -12567,6 +12588,44 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.ok(!/session|agentId|s1/.test(s), s);
       assert.deepStrictEqual(Object.keys(e).sort(), ['days', 'groups', 'merges', 'unmatched']);
       assert.deepStrictEqual(Object.keys(e.groups[0]).sort(), ['escaped', 'fixes', 'key', 'label', 'merges', 'ratePct', 'redTeamPerMerge']);
+    });
+
+    test('[alpha8 fix] escapes with the real agentModels(): a pre-0.6.3 fable gate is Unknown (two agents share fable), an opus gate is red-team-lean, size unknown', () => {
+      const real = pl.agentModels();
+      const fam = (a) => (real.find((m) => m.agent === a) || {}).model;
+      assert.strictEqual(fam('sereno:red-team'), 'fable'); assert.strictEqual(fam('sereno:red-team-browse'), 'fable');
+      const old = (model) => FR({ agent: null, light: null, model });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-fable-5')), M('b', old('claude-opus-5'))] }], NOW, real);
+      assert.deepStrictEqual(e.groups.map((x) => x.label).sort(), ['Unknown', 'red-team-lean · size unknown']);
+    });
+
+    test('[alpha8 fix] escapes: a merge counts both as a merge and, when it names another merge, as a fix', () => {
+      const fixM = Object.assign(M('b'), { fixes: 'a', createdAt: NOW - D });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a'), fixM] }], NOW, MODELS);
+      assert.deepStrictEqual([e.merges, e.unmatched, grp(e, 'red-team|full').merges, grp(e, 'red-team|full').escaped, grp(e, 'red-team|full').fixes], [2, 0, 2, 1, 1]);
+    });
+
+    test('[alpha8 fix] escapes: a task re-merged under a new reviewer leaves its older fix unmatched; a later fix counts; no createdAt is unmatched', () => {
+      const mergedLean = Object.assign(M('a', FR({ agent: 'red-team-lean', light: true, at: new Date(NOW - 2 * D).toISOString() })), { createdAt: NOW - 20 * D });
+      const e = pl.escapes([{ id: 'p', tasks: [mergedLean, FX('old-fix', 'a', NOW - 10 * D)] }], NOW, MODELS);
+      assert.deepStrictEqual([e.merges, e.unmatched], [1, 1], 'the fix predates the re-merge');
+      assert.deepStrictEqual([grp(e, 'red-team-lean|light').escaped, grp(e, 'red-team-lean|light').fixes], [0, 0], 'the new group stays clean');
+      const later = pl.escapes([{ id: 'p', tasks: [mergedLean, FX('new-fix', 'a', NOW - D)] }], NOW, MODELS);
+      assert.deepStrictEqual([later.unmatched, grp(later, 'red-team-lean|light').fixes], [0, 1]);
+      for (const c of [null, undefined, NaN]) {
+        const x = pl.escapes([{ id: 'p', tasks: [M('a'), Object.assign(FX('f', 'a'), { createdAt: c })] }], NOW, MODELS);
+        assert.deepStrictEqual([x.unmatched, grp(x, 'red-team|full').fixes], [1, 0], 'createdAt ' + c);
+      }
+      // a fix created exactly at the merge time counts
+      const at = NOW - 5 * D;
+      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a'), FX('f', 'a', at)] }], NOW, MODELS).unmatched, 0);
+    });
+
+    test('[alpha8 fix] escapes: an undated merge falls back to the task updatedAt (in or out of the window)', () => {
+      const undated = (task, updatedAt) => Object.assign(M(task, FR({ at: null })), { updatedAt });
+      const e = pl.escapes([{ id: 'p', tasks: [undated('a', NOW - D), undated('b', NOW - 100 * D), undated('c', null), FX('f', 'a', NOW - 1000)] }], NOW, MODELS);
+      assert.strictEqual(e.merges, 1, 'only a, dated by updatedAt');
+      assert.deepStrictEqual([e.unmatched, grp(e, 'red-team|full').fixes], [0, 1]);
     });
   }
 
@@ -12757,7 +12816,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       const o = { p1: { pipeline: { tasks: [
         tview('t-m1', 'merged', { finalReview: fr() }),
         tview('t-m2', 'merged', { finalReview: fr({ agent: 'red-team-lean', light: true, agentId: 'a-none' }) }),
-        tview('t-fix', 'builder', { fixes: 't-m1', specBody: 'SECRET-BODY' }),
+        tview('t-fix', 'builder', { fixes: 't-m1', specBody: 'SECRET-BODY', createdAt: NOW - DAY }),
       ], skipped: 0, error: false, redTeam: null, hasData: true } } };
       if (hiddenToo) o.ph = { pipeline: { tasks: [tview('t-h', 'merged', { finalReview: fr() })], skipped: 0, error: false, redTeam: null, hasData: true } };
       return o;
@@ -12824,6 +12883,12 @@ test('missing rate_limits degrades instead of throwing', () => {
         assert.strictEqual(b.escapes.groups.length, 20);
         assert.ok(b.escapes.groups.every((g) => g.key.length <= 80 && !/[\x00-\x1f]/.test(g.label) && g.redTeamPerMerge.mean === null));
         assert.ok(!JSON.stringify(b.escapes).includes('SECRET'));
+        // exact key sets, so a new field cannot leak in silently
+        assert.deepStrictEqual(Object.keys(b.escapes).sort(), ['days', 'groups', 'merges', 'unmatched']);
+        for (const g of b.escapes.groups) {
+          assert.deepStrictEqual(Object.keys(g).sort(), ['escaped', 'fixes', 'key', 'label', 'merges', 'ratePct', 'redTeamPerMerge']);
+          assert.deepStrictEqual(Object.keys(g.redTeamPerMerge).sort(), ['excluded', 'mean', 'n']);
+        }
       } finally { pl.escapes = orig; await haltP(c); }
       const c2 = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(false) } });
       try {
@@ -13807,6 +13872,10 @@ test('missing rate_limits degrades instead of throwing', () => {
       test('[alpha8 A4] empty states: no merges, and merges with no fixes show the hint', () => {
         assert.match(exCard(card({ days: 90, merges: 0, unmatched: 0, groups: [] })), /No merges in the last 90 days\./);
         assert.match(exCard(card({ days: 90, merges: 0, unmatched: 0, groups: [grp('a', 'red-team · full', 0, 0, 0, null, null, 0, 0)] })), /No merges in the last 90 days\./);
+        const un = exCard(card({ days: 90, merges: 0, unmatched: 2, groups: [] }));
+        assert.match(un, /No merges in the last 90 days\./);
+        assert.match(un, /2 fixes name a task that isn’t a merge here\./, 'the footnote shows in the empty state too');
+        assert.ok(!/name a task/.test(exCard(card({ days: 90, merges: 0, unmatched: 0, groups: [] }))));
         const z = exCard(card({ days: 90, merges: 5, unmatched: 0, groups: [grp('a', 'red-team · full', 5, 0, 0, 0, 0.3, 5, 0)] }));
         assert.match(z, /<table/);
         assert.ok(z.includes('No follow-up fixes recorded yet. Mark one with /sereno:task &lt;name&gt; --fixes &lt;merged task&gt;.'));
@@ -20464,6 +20533,15 @@ test('missing rate_limits degrades instead of throwing', () => {
       const j = gateOf('r6', []);
       assert.ok(!('reviewer' in j), 'the older shape');
       assert.strictEqual(j.outcome, 'pass');
+    });
+    test('[plugin-0.6.3 fix] gate: reviewer.agent follows the app rule: sereno: stripped, anything else off-pattern is null, never an error', () => {
+      assert.deepStrictEqual(gateOf('r7', ['--agent-name', 'sereno:red-team', '--model', 'fable']).reviewer, { agent: 'red-team', light: null });
+      const j = gateOf('r8', ['--model', 'x', '--agent-name', 'Red Team', '--light', 'true']);
+      assert.deepStrictEqual(j.reviewer, { agent: null, light: true });
+      assert.strictEqual(j.model, 'x');
+      const k = gateOf('r9', ['--model', 'x', '--agent-name', 'Red Team']);
+      assert.ok(!('reviewer' in k), 'both null: no field');
+      assert.deepStrictEqual(gateOf('r10', ['--model', 'x', '--agent-name', 'a'.repeat(65), '--light', 'false']).reviewer, { agent: null, light: false });
     });
     test('[plugin-0.6.3 A1] ship skill passes --light from the reviewer result and drops it when reviewer failed', () => {
       const s = rd('skills/ship/SKILL.md');

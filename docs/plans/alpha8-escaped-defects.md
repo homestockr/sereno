@@ -42,11 +42,14 @@ It is read-only. It observes the records only. Nothing switches automatically.
   `ended_at`.
 - **Follow-up fix:** any other task in the same repo whose `fixes` names the merge. The spec's
   value wins; otherwise use the newest attempt's value. The fix counts as soon as its spec
-  exists, whether or not the fix is merged. A task that names itself is ignored.
+  exists, whether or not the fix is merged. A task that names itself is ignored. It counts
+  against a merge only when its creation time (the spec's `created_at`, else its earliest
+  attempt start) is known and is not before the merge time.
 - **Escaped merge:** a merge with at least one follow-up fix. The rate is escaped merges over
   merges. The card also shows the total number of fixes.
 - **Unmatched fix:** a `fixes` value that names no merged task in that repo. It is counted and
-  shown as a number, never guessed at.
+  shown as a number, never guessed at. A fix with no known creation time, or created before the
+  merge it names, is also unmatched: it names a task, but not this merge.
 
 ## Decisions (architect, 2026-11-12)
 
@@ -83,6 +86,8 @@ It is read-only. It observes the records only. Nothing switches automatically.
 - Any automatic change to presets or config.
 - Fixes recorded across repos (`fixes` is a task name within one repo).
 - Showing the plugin version per project. It stays open.
+- The history of earlier merges of a re-opened task is not kept, so a fix recorded before a
+  re-merge is unmatched.
 
 ## Steps
 

@@ -743,7 +743,7 @@ function createCollector(store, port, opts) {
       }
       outProjects.push({ id: p.id, name: p.name, tasks: active.map((t) => pipeTask(t, models)), idle });
       sigIn.push({ id: p.id, tasks: all.map((t) => ({ task: t.task, stage: t.stage, gates: Array.isArray(t.gates) ? t.gates : [] })) });
-      escIn.push({ id: p.id, tasks: all.map((t) => ({ task: t.task, stage: t.stage, fixes: t.fixes, finalReview: t.finalReview })) });
+      escIn.push({ id: p.id, tasks: all.map((t) => ({ task: t.task, stage: t.stage, fixes: t.fixes, finalReview: t.finalReview, createdAt: t.createdAt, updatedAt: t.updatedAt })) });
       routingProjects.push({ id: p.id, redTeam: pipeRedTeam(rt) });
     }
     const sg = pipelineLib.signals(sigIn, asOf);

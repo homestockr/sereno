@@ -382,11 +382,14 @@ async function taskView(root, entry, cfg, git, now, opts) {
   const startedAt = starts.length ? Math.min(...starts) : (stamps.length ? Math.min(...stamps) : null);
   const updatedAt = stamps.length ? Math.max(...stamps) : null;
   const expired = isExpired(updatedAt, now);
+  // When the task was created: the spec's created_at, else its earliest attempt start. ms or null.
+  const specCreated = spec && typeof spec.created_at === 'string' ? Date.parse(spec.created_at) : NaN;
+  const createdAt = Number.isFinite(specCreated) ? specCreated : (starts.length ? Math.min(...starts) : null);
 
   // The task this one repairs: the spec's value wins, else the newest attempt's.
   const fixes = (spec && spec.fixes) || (latest && latest.fixes) || null;
   const view = (/** @type {string} */ stage, /** @type {string} */ step, /** @type {string | null} */ reason, /** @type {number | null} */ attempt) =>
-    ({ task: entry.task, stage, step, reason, attempt, gate, findings, startedAt, updatedAt, reviewRuns: gates.length, expired, fixes });
+    ({ task: entry.task, stage, step, reason, attempt, gate, findings, startedAt, updatedAt, createdAt, reviewRuns: gates.length, expired, fixes });
   const mergedView = (/** @type {any} */ finalReview) => Object.assign(view('merged', 'Merged', null, latest ? latest.attempt : null), { finalReview });
   /** True when `head` is in the base branch; false for "not an ancestor" or "commit not in this repo"; throws otherwise. */
   const inBase = async (/** @type {string} */ head, /** @type {string} */ base) => {
@@ -425,10 +428,12 @@ async function taskView(root, entry, cfg, git, now, opts) {
     const base = spec && spec.base_branch;
     const baseOk = !!base && briefsLib.validBranchName(base);
     // A skipped attempt with no gate of its own: its own head commit says whether it landed.
-    if (latest.outcome === 'skipped' && !byRun && latest.head_commit && baseOk && await inBase(latest.head_commit, base)) {
+    // When it has a head, that head is the only evidence: a stale gate of an earlier run must not decide.
+    const skipOwn = latest.outcome === 'skipped' && !byRun && !!latest.head_commit;
+    if (skipOwn && baseOk && await inBase(latest.head_commit, base)) {
       return mergedView({ kind: 'skip', agent: null, light: null, skip: latest.skip === 'off' || latest.skip === 'spec' ? latest.skip : null, model: null, at: latest.ended_at || null, sessionId: null, agentId: null });
     }
-    const head = gateIsLatest && gate && gate.head_commit;
+    const head = gateIsLatest && !skipOwn && gate && gate.head_commit;
     if (head && baseOk && await inBase(head, base)) {
       const rv = gate.reviewer;
       return mergedView({ kind: 'gate', agent: rv ? rv.agent : null, light: rv ? rv.light : null, skip: null, model: gate.model || null, at: gate.reviewed_at || null, sessionId: gate.session_id || null, agentId: gate.agent_id || null });
@@ -698,7 +703,9 @@ function redTeamPerMerge(projects, spendForAgent) {
  * outside the window is in neither. Groups: reviewer agent x full/light/size unknown, `No review (spec)`,
  * `Gate off`, `Unknown`. A gate without `reviewer` falls back to its model: the agent is named only when
  * exactly one red-team agent in `models` has that family, and its size is unknown.
- * @param {Array<{ id?: string, tasks?: Array<{ task: string, stage?: string, fixes?: string | null, finalReview?: any }> }>} projects
+ * A fix counts against a merge only when its `createdAt` (ms) is known and >= the merge's time (`finalReview.at`,
+ * else the task's `updatedAt`); otherwise it is `unmatched`.
+ * @param {Array<{ id?: string, tasks?: Array<{ task: string, stage?: string, fixes?: string | null, finalReview?: any, createdAt?: number | null, updatedAt?: number | null }> }>} projects
  * @param {number} now
  * @param {Array<{ agent: string, role: string, model: string }>} [models] the agentModels() shape
  * @param {((sessionId: string, agentId: string) => number) | null | undefined} [spendForAgent]
@@ -737,12 +744,13 @@ function escapes(projects, now, models, spendForAgent) {
   let merges = 0, unmatched = 0;
   for (const p of Array.isArray(projects) ? projects : []) {
     const tasks = p && Array.isArray(p.tasks) ? p.tasks : [];
-    /** @type {Map<string, { g: any, hit: number } | null>} merged task name -> its group, or null outside the window */
+    /** @type {Map<string, { g: any, hit: number, at: number } | null>} merged task name -> its group, or null outside the window */
     const merged = new Map();
     for (const t of tasks) {
       if (!t || t.stage !== 'merged' || typeof t.task !== 'string') continue;
       const fr = t.finalReview;
-      const at = fr && typeof fr.at === 'string' ? Date.parse(fr.at) : (fr && typeof fr.at === 'number' ? fr.at : NaN);
+      let at = fr && typeof fr.at === 'string' ? Date.parse(fr.at) : (fr && typeof fr.at === 'number' ? fr.at : NaN);
+      if (!Number.isFinite(at) && typeof t.updatedAt === 'number') at = t.updatedAt;   // undated merge: the task's last activity
       if (!Number.isFinite(at) || at < since || at > now) { merged.set(t.task, null); continue; }
       const g = groupFor(fr);
       g.merges++; merges++;
@@ -756,13 +764,15 @@ function escapes(projects, now, models, spendForAgent) {
           } catch (_) { g.excluded++; }
         }
       }
-      merged.set(t.task, { g, hit: 0 });
+      merged.set(t.task, { g, hit: 0, at });
     }
     for (const t of tasks) {
       if (!t || typeof t.fixes !== 'string' || !t.fixes || t.fixes === t.task) continue;
       if (!merged.has(t.fixes)) { unmatched++; continue; }
       const m = merged.get(t.fixes);
       if (!m) continue;
+      // A fix counts only when it was created at or after the merge; unknown creation time names a task, not this merge.
+      if (typeof t.createdAt !== 'number' || !Number.isFinite(t.createdAt) || t.createdAt < m.at) { unmatched++; continue; }
       m.g.fixes++;
       if (!m.hit++) m.g.escaped++;
     }
