@@ -13315,7 +13315,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
       'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'cmdRow', 'installHtml', 'pipelineHasData',
       'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
-      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'sessionHash', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts', 'pathBreak', 'selectedCtx'];
+      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'sessionHash', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts', 'pathBreak', 'selectedCtx', 'cnt', 'escapesHtml'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
     const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -13758,6 +13758,76 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(work, /class="ptable"/);
       assert.ok(!/Role routing|Gate state/.test(work));
     });
+
+    // ---- [alpha8 A4] Signals card: escaped defects per reviewer ----
+    {
+      const grp = (key, label, merges, escaped, fixes, ratePct, mean, n, excluded) => ({ key, label, merges, escaped, fixes, ratePct, redTeamPerMerge: { mean, n, excluded } });
+      const EX = { days: 90, merges: 16, unmatched: 2, groups: [
+        grp('a', 'red-team · full', 9, 2, 3, 22, 0.42, 8, 1),
+        grp('b', 'red-team-lean · light', 4, 1, 1, null, 0.1, 3, 0),
+        grp('c', 'No review (spec)', 3, 0, 0, null, null, 0, 0),
+      ] };
+      const card = (ex) => T.signalsHtml(body([task('red-team')], { escapes: ex }), NOW, {});
+      const exCard = (h) => (h.match(/<div class="sig"><h3>Escaped defects[\s\S]*?(?=<div class="sig"><h3>Spend by)/) || [''])[0];
+
+      test('[alpha8 A4] populated body: card sits after Rework and cost, one row per group, columns split', () => {
+        const h = card(EX);
+        assert.ok(h.indexOf('Rework and cost') < h.indexOf('Escaped defects (90 days)'));
+        assert.ok(h.indexOf('Escaped defects (90 days)') < h.indexOf('Spend by pipeline role'));
+        const c = exCard(h);
+        assert.strictEqual((c.match(/<tbody>[\s\S]*<\/tbody>/)[0].match(/<tr>/g) || []).length, 3);
+        assert.match(c, /<td>red-team<\/td><td>full<\/td><td class="num">9<\/td><td class="num">2 of 9 \(22%\)<\/td><td class="num">3<\/td>/);
+        assert.match(c, /<td>red-team-lean<\/td><td>light<\/td><td class="num">4<\/td><td class="num">1 of 4<\/td>/);
+        assert.match(c, /<td>No review \(spec\)<\/td><td><\/td><td class="num">3<\/td><td class="num">0 of 3<\/td>/);
+        for (const th of ['Reviewer', 'Size', 'Merges', 'Fixed later', 'Fixes', 'Red team per merge']) assert.ok(c.includes('>' + th + '<'), th);
+      });
+
+      test('[alpha8 A4] every dollar says est., every cost carries n, % only with ratePct, unmatched footnote', () => {
+        const c = exCard(card(EX));
+        assert.match(c, /\$0\.42 est\. \(n=8, 1 excluded\)/);
+        assert.match(c, /\$0\.10 est\. \(n=3\)/);
+        assert.match(c, /— \(n=0\)/);
+        const dollars = strip(c).match(/\$[\d.,]+/g) || [];
+        assert.strictEqual(dollars.length, (strip(c).match(/\$[\d.,]+ est\./g) || []).length);
+        assert.strictEqual((c.match(/%/g) || []).length, 1);
+        assert.match(c, /2 fixes name a task that isn’t a merge here\./);
+        assert.match(exCard(card(Object.assign({}, EX, { unmatched: 1 }))), /1 fix names a task/);
+        assert.ok(!/name a task/.test(exCard(card(Object.assign({}, EX, { unmatched: 0 })))));
+        assert.ok(!/No follow-up fixes recorded/.test(c));
+      });
+
+      test('[alpha8 A4] hostile label and non-numbers are escaped or neutralised; no amber', () => {
+        const evil = '<img src=x onerror=alert(1)>';
+        const c = exCard(card({ days: 90, merges: 1, unmatched: 0, groups: [grp('k', evil + ' · ' + evil, 1, 1, 1, null, 0.5, 1, 0), grp('j', '<b>x</b>', '<i>', 'q', null, 'z', 'bad', '<u>', {})] }));
+        assert.ok(!c.includes(evil) && !c.includes('<b>') && !c.includes('<i>') && !c.includes('<u>'));
+        assert.match(c, /&lt;img src=x onerror=alert\(1\)&gt;/);
+        assert.ok(!/amber|--warn|attention/.test(c));
+      });
+
+      test('[alpha8 A4] empty states: no merges, and merges with no fixes show the hint', () => {
+        assert.match(exCard(card({ days: 90, merges: 0, unmatched: 0, groups: [] })), /No merges in the last 90 days\./);
+        assert.match(exCard(card({ days: 90, merges: 0, unmatched: 0, groups: [grp('a', 'red-team · full', 0, 0, 0, null, null, 0, 0)] })), /No merges in the last 90 days\./);
+        const z = exCard(card({ days: 90, merges: 5, unmatched: 0, groups: [grp('a', 'red-team · full', 5, 0, 0, 0, 0.3, 5, 0)] }));
+        assert.match(z, /<table/);
+        assert.ok(z.includes('No follow-up fixes recorded yet. Mark one with /sereno:task &lt;name&gt; --fixes &lt;merged task&gt;.'));
+        assert.match(exCard(card({ days: 30, merges: 0, groups: [] })), /Escaped defects \(30 days\)/);
+      });
+
+      test('[alpha8 A4] an older body with no escapes key renders no card and does not throw', () => {
+        for (const ex of [undefined, null, 'x']) {
+          const h = card(ex);
+          assert.ok(!h.includes('Escaped defects'));
+          assert.match(h, /Spend by pipeline role/);
+        }
+        assert.strictEqual(T.escapesHtml(undefined), '');
+      });
+
+      test('[alpha8 A4] console.js keeps theme tokens: no hex outside tokens, no new colour in the card code', () => {
+        const fn = cj.match(/^function escapesHtml\([\s\S]*?\n}/m)[0];
+        assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(fn));
+        assert.ok(!/\.text\b|\{[^}]*\btext\b[^}]*\}\s*=/.test(fn));
+      });
+    }
 
     test('[4b-layout] friendly model names: family word from the id, raw id as fallback and as quieter text', () => {
       for (const [id, n] of [['claude-haiku-4-5-20251001', 'Haiku'], ['claude-sonnet-4-6', 'Sonnet'], ['claude-opus-4-8[1m]', 'Opus'], ['us.anthropic.Claude-FABLE-1', 'Fable'], ['sonnet', 'Sonnet']]) assert.strictEqual(T.modelName(id), n, id);

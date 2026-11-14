@@ -903,6 +903,41 @@ function perMergeLine(m) {
   return 'Red team per merge: ' + (v || '—') + ' (' + tail + ')';
 }
 
+/** Whole non-negative count from an API value. */
+function cnt(v) {
+  return Number(v) > 0 ? Math.floor(Number(v)) : 0;
+}
+
+/** Signals card: escaped defects per reviewer. '' when the body has no escapes (an older collector). */
+function escapesHtml(ex) {
+  if (!ex || typeof ex !== 'object') return '';
+  const days = cnt(ex.days) || 90;
+  const title = '<h3>Escaped defects (' + days + ' days)</h3>';
+  const groups = Array.isArray(ex.groups) ? ex.groups.filter((g) => g && typeof g === 'object') : [];
+  if (!groups.length || !cnt(ex.merges)) return '<div class="sig">' + title + '<p class="empty-note">No merges in the last ' + days + ' days.</p></div>';
+  const rows = groups.map((g) => {
+    const label = String(g.label == null ? '' : g.label);
+    const at = label.indexOf(' · ');
+    const who = at >= 0 ? label.slice(0, at) : label;
+    const size = at >= 0 ? label.slice(at + 3) : '';
+    const merges = cnt(g.merges);
+    const rate = cnt(g.escaped) + ' of ' + merges + (g.ratePct != null && Number.isFinite(Number(g.ratePct)) ? ' (' + Math.round(Number(g.ratePct)) + '%)' : '');
+    const m = g.redTeamPerMerge;
+    const n = cnt(m && m.n);
+    const ex2 = cnt(m && m.excluded);
+    const v = m && m.mean != null ? usdEst(Number(m.mean)) : '';
+    const cost = (v || '—') + ' (n=' + n + (ex2 ? ', ' + ex2 + ' excluded' : '') + ')';
+    return '<tr><td>' + esc(who) + '</td><td>' + esc(size) + '</td><td class="num">' + merges + '</td><td class="num">' + esc(rate)
+      + '</td><td class="num">' + cnt(g.fixes) + '</td><td class="num">' + esc(cost) + '</td></tr>';
+  }).join('');
+  const table = '<div class="table-wrap"><table class="xtable" aria-label="Escaped defects by reviewer"><thead><tr><th>Reviewer</th><th>Size</th>'
+    + '<th class="num">Merges</th><th class="num">Fixed later</th><th class="num">Fixes</th><th class="num">Red team per merge</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  const un = cnt(ex.unmatched);
+  const note = un ? '<p class="quiet-text">' + un + (un === 1 ? ' fix names a task that isn’t a merge here.' : ' fixes name a task that isn’t a merge here.') + '</p>' : '';
+  const hint = groups.every((g) => !cnt(g.fixes)) ? '<p class="quiet-text">' + esc('No follow-up fixes recorded yet. Mark one with /sereno:task <name> --fixes <merged task>.') + '</p>' : '';
+  return '<div class="sig">' + title + table + note + hint + '</div>';
+}
+
 /** Role spend share with its attribution mix. Not enabled -> the history-off note. */
 function roleSpendHtml(rs) {
   if (!rs || rs.enabled !== true) return '<p class="empty-note">Spend history is off</p>';
@@ -1147,6 +1182,7 @@ function signalsHtml(body, nowMs, open) {
   return '<div class="sig"><h3>Gate state</h3>' + gateBox + '</div>'
     + '<div class="sig"><h3>Review outcomes<span class="sub"> Last ' + (Number(sg.days) || 30) + ' days</span></h3>' + outcomesHtml(sg.outcomes) + '</div>'
     + '<div class="sig"><h3>Rework and cost</h3><p>' + esc(reworkLine(sg.rework)) + '</p><p>' + esc(perMergeLine(body.redTeamPerMerge)) + '</p></div>'
+    + escapesHtml(body.escapes)
     + '<div class="sig"><h3>Spend by pipeline role</h3>' + roleSpendHtml(body.roleSpend) + '</div>';
 }
 
