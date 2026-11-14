@@ -146,10 +146,10 @@ JSON (or any `{"`) on a Bash command line, and never use heredocs, `echo` or pip
 run the gate (its `--file` is the same `<cacheDir>/verdict-<review_run_id>.json` path, exactly as given), which reads that file and deletes it:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file <cacheDir>/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team, red-team-lean or red-team-browse, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true --reviewer-reason "<reason from reviewer>"
+node "${CLAUDE_PLUGIN_ROOT}/bin/sereno.js" gate --file <cacheDir>/verdict-<review_run_id>.json --task <task> --spec .sereno/specs/<task>.md --base <base> --head <head> --branch task/<task> --run-id <review_run_id> --session "${CLAUDE_SESSION_ID}" --agent-name <red-team, red-team-lean or red-team-browse, whichever actually reviewed> --agent <agent id from the Agent tool result> --tests-passed true --reviewer-reason "<reason from reviewer>" --light <light from reviewer, true or false>
 ```
 
-Leave out `--reviewer-reason` when `reviewer` failed. The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.
+Leave out `--reviewer-reason` and `--light` when `reviewer` failed. The gate's `model` is read from that agent's definition. Omit `--agent` when the Agent tool result gave no id. The result has `outcome`, `findings` and `path`.
 
 ## 4. Record the outcome
 

@@ -47,7 +47,9 @@
  *                           path also gets the light floor (lockfiles, test files with removed lines), the
  *                           red-team-block rule (a blocked attempt keeps the full review) and the range
  *                           guards (empty diff, or head not the tip of task/<t>, goes full). Ship stores the
- *                           reason in the gate as reviewer_reason (gate --reviewer-reason).
+ *                           reason in the gate as reviewer_reason (gate --reviewer-reason), and since 0.6.3 the
+ *                           reviewer as reviewer: { agent, light } (gate --agent-name, --light true|false; an
+ *                           invalid --light is null, and the field is left out when both are null).
  *   review-pack --task <t> --base <sha> --head <sha>
  *                           writes .sereno/cache/review-<t>.md (<= 200 lines): the spec's acceptance
  *                           criteria, diffstat, touched files, test counts and failing names, and source
@@ -325,7 +327,7 @@ const COMMANDS = {
 
   gate(/** @type {string[]} */ argv) {
     const a = parseArgs(argv, {
-      value: ['file', 'task', 'spec', 'base', 'head', 'branch', 'session', 'agent', 'agent-name', 'model', 'tests-passed', 'run-id', 'reviewer-reason'],
+      value: ['file', 'task', 'spec', 'base', 'head', 'branch', 'session', 'agent', 'agent-name', 'model', 'tests-passed', 'run-id', 'reviewer-reason', 'light'],
       bool: ['json', 'stdin'],
     });
     if (!!a.file === !!a.stdin) throw new SerenoError('usage', 'give exactly one of --file or --stdin');
@@ -404,6 +406,12 @@ const COMMANDS = {
       config_hash,
     };
     if (reviewerReason) /** @type {any} */ (gate).reviewer_reason = reviewerReason;
+    // 0.6.3: who reviewed and how big. light is null unless the flag is exactly true or false; the whole
+    // field is left out when both are null, so older readers see the older shape.
+    const lightRaw = str(a, 'light');
+    const reviewerAgent = agentName === undefined ? null : matchId(agentName, '--agent-name', id);
+    const reviewerLight = lightRaw === 'true' ? true : (lightRaw === 'false' ? false : null);
+    if (reviewerAgent !== null || reviewerLight !== null) /** @type {any} */ (gate).reviewer = { agent: reviewerAgent, light: reviewerLight };
     if (checks.length) /** @type {any} */ (gate).checks = checks;
     const rel = '.sereno/gates/' + runId + '.json';
     fsafe.writeJson(rel, gate);

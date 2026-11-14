@@ -9616,12 +9616,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['/sereno:next', '--after', '--hold', 'preflight', 'hook_failed', 'attempt --adopt', '/sereno:merge', 'after_not_merged']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes('`next`, `build`') || r.includes('`task`, `next`, `build`'));
     });
-    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.2', () => {
+    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.3', () => {
       const pj = JSON.parse(rd('.claude-plugin/plugin.json'));
       const mp = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
-      assert.strictEqual(pj.version, '0.6.2');
-      assert.strictEqual(mp.plugins[0].version, '0.6.2');
-      assert.ok(rd('README.md').includes('Version 0.6.2.'));
+      assert.strictEqual(pj.version, '0.6.3');
+      assert.strictEqual(mp.plugins[0].version, '0.6.3');
+      assert.ok(rd('README.md').includes('Version 0.6.3.'));
     });
     test('[plugin-0.5 P4] README has the lighter-setup section and the 0.5.0 notes', () => {
       const r = rd('README.md');
@@ -19432,7 +19432,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     // ---- R7 docs and version ----
-    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.2', () => {
+    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.3', () => {
       const r = rd('README.md');
       const i = r.indexOf('### Review level'), j = r.indexOf('### Spec review');
       assert.ok(i > 0 && j > i);
@@ -19440,8 +19440,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['--review', '`none`', '`light`', '`full`', 'Safety floor', 'skip: "spec"', 'spec_changed', 'roles.redTeam.enabled: false']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes("A spec's own `review` field overrides `kinds` and `maxDiffLines`"));
       assert.ok(r.includes('New in 0.6.1') && r.includes('New in 0.6.0') && r.includes('New in 0.5.0'));
-      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.2');
-      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.2');
+      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.3');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.3');
     });
 
     // ---- red-team follow-ups ----
@@ -20062,17 +20062,98 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     // ---- G3 docs and version ----
-    test('[plugin-0.6.2 G3] README: New in 0.6.2 and the refs command; manifests say 0.6.2', () => {
+    test('[plugin-0.6.2 G3] README: New in 0.6.2 and the refs command; manifests say 0.6.3', () => {
       const r = rd('README.md');
-      assert.ok(r.includes('Version 0.6.2.') && r.includes('New in 0.6.2') && r.includes('New in 0.6.1'));
+      assert.ok(r.includes('Version 0.6.3.') && r.includes('New in 0.6.2') && r.includes('New in 0.6.1'));
       assert.ok(r.indexOf('New in 0.6.2') < r.indexOf('New in 0.6.1'));
       for (const k of ['sereno.js refs --text-file', '--refs-ok', 'latest message', 'flags-only revision', '`{ ok, checked, missing, warn, new }`', '`warn`', 'known extension']) assert.ok(r.includes(k), k);
-      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.2');
-      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.2');
+      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.3');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.3');
       assert.ok(fs.readFileSync(SERENO, 'utf8').includes('spec-review, refs.'), 'the command list in sereno.js names refs');
     });
 
     await atest('[plugin-0.6.2] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
+  /* ---- [plugin-0.6.3] the gate records the reviewer (A1) ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p063-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const rd = (p) => fs.readFileSync(path.join(PLUGIN, p), 'utf8').replace(/\r\n/g, '\n');
+    const dir = mk();
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+    /** One task branch with a spec and a commit; back on main. */
+    function mkTask(task) {
+      const base = git(dir, 'rev-parse', 'main');
+      assert.strictEqual(S(dir, ['branch', '--task', task]).out.ok, true);
+      assert.strictEqual(S(dir, ['spec', '--task', task, '--builder', 'sonnet', '--kind', 'mechanical', '--reason', 'r', '--base-branch', 'main', '--stdin'], '## Goal\nx\n').out.ok, true);
+      git(dir, 'switch', '-q', 'task/' + task);
+      fs.writeFileSync(path.join(dir, task + '.js'), 'a\n');
+      git(dir, 'add', '--', task + '.js'); git(dir, 'commit', '-q', '-m', 'work');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      git(dir, 'switch', '-q', 'main');
+      return { base, head };
+    }
+    /** Run gate for `task` with extra flags; returns the parsed gate record. */
+    function gateOf(task, extra) {
+      const t = mkTask(task);
+      const g = S(dir, ['gate', '--stdin', '--task', task, '--spec', '.sereno/specs/' + task + '.md', '--base', t.base, '--head', t.head, '--branch', 'task/' + task, '--tests-passed', 'true', ...extra], '{"outcome":"pass","findings":[]}').out;
+      assert.strictEqual(g.ok, true, JSON.stringify(g));
+      return JSON.parse(fs.readFileSync(path.join(dir, g.path), 'utf8'));
+    }
+
+    test('[plugin-0.6.3 A1] gate: --agent-name and --light true write reviewer: { agent, light }', () => {
+      const j = gateOf('r1', ['--agent-name', 'red-team-lean', '--light', 'true']);
+      assert.deepStrictEqual(j.reviewer, { agent: 'red-team-lean', light: true });
+    });
+    test('[plugin-0.6.3 A1] gate: --light false is false, not null', () => {
+      const j = gateOf('r2', ['--agent-name', 'red-team', '--light', 'false']);
+      assert.deepStrictEqual(j.reviewer, { agent: 'red-team', light: false });
+    });
+    test('[plugin-0.6.3 A1] gate: a missing --light gives light null', () => {
+      const j = gateOf('r3', ['--agent-name', 'red-team']);
+      assert.deepStrictEqual(j.reviewer, { agent: 'red-team', light: null });
+    });
+    test('[plugin-0.6.3 A1] gate: an invalid --light is null and the gate is still written', () => {
+      for (const [i, v] of ['yes', 'TRUE', '1', ''].entries()) {
+        const j = gateOf('r4' + i, ['--agent-name', 'red-team', '--light', v]);
+        assert.deepStrictEqual(j.reviewer, { agent: 'red-team', light: null }, 'value ' + JSON.stringify(v));
+        assert.strictEqual(j.outcome, 'pass');
+      }
+      const j2 = gateOf('r45', ['--light', 'maybe']);
+      assert.ok(!('reviewer' in j2), 'both null: no field');
+    });
+    test('[plugin-0.6.3 A1] gate: --light alone gives agent null; neither flag gives no reviewer key', () => {
+      assert.deepStrictEqual(gateOf('r5', ['--light', 'true']).reviewer, { agent: null, light: true });
+      const j = gateOf('r6', []);
+      assert.ok(!('reviewer' in j), 'the older shape');
+      assert.strictEqual(j.outcome, 'pass');
+    });
+    test('[plugin-0.6.3 A1] ship skill passes --light from the reviewer result and drops it when reviewer failed', () => {
+      const s = rd('skills/ship/SKILL.md');
+      assert.ok(s.includes('--light <light from reviewer'));
+      assert.ok(s.includes('Leave out `--reviewer-reason` and `--light` when `reviewer` failed'));
+    });
+    test('[plugin-0.6.3 A1] README: New in 0.6.3, above 0.6.2; usage comment names --light; build.files unchanged', () => {
+      const r = rd('README.md');
+      assert.ok(r.includes('New in 0.6.3') && r.indexOf('New in 0.6.3') < r.indexOf('New in 0.6.2'));
+      assert.ok(fs.readFileSync(SERENO, 'utf8').includes('--light true|false'));
+      assert.ok(!JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files.some((f) => /sereno\.js/.test(f)), 'sereno.js is not bundled');
+    });
+
+    await atest('[plugin-0.6.3] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
