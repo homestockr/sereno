@@ -11988,7 +11988,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(v.step, 'Spec written');
           assert.strictEqual(v.reviewRuns, 0);
           assert.strictEqual(v.expired, false);
-          assert.deepStrictEqual(Object.keys(v).sort(), ['attempt', 'expired', 'findings', 'gate', 'reason', 'reviewRuns', 'stage', 'startedAt', 'step', 'task', 'updatedAt']);
+          assert.deepStrictEqual(Object.keys(v).sort(), ['attempt', 'expired', 'findings', 'fixes', 'gate', 'reason', 'reviewRuns', 'stage', 'startedAt', 'step', 'task', 'updatedAt']);
         });
 
         await atest('[4b-stage] builder: an environment error is retried', async () => {
@@ -12072,6 +12072,66 @@ test('missing rate_limits degrades instead of throwing', () => {
           putAtt(r, 'demo', 2, { outcome: 'built' });
           const v = await viewOf(r, 'demo');
           assert.strictEqual(v.stage, 'red-team');
+        });
+
+        /* ---- [alpha8 A2] reviewer on the gate, skipped merges, fixes and finalReview ---- */
+        await atest('[alpha8 A2] cleanGate keeps reviewer { agent, light } sanitised; no reviewer in the source leaves the key out', async () => {
+          const r = mkrepo();
+          const ids = [rid(), rid(), rid(), rid(), rid()];
+          putSpec(r, 'demo');
+          putGate(r, 'demo', ids[0], { reviewer: { agent: 'red-team-lean', light: true } });
+          putGate(r, 'demo', ids[1], { reviewer: { agent: 'Bad Name!', light: 'yes' } });
+          putGate(r, 'demo', ids[2], { reviewer: { agent: 'x'.repeat(65), light: false } });
+          putGate(r, 'demo', ids[3], { reviewer: 'red-team' });
+          putGate(r, 'demo', ids[4], {});
+          const out = await pl.readRepo(r);
+          const by = (id) => out.tasks.find((t) => t.task === 'demo').gates.find((x) => x.review_run_id === id);
+          assert.deepStrictEqual(by(ids[0]).reviewer, { agent: 'red-team-lean', light: true });
+          assert.deepStrictEqual(by(ids[1]).reviewer, { agent: null, light: null });
+          assert.deepStrictEqual(by(ids[2]).reviewer, { agent: null, light: false });
+          assert.ok(!('reviewer' in by(ids[3])), 'a non-object reviewer is dropped');
+          assert.ok(!('reviewer' in by(ids[4])), 'the older shape is unchanged');
+        });
+
+        await atest('[alpha8 A2] merged gate: finalReview carries the gate reviewer, model, time and ids; fixes comes from the spec, else the attempt', async () => {
+          const r = mkrepo(); const { id } = passTask(r, 'demo');
+          putGate(r, 'demo', id, { outcome: 'pass', tests_passed: true, head_commit: g(r, 'rev-parse', 'task/demo'), spec_hash: rec.sha256(fs.readFileSync(path.join(r, '.sereno', 'specs', 'demo.md'))), reviewer: { agent: 'red-team', light: false }, reviewed_at: '2026-10-15T11:30:00.000Z' });
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'merged');
+          assert.deepStrictEqual(v.finalReview, { kind: 'gate', agent: 'red-team', light: false, skip: null, model: 'claude-fable-5', at: '2026-10-15T11:30:00.000Z', sessionId: 's-1', agentId: 'a_2' });
+          assert.strictEqual(v.fixes, null);
+          const r2 = mkrepo(); const tip = mkTask(r2, 'fx');
+          wj(sub(r2, 'specs'), 'fx.md', SPEC('fx').replace('fixes: null', 'fixes: "old-task"'));
+          putAtt(r2, 'fx', 1, { outcome: 'built', fixes: 'other-task' });
+          assert.strictEqual((await viewOf(r2, 'fx')).fixes, 'old-task', 'the spec wins');
+          wj(sub(r2, 'specs'), 'fx.md', SPEC('fx'));
+          assert.strictEqual((await viewOf(r2, 'fx')).fixes, 'other-task', 'else the newest attempt');
+          assert.ok(!('finalReview' in (await viewOf(r2, 'fx'))), 'only a merged view has finalReview');
+          void tip;
+        });
+
+        for (const skip of ['off', 'spec']) {
+          await atest('[alpha8 A2] a skipped latest attempt (skip: ' + skip + ') with no gate, head in the base branch, is merged; finalReview is the skip', async () => {
+            const r = mkrepo(); const tip = mkTask(r, 'demo'); putSpec(r, 'demo');
+            putAtt(r, 'demo', 1, { outcome: 'skipped', skip, head_commit: tip, ended_at: '2026-10-15T10:07:00.000Z' });
+            assert.notStrictEqual((await viewOf(r, 'demo')).stage, 'merged', 'not merged yet');
+            g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+            const v = await viewOf(r, 'demo');
+            assert.strictEqual(v.stage, 'merged');
+            assert.strictEqual(v.step, 'Merged');
+            assert.strictEqual(v.gate, null);
+            assert.deepStrictEqual(v.finalReview, { kind: 'skip', agent: null, light: null, skip, model: null, at: '2026-10-15T10:07:00.000Z', sessionId: null, agentId: null });
+          });
+        }
+
+        await atest('[alpha8 A2] skipped merge: a pruned head (git 128) is not merged, and any other git failure is stage unknown', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          putAtt(r, 'demo', 1, { outcome: 'skipped', skip: 'off', head_commit: 'c'.repeat(40) });
+          const v = await viewOf(r, 'demo');
+          assert.notStrictEqual(v.stage, 'merged');
+          const w = await viewOf(r, 'demo', NOW, async () => { throw Object.assign(new Error('boom'), { code: 'spawn_failed' }); });
+          assert.deepStrictEqual([w.stage, w.reason], ['unknown', 'spawn_failed']);
         });
 
         await atest('[4b-stage] head_moved: a commit on the task branch after the gate sends it back to review', async () => {
@@ -12394,6 +12454,119 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual(pl.redTeamPerMerge(none, l.spendForAgent), { mean: null, n: 0, excluded: 1 });
       assert.deepStrictEqual(pl.redTeamPerMerge(projects.concat(none), l.spendForAgent), { mean: 3, n: 2, excluded: 2 });
       l.close();
+    });
+
+    /* ---- [alpha8 A2] escapes ---- */
+    const MODELS = [
+      { agent: 'sereno:red-team', role: 'red-team', model: 'fable' },
+      { agent: 'sereno:red-team-lean', role: 'red-team', model: 'opus' },
+      { agent: 'sereno:red-team-browse', role: 'red-team', model: 'opus' },
+      { agent: 'sereno:builder', role: 'builder', model: 'sonnet' },
+    ];
+    const FR = (extra) => Object.assign({ kind: 'gate', agent: 'red-team', light: false, skip: null, model: 'claude-fable-5', at: new Date(NOW - 5 * D).toISOString(), sessionId: 's1', agentId: null }, extra || {});
+    const M = (task, fr) => ({ task, stage: 'merged', fixes: null, finalReview: fr || FR() });
+    const FX = (task, fixes) => ({ task, stage: 'builder', fixes, finalReview: undefined });
+    const grp = (e, key) => e.groups.find((x) => x.key === key);
+
+    test('[alpha8 A2] escapes: empty and junk input give the empty shape', () => {
+      for (const x of [[], undefined, null, [{}], [{ id: 'p', tasks: [null, {}] }]]) assert.deepStrictEqual(pl.escapes(x, NOW, MODELS), { days: 90, merges: 0, unmatched: 0, groups: [] });
+    });
+
+    test('[alpha8 A2] escapes: merges, escaped, fixes by reviewer x size; two fixes for one merge are one escape and two fixes', () => {
+      const p = [{ id: 'p', tasks: [M('a'), M('b'), M('c', FR({ light: true, agent: 'red-team-lean', model: 'opus' })), FX('f1', 'a'), FX('f2', 'a'), FX('f3', 'c')] }];
+      const e = pl.escapes(p, NOW, MODELS);
+      assert.strictEqual(e.days, 90); assert.strictEqual(e.merges, 3); assert.strictEqual(e.unmatched, 0);
+      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges, x.escaped, x.fixes, x.ratePct]), [
+        ['red-team|full', 'red-team · full', 2, 1, 2, null],
+        ['red-team-lean|light', 'red-team-lean · light', 1, 1, 1, null],
+      ]);
+    });
+
+    test('[alpha8 A2] escapes: a fix naming its own task is ignored, a fix naming nothing merged is unmatched, a task not merged is not a target', () => {
+      const p = [{ id: 'p', tasks: [M('a'), { task: 'self', stage: 'merged', fixes: 'self', finalReview: FR() }, FX('f1', 'ghost'), FX('f2', 'open'), { task: 'open', stage: 'ready', fixes: null }, FX('f3', 'f3')] }];
+      const e = pl.escapes(p, NOW, MODELS);
+      assert.strictEqual(e.unmatched, 2, 'ghost and open');
+      assert.deepStrictEqual([e.merges, grp(e, 'red-team|full').escaped, grp(e, 'red-team|full').fixes], [2, 0, 0]);
+    });
+
+    test('[alpha8 A2] escapes: fixes match within a project only', () => {
+      const e = pl.escapes([{ id: 'p', tasks: [M('a')] }, { id: 'q', tasks: [FX('f', 'a')] }], NOW, MODELS);
+      assert.deepStrictEqual([e.merges, e.unmatched, e.groups[0].fixes], [1, 1, 0]);
+    });
+
+    test('[alpha8 A2] escapes: a merge older than 90 days is out of the window, and a fix naming it counts in neither merges nor unmatched', () => {
+      const old = FR({ at: new Date(NOW - 91 * D).toISOString() });
+      const edge = FR({ at: new Date(NOW - 90 * D).toISOString() });
+      const e = pl.escapes([{ id: 'p', tasks: [M('old', old), M('edge', edge), M('bad', FR({ at: 'garbage' })), FX('f1', 'old'), FX('f2', 'edge'), FX('f3', 'bad')] }], NOW, MODELS);
+      assert.strictEqual(e.merges, 1, 'only the edge merge');
+      assert.strictEqual(e.unmatched, 0);
+      assert.deepStrictEqual([e.groups[0].escaped, e.groups[0].fixes], [1, 1]);
+    });
+
+    test('[alpha8 A2] escapes: skipped merges group as Gate off and No review (spec), with no cost measured', () => {
+      const sk = (skip) => FR({ kind: 'skip', skip, agent: null, light: null, model: null, sessionId: null });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', sk('off')), M('b', sk('spec')), M('c', sk('spec')), FX('f', 'b')] }], NOW, MODELS, () => 9);
+      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges, x.escaped]), [['skip-spec', 'No review (spec)', 2, 1], ['skip-off', 'Gate off', 1, 0]]);
+      for (const x of e.groups) assert.deepStrictEqual(x.redTeamPerMerge, { mean: null, n: 0, excluded: 0 });
+      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a', sk('weird'))] }], NOW, MODELS).groups[0].key, 'unknown');
+    });
+
+    test('[alpha8 A2] escapes: an old gate (no reviewer) names its agent by a model family only one red-team agent uses, size unknown', () => {
+      const old = (model) => FR({ agent: null, light: null, model });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-fable-5')), M('b', old('fable'))] }], NOW, MODELS);
+      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges]), [['red-team|unknown', 'red-team · size unknown', 2]]);
+    });
+
+    test('[alpha8 A2] escapes: an old gate whose family two reviewers share, an unknown model, or no models at all is Unknown', () => {
+      const old = (model) => FR({ agent: null, light: null, model });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-opus-5')), M('b', old('mystery-1')), M('c', old(null))] }], NOW, MODELS);
+      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges]), [['unknown', 'Unknown', 3]]);
+      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a', old('fable'))] }], NOW).groups[0].key, 'unknown');
+      // a builder on the same family is not a reviewer
+      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a', old('sonnet'))] }], NOW, MODELS).groups[0].key, 'unknown');
+    });
+
+    test('[alpha8 A2] escapes: a recorded reviewer with light null is size unknown; a recorded agent beats the model fallback', () => {
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', FR({ agent: 'red-team-browse', light: null, model: 'fable' })), M('b', FR({ agent: 'custom-rt', light: true, model: 'fable' }))] }], NOW, MODELS);
+      assert.deepStrictEqual(e.groups.map((x) => x.label).sort(), ['custom-rt · light', 'red-team-browse · size unknown']);
+    });
+
+    test('[alpha8 A2] escapes: ratePct is null below 5 merges, and rounded at the source from 5', () => {
+      const mk = (n, bad) => [{ id: 'p', tasks: [].concat(Array.from({ length: n }, (_, i) => M('m' + i)), Array.from({ length: bad }, (_, i) => FX('f' + i, 'm' + i))) }];
+      assert.strictEqual(pl.escapes(mk(4, 4), NOW, MODELS).groups[0].ratePct, null);
+      assert.strictEqual(pl.escapes(mk(5, 1), NOW, MODELS).groups[0].ratePct, 20);
+      assert.strictEqual(pl.escapes(mk(6, 1), NOW, MODELS).groups[0].ratePct, 17, '16.666 rounds');
+      assert.strictEqual(pl.escapes(mk(7, 2), NOW, MODELS).groups[0].ratePct, 29, '28.57 rounds');
+      assert.strictEqual(pl.escapes(mk(8, 1), NOW, MODELS).groups[0].ratePct, 13, '12.5 rounds up');
+      assert.ok(Number.isInteger(pl.escapes(mk(9, 2), NOW, MODELS).groups[0].ratePct));
+    });
+
+    test('[alpha8 A2] escapes: groups sort by merges desc, then key', () => {
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', FR({ agent: 'zeta' })), M('b', FR({ agent: 'alpha' })), M('c', FR({ agent: 'mid' })), M('d', FR({ agent: 'mid' }))] }], NOW, MODELS);
+      assert.deepStrictEqual(e.groups.map((x) => x.key), ['mid|full', 'alpha|full', 'zeta|full']);
+    });
+
+    test('[alpha8 A2] escapes: red-team $/merge per group, only gate merges; spend 0 or a throw is excluded; no spendForAgent means no mean', () => {
+      const spend = { x1: 2, x2: 4, x3: 0 };
+      const f = (sessionId, agentId) => { if (agentId === 'boom') throw new Error('x'); return spend[agentId] || 0; };
+      const mkp = () => [{ id: 'p', tasks: [
+        M('a', FR({ agentId: 'x1' })), M('b', FR({ agentId: 'x2' })), M('c', FR({ agentId: 'x3' })), M('d', FR({ agentId: 'boom' })), M('e', FR({ agentId: null })), M('f', FR({ sessionId: null, agentId: 'x1' })),
+        M('g', FR({ agent: 'red-team-lean', light: true, agentId: 'x2' })),
+      ] }];
+      const e = pl.escapes(mkp(), NOW, MODELS, f);
+      assert.deepStrictEqual(grp(e, 'red-team|full').redTeamPerMerge, { mean: 3, n: 2, excluded: 4 });
+      assert.deepStrictEqual(grp(e, 'red-team-lean|light').redTeamPerMerge, { mean: 4, n: 1, excluded: 0 });
+      const none = pl.escapes(mkp(), NOW, MODELS);
+      assert.deepStrictEqual(grp(none, 'red-team|full').redTeamPerMerge, { mean: null, n: 0, excluded: 6 });
+      assert.deepStrictEqual(grp(pl.escapes(mkp(), NOW, MODELS, null), 'red-team-lean|light').redTeamPerMerge, { mean: null, n: 0, excluded: 1 });
+    });
+
+    test('[alpha8 A2] escapes: output holds names and counts only (privacy)', () => {
+      const e = pl.escapes([{ id: 'p', tasks: [M('a'), FX('f', 'a')] }], NOW, MODELS, () => 1);
+      const s = JSON.stringify(e);
+      assert.ok(!/session|agentId|s1/.test(s), s);
+      assert.deepStrictEqual(Object.keys(e).sort(), ['days', 'groups', 'merges', 'unmatched']);
+      assert.deepStrictEqual(Object.keys(e.groups[0]).sort(), ['escaped', 'fixes', 'key', 'label', 'merges', 'ratePct', 'redTeamPerMerge']);
     });
   }
 
