@@ -9616,12 +9616,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['/sereno:next', '--after', '--hold', 'preflight', 'hook_failed', 'attempt --adopt', '/sereno:merge', 'after_not_merged']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes('`next`, `build`') || r.includes('`task`, `next`, `build`'));
     });
-    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.3', () => {
+    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.4', () => {
       const pj = JSON.parse(rd('.claude-plugin/plugin.json'));
       const mp = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
-      assert.strictEqual(pj.version, '0.6.3');
-      assert.strictEqual(mp.plugins[0].version, '0.6.3');
-      assert.ok(rd('README.md').includes('Version 0.6.3.'));
+      assert.strictEqual(pj.version, '0.6.4');
+      assert.strictEqual(mp.plugins[0].version, '0.6.4');
+      assert.ok(rd('README.md').includes('Version 0.6.4.'));
     });
     test('[plugin-0.5 P4] README has the lighter-setup section and the 0.5.0 notes', () => {
       const r = rd('README.md');
@@ -19833,7 +19833,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     // ---- R7 docs and version ----
-    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.3', () => {
+    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.4', () => {
       const r = rd('README.md');
       const i = r.indexOf('### Review level'), j = r.indexOf('### Spec review');
       assert.ok(i > 0 && j > i);
@@ -19841,8 +19841,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['--review', '`none`', '`light`', '`full`', 'Safety floor', 'skip: "spec"', 'spec_changed', 'roles.redTeam.enabled: false']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes("A spec's own `review` field overrides `kinds` and `maxDiffLines`"));
       assert.ok(r.includes('New in 0.6.1') && r.includes('New in 0.6.0') && r.includes('New in 0.5.0'));
-      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.3');
-      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.3');
+      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.4');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.4');
     });
 
     // ---- red-team follow-ups ----
@@ -20463,13 +20463,13 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     // ---- G3 docs and version ----
-    test('[plugin-0.6.2 G3] README: New in 0.6.2 and the refs command; manifests say 0.6.3', () => {
+    test('[plugin-0.6.2 G3] README: New in 0.6.2 and the refs command; manifests say 0.6.4', () => {
       const r = rd('README.md');
-      assert.ok(r.includes('Version 0.6.3.') && r.includes('New in 0.6.2') && r.includes('New in 0.6.1'));
+      assert.ok(r.includes('Version 0.6.4.') && r.includes('New in 0.6.2') && r.includes('New in 0.6.1'));
       assert.ok(r.indexOf('New in 0.6.2') < r.indexOf('New in 0.6.1'));
       for (const k of ['sereno.js refs --text-file', '--refs-ok', 'latest message', 'flags-only revision', '`{ ok, checked, missing, warn, new }`', '`warn`', 'known extension']) assert.ok(r.includes(k), k);
-      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.3');
-      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.3');
+      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.4');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.4');
       assert.ok(fs.readFileSync(SERENO, 'utf8').includes('spec-review, refs.'), 'the command list in sereno.js names refs');
     });
 
@@ -20574,6 +20574,89 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     await atest('[plugin-0.6.3] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
+  /* ---- [plugin-0.6.4] a revised spec keeps its created_at (S1) ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p064-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const dir = mk();
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+    const spec = (task, body) => assert.strictEqual(S(dir, ['spec', '--task', task, '--builder', 'sonnet', '--kind', 'mechanical', '--reason', 'r', '--base-branch', 'main', '--stdin'], body || '## Goal\nx\n').out.ok, true);
+    const specPath = (task) => path.join(dir, '.sereno', 'specs', task + '.md');
+    const createdAt = (task) => (/^created_at: "([^"]*)"$/m.exec(fs.readFileSync(specPath(task), 'utf8')) || [])[1];
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    await atest('[plugin-0.6.4 S1] a first write sets created_at to now, as a full ISO time', async () => {
+      const t0 = Date.now();
+      spec('c1');
+      const c = createdAt('c1');
+      assert.ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(c), c);
+      assert.ok(Date.parse(c) >= t0 - 5 && Date.parse(c) <= Date.now() + 5);
+    });
+    await atest('[plugin-0.6.4 S1] a revision keeps the earlier created_at and bumps the revision', async () => {
+      spec('c2');
+      const first = createdAt('c2');
+      await sleep(30);
+      spec('c2', '## Goal\ny\n');
+      assert.strictEqual(createdAt('c2'), first);
+      assert.ok(/^spec_revision: 2$/m.test(fs.readFileSync(specPath('c2'), 'utf8')));
+    });
+    await atest('[plugin-0.6.4 S1] an earlier created_at that is not a date falls back to now', async () => {
+      spec('c3');
+      const f = specPath('c3');
+      fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace(/^created_at: .*$/m, 'created_at: "not-a-date"'));
+      const t0 = Date.now();
+      spec('c3', '## Goal\ny\n');
+      const c = createdAt('c3');
+      assert.ok(!Number.isNaN(Date.parse(c)) && Date.parse(c) >= t0 - 5, c);
+    });
+    await atest('[plugin-0.6.4 S1] a date-only earlier created_at is re-serialised as a full ISO time', async () => {
+      spec('c4');
+      const f = specPath('c4');
+      fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace(/^created_at: .*$/m, 'created_at: "2026-01-02"'));
+      spec('c4', '## Goal\ny\n');
+      assert.strictEqual(createdAt('c4'), '2026-01-02T00:00:00.000Z');
+    });
+    await atest('[plugin-0.6.4 S1] /sereno:next queue order is unchanged after revising the older of two specs', async () => {
+      const d2 = mk();
+      git(d2, 'init', '-q', '-b', 'main');
+      git(d2, 'config', 'user.email', 't@example.invalid'); git(d2, 'config', 'user.name', 't'); git(d2, 'config', 'commit.gpgsign', 'false');
+      fs.writeFileSync(path.join(d2, 'a.txt'), 'one\n');
+      git(d2, 'add', '.'); git(d2, 'commit', '-q', '-m', 'base');
+      const sp = (task, body) => assert.strictEqual(S(d2, ['spec', '--task', task, '--builder', 'sonnet', '--kind', 'mechanical', '--reason', 'r', '--base-branch', 'main', '--stdin'], body).out.ok, true);
+      sp('older', '## Goal\nx\n');
+      await sleep(30);
+      sp('newer', '## Goal\nx\n');
+      assert.strictEqual(S(d2, ['next']).out.task, 'older');
+      await sleep(30);
+      sp('older', '## Goal\nrevised\n');
+      assert.strictEqual(S(d2, ['next']).out.task, 'older', 'a revision does not send the older task to the back');
+    });
+    test('[plugin-0.6.4 S1] renderSpec: createdAt is used when valid; now otherwise', () => {
+      const { renderSpec } = require(path.join(PLUGIN, 'bin', 'lib', 'spec.js'));
+      const base = { task: 't', builder: 'sonnet', kind: 'mechanical', reason: 'r', fixes: null, revision: 1, body: 'b', now: new Date('2030-05-05T00:00:00.000Z') };
+      assert.ok(renderSpec(Object.assign({}, base, { createdAt: '2026-03-04T05:06:07.000Z' })).includes('created_at: "2026-03-04T05:06:07.000Z"'));
+      assert.ok(renderSpec(Object.assign({}, base, { createdAt: 'nope' })).includes('created_at: "2030-05-05T00:00:00.000Z"'));
+      assert.ok(renderSpec(base).includes('created_at: "2030-05-05T00:00:00.000Z"'));
+    });
+    await atest('[plugin-0.6.4 S1] README: New in 0.6.4, above 0.6.3', async () => {
+      const r = fs.readFileSync(path.join(PLUGIN, 'README.md'), 'utf8');
+      assert.ok(r.includes('New in 0.6.4') && r.indexOf('New in 0.6.4') < r.indexOf('New in 0.6.3'));
+    });
+    await atest('[plugin-0.6.4] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

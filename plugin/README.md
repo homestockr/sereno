@@ -7,8 +7,10 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.6.3. Windows is the first
+can observe the files it writes. Version 0.6.4. Windows is the first
 platform; other systems are not yet tested.
+
+New in 0.6.4: a revised spec keeps its `created_at`, so it keeps its queue place and escaped-defect counts stay right.
 
 New in 0.6.3: the gate records who reviewed. `sereno.js gate` now takes `--light true|false` and writes `reviewer: { agent, light }` (the agent from `--agent-name`; `light` is null when the flag is missing or not exactly `true` or `false`). The field is left out when both are null, so older gates keep their shape. `/sereno:ship` passes `--light` from the `reviewer` result. The Sereno app reads it to compare follow-up fixes per reviewer.
 
