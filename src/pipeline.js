@@ -754,7 +754,7 @@ function escapes(projects, now, models, spendForAgent) {
       if (!Number.isFinite(at) || at < since || at > now) { merged.set(t.task, null); continue; }
       const g = groupFor(fr);
       g.merges++; merges++;
-      if (fr.kind === 'gate') {
+      if (fr && fr.kind === 'gate') {
         if (!fr.agentId || !fr.sessionId || typeof spendForAgent !== 'function') g.excluded++;
         else {
           try {

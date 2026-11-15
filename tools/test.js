@@ -12491,6 +12491,14 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     test('[alpha8 A2] escapes: empty and junk input give the empty shape', () => {
       for (const x of [[], undefined, null, [{}], [{ id: 'p', tasks: [null, {}] }]]) assert.deepStrictEqual(pl.escapes(x, NOW, MODELS), { days: 90, merges: 0, unmatched: 0, groups: [] });
+      // A merged task with a missing or non-object finalReview must not throw: it is a merge in Unknown.
+      for (const fr of [undefined, null, 'x', 5]) {
+        const e = pl.escapes([{ id: 'p', tasks: [{ task: 'a', stage: 'merged', fixes: null, finalReview: fr, updatedAt: NOW - D }] }], NOW, MODELS, () => 1);
+        assert.strictEqual(e.merges, 1);
+        assert.strictEqual(e.groups.length, 1);
+        assert.strictEqual(e.groups[0].key, 'unknown');
+        assert.deepStrictEqual(e.groups[0].redTeamPerMerge, { mean: null, n: 0, excluded: 0 });
+      }
     });
 
     test('[alpha8 A2] escapes: merges, escaped, fixes by reviewer x size; two fixes for one merge are one escape and two fixes', () => {
@@ -20542,6 +20550,16 @@ test('missing rate_limits degrades instead of throwing', () => {
       const k = gateOf('r9', ['--model', 'x', '--agent-name', 'Red Team']);
       assert.ok(!('reviewer' in k), 'both null: no field');
       assert.deepStrictEqual(gateOf('r10', ['--model', 'x', '--agent-name', 'a'.repeat(65), '--light', 'false']).reviewer, { agent: null, light: false });
+    });
+    test('[plugin-0.6.3 fix] gate: without --model the --agent-name lookup still rejects a non-agent name (invalid_arg, as on 0.6.2); a bare agent name stores reviewer.agent', () => {
+      const t = mkTask('r11');
+      const g = (extra) => S(dir, ['gate', '--stdin', '--task', 'r11', '--spec', '.sereno/specs/r11.md', '--base', t.base, '--head', t.head, '--branch', 'task/r11', '--tests-passed', 'true', ...extra], '{"outcome":"pass","findings":[]}').out;
+      const bad = g(['--agent-name', 'sereno:red-team']);
+      assert.strictEqual(bad.ok, false);
+      assert.strictEqual(bad.code, 'invalid_arg');
+      const ok = g(['--agent-name', 'red-team']);
+      assert.strictEqual(ok.ok, true, JSON.stringify(ok));
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, ok.path), 'utf8')).reviewer.agent, 'red-team');
     });
     test('[plugin-0.6.3 A1] ship skill passes --light from the reviewer result and drops it when reviewer failed', () => {
       const s = rd('skills/ship/SKILL.md');

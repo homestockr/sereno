@@ -88,6 +88,11 @@ It is read-only. It observes the records only. Nothing switches automatically.
 - Showing the plugin version per project. It stays open.
 - The history of earlier merges of a re-opened task is not kept, so a fix recorded before a
   re-merge is unmatched.
+- The plugin rewrites a spec's `created_at` on every revision, so a fix spec revised after a
+  re-merge counts against the new merge (it over-counts, never drops).
+- A hand-edited date-only `created_at` parses as UTC midnight and can leave a same-day fix
+  unmatched; the plugin always writes a full ISO time.
+- Merges dated after `now` (clock skew) are left out, as in Signals.
 
 ## Steps
 

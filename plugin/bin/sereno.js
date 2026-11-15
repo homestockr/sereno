@@ -409,7 +409,9 @@ const COMMANDS = {
     // 0.6.3: who reviewed and how big. light is null unless the flag is exactly true or false; the whole
     // field is left out when both are null, so older readers see the older shape.
     const lightRaw = str(a, 'light');
-    // The app's rule: drop a leading "sereno:", keep only [a-z0-9-]{1,64}, else null. Never an error here.
+    // The app's rule: drop a leading "sereno:", keep only [a-z0-9-]{1,64}, else null. This field never fails the
+    // gate. Without --model, though, the agentModel(--agent-name) lookup above still rejects a name that is not
+    // a plugin agent file (invalid_arg), as on 0.6.2.
     const reviewerAgentRaw = agentName === undefined ? '' : agentName.replace(/^sereno:/, '');
     const reviewerAgent = /^[a-z0-9-]{1,64}$/.test(reviewerAgentRaw) ? reviewerAgentRaw : null;
     const reviewerLight = lightRaw === 'true' ? true : (lightRaw === 'false' ? false : null);
