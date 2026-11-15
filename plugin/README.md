@@ -7,8 +7,10 @@ the spec and returns a verdict. `/sereno:ship` runs the tests against the base c
 writes a gate file, repairs once for a defect, and stops. You merge with `/sereno:merge`.
 
 It works without the Sereno app. It needs only Node and git. The Sereno app (Windows)
-can observe the files it writes. Version 0.6.2. Windows is the first
+can observe the files it writes. Version 0.6.3. Windows is the first
 platform; other systems are not yet tested.
+
+New in 0.6.3: the gate records who reviewed. `sereno.js gate` now takes `--light true|false` and writes `reviewer: { agent, light }` (the agent from `--agent-name`; `light` is null when the flag is missing or not exactly `true` or `false`). The field is left out when both are null, so older gates keep their shape. `/sereno:ship` passes `--light` from the `reviewer` result. The Sereno app reads it to compare follow-up fixes per reviewer.
 
 New in 0.6.2: task text without the long paste. `/sereno:task <name>` with no goal now takes the task from your latest message(s) before the command, so you can paste a long task as a message and then run the short command (a long command line can lose chunks when pasted, and a spec built from damaged text sends the Builder wrong). Before it writes a spec, the skill checks the file paths and code names in the task text against the repo with the new `sereno.js refs` command; anything that does not resolve and is not described as new work stops the skill with a list. `--refs-ok` skips that stop. The report says whether the goal came from your message or from the command.
 
@@ -245,9 +247,10 @@ Every component of the pipeline encodes an assumption about what the model canno
 Those assumptions go stale, so remove one piece at a time and see what you lose. Turn
 `roles.redTeam.light.kinds` on for more kinds, turn `roles.redTeam.specReview` off, or try the
 `lean` preset for a week. Then compare follow-up fixes (`/sereno:task --fixes <task>` records
-one) and cost per merge (an estimate) against the week before. The Sereno app will show escaped
-defects per reviewer in a later release (alpha.8). Nothing switches automatically: you change
-the config and you decide whether to keep it.
+one) and cost per merge (an estimate) against the week before. From alpha.8 the Sereno app shows
+this on Pipeline > Signals, "Escaped defects": merges, follow-up fixes and red-team cost per
+merge (est.) for each reviewer and review size. Nothing switches automatically: you change the
+config and you decide whether to keep it.
 
 ## Recovery
 

@@ -162,7 +162,7 @@ function cleanAttempt(r, task, n) {
 /** @param {Record<string, any>} r @param {string} task @param {string} runId */
 function cleanGate(r, task, runId) {
   const v = rec.sanitizeVerdict({ outcome: r.outcome, findings: r.findings, context_requests: r.context_requests });
-  return {
+  const out = {
     review_run_id: runId,
     task_id: task,
     spec: str(r.spec, 260),
@@ -180,6 +180,14 @@ function cleanGate(r, task, runId) {
     reviewed_at: iso(r.reviewed_at),
     config_hash: sha(r.config_hash),
   };
+  // plugin 0.6.3: which reviewer ran and whether it was the light one. Older gates keep their exact shape.
+  if (isObj(r.reviewer)) {
+    out.reviewer = {
+      agent: typeof r.reviewer.agent === 'string' && /^[a-z0-9-]{1,64}$/.test(r.reviewer.agent) ? r.reviewer.agent : null,
+      light: typeof r.reviewer.light === 'boolean' ? r.reviewer.light : null,
+    };
+  }
+  return out;
 }
 
 /**
@@ -374,9 +382,25 @@ async function taskView(root, entry, cfg, git, now, opts) {
   const startedAt = starts.length ? Math.min(...starts) : (stamps.length ? Math.min(...stamps) : null);
   const updatedAt = stamps.length ? Math.max(...stamps) : null;
   const expired = isExpired(updatedAt, now);
+  // When the task was created: the spec's created_at, else its earliest attempt start. ms or null.
+  const specCreated = spec && typeof spec.created_at === 'string' ? Date.parse(spec.created_at) : NaN;
+  const createdAt = Number.isFinite(specCreated) ? specCreated : (starts.length ? Math.min(...starts) : null);
 
+  // The task this one repairs: the spec's value wins, else the newest attempt's.
+  const fixes = (spec && spec.fixes) || (latest && latest.fixes) || null;
   const view = (/** @type {string} */ stage, /** @type {string} */ step, /** @type {string | null} */ reason, /** @type {number | null} */ attempt) =>
-    ({ task: entry.task, stage, step, reason, attempt, gate, findings, startedAt, updatedAt, reviewRuns: gates.length, expired });
+    ({ task: entry.task, stage, step, reason, attempt, gate, findings, startedAt, updatedAt, createdAt, reviewRuns: gates.length, expired, fixes });
+  const mergedView = (/** @type {any} */ finalReview) => Object.assign(view('merged', 'Merged', null, latest ? latest.attempt : null), { finalReview });
+  /** True when `head` is in the base branch; false for "not an ancestor" or "commit not in this repo"; throws otherwise. */
+  const inBase = async (/** @type {string} */ head, /** @type {string} */ base) => {
+    try { await git(['merge-base', '--is-ancestor', head, 'refs/heads/' + base], root); return true; }
+    catch (e) {
+      // 1: not an ancestor. 128: the commit is not in this repo (pruned, other clone): not merged.
+      const c = e && /** @type {any} */ (e).code;
+      if (c !== 1 && c !== 128) throw e;
+      return false;
+    }
+  };
 
   try {
     if (!attempts.length) return view('architect', 'Spec written', null, null);
@@ -401,15 +425,18 @@ async function taskView(root, entry, cfg, git, now, opts) {
     // Only a gate that belongs to the latest attempt (or a latest attempt that passed/skipped) can
     // say "merged"; a task re-opened under the same name after a merge has a fresh built attempt.
     const gateIsLatest = !!byRun || latest.outcome === 'pass' || latest.outcome === 'skipped';
-    const head = gateIsLatest && gate && gate.head_commit;
     const base = spec && spec.base_branch;
-    if (head && base && briefsLib.validBranchName(base)) {
-      try { await git(['merge-base', '--is-ancestor', head, 'refs/heads/' + base], root); return view('merged', 'Merged', null, latest.attempt); }
-      catch (e) {
-        // 1: not an ancestor. 128: the commit is not in this repo (pruned, other clone): not merged.
-        const c = e && /** @type {any} */ (e).code;
-        if (c !== 1 && c !== 128) throw e;
-      }
+    const baseOk = !!base && briefsLib.validBranchName(base);
+    // A skipped attempt with no gate of its own: its own head commit says whether it landed.
+    // When it has a head, that head is the only evidence: a stale gate of an earlier run must not decide.
+    const skipOwn = latest.outcome === 'skipped' && !byRun && !!latest.head_commit;
+    if (skipOwn && baseOk && await inBase(latest.head_commit, base)) {
+      return mergedView({ kind: 'skip', agent: null, light: null, skip: latest.skip === 'off' || latest.skip === 'spec' ? latest.skip : null, model: null, at: latest.ended_at || null, sessionId: null, agentId: null });
+    }
+    const head = gateIsLatest && !skipOwn && gate && gate.head_commit;
+    if (head && baseOk && await inBase(head, base)) {
+      const rv = gate.reviewer;
+      return mergedView({ kind: 'gate', agent: rv ? rv.agent : null, light: rv ? rv.light : null, skip: null, model: gate.model || null, at: gate.reviewed_at || null, sessionId: gate.session_id || null, agentId: gate.agent_id || null });
     }
 
     const names = await listAttempts(root, { fsp });
@@ -453,6 +480,7 @@ async function guard(root) { return (await guardRepo(root, nodeFs.promises)) !==
 const DAY_MS = 24 * 3600 * 1000;
 const SIGNAL_DAYS = 30;
 const WEEK_DAYS = 7;
+const ESCAPE_DAYS = 90;
 const ROLE_MAP = Object.freeze({
   'sereno:builder': 'builder', 'sereno:builder-haiku': 'builder', 'sereno:builder-opus': 'builder',
   'sereno:red-team': 'red-team', 'sereno:red-team-lean': 'red-team', 'sereno:red-team-browse': 'red-team',
@@ -667,4 +695,95 @@ function redTeamPerMerge(projects, spendForAgent) {
   return { mean: n ? sum / n : null, n, excluded };
 }
 
-module.exports = { roleMap, modelFamily, inferModels, agentModels, signals, redTeamPerMerge, recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView, isExpired };
+/**
+ * Escaped defects per reviewer (alpha.8). A "merge" is a task at stage `merged`; a follow-up fix is
+ * another task in the same project whose `fixes` names it. Only merges whose `finalReview.at` is
+ * within 90 days of `now` count; fixes found at any time count against them. A fix naming itself is
+ * ignored; a fix naming no merged task of that project is `unmatched`; a fix naming a merged task
+ * outside the window is in neither. Groups: reviewer agent x full/light/size unknown, `No review (spec)`,
+ * `Gate off`, `Unknown`. A gate without `reviewer` falls back to its model: the agent is named only when
+ * exactly one red-team agent in `models` has that family, and its size is unknown.
+ * A fix counts against a merge only when its `createdAt` (ms) is known and >= the merge's time (`finalReview.at`,
+ * else the task's `updatedAt`); otherwise it is `unmatched`.
+ * @param {Array<{ id?: string, tasks?: Array<{ task: string, stage?: string, fixes?: string | null, finalReview?: any, createdAt?: number | null, updatedAt?: number | null }> }>} projects
+ * @param {number} now
+ * @param {Array<{ agent: string, role: string, model: string }>} [models] the agentModels() shape
+ * @param {((sessionId: string, agentId: string) => number) | null | undefined} [spendForAgent]
+ */
+function escapes(projects, now, models, spendForAgent) {
+  const since = now - ESCAPE_DAYS * DAY_MS;
+  /** @type {Map<string, string | null>} family -> the one red-team agent using it (null when several) */
+  const byFamily = new Map();
+  for (const m of Array.isArray(models) ? models : []) {
+    if (!m || m.role !== 'red-team' || typeof m.agent !== 'string') continue;
+    const fam = modelFamily(m.model);
+    if (!fam) continue;
+    const name = m.agent.replace(/^sereno:/, '');
+    const prev = byFamily.get(fam);
+    byFamily.set(fam, prev === undefined || prev === name ? name : null);
+  }
+  /** @type {Map<string, { key: string, label: string, merges: number, escaped: number, fixes: number, sum: number, n: number, excluded: number }>} */
+  const groups = new Map();
+  const groupFor = (/** @type {any} */ fr) => {
+    let key = 'unknown', label = 'Unknown';
+    if (fr && fr.kind === 'skip') {
+      if (fr.skip === 'spec') { key = 'skip-spec'; label = 'No review (spec)'; }
+      else if (fr.skip === 'off') { key = 'skip-off'; label = 'Gate off'; }
+    } else if (fr && fr.kind === 'gate') {
+      let agent = typeof fr.agent === 'string' && fr.agent ? fr.agent : null;
+      if (!agent) { const fam = modelFamily(fr.model); agent = (fam && byFamily.get(fam)) || null; }
+      if (agent) {
+        const size = fr.light === true ? 'light' : fr.light === false ? 'full' : 'unknown';
+        key = agent + '|' + size; label = agent + ' · ' + (size === 'unknown' ? 'size unknown' : size);
+      }
+    }
+    let g = groups.get(key);
+    if (!g) { g = { key, label, merges: 0, escaped: 0, fixes: 0, sum: 0, n: 0, excluded: 0 }; groups.set(key, g); }
+    return g;
+  };
+  let merges = 0, unmatched = 0;
+  for (const p of Array.isArray(projects) ? projects : []) {
+    const tasks = p && Array.isArray(p.tasks) ? p.tasks : [];
+    /** @type {Map<string, { g: any, hit: number, at: number } | null>} merged task name -> its group, or null outside the window */
+    const merged = new Map();
+    for (const t of tasks) {
+      if (!t || t.stage !== 'merged' || typeof t.task !== 'string') continue;
+      const fr = t.finalReview;
+      let at = fr && typeof fr.at === 'string' ? Date.parse(fr.at) : (fr && typeof fr.at === 'number' ? fr.at : NaN);
+      if (!Number.isFinite(at) && typeof t.updatedAt === 'number') at = t.updatedAt;   // undated merge: the task's last activity
+      if (!Number.isFinite(at) || at < since || at > now) { merged.set(t.task, null); continue; }
+      const g = groupFor(fr);
+      g.merges++; merges++;
+      if (fr && fr.kind === 'gate') {
+        if (!fr.agentId || !fr.sessionId || typeof spendForAgent !== 'function') g.excluded++;
+        else {
+          try {
+            // 0 means no ledger rows carry this agent_id: unmeasured, not free.
+            const c = Number(spendForAgent(fr.sessionId, fr.agentId)) || 0;
+            if (c > 0) { g.sum += c; g.n++; } else g.excluded++;
+          } catch (_) { g.excluded++; }
+        }
+      }
+      merged.set(t.task, { g, hit: 0, at });
+    }
+    for (const t of tasks) {
+      if (!t || typeof t.fixes !== 'string' || !t.fixes || t.fixes === t.task) continue;
+      if (!merged.has(t.fixes)) { unmatched++; continue; }
+      const m = merged.get(t.fixes);
+      if (!m) continue;
+      // A fix counts only when it was created at or after the merge; unknown creation time names a task, not this merge.
+      if (typeof t.createdAt !== 'number' || !Number.isFinite(t.createdAt) || t.createdAt < m.at) { unmatched++; continue; }
+      m.g.fixes++;
+      if (!m.hit++) m.g.escaped++;
+    }
+  }
+  const list = [...groups.values()].map((g) => ({
+    key: g.key, label: g.label, merges: g.merges, escaped: g.escaped, fixes: g.fixes,
+    ratePct: g.merges >= 5 ? Math.round(g.escaped / g.merges * 100) : null,
+    redTeamPerMerge: { mean: g.n ? g.sum / g.n : null, n: g.n, excluded: g.excluded },
+  }));
+  list.sort((a, b) => b.merges - a.merges || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  return { days: ESCAPE_DAYS, merges, unmatched, groups: list };
+}
+
+module.exports = { roleMap, modelFamily, inferModels, agentModels, signals, redTeamPerMerge, escapes, recovery, config, decide: recovery.decide, readRepo, listAttempts, guard, taskView, isExpired };

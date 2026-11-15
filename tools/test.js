@@ -9616,12 +9616,12 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['/sereno:next', '--after', '--hold', 'preflight', 'hook_failed', 'attempt --adopt', '/sereno:merge', 'after_not_merged']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes('`next`, `build`') || r.includes('`task`, `next`, `build`'));
     });
-    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.2', () => {
+    test('[plugin-0.5 P4] plugin.json, marketplace and README all say 0.6.3', () => {
       const pj = JSON.parse(rd('.claude-plugin/plugin.json'));
       const mp = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
-      assert.strictEqual(pj.version, '0.6.2');
-      assert.strictEqual(mp.plugins[0].version, '0.6.2');
-      assert.ok(rd('README.md').includes('Version 0.6.2.'));
+      assert.strictEqual(pj.version, '0.6.3');
+      assert.strictEqual(mp.plugins[0].version, '0.6.3');
+      assert.ok(rd('README.md').includes('Version 0.6.3.'));
     });
     test('[plugin-0.5 P4] README has the lighter-setup section and the 0.5.0 notes', () => {
       const r = rd('README.md');
@@ -11988,7 +11988,7 @@ test('missing rate_limits degrades instead of throwing', () => {
           assert.strictEqual(v.step, 'Spec written');
           assert.strictEqual(v.reviewRuns, 0);
           assert.strictEqual(v.expired, false);
-          assert.deepStrictEqual(Object.keys(v).sort(), ['attempt', 'expired', 'findings', 'gate', 'reason', 'reviewRuns', 'stage', 'startedAt', 'step', 'task', 'updatedAt']);
+          assert.deepStrictEqual(Object.keys(v).sort(), ['attempt', 'createdAt', 'expired', 'findings', 'fixes', 'gate', 'reason', 'reviewRuns', 'stage', 'startedAt', 'step', 'task', 'updatedAt']);
         });
 
         await atest('[4b-stage] builder: an environment error is retried', async () => {
@@ -12072,6 +12072,87 @@ test('missing rate_limits degrades instead of throwing', () => {
           putAtt(r, 'demo', 2, { outcome: 'built' });
           const v = await viewOf(r, 'demo');
           assert.strictEqual(v.stage, 'red-team');
+        });
+
+        /* ---- [alpha8 A2] reviewer on the gate, skipped merges, fixes and finalReview ---- */
+        await atest('[alpha8 A2] cleanGate keeps reviewer { agent, light } sanitised; no reviewer in the source leaves the key out', async () => {
+          const r = mkrepo();
+          const ids = [rid(), rid(), rid(), rid(), rid()];
+          putSpec(r, 'demo');
+          putGate(r, 'demo', ids[0], { reviewer: { agent: 'red-team-lean', light: true } });
+          putGate(r, 'demo', ids[1], { reviewer: { agent: 'Bad Name!', light: 'yes' } });
+          putGate(r, 'demo', ids[2], { reviewer: { agent: 'x'.repeat(65), light: false } });
+          putGate(r, 'demo', ids[3], { reviewer: 'red-team' });
+          putGate(r, 'demo', ids[4], {});
+          const out = await pl.readRepo(r);
+          const by = (id) => out.tasks.find((t) => t.task === 'demo').gates.find((x) => x.review_run_id === id);
+          assert.deepStrictEqual(by(ids[0]).reviewer, { agent: 'red-team-lean', light: true });
+          assert.deepStrictEqual(by(ids[1]).reviewer, { agent: null, light: null });
+          assert.deepStrictEqual(by(ids[2]).reviewer, { agent: null, light: false });
+          assert.ok(!('reviewer' in by(ids[3])), 'a non-object reviewer is dropped');
+          assert.ok(!('reviewer' in by(ids[4])), 'the older shape is unchanged');
+        });
+
+        await atest('[alpha8 A2] merged gate: finalReview carries the gate reviewer, model, time and ids; fixes comes from the spec, else the attempt', async () => {
+          const r = mkrepo(); const { id } = passTask(r, 'demo');
+          putGate(r, 'demo', id, { outcome: 'pass', tests_passed: true, head_commit: g(r, 'rev-parse', 'task/demo'), spec_hash: rec.sha256(fs.readFileSync(path.join(r, '.sereno', 'specs', 'demo.md'))), reviewer: { agent: 'red-team', light: false }, reviewed_at: '2026-10-15T11:30:00.000Z' });
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          const v = await viewOf(r, 'demo');
+          assert.strictEqual(v.stage, 'merged');
+          assert.deepStrictEqual(v.finalReview, { kind: 'gate', agent: 'red-team', light: false, skip: null, model: 'claude-fable-5', at: '2026-10-15T11:30:00.000Z', sessionId: 's-1', agentId: 'a_2' });
+          assert.strictEqual(v.fixes, null);
+          const r2 = mkrepo(); const tip = mkTask(r2, 'fx');
+          wj(sub(r2, 'specs'), 'fx.md', SPEC('fx').replace('fixes: null', 'fixes: "old-task"'));
+          putAtt(r2, 'fx', 1, { outcome: 'built', fixes: 'other-task' });
+          assert.strictEqual((await viewOf(r2, 'fx')).fixes, 'old-task', 'the spec wins');
+          wj(sub(r2, 'specs'), 'fx.md', SPEC('fx'));
+          assert.strictEqual((await viewOf(r2, 'fx')).fixes, 'other-task', 'else the newest attempt');
+          assert.ok(!('finalReview' in (await viewOf(r2, 'fx'))), 'only a merged view has finalReview');
+          void tip;
+        });
+
+        for (const skip of ['off', 'spec']) {
+          await atest('[alpha8 A2] a skipped latest attempt (skip: ' + skip + ') with no gate, head in the base branch, is merged; finalReview is the skip', async () => {
+            const r = mkrepo(); const tip = mkTask(r, 'demo'); putSpec(r, 'demo');
+            putAtt(r, 'demo', 1, { outcome: 'skipped', skip, head_commit: tip, ended_at: '2026-10-15T10:07:00.000Z' });
+            assert.notStrictEqual((await viewOf(r, 'demo')).stage, 'merged', 'not merged yet');
+            g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+            const v = await viewOf(r, 'demo');
+            assert.strictEqual(v.stage, 'merged');
+            assert.strictEqual(v.step, 'Merged');
+            assert.strictEqual(v.gate, null);
+            assert.deepStrictEqual(v.finalReview, { kind: 'skip', agent: null, light: null, skip, model: null, at: '2026-10-15T10:07:00.000Z', sessionId: null, agentId: null });
+          });
+        }
+
+        await atest('[alpha8 fix] a re-opened task whose latest attempt is skipped: a head not in base is not merged despite a stale merged gate; in base it is merged as a skip; createdAt is the spec created_at', async () => {
+          const r = mkrepo(); passTask(r, 'demo');
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          assert.strictEqual((await viewOf(r, 'demo')).stage, 'merged');
+          g(r, 'checkout', '-q', 'task/demo'); g(r, 'commit', '-q', '--allow-empty', '-m', 'again'); const tip2 = g(r, 'rev-parse', 'HEAD'); g(r, 'checkout', '-q', 'main');
+          putAtt(r, 'demo', 2, { outcome: 'skipped', skip: 'spec', head_commit: tip2, review_run_id: null, ended_at: '2026-10-15T10:30:00.000Z' });
+          const v = await viewOf(r, 'demo');
+          assert.notStrictEqual(v.stage, 'merged', 'the stale gate must not label it merged');
+          assert.ok(!('finalReview' in v));
+          assert.strictEqual(v.createdAt, Date.parse('2026-10-15T09:00:00.000Z'));
+          g(r, 'merge', '-q', '--no-ff', '-m', 'merge again', 'task/demo');
+          const w = await viewOf(r, 'demo');
+          assert.strictEqual(w.stage, 'merged');
+          assert.strictEqual(w.finalReview.kind, 'skip');
+          // an old record with no head_commit keeps the gate fallthrough
+          const r2 = mkrepo(); passTask(r2, 'demo');
+          g(r2, 'merge', '-q', '--no-ff', '-m', 'merge', 'task/demo');
+          putAtt(r2, 'demo', 2, { outcome: 'skipped', skip: 'off', head_commit: null, review_run_id: null });
+          assert.strictEqual((await viewOf(r2, 'demo')).stage, 'merged');
+        });
+
+        await atest('[alpha8 A2] skipped merge: a pruned head (git 128) is not merged, and any other git failure is stage unknown', async () => {
+          const r = mkrepo(); mkTask(r, 'demo'); putSpec(r, 'demo');
+          putAtt(r, 'demo', 1, { outcome: 'skipped', skip: 'off', head_commit: 'c'.repeat(40) });
+          const v = await viewOf(r, 'demo');
+          assert.notStrictEqual(v.stage, 'merged');
+          const w = await viewOf(r, 'demo', NOW, async () => { throw Object.assign(new Error('boom'), { code: 'spawn_failed' }); });
+          assert.deepStrictEqual([w.stage, w.reason], ['unknown', 'spawn_failed']);
         });
 
         await atest('[4b-stage] head_moved: a commit on the task branch after the gate sends it back to review', async () => {
@@ -12395,6 +12476,165 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.deepStrictEqual(pl.redTeamPerMerge(projects.concat(none), l.spendForAgent), { mean: 3, n: 2, excluded: 2 });
       l.close();
     });
+
+    /* ---- [alpha8 A2] escapes ---- */
+    const MODELS = [
+      { agent: 'sereno:red-team', role: 'red-team', model: 'fable' },
+      { agent: 'sereno:red-team-lean', role: 'red-team', model: 'opus' },
+      { agent: 'sereno:red-team-browse', role: 'red-team', model: 'fable' },   // as shipped: red-team and red-team-browse share fable
+      { agent: 'sereno:builder', role: 'builder', model: 'sonnet' },
+    ];
+    const FR = (extra) => Object.assign({ kind: 'gate', agent: 'red-team', light: false, skip: null, model: 'claude-fable-5', at: new Date(NOW - 5 * D).toISOString(), sessionId: 's1', agentId: null }, extra || {});
+    const M = (task, fr) => ({ task, stage: 'merged', fixes: null, finalReview: fr || FR() });
+    const FX = (task, fixes, createdAt) => ({ task, stage: 'builder', fixes, finalReview: undefined, createdAt: createdAt === undefined ? NOW - D : createdAt });
+    const grp = (e, key) => e.groups.find((x) => x.key === key);
+
+    test('[alpha8 A2] escapes: empty and junk input give the empty shape', () => {
+      for (const x of [[], undefined, null, [{}], [{ id: 'p', tasks: [null, {}] }]]) assert.deepStrictEqual(pl.escapes(x, NOW, MODELS), { days: 90, merges: 0, unmatched: 0, groups: [] });
+      // A merged task with a missing or non-object finalReview must not throw: it is a merge in Unknown.
+      for (const fr of [undefined, null, 'x', 5]) {
+        const e = pl.escapes([{ id: 'p', tasks: [{ task: 'a', stage: 'merged', fixes: null, finalReview: fr, updatedAt: NOW - D }] }], NOW, MODELS, () => 1);
+        assert.strictEqual(e.merges, 1);
+        assert.strictEqual(e.groups.length, 1);
+        assert.strictEqual(e.groups[0].key, 'unknown');
+        assert.deepStrictEqual(e.groups[0].redTeamPerMerge, { mean: null, n: 0, excluded: 0 });
+      }
+    });
+
+    test('[alpha8 A2] escapes: merges, escaped, fixes by reviewer x size; two fixes for one merge are one escape and two fixes', () => {
+      const p = [{ id: 'p', tasks: [M('a'), M('b'), M('c', FR({ light: true, agent: 'red-team-lean', model: 'opus' })), FX('f1', 'a'), FX('f2', 'a'), FX('f3', 'c')] }];
+      const e = pl.escapes(p, NOW, MODELS);
+      assert.strictEqual(e.days, 90); assert.strictEqual(e.merges, 3); assert.strictEqual(e.unmatched, 0);
+      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges, x.escaped, x.fixes, x.ratePct]), [
+        ['red-team|full', 'red-team · full', 2, 1, 2, null],
+        ['red-team-lean|light', 'red-team-lean · light', 1, 1, 1, null],
+      ]);
+    });
+
+    test('[alpha8 A2] escapes: a fix naming its own task is ignored, a fix naming nothing merged is unmatched, a task not merged is not a target', () => {
+      const p = [{ id: 'p', tasks: [M('a'), { task: 'self', stage: 'merged', fixes: 'self', finalReview: FR() }, FX('f1', 'ghost'), FX('f2', 'open'), { task: 'open', stage: 'ready', fixes: null }, FX('f3', 'f3')] }];
+      const e = pl.escapes(p, NOW, MODELS);
+      assert.strictEqual(e.unmatched, 2, 'ghost and open');
+      assert.deepStrictEqual([e.merges, grp(e, 'red-team|full').escaped, grp(e, 'red-team|full').fixes], [2, 0, 0]);
+    });
+
+    test('[alpha8 A2] escapes: fixes match within a project only', () => {
+      const e = pl.escapes([{ id: 'p', tasks: [M('a')] }, { id: 'q', tasks: [FX('f', 'a')] }], NOW, MODELS);
+      assert.deepStrictEqual([e.merges, e.unmatched, e.groups[0].fixes], [1, 1, 0]);
+    });
+
+    test('[alpha8 A2] escapes: a merge older than 90 days is out of the window, and a fix naming it counts in neither merges nor unmatched', () => {
+      const old = FR({ at: new Date(NOW - 91 * D).toISOString() });
+      const edge = FR({ at: new Date(NOW - 90 * D).toISOString() });
+      const e = pl.escapes([{ id: 'p', tasks: [M('old', old), M('edge', edge), M('bad', FR({ at: 'garbage' })), FX('f1', 'old'), FX('f2', 'edge'), FX('f3', 'bad')] }], NOW, MODELS);
+      assert.strictEqual(e.merges, 1, 'only the edge merge');
+      assert.strictEqual(e.unmatched, 0);
+      assert.deepStrictEqual([e.groups[0].escaped, e.groups[0].fixes], [1, 1]);
+    });
+
+    test('[alpha8 A2] escapes: skipped merges group as Gate off and No review (spec), with no cost measured', () => {
+      const sk = (skip) => FR({ kind: 'skip', skip, agent: null, light: null, model: null, sessionId: null });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', sk('off')), M('b', sk('spec')), M('c', sk('spec')), FX('f', 'b')] }], NOW, MODELS, () => 9);
+      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges, x.escaped]), [['skip-spec', 'No review (spec)', 2, 1], ['skip-off', 'Gate off', 1, 0]]);
+      for (const x of e.groups) assert.deepStrictEqual(x.redTeamPerMerge, { mean: null, n: 0, excluded: 0 });
+      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a', sk('weird'))] }], NOW, MODELS).groups[0].key, 'unknown');
+    });
+
+    test('[alpha8 A2] escapes: an old gate (no reviewer) names its agent by a model family only one red-team agent uses, size unknown', () => {
+      const old = (model) => FR({ agent: null, light: null, model });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-opus-5')), M('b', old('opus'))] }], NOW, MODELS);
+      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges]), [['red-team-lean|unknown', 'red-team-lean · size unknown', 2]]);
+    });
+
+    test('[alpha8 A2] escapes: an old gate whose family two reviewers share, an unknown model, or no models at all is Unknown', () => {
+      const old = (model) => FR({ agent: null, light: null, model });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-fable-5')), M('b', old('mystery-1')), M('c', old(null))] }], NOW, MODELS);
+      assert.deepStrictEqual(e.groups.map((x) => [x.key, x.label, x.merges]), [['unknown', 'Unknown', 3]]);
+      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a', old('opus'))] }], NOW).groups[0].key, 'unknown');
+      // a builder on the same family is not a reviewer
+      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a', old('sonnet'))] }], NOW, MODELS).groups[0].key, 'unknown');
+    });
+
+    test('[alpha8 A2] escapes: a recorded reviewer with light null is size unknown; a recorded agent beats the model fallback', () => {
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', FR({ agent: 'red-team-browse', light: null, model: 'fable' })), M('b', FR({ agent: 'custom-rt', light: true, model: 'fable' }))] }], NOW, MODELS);
+      assert.deepStrictEqual(e.groups.map((x) => x.label).sort(), ['custom-rt · light', 'red-team-browse · size unknown']);
+    });
+
+    test('[alpha8 A2] escapes: ratePct is null below 5 merges, and rounded at the source from 5', () => {
+      const mk = (n, bad) => [{ id: 'p', tasks: [].concat(Array.from({ length: n }, (_, i) => M('m' + i)), Array.from({ length: bad }, (_, i) => FX('f' + i, 'm' + i))) }];
+      assert.strictEqual(pl.escapes(mk(4, 4), NOW, MODELS).groups[0].ratePct, null);
+      assert.strictEqual(pl.escapes(mk(5, 1), NOW, MODELS).groups[0].ratePct, 20);
+      assert.strictEqual(pl.escapes(mk(6, 1), NOW, MODELS).groups[0].ratePct, 17, '16.666 rounds');
+      assert.strictEqual(pl.escapes(mk(7, 2), NOW, MODELS).groups[0].ratePct, 29, '28.57 rounds');
+      assert.strictEqual(pl.escapes(mk(8, 1), NOW, MODELS).groups[0].ratePct, 13, '12.5 rounds up');
+      assert.ok(Number.isInteger(pl.escapes(mk(9, 2), NOW, MODELS).groups[0].ratePct));
+    });
+
+    test('[alpha8 A2] escapes: groups sort by merges desc, then key', () => {
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', FR({ agent: 'zeta' })), M('b', FR({ agent: 'alpha' })), M('c', FR({ agent: 'mid' })), M('d', FR({ agent: 'mid' }))] }], NOW, MODELS);
+      assert.deepStrictEqual(e.groups.map((x) => x.key), ['mid|full', 'alpha|full', 'zeta|full']);
+    });
+
+    test('[alpha8 A2] escapes: red-team $/merge per group, only gate merges; spend 0 or a throw is excluded; no spendForAgent means no mean', () => {
+      const spend = { x1: 2, x2: 4, x3: 0 };
+      const f = (sessionId, agentId) => { if (agentId === 'boom') throw new Error('x'); return spend[agentId] || 0; };
+      const mkp = () => [{ id: 'p', tasks: [
+        M('a', FR({ agentId: 'x1' })), M('b', FR({ agentId: 'x2' })), M('c', FR({ agentId: 'x3' })), M('d', FR({ agentId: 'boom' })), M('e', FR({ agentId: null })), M('f', FR({ sessionId: null, agentId: 'x1' })),
+        M('g', FR({ agent: 'red-team-lean', light: true, agentId: 'x2' })),
+      ] }];
+      const e = pl.escapes(mkp(), NOW, MODELS, f);
+      assert.deepStrictEqual(grp(e, 'red-team|full').redTeamPerMerge, { mean: 3, n: 2, excluded: 4 });
+      assert.deepStrictEqual(grp(e, 'red-team-lean|light').redTeamPerMerge, { mean: 4, n: 1, excluded: 0 });
+      const none = pl.escapes(mkp(), NOW, MODELS);
+      assert.deepStrictEqual(grp(none, 'red-team|full').redTeamPerMerge, { mean: null, n: 0, excluded: 6 });
+      assert.deepStrictEqual(grp(pl.escapes(mkp(), NOW, MODELS, null), 'red-team-lean|light').redTeamPerMerge, { mean: null, n: 0, excluded: 1 });
+    });
+
+    test('[alpha8 A2] escapes: output holds names and counts only (privacy)', () => {
+      const e = pl.escapes([{ id: 'p', tasks: [M('a'), FX('f', 'a')] }], NOW, MODELS, () => 1);
+      const s = JSON.stringify(e);
+      assert.ok(!/session|agentId|s1/.test(s), s);
+      assert.deepStrictEqual(Object.keys(e).sort(), ['days', 'groups', 'merges', 'unmatched']);
+      assert.deepStrictEqual(Object.keys(e.groups[0]).sort(), ['escaped', 'fixes', 'key', 'label', 'merges', 'ratePct', 'redTeamPerMerge']);
+    });
+
+    test('[alpha8 fix] escapes with the real agentModels(): a pre-0.6.3 fable gate is Unknown (two agents share fable), an opus gate is red-team-lean, size unknown', () => {
+      const real = pl.agentModels();
+      const fam = (a) => (real.find((m) => m.agent === a) || {}).model;
+      assert.strictEqual(fam('sereno:red-team'), 'fable'); assert.strictEqual(fam('sereno:red-team-browse'), 'fable');
+      const old = (model) => FR({ agent: null, light: null, model });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a', old('claude-fable-5')), M('b', old('claude-opus-5'))] }], NOW, real);
+      assert.deepStrictEqual(e.groups.map((x) => x.label).sort(), ['Unknown', 'red-team-lean · size unknown']);
+    });
+
+    test('[alpha8 fix] escapes: a merge counts both as a merge and, when it names another merge, as a fix', () => {
+      const fixM = Object.assign(M('b'), { fixes: 'a', createdAt: NOW - D });
+      const e = pl.escapes([{ id: 'p', tasks: [M('a'), fixM] }], NOW, MODELS);
+      assert.deepStrictEqual([e.merges, e.unmatched, grp(e, 'red-team|full').merges, grp(e, 'red-team|full').escaped, grp(e, 'red-team|full').fixes], [2, 0, 2, 1, 1]);
+    });
+
+    test('[alpha8 fix] escapes: a task re-merged under a new reviewer leaves its older fix unmatched; a later fix counts; no createdAt is unmatched', () => {
+      const mergedLean = Object.assign(M('a', FR({ agent: 'red-team-lean', light: true, at: new Date(NOW - 2 * D).toISOString() })), { createdAt: NOW - 20 * D });
+      const e = pl.escapes([{ id: 'p', tasks: [mergedLean, FX('old-fix', 'a', NOW - 10 * D)] }], NOW, MODELS);
+      assert.deepStrictEqual([e.merges, e.unmatched], [1, 1], 'the fix predates the re-merge');
+      assert.deepStrictEqual([grp(e, 'red-team-lean|light').escaped, grp(e, 'red-team-lean|light').fixes], [0, 0], 'the new group stays clean');
+      const later = pl.escapes([{ id: 'p', tasks: [mergedLean, FX('new-fix', 'a', NOW - D)] }], NOW, MODELS);
+      assert.deepStrictEqual([later.unmatched, grp(later, 'red-team-lean|light').fixes], [0, 1]);
+      for (const c of [null, undefined, NaN]) {
+        const x = pl.escapes([{ id: 'p', tasks: [M('a'), Object.assign(FX('f', 'a'), { createdAt: c })] }], NOW, MODELS);
+        assert.deepStrictEqual([x.unmatched, grp(x, 'red-team|full').fixes], [1, 0], 'createdAt ' + c);
+      }
+      // a fix created exactly at the merge time counts
+      const at = NOW - 5 * D;
+      assert.strictEqual(pl.escapes([{ id: 'p', tasks: [M('a'), FX('f', 'a', at)] }], NOW, MODELS).unmatched, 0);
+    });
+
+    test('[alpha8 fix] escapes: an undated merge falls back to the task updatedAt (in or out of the window)', () => {
+      const undated = (task, updatedAt) => Object.assign(M(task, FR({ at: null })), { updatedAt });
+      const e = pl.escapes([{ id: 'p', tasks: [undated('a', NOW - D), undated('b', NOW - 100 * D), undated('c', null), FX('f', 'a', NOW - 1000)] }], NOW, MODELS);
+      assert.strictEqual(e.merges, 1, 'only a, dated by updatedAt');
+      assert.deepStrictEqual([e.unmatched, grp(e, 'red-team|full').fixes], [0, 1]);
+    });
   }
 
   /* ---- Step 4: GET /api/pipeline ---- */
@@ -12446,7 +12686,7 @@ test('missing rate_limits degrades instead of throwing', () => {
 
     // Expected key sets, walked recursively against the real body.
     const KEYS = {
-      body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin'],
+      body: ['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'escapes', 'routing', 'plugin'],
       project: ['id', 'name', 'tasks', 'idle'],
       task: ['task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt'],
       attempt: ['attempt', 'outcome', 'startedAt', 'endedAt', 'sessionId'], activity: ['at', 'kind', 'outcome'],
@@ -12576,6 +12816,93 @@ test('missing rate_limits degrades instead of throwing', () => {
         for (const k of ROLES) assert.deepStrictEqual(b.roleSpend.roles[k], { costUsd: 0, explicit: 0, inferred: 0, unattributed: 0 });
         assert.deepStrictEqual(b.redTeamPerMerge, { mean: null, n: 0, excluded: 2 });
       } finally { await haltP(c); }
+    });
+
+    // alpha8 A3: escapes in the /api/pipeline body.
+    const escSnap = (hiddenToo) => {
+      const fr = (extra) => Object.assign({ kind: 'gate', agent: 'red-team', light: false, at: iso(NOW - 2 * DAY), agentId: 'a-esc', sessionId: 's1', model: 'claude-fable-5-1' }, extra || {});
+      const o = { p1: { pipeline: { tasks: [
+        tview('t-m1', 'merged', { finalReview: fr() }),
+        tview('t-m2', 'merged', { finalReview: fr({ agent: 'red-team-lean', light: true, agentId: 'a-none' }) }),
+        tview('t-fix', 'builder', { fixes: 't-m1', specBody: 'SECRET-BODY', createdAt: NOW - DAY }),
+      ], skipped: 0, error: false, redTeam: null, hasData: true } } };
+      if (hiddenToo) o.ph = { pipeline: { tasks: [tview('t-h', 'merged', { finalReview: fr() })], skipped: 0, error: false, redTeam: null, hasData: true } };
+      return o;
+    };
+    const escGrp = (b, k) => b.escapes.groups.find((g) => g.key === k);
+
+    await atest('[alpha8 A3] /api/pipeline: escapes body shape, a merged task with a follow-up fix lands in its reviewer group', async () => {
+      const l = openLedger({ file: ':memory:' });
+      l.ingestRequests([rqL({ requestKey: '1', requestId: 'r1', costMicros: 3000000 })]);
+      l.ingestSpans([{ requestId: 'r1', sessionId: 's1', agentId: 'a-esc', ts: NOW }]);
+      const c = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(true) }, ledger: l });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        same(b.escapes, ['days', 'merges', 'unmatched', 'groups'], 'escapes');
+        assert.strictEqual(b.escapes.days, 90);
+        assert.strictEqual(b.escapes.merges, 2, 'the hidden project is not counted');
+        assert.strictEqual(b.escapes.unmatched, 0);
+        for (const g of b.escapes.groups) { same(g, ['key', 'label', 'merges', 'escaped', 'fixes', 'ratePct', 'redTeamPerMerge'], 'group'); same(g.redTeamPerMerge, ['mean', 'n', 'excluded'], 'group rpm'); }
+        const full = escGrp(b, 'red-team|full');
+        assert.strictEqual(full.merges, 1); assert.strictEqual(full.escaped, 1); assert.strictEqual(full.fixes, 1);
+        assert.strictEqual(full.ratePct, null, 'under 5 merges gives no rate');
+        assert.strictEqual(full.label, 'red-team \u00b7 full');
+        assert.deepStrictEqual(full.redTeamPerMerge, { mean: 3, n: 1, excluded: 0 });
+        const lite = escGrp(b, 'red-team-lean|light');
+        assert.strictEqual(lite.merges, 1); assert.strictEqual(lite.escaped, 0);
+        assert.strictEqual(lite.redTeamPerMerge.mean, null);
+      } finally { await haltP(c); l.close(); }
+    });
+
+    await atest('[alpha8 A3] /api/pipeline: with no ledger every escapes red-team $/merge is null', async () => {
+      const c = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(false) } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        assert.ok(b.escapes.groups.length >= 1);
+        for (const g of b.escapes.groups) assert.strictEqual(g.redTeamPerMerge.mean, null);
+        assert.strictEqual(escGrp(b, 'red-team|full').redTeamPerMerge.excluded, 1);
+      } finally { await haltP(c); }
+    });
+
+    await atest('[alpha8 A3] /api/pipeline: an escapes() throw gives the empty shape and the rest of the body survives', async () => {
+      const orig = pl.escapes;
+      pl.escapes = () => { throw new Error('boom'); };
+      const c = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(false) } });
+      try {
+        const r = await getP(c.port, '/api/pipeline');
+        assert.strictEqual(r.status, 200);
+        const b = JSON.parse(r.text);
+        checkBody(b);
+        assert.deepStrictEqual(b.escapes, { days: 90, merges: 0, unmatched: 0, groups: [] });
+      } finally { pl.escapes = orig; await haltP(c); }
+    });
+
+    await atest('[alpha8 A3] /api/pipeline: groups are capped at 20 and no spec text, finding text or path appears in escapes', async () => {
+      const orig = pl.escapes;
+      pl.escapes = () => ({ days: 90, merges: 25, unmatched: 0, groups: Array.from({ length: 30 }, (_, i) => ({
+        key: 'k' + i + 'x'.repeat(200), label: 'L' + i + '\n', merges: 1, escaped: 0, fixes: 0, ratePct: null, command: 'SECRET-CMD', specBody: 'SECRET-BODY',
+        redTeamPerMerge: { mean: NaN, n: 0, excluded: 1, prompt: 'SECRET-PROMPT' } })) });
+      const c = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(false) } });
+      try {
+        const b = JSON.parse((await getP(c.port, '/api/pipeline')).text);
+        checkBody(b);
+        assert.strictEqual(b.escapes.groups.length, 20);
+        assert.ok(b.escapes.groups.every((g) => g.key.length <= 80 && !/[\x00-\x1f]/.test(g.label) && g.redTeamPerMerge.mean === null));
+        assert.ok(!JSON.stringify(b.escapes).includes('SECRET'));
+        // exact key sets, so a new field cannot leak in silently
+        assert.deepStrictEqual(Object.keys(b.escapes).sort(), ['days', 'groups', 'merges', 'unmatched']);
+        for (const g of b.escapes.groups) {
+          assert.deepStrictEqual(Object.keys(g).sort(), ['escaped', 'fixes', 'key', 'label', 'merges', 'ratePct', 'redTeamPerMerge']);
+          assert.deepStrictEqual(Object.keys(g.redTeamPerMerge).sort(), ['excluded', 'mean', 'n']);
+        }
+      } finally { pl.escapes = orig; await haltP(c); }
+      const c2 = await bootP({ projects: reg(), repos: { snapshot: () => escSnap(false) } });
+      try {
+        const e = JSON.stringify(JSON.parse((await getP(c2.port, '/api/pipeline')).text).escapes);
+        for (const bad of ['SECRET', 'C:\\\\secret', '.sereno/specs', 'src/a.js', 'findings', 'specBody']) assert.ok(!e.includes(bad), 'leaked ' + bad);
+      } finally { await haltP(c2); }
     });
 
     await atest('[4b-layout-api] builderModel maps the spec builder to its agent model; unknown or missing is null', async () => {
@@ -13061,7 +13388,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       'topSessions', 'parseRoute', 'parsePipeSub', 'initialRoute', 'usdEst', 'isOpenDecision', 'isRepair', 'pipelineCounts', 'outcomeShape', 'findingsHtml', 'taskBrief',
       'gateLine', 'outcomesHtml', 'reworkLine', 'perMergeLine', 'roleSpendHtml', 'routingHtml', 'modelName', 'modelHtml', 'cmdRow', 'installHtml', 'pipelineHasData',
       'buildLabel', 'trackMarks', 'markSvg', 'stageGroup', 'pipeRows', 'resolveSel', 'moveSel', 'rowHtml', 'pipeFiltersHtml', 'idleHtml', 'stripHtml', 'workHtml',
-      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'sessionHash', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts', 'pathBreak', 'selectedCtx'];
+      'signalsHtml', 'routingTabHtml', 'subtabsHtml', 'pipeUi', 'pipelineBody', 'outcomeDotsHtml', 'liveSessionId', 'sessionHash', 'timelineText', 'activityText', 'panelHtml', 'pipelineSideHtml', 'pipelineSideParts', 'pathBreak', 'selectedCtx', 'cnt', 'escapesHtml'];
     const lifted = fnames.map((n) => cj.match(new RegExp('^function ' + n + '\\([\\s\\S]*?\\n}', 'm'))[0]);
     const T = new Function(consts.join('\n') + '\n' + lifted.join('\n') + '\nreturn { ' + fnames.join(', ') + ' };')();
     const NOW = 1_800_000_000_000;
@@ -13504,6 +13831,80 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(work, /class="ptable"/);
       assert.ok(!/Role routing|Gate state/.test(work));
     });
+
+    // ---- [alpha8 A4] Signals card: escaped defects per reviewer ----
+    {
+      const grp = (key, label, merges, escaped, fixes, ratePct, mean, n, excluded) => ({ key, label, merges, escaped, fixes, ratePct, redTeamPerMerge: { mean, n, excluded } });
+      const EX = { days: 90, merges: 16, unmatched: 2, groups: [
+        grp('a', 'red-team · full', 9, 2, 3, 22, 0.42, 8, 1),
+        grp('b', 'red-team-lean · light', 4, 1, 1, null, 0.1, 3, 0),
+        grp('c', 'No review (spec)', 3, 0, 0, null, null, 0, 0),
+      ] };
+      const card = (ex) => T.signalsHtml(body([task('red-team')], { escapes: ex }), NOW, {});
+      const exCard = (h) => (h.match(/<div class="sig"><h3>Escaped defects[\s\S]*?(?=<div class="sig"><h3>Spend by)/) || [''])[0];
+
+      test('[alpha8 A4] populated body: card sits after Rework and cost, one row per group, columns split', () => {
+        const h = card(EX);
+        assert.ok(h.indexOf('Rework and cost') < h.indexOf('Escaped defects (90 days)'));
+        assert.ok(h.indexOf('Escaped defects (90 days)') < h.indexOf('Spend by pipeline role'));
+        const c = exCard(h);
+        assert.strictEqual((c.match(/<tbody>[\s\S]*<\/tbody>/)[0].match(/<tr>/g) || []).length, 3);
+        assert.match(c, /<td>red-team<\/td><td>full<\/td><td class="num">9<\/td><td class="num">2 of 9 \(22%\)<\/td><td class="num">3<\/td>/);
+        assert.match(c, /<td>red-team-lean<\/td><td>light<\/td><td class="num">4<\/td><td class="num">1 of 4<\/td>/);
+        assert.match(c, /<td>No review \(spec\)<\/td><td><\/td><td class="num">3<\/td><td class="num">0 of 3<\/td>/);
+        for (const th of ['Reviewer', 'Size', 'Merges', 'Fixed later', 'Fixes', 'Red team per merge']) assert.ok(c.includes('>' + th + '<'), th);
+      });
+
+      test('[alpha8 A4] every dollar says est., every cost carries n, % only with ratePct, unmatched footnote', () => {
+        const c = exCard(card(EX));
+        assert.match(c, /\$0\.42 est\. \(n=8, 1 excluded\)/);
+        assert.match(c, /\$0\.10 est\. \(n=3\)/);
+        assert.match(c, /— \(n=0\)/);
+        const dollars = strip(c).match(/\$[\d.,]+/g) || [];
+        assert.strictEqual(dollars.length, (strip(c).match(/\$[\d.,]+ est\./g) || []).length);
+        assert.strictEqual((c.match(/%/g) || []).length, 1);
+        assert.match(c, /2 fixes name a task that isn’t a merge here\./);
+        assert.match(exCard(card(Object.assign({}, EX, { unmatched: 1 }))), /1 fix names a task/);
+        assert.ok(!/name a task/.test(exCard(card(Object.assign({}, EX, { unmatched: 0 })))));
+        assert.ok(!/No follow-up fixes recorded/.test(c));
+      });
+
+      test('[alpha8 A4] hostile label and non-numbers are escaped or neutralised; no amber', () => {
+        const evil = '<img src=x onerror=alert(1)>';
+        const c = exCard(card({ days: 90, merges: 1, unmatched: 0, groups: [grp('k', evil + ' · ' + evil, 1, 1, 1, null, 0.5, 1, 0), grp('j', '<b>x</b>', '<i>', 'q', null, 'z', 'bad', '<u>', {})] }));
+        assert.ok(!c.includes(evil) && !c.includes('<b>') && !c.includes('<i>') && !c.includes('<u>'));
+        assert.match(c, /&lt;img src=x onerror=alert\(1\)&gt;/);
+        assert.ok(!/amber|--warn|attention/.test(c));
+      });
+
+      test('[alpha8 A4] empty states: no merges, and merges with no fixes show the hint', () => {
+        assert.match(exCard(card({ days: 90, merges: 0, unmatched: 0, groups: [] })), /No merges in the last 90 days\./);
+        assert.match(exCard(card({ days: 90, merges: 0, unmatched: 0, groups: [grp('a', 'red-team · full', 0, 0, 0, null, null, 0, 0)] })), /No merges in the last 90 days\./);
+        const un = exCard(card({ days: 90, merges: 0, unmatched: 2, groups: [] }));
+        assert.match(un, /No merges in the last 90 days\./);
+        assert.match(un, /2 fixes name a task that isn’t a merge here\./, 'the footnote shows in the empty state too');
+        assert.ok(!/name a task/.test(exCard(card({ days: 90, merges: 0, unmatched: 0, groups: [] }))));
+        const z = exCard(card({ days: 90, merges: 5, unmatched: 0, groups: [grp('a', 'red-team · full', 5, 0, 0, 0, 0.3, 5, 0)] }));
+        assert.match(z, /<table/);
+        assert.ok(z.includes('No follow-up fixes recorded yet. Mark one with /sereno:task &lt;name&gt; --fixes &lt;merged task&gt;.'));
+        assert.match(exCard(card({ days: 30, merges: 0, groups: [] })), /Escaped defects \(30 days\)/);
+      });
+
+      test('[alpha8 A4] an older body with no escapes key renders no card and does not throw', () => {
+        for (const ex of [undefined, null, 'x']) {
+          const h = card(ex);
+          assert.ok(!h.includes('Escaped defects'));
+          assert.match(h, /Spend by pipeline role/);
+        }
+        assert.strictEqual(T.escapesHtml(undefined), '');
+      });
+
+      test('[alpha8 A4] console.js keeps theme tokens: no hex outside tokens, no new colour in the card code', () => {
+        const fn = cj.match(/^function escapesHtml\([\s\S]*?\n}/m)[0];
+        assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(fn));
+        assert.ok(!/\.text\b|\{[^}]*\btext\b[^}]*\}\s*=/.test(fn));
+      });
+    }
 
     test('[4b-layout] friendly model names: family word from the id, raw id as fallback and as quieter text', () => {
       for (const [id, n] of [['claude-haiku-4-5-20251001', 'Haiku'], ['claude-sonnet-4-6', 'Sonnet'], ['claude-opus-4-8[1m]', 'Opus'], ['us.anthropic.Claude-FABLE-1', 'Fable'], ['sonnet', 'Sonnet']]) assert.strictEqual(T.modelName(id), n, id);
@@ -14142,7 +14543,7 @@ test('missing rate_limits degrades instead of throwing', () => {
       try {
         const text = await getText(c.port);
         const b = JSON.parse(text);
-        const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'routing', 'plugin', 'versions',
+        const ALLOWED = new Set(['projects', 'signals', 'roleSpend', 'redTeamPerMerge', 'escapes', 'groups', 'key', 'label', 'merges', 'unmatched', 'escaped', 'fixes', 'ratePct', 'routing', 'plugin', 'versions',
           'id', 'name', 'tasks', 'idle', 'task', 'stage', 'step', 'reason', 'attempt', 'gate', 'findings', 'startedAt', 'updatedAt', 'reviewRuns', 'expired', 'costUsd', 'builderModel', 'attempts', 'activity', 'firstStartedAt', 'endedAt', 'at',
           'review_run_id', 'outcome', 'tests_passed', 'reviewed_at', 'model', 'sessionId', 'severity', 'kind', 'file', 'line', 'summary',
           'days', 'outcomes', 'seq', 'rework', 'runsThisWeek', 'ageMs', 'n', 'pass', 'block', 'needs_context', 'error', 'skipped', 'median', 'max', 'excluded',
@@ -19432,7 +19833,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     // ---- R7 docs and version ----
-    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.2', () => {
+    test('[plugin-0.6 R7] README: Review level section, the floor, the config-table line; manifests say 0.6.3', () => {
       const r = rd('README.md');
       const i = r.indexOf('### Review level'), j = r.indexOf('### Spec review');
       assert.ok(i > 0 && j > i);
@@ -19440,8 +19841,8 @@ test('missing rate_limits degrades instead of throwing', () => {
       for (const k of ['--review', '`none`', '`light`', '`full`', 'Safety floor', 'skip: "spec"', 'spec_changed', 'roles.redTeam.enabled: false']) assert.ok(sec.includes(k), k);
       assert.ok(r.includes("A spec's own `review` field overrides `kinds` and `maxDiffLines`"));
       assert.ok(r.includes('New in 0.6.1') && r.includes('New in 0.6.0') && r.includes('New in 0.5.0'));
-      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.2');
-      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.2');
+      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.3');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.3');
     });
 
     // ---- red-team follow-ups ----
@@ -20062,17 +20463,117 @@ test('missing rate_limits degrades instead of throwing', () => {
     });
 
     // ---- G3 docs and version ----
-    test('[plugin-0.6.2 G3] README: New in 0.6.2 and the refs command; manifests say 0.6.2', () => {
+    test('[plugin-0.6.2 G3] README: New in 0.6.2 and the refs command; manifests say 0.6.3', () => {
       const r = rd('README.md');
-      assert.ok(r.includes('Version 0.6.2.') && r.includes('New in 0.6.2') && r.includes('New in 0.6.1'));
+      assert.ok(r.includes('Version 0.6.3.') && r.includes('New in 0.6.2') && r.includes('New in 0.6.1'));
       assert.ok(r.indexOf('New in 0.6.2') < r.indexOf('New in 0.6.1'));
       for (const k of ['sereno.js refs --text-file', '--refs-ok', 'latest message', 'flags-only revision', '`{ ok, checked, missing, warn, new }`', '`warn`', 'known extension']) assert.ok(r.includes(k), k);
-      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.2');
-      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.2');
+      assert.strictEqual(JSON.parse(rd('.claude-plugin/plugin.json')).version, '0.6.3');
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8')).plugins[0].version, '0.6.3');
       assert.ok(fs.readFileSync(SERENO, 'utf8').includes('spec-review, refs.'), 'the command list in sereno.js names refs');
     });
 
     await atest('[plugin-0.6.2] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
+  }
+
+  /* ---- [plugin-0.6.3] the gate records the reviewer (A1) ---- */
+  {
+    const PLUGIN = path.join(ROOT, 'plugin');
+    const SERENO = path.join(PLUGIN, 'bin', 'sereno.js');
+    const tmps = [];
+    const mk = () => { const d = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'sereno-p063-'))); tmps.push(d); return d; };
+    const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const home = mk();
+    const S = (cwd, args, input) => {
+      const r = spawnSync(process.execPath, [SERENO, ...args], { cwd, input: input || '', encoding: 'utf8', timeout: 60000, env: Object.assign({}, process.env, { HOME: home, USERPROFILE: home }) });
+      assert.strictEqual(r.stdout.trim().split('\n').length, 1, 'one line of stdout: ' + r.stdout);
+      return { status: r.status, out: JSON.parse(r.stdout) };
+    };
+    const rd = (p) => fs.readFileSync(path.join(PLUGIN, p), 'utf8').replace(/\r\n/g, '\n');
+    const dir = mk();
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@example.invalid'); git(dir, 'config', 'user.name', 't'); git(dir, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    git(dir, 'add', '.'); git(dir, 'commit', '-q', '-m', 'base');
+    /** One task branch with a spec and a commit; back on main. */
+    function mkTask(task) {
+      const base = git(dir, 'rev-parse', 'main');
+      assert.strictEqual(S(dir, ['branch', '--task', task]).out.ok, true);
+      assert.strictEqual(S(dir, ['spec', '--task', task, '--builder', 'sonnet', '--kind', 'mechanical', '--reason', 'r', '--base-branch', 'main', '--stdin'], '## Goal\nx\n').out.ok, true);
+      git(dir, 'switch', '-q', 'task/' + task);
+      fs.writeFileSync(path.join(dir, task + '.js'), 'a\n');
+      git(dir, 'add', '--', task + '.js'); git(dir, 'commit', '-q', '-m', 'work');
+      const head = git(dir, 'rev-parse', 'HEAD');
+      git(dir, 'switch', '-q', 'main');
+      return { base, head };
+    }
+    /** Run gate for `task` with extra flags; returns the parsed gate record. */
+    function gateOf(task, extra) {
+      const t = mkTask(task);
+      const g = S(dir, ['gate', '--stdin', '--task', task, '--spec', '.sereno/specs/' + task + '.md', '--base', t.base, '--head', t.head, '--branch', 'task/' + task, '--tests-passed', 'true', ...extra], '{"outcome":"pass","findings":[]}').out;
+      assert.strictEqual(g.ok, true, JSON.stringify(g));
+      return JSON.parse(fs.readFileSync(path.join(dir, g.path), 'utf8'));
+    }
+
+    test('[plugin-0.6.3 A1] gate: --agent-name and --light true write reviewer: { agent, light }', () => {
+      const j = gateOf('r1', ['--agent-name', 'red-team-lean', '--light', 'true']);
+      assert.deepStrictEqual(j.reviewer, { agent: 'red-team-lean', light: true });
+    });
+    test('[plugin-0.6.3 A1] gate: --light false is false, not null', () => {
+      const j = gateOf('r2', ['--agent-name', 'red-team', '--light', 'false']);
+      assert.deepStrictEqual(j.reviewer, { agent: 'red-team', light: false });
+    });
+    test('[plugin-0.6.3 A1] gate: a missing --light gives light null', () => {
+      const j = gateOf('r3', ['--agent-name', 'red-team']);
+      assert.deepStrictEqual(j.reviewer, { agent: 'red-team', light: null });
+    });
+    test('[plugin-0.6.3 A1] gate: an invalid --light is null and the gate is still written', () => {
+      for (const [i, v] of ['yes', 'TRUE', '1', ''].entries()) {
+        const j = gateOf('r4' + i, ['--agent-name', 'red-team', '--light', v]);
+        assert.deepStrictEqual(j.reviewer, { agent: 'red-team', light: null }, 'value ' + JSON.stringify(v));
+        assert.strictEqual(j.outcome, 'pass');
+      }
+      const j2 = gateOf('r45', ['--light', 'maybe']);
+      assert.ok(!('reviewer' in j2), 'both null: no field');
+    });
+    test('[plugin-0.6.3 A1] gate: --light alone gives agent null; neither flag gives no reviewer key', () => {
+      assert.deepStrictEqual(gateOf('r5', ['--light', 'true']).reviewer, { agent: null, light: true });
+      const j = gateOf('r6', []);
+      assert.ok(!('reviewer' in j), 'the older shape');
+      assert.strictEqual(j.outcome, 'pass');
+    });
+    test('[plugin-0.6.3 fix] gate: reviewer.agent follows the app rule: sereno: stripped, anything else off-pattern is null, never an error', () => {
+      assert.deepStrictEqual(gateOf('r7', ['--agent-name', 'sereno:red-team', '--model', 'fable']).reviewer, { agent: 'red-team', light: null });
+      const j = gateOf('r8', ['--model', 'x', '--agent-name', 'Red Team', '--light', 'true']);
+      assert.deepStrictEqual(j.reviewer, { agent: null, light: true });
+      assert.strictEqual(j.model, 'x');
+      const k = gateOf('r9', ['--model', 'x', '--agent-name', 'Red Team']);
+      assert.ok(!('reviewer' in k), 'both null: no field');
+      assert.deepStrictEqual(gateOf('r10', ['--model', 'x', '--agent-name', 'a'.repeat(65), '--light', 'false']).reviewer, { agent: null, light: false });
+    });
+    test('[plugin-0.6.3 fix] gate: without --model the --agent-name lookup still rejects a non-agent name (invalid_arg, as on 0.6.2); a bare agent name stores reviewer.agent', () => {
+      const t = mkTask('r11');
+      const g = (extra) => S(dir, ['gate', '--stdin', '--task', 'r11', '--spec', '.sereno/specs/r11.md', '--base', t.base, '--head', t.head, '--branch', 'task/r11', '--tests-passed', 'true', ...extra], '{"outcome":"pass","findings":[]}').out;
+      const bad = g(['--agent-name', 'sereno:red-team']);
+      assert.strictEqual(bad.ok, false);
+      assert.strictEqual(bad.code, 'invalid_arg');
+      const ok = g(['--agent-name', 'red-team']);
+      assert.strictEqual(ok.ok, true, JSON.stringify(ok));
+      assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, ok.path), 'utf8')).reviewer.agent, 'red-team');
+    });
+    test('[plugin-0.6.3 A1] ship skill passes --light from the reviewer result and drops it when reviewer failed', () => {
+      const s = rd('skills/ship/SKILL.md');
+      assert.ok(s.includes('--light <light from reviewer'));
+      assert.ok(s.includes('Leave out `--reviewer-reason` and `--light` when `reviewer` failed'));
+    });
+    test('[plugin-0.6.3 A1] README: New in 0.6.3, above 0.6.2; usage comment names --light; build.files unchanged', () => {
+      const r = rd('README.md');
+      assert.ok(r.includes('New in 0.6.3') && r.indexOf('New in 0.6.3') < r.indexOf('New in 0.6.2'));
+      assert.ok(fs.readFileSync(SERENO, 'utf8').includes('--light true|false'));
+      assert.ok(!JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).build.files.some((f) => /sereno\.js/.test(f)), 'sereno.js is not bundled');
+    });
+
+    await atest('[plugin-0.6.3] cleanup', async () => { for (const d of tmps) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 }); } catch (_) { /* Windows may hold a temp dir briefly */ } } });
   }
   console.log('\n' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);
