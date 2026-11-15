@@ -203,6 +203,7 @@ td.proj { font-weight: 500; }
 .nobrief { font-size: 13px; color: var(--quiet); }
 .git { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 12px; color: var(--muted); }
 .git-off { color: var(--quiet); }
+.plugin-ver { font-size: 12px; color: var(--quiet); }
 .dirty { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 .dirty svg { width: 8px; height: 8px; }
 .quiet-text { color: var(--quiet); }

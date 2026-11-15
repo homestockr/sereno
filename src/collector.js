@@ -144,6 +144,7 @@ function createCollector(store, port, opts) {
   const repos = (opts && opts.repos) || null;   // repo poller (src/repos.js)
   const pipelineAlerts = (opts && opts.pipelineAlerts && typeof opts.pipelineAlerts.open === 'function') ? opts.pipelineAlerts : null;   // src/pipeline-alerts.js machine (absent under npm run serve)
   const pluginStatusFn = (opts && typeof opts.pluginStatus === 'function') ? opts.pluginStatus : () => wiring.pluginStatus();   // tests inject; reads installed_plugins.json read-only
+  const pluginVersionsFn = (opts && typeof opts.pluginVersions === 'function') ? opts.pluginVersions : () => wiring.pluginVersions();   // tests inject
   const onReview = (opts && typeof opts.onReview === 'function') ? opts.onReview : null;   // absent under npm run serve
   // Per-launch secret for the console's POST actions; handed out by GET /api/token.
   const token = crypto.randomBytes(24).toString('base64url');
@@ -501,8 +502,31 @@ function createCollector(store, port, opts) {
       for (const [oid, ns] of normsOf) if (oid !== id && depth(cwd, ns) > mine) return false;
       return true;
     };
+    // Plugin versions: records are matched by normalized path and only the cleaned version leaves here.
+    let pvRecs = [];
+    try { const x = pluginVersionsFn(); if (Array.isArray(x)) pvRecs = x; } catch (_) { pvRecs = []; }
+    const pvClean = (v) => (typeof v === 'string' ? v.replace(/[^0-9A-Za-z.+-]/g, '').slice(0, 32) : '');
+    const pvProject = new Map();   // normalized path -> newest version
+    let pvUser = null;
+    let pvNewest = null;
+    const pvNewer = (a, b) => (b === null || wiring.compareVersionsDesc(a, b) < 0 ? a : b);
+    for (const r of pvRecs) {
+      if (!r || typeof r !== 'object') continue;
+      const v = pvClean(r.version);
+      if (!v) continue;
+      pvNewest = pvNewer(v, pvNewest);
+      if (r.scope === 'user') { pvUser = pvNewer(v, pvUser); continue; }
+      if (typeof r.projectPath !== 'string' || !r.projectPath) continue;
+      let k;
+      try { k = normalizePath(r.projectPath).replace(/\/$/, ''); } catch (_) { continue; }
+      pvProject.set(k, pvNewer(v, pvProject.has(k) ? pvProject.get(k) : null));
+    }
     const out = meta.map(({ p, st }) => {
       const sp = spend && spend.get(p.id);
+      let pv0 = null;
+      for (const k of (normsOf.get(p.id) || [])) if (pvProject.has(k)) pv0 = pvNewer(pvProject.get(k), pv0);
+      if (pv0 === null) pv0 = pvUser;
+      const plugin = { version: pv0, newest: pvNewest };
       let last = st ? num(st.lastCommitAt) : null;
       for (const s of sessions) {
         if (owns(s.cwd, p.id) && typeof s.lastSeen === 'number' && (last === null || s.lastSeen > last)) last = s.lastSeen;
@@ -580,6 +604,7 @@ function createCollector(store, port, opts) {
         live: { state: liveRank >= 0 ? LIVE_ORDER[liveRank] : null, sessionIds: liveIds },
         error: st ? st.error === true : false,
         briefsMalformed: st ? (num(st.briefsMalformed) || 0) : 0,
+        plugin,
       };
     });
     // Header counts cover visible projects only. Decisions are the pipeline alerts' open ones.

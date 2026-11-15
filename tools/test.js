@@ -5597,7 +5597,7 @@ test('missing rate_limits degrades instead of throwing', () => {
     const halt = (c) => new Promise((res) => { c.server.close(() => res()); c.close(); });
     const getJson = async (port, p) => JSON.parse((await rq(port, { path: p })).text);
 
-    const PROJECT_KEYS = ['id', 'name', 'hidden', 'pinned', 'active', 'lastActivityAt', 'blockers', 'activity', 'freshness', 'brief', 'git', 'prs', 'branches', 'spend14', 'lastActivity', 'live', 'error', 'briefsMalformed'];
+    const PROJECT_KEYS = ['id', 'name', 'hidden', 'pinned', 'active', 'lastActivityAt', 'blockers', 'activity', 'freshness', 'brief', 'git', 'prs', 'branches', 'spend14', 'lastActivity', 'live', 'error', 'briefsMalformed', 'plugin'];
     const FORBIDDEN_KEYS = new Set(['repoPath', 'worktree', 'worktrees', 'worktreePath', 'cwd', 'path', 'head', 'sourceCommit', 'file', 'message']);
     const walk = (o, where, cb) => {
       if (Array.isArray(o)) { o.forEach((x, i) => walk(x, where + '[' + i + ']', cb)); return; }
@@ -5689,6 +5689,55 @@ test('missing rate_limits degrades instead of throwing', () => {
         c.setLedger(null);
         assert.strictEqual((await getJson(PORT, '/api/projects')).projects[0].spend14, null);
       } finally { await halt(c); ledger.close(); }
+    });
+
+    await atest('[2.0.0 S2] /api/projects carries plugin {version, newest}: case-insensitive match, worktree, user fallback, project wins, no path leaks', async () => {
+      let PORT = 0;
+      const win = process.platform === 'win32';
+      const d = mk(); const wt = mk(); const plain = mk(); const other = mk();
+      const swap = (s) => (win ? s.toUpperCase().replace(/\//g, '\\') : s);   // different case and separators
+      const reg = { list: () => [
+        { id: 'p1', name: 'a', repoPath: d, hidden: false, firstSeen: 0 },
+        { id: 'p2', name: 'b', repoPath: plain, hidden: false, firstSeen: 0 },
+        { id: 'p3', name: 'c', repoPath: other, hidden: false, firstSeen: 0 },
+      ], noteCwd: () => Promise.resolve() };
+      const stub = { snapshot: () => ({ p1: { id: 'p1', worktrees: [{ path: wt, branch: 'x' }], branches: [], error: false, freshness: 'none', brief: null, lastCommitAt: null }, p3: { id: 'p3', worktrees: [], branches: [], error: false, freshness: 'none', brief: null, lastCommitAt: null } }) };
+      let recs = [
+        { projectPath: swap(d), version: '0.6.2', scope: 'project' },
+        { projectPath: swap(other), version: '0.6.0', scope: 'project' },
+        { projectPath: '', version: '0.6.4', scope: 'user' },
+        { projectPath: 'C:\\elsewhere', version: '0.6.3', scope: 'project' },
+      ];
+      const c = await boot(new Store(), PORT, { projects: reg, repos: stub, pluginVersions: () => recs });
+      PORT = c.port;
+      try {
+        const get = async () => { const r = await getJson(PORT, '/api/projects'); return { r, by: Object.fromEntries(r.projects.map((p) => [p.id, p])) }; };
+        let { r, by } = await get();
+        assert.deepStrictEqual(by.p1.plugin, { version: '0.6.2', newest: '0.6.4' }, 'case-insensitive path match');
+        assert.deepStrictEqual(Object.keys(by.p1.plugin).sort(), ['newest', 'version']);
+        assert.deepStrictEqual(by.p2.plugin, { version: '0.6.4', newest: '0.6.4' }, 'user scope applies when no project record');
+        assert.deepStrictEqual(by.p3.plugin, { version: '0.6.0', newest: '0.6.4' }, 'project record wins over user scope, even when older');
+        recs = [{ projectPath: swap(wt), version: '0.6.1', scope: 'project' }, { projectPath: 'C:\\elsewhere', version: '0.6.3', scope: 'project' }];
+        ({ r, by } = await get());
+        assert.deepStrictEqual(by.p1.plugin, { version: '0.6.1', newest: '0.6.3' }, 'worktree path matches too');
+        assert.deepStrictEqual(by.p2.plugin, { version: null, newest: '0.6.3' }, 'no record: version null');
+        recs = [{ projectPath: swap(d), version: '<b>1.0.0', scope: 'project' }, null, 5, { version: 7 }];
+        ({ r, by } = await get());
+        assert.strictEqual(by.p1.plugin.version, 'b1.0.0', 'cleaned again at the collector');
+        recs = [];
+        ({ r, by } = await get());
+        assert.deepStrictEqual(by.p1.plugin, { version: null, newest: null });
+        const bad = await boot(new Store(), 0, { projects: reg, repos: stub, pluginVersions: () => { throw new Error('boom'); } });
+        try { assert.deepStrictEqual((await getJson(bad.port, '/api/projects')).projects[0].plugin, { version: null, newest: null }, 'a throwing reader is not fatal'); } finally { await halt(bad); }
+        recs = [{ projectPath: swap(d), version: '0.6.2', scope: 'project' }];
+        ({ r } = await get());
+        walk(r, '$', (k, v, where) => {
+          assert.ok(!FORBIDDEN_KEYS.has(k), 'forbidden key ' + where);
+          if (typeof v === 'string') assert.ok(!/[a-zA-Z]:[\\/]/.test(v) && !v.includes('\\'), 'path-like value at ' + where + ': ' + v);
+        });
+        const body = JSON.stringify(r).toLowerCase();
+        assert.ok(!body.includes(path.basename(d).toLowerCase()), 'no repo path fragment');
+      } finally { await halt(c); }
     });
 
     await atest('projects exit 3: sessions in the main repo and in a worktree make one project', async () => {
@@ -14185,6 +14234,54 @@ test('missing rate_limits degrades instead of throwing', () => {
       try { fs.mkdirSync(h.file); assert.deepStrictEqual(wiring.pluginStatus(h.home), none); } finally { h.done(); }
     });
 
+    test('[2.0.0 S2] pluginVersions: array, single object, malformed records skipped, cleaned and capped', () => {
+      const rec = (o) => Object.assign({ scope: 'project', projectPath: 'C:\\Users\\X\\desktop\\p', installPath: 'X:\\synthetic', version: '0.6.2' }, o);
+      let h = mkHome({ version: 2, plugins: { 'other@m': [rec({ version: '9.9.9' })], 'sereno@sereno': [rec({}), rec({ projectPath: 'C:\\q', version: '0.6.1' }), rec({ scope: 'user', projectPath: undefined, version: 'v0.6.4' })] } });
+      try {
+        assert.deepStrictEqual(wiring.pluginVersions(h.home), [
+          { projectPath: 'C:\\Users\\X\\desktop\\p', version: '0.6.2', scope: 'project' },
+          { projectPath: 'C:\\q', version: '0.6.1', scope: 'project' },
+          { projectPath: '', version: 'v0.6.4', scope: 'user' },
+        ]);
+      } finally { h.done(); }
+      h = mkHome({ plugins: { 'sereno@sereno': rec({}) } });
+      try { assert.deepStrictEqual(wiring.pluginVersions(h.home), [{ projectPath: 'C:\\Users\\X\\desktop\\p', version: '0.6.2', scope: 'project' }], 'single object'); } finally { h.done(); }
+      h = mkHome({ plugins: { 'sereno@sereno': [null, 7, 'x', [], {}, rec({ version: 5 }), rec({ version: ' <b> ' }), rec({ projectPath: undefined }), rec({ projectPath: 'C:\\ok\u0000\n', version: '1.0.0\u202e<x>' })] } });
+      try {
+        assert.deepStrictEqual(wiring.pluginVersions(h.home), [
+          { projectPath: 'C:\\Users\\X\\desktop\\p', version: 'b', scope: 'project' },
+          { projectPath: 'C:\\ok', version: '1.0.0x', scope: 'project' },
+        ]);
+      } finally { h.done(); }
+      const many = []; for (let i = 0; i < 400; i++) many.push(rec({ projectPath: 'C:\\p' + i, version: '1.0.' + i }));
+      h = mkHome({ plugins: { 'sereno@sereno': many } });
+      try { assert.strictEqual(wiring.pluginVersions(h.home).length, 256); } finally { h.done(); }
+      h = mkHome({ plugins: { 'sereno@sereno': [rec({ projectPath: 'C:\\' + 'a'.repeat(5000), version: '0.1.0' })] } });
+      try { assert.strictEqual(wiring.pluginVersions(h.home)[0].projectPath.length, 1024); } finally { h.done(); }
+    });
+
+    test('[2.0.0 S2] pluginVersions: missing file, bad json, wrong shape, oversized, directory and symlink all give []', () => {
+      assert.deepStrictEqual(wiring.pluginVersions(path.join(os.tmpdir(), 'sereno-no-such-home-s2-' + process.pid)), []);
+      let h = mkHome();
+      try { assert.deepStrictEqual(wiring.pluginVersions(h.home), [], 'no file'); fs.mkdirSync(h.file); assert.deepStrictEqual(wiring.pluginVersions(h.home), [], 'directory'); } finally { h.done(); }
+      for (const body of ['{ nope', '', 'null', '[]', JSON.stringify({ plugins: [] }), JSON.stringify({ plugins: { 'other@m': [] } })]) {
+        h = mkHome(body);
+        try { assert.deepStrictEqual(wiring.pluginVersions(h.home), [], JSON.stringify(body)); } finally { h.done(); }
+      }
+      h = mkHome('{"plugins":{"sereno@sereno":[{"version":"1.0.0","projectPath":"C:\\\\p"}]},"pad":"' + 'x'.repeat(1100 * 1024) + '"}');
+      try { assert.deepStrictEqual(wiring.pluginVersions(h.home), [], 'oversized'); } finally { h.done(); }
+      h = mkHome();
+      const real = path.join(h.home, 'real.json');
+      try {
+        fs.writeFileSync(real, JSON.stringify({ plugins: { 'sereno@sereno': [{ version: '0.1.0', projectPath: 'C:\\p' }] } }));
+        try { fs.symlinkSync(real, h.file, 'file'); } catch (e) {
+          if (e && (e.code === 'EPERM' || e.code === 'EACCES')) return;
+          throw e;
+        }
+        assert.deepStrictEqual(wiring.pluginVersions(h.home), [], 'symlink');
+      } finally { h.done(); }
+    });
+
     test('[4b-plugin] pluginStatus: a linked installed_plugins.json is refused (exit 6)', () => {
       const h = mkHome();
       const real = path.join(h.home, 'real.json');
@@ -14896,6 +14993,25 @@ test('missing rate_limits degrades instead of throwing', () => {
       assert.match(N.navDetailHtml(mk({ error: true }), dctx), /Git status unavailable/);
       assert.match(N.navDetailHtml(mk({ git: { defaultBranch: 'main', ahead: 0, behind: 0, dirty: true, lastCommitAt: NOW } }), dctx), /class="dirty"/);
       assert.match(N.navDetailHtml(null, dctx), /Select a project/);
+    });
+
+    test('[2.0.0 S2] detail shows the plugin version muted: behind, up to date, no record, escaped; no new colour', () => {
+      const dctx = { nowMs: NOW, sid: null, opts: { review: true }, tab: 'branches', pluginMissing: false, sessions: [] };
+      const behind = N.navDetailHtml(mk({ plugin: { version: '0.6.2', newest: '0.6.4' } }), dctx);
+      assert.match(behind, /<div class="plugin-ver">Plugin 0\.6\.2 \(0\.6\.4 installed elsewhere\)<\/div>/);
+      const same = N.navDetailHtml(mk({ plugin: { version: '0.6.4', newest: '0.6.4' } }), dctx);
+      assert.match(same, /<div class="plugin-ver">Plugin 0\.6\.4<\/div>/);
+      assert.ok(!/installed elsewhere/.test(same));
+      for (const plugin of [{ version: null, newest: '0.6.4' }, { version: null, newest: null }, undefined, null, 'x']) {
+        assert.ok(!/plugin-ver|Plugin 0|not installed/i.test(N.navDetailHtml(mk({ plugin }), dctx)), 'no claim without a record');
+      }
+      const ev = N.navDetailHtml(mk({ plugin: { version: evil, newest: evil + 'x' } }), dctx);
+      assert.ok(!ev.includes(evil), 'escaped');
+      assert.ok(ev.includes('&lt;img'));
+      const rule = css.match(/\.plugin-ver \{[^}]*\}/);
+      assert.ok(rule, 'css rule present');
+      assert.ok(!/#[0-9a-fA-F]{3,8}\b|rgba?\(|amber|button/.test(rule[0]), 'tokens only: ' + rule[0]);
+      assert.match(rule[0], /color: var\(--quiet\)/);
     });
 
     test('[alpha6-nav] sub-tabs: Branches (default branch numbers, brief freshness), Activity (newest first, at most 20), Git & PRs', () => {

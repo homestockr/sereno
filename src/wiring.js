@@ -542,6 +542,48 @@ function pluginStatus(home) {
   } catch (_) { return none; }
 }
 
+const MAX_PLUGIN_PATH = 1024;
+
+/**
+ * Per-install records of the Sereno plugin, read-only and bounded like pluginStatus.
+ * `projectPath` is data only (the caller matches it, never logs it); '' for a user-scope
+ * record. Malformed records are skipped. Never throws; any failure gives [].
+ * @param {string} [home]
+ * @returns {{projectPath: string, version: string, scope: 'project'|'user'|'local'}[]}
+ */
+function pluginVersions(home) {
+  try {
+    const file = path.join(home || os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || st.isSymbolicLink() || st.size > MAX_PLUGINS_FILE) return [];
+    const fd = fs.openSync(file, 'r');
+    let text;
+    try {
+      const buf = Buffer.alloc(st.size);
+      const n = fs.readSync(fd, buf, 0, st.size, 0);
+      text = buf.toString('utf8', 0, n);
+    } finally { fs.closeSync(fd); }
+    const j = JSON.parse(text);
+    const plugins = j && typeof j === 'object' ? j.plugins : null;
+    if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return [];
+    if (!Object.prototype.hasOwnProperty.call(plugins, 'sereno@sereno')) return [];
+    const v = plugins['sereno@sereno'];
+    const records = Array.isArray(v) ? v.slice(0, MAX_PLUGIN_RECORDS) : [v];
+    const out = [];
+    for (const r of records) {
+      if (!r || typeof r !== 'object' || typeof r.version !== 'string') continue;
+      const version = r.version.replace(VERSION_DISALLOWED, '').trim().slice(0, 32);
+      if (!version) continue;
+      const projectPath = typeof r.projectPath === 'string'
+        ? r.projectPath.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, MAX_PLUGIN_PATH) : '';
+      const scope = r.scope === 'user' || r.scope === 'local' || r.scope === 'project' ? r.scope : (projectPath ? 'project' : 'user');
+      if (scope !== 'user' && !projectPath) continue;
+      out.push({ projectPath, version, scope });
+    }
+    return out;
+  } catch (_) { return []; }
+}
+
 function backups() {
   const file = settingsPath();
   const dir = path.dirname(file);
@@ -570,6 +612,6 @@ function unwire() {
 module.exports = {
   EVENTS, ledgerPath, configDir, settingsPath, buildCommands,
   wireTelemetry, unwireTelemetry, telemetryWired, conflictMessage, telemetryEnv,
-  uninstallCommands, commandsStatus, pluginStatus,
+  uninstallCommands, commandsStatus, pluginStatus, pluginVersions, compareVersionsDesc,
   status, wire, unwire, removeEntries, backups, isOurs, shimPathOf, ownShims,
 };

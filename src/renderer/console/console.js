@@ -753,6 +753,11 @@ function navDetailHtml(p, c) {
       ? '<span class="dirty"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1l4 4-4 4-4-4z" fill="currentColor"/></svg>dirty</span>' : '';
     if (line || dirty) git = '<div class="git">' + (line ? '<span>' + esc(line) + '</span>' : '') + dirty + '</div>';
   }
+  // Plugin version for this project (read-only, muted). Nothing when no install record matched.
+  const pl = p.plugin && typeof p.plugin === 'object' ? p.plugin : null;
+  const plug = pl && typeof pl.version === 'string' && pl.version
+    ? '<div class="plugin-ver">Plugin ' + esc(pl.version)
+      + (typeof pl.newest === 'string' && pl.newest && pl.newest !== pl.version ? ' (' + esc(pl.newest) + ' installed elsewhere)' : '') + '</div>' : '';
   const review = c.sid ? reviewControl({ sessionId: c.sid }, c.opts) : '';
   const tab = NAV_TABS.some((t) => t[0] === c.tab) ? c.tab : 'branches';
   const tabs = '<div class="ntabs" role="tablist" aria-label="Project detail">' + NAV_TABS.map((t) => '<button type="button" role="tab" class="ntab' + (tab === t[0] ? ' on' : '')
@@ -760,7 +765,7 @@ function navDetailHtml(p, c) {
   const pane = tab === 'activity' ? navActivityHtml(p, c.nowMs) : tab === 'git' ? navGitHtml(p, c.nowMs) : navBranchesHtml(p, c.nowMs);
   return '<div class="ndetail-head"><div class="ndetail-title"><h2>' + esc(p.name) + '</h2><span class="chip ' + chip.cls + '">' + esc(chip.label) + '</span>'
     + (blocked ? '<span class="pill-amber">' + ringIcon() + 'Needs you</span>' : '')
-    + (typeof p.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(p.id) ? '<a class="xlink" href="' + esc(sessionsProjectHash(p.id)) + '">Recent sessions</a>' : '') + '</div>' + git + review + '</div>'
+    + (typeof p.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(p.id) ? '<a class="xlink" href="' + esc(sessionsProjectHash(p.id)) + '">Recent sessions</a>' : '') + '</div>' + git + plug + review + '</div>'
     + navBriefHtml(p, c) + navSpendHtml(p) + tabs + '<div class="ntabpanel" role="tabpanel">' + pane + '</div>' + navLiveStrip(p, c.sessions, c.nowMs);
 }
 
