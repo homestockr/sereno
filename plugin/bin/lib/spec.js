@@ -354,8 +354,17 @@ function readSpecTitle(root, task) {
 }
 
 /**
+ * The created_at to write: an earlier valid date is kept (a revision keeps its queue place), else now.
+ * @param {{ now?: Date, createdAt?: string | null }} p
+ */
+function createdAtOf(p) {
+  if (typeof p.createdAt === 'string' && !Number.isNaN(Date.parse(p.createdAt))) return new Date(p.createdAt).toISOString();
+  return (p.now || new Date()).toISOString();
+}
+
+/**
  * Build the spec file text.
- * @param {{ task: string, builder: string, kind: string, reason: string, fixes: string | null, baseBranch?: string | null, after?: string | null, hold?: string | null, checkHosts?: string[], review?: string | null, revision: number, body: string, now?: Date }} p
+ * @param {{ task: string, builder: string, kind: string, reason: string, fixes: string | null, baseBranch?: string | null, after?: string | null, hold?: string | null, checkHosts?: string[], review?: string | null, revision: number, body: string, now?: Date, createdAt?: string | null }} p
  */
 function renderSpec(p) {
   // JSON strings are valid YAML scalars, so free text can never break the front matter.
@@ -372,7 +381,7 @@ function renderSpec(p) {
     'hold_before_merge: ' + (p.hold ? JSON.stringify(p.hold) : 'null'),
     ...(p.checkHosts && p.checkHosts.length ? ['check_hosts: ' + JSON.stringify(p.checkHosts)] : []),
     'spec_revision: ' + p.revision,
-    'created_at: ' + JSON.stringify((p.now || new Date()).toISOString()),
+    'created_at: ' + JSON.stringify(createdAtOf(p)),
     '---',
     '',
   ].join('\n');
@@ -420,7 +429,7 @@ function writeSpec(a) {
   const review = a.review !== undefined ? a.review : (prev ? prev.review : null);
   parseChecks(a.body, checkHosts); // a malformed checks block is refused at write time, never at test time
   const revision = previousRevision(a.root, task) + 1;
-  const text = renderSpec({ task, builder: /** @type {string} */ (a.builder), kind: /** @type {string} */ (a.kind), reason, fixes, baseBranch, after, hold, checkHosts, review, revision, body: a.body });
+  const text = renderSpec({ task, builder: /** @type {string} */ (a.builder), kind: /** @type {string} */ (a.kind), reason, fixes, baseBranch, after, hold, checkHosts, review, revision, body: a.body, createdAt: prev ? prev.created_at : null });
   const rel = '.sereno/specs/' + task + '.md';
   a.fsafe.writeFile(rel, text);
   return { path: rel, spec_revision: revision, spec_hash: rec.sha256(Buffer.from(text, 'utf8')) };
